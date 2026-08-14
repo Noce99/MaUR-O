@@ -1,0 +1,19 @@
+build/
+build*/
+out/
+.cache/
+compile_commands.json
+
+
+
+target/
+benchmarks/maps/
+benchmarks/expected/
+benchmarks/predictions/
+benchmarks/differences/
+
+OMOLOGATE
+benchmark*.zip
+
+# Python bytecode, from importing benchmarks/differences.py
+__pycache__/

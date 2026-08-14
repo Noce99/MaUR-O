@@ -1,0 +1,34 @@
+[package]
+name = "rust_omap_renderer"
+version = "1.0.0"
+edition = "2021"
+description = "Renders OpenOrienteering Mapper maps to raster images"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "mti"
+path = "src/lib.rs"
+
+[[bin]]
+name = "map_to_image"
+path = "src/bin/map_to_image.rs"
+
+[[bin]]
+name = "image_compare"
+path = "src/bin/image_compare.rs"
+
+[dependencies]
+quick-xml = "0.37"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png", "bmp", "tiff", "jpeg"] }
+tiny-skia = "0.11"
+fontdb = "0.21"
+rustybuzz = "0.20"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3

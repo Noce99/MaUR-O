@@ -1,0 +1,313 @@
+//! Text layout and rendering. Ported from `Renderer::addText()`
+//! (`renderer.cpp:1352-1467`).
+//!
+//! The text is laid out at a large font size (matching Mapper's own
+//! `internal_font_size`) and scaled down afterwards, so the result does not
+//! depend on hinting. Font matching goes through `fontdb` (which uses
+//! fontconfig on Linux, matching how Qt resolves font families); shaping
+//! goes through `rustybuzz`, a pure-Rust port of HarfBuzz -- the same
+//! shaping engine family Qt5 uses by default, which should make kerning and
+//! advances closer to Qt's own than a naive per-glyph-advance layout would
+//! be. Glyph outlines come from `ttf-parser`.
+//!
+//! This is the highest-risk-for-divergence module in the port: exact text
+//! metrics are font-engine-specific, so word-for-word pixel matches with
+//! Mapper's Qt/FreeType text rendering are not expected here the way they
+//! are for pure geometry. What matters is that text lands in the right
+//! place, at the right size, with the right alignment.
+
+use std::sync::OnceLock;
+
+use fontdb::{Database, Family, Query, Stretch, Style, Weight};
+use tiny_skia::Transform;
+
+use crate::geometry::{Path, PathCommand, PenCap, PenJoin, Rect};
+use crate::map::*;
+use crate::renderer::Renderer;
+
+/// The font size used while laying out text, before scaling it down to mm.
+const INTERNAL_FONT_SIZE: f64 = 256.0;
+
+fn font_db() -> &'static Database {
+    static DB: OnceLock<Database> = OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = Database::new();
+        db.load_system_fonts();
+        db
+    })
+}
+
+fn family_for(name: &str) -> Family<'_> {
+    // Mapper stores Qt's own generic family names ("Sans Serif", "Serif",
+    // "Monospace", ...), not the CSS hyphenated spellings; recognize both.
+    match name.to_ascii_lowercase().as_str() {
+        "serif" => Family::Serif,
+        "sans-serif" | "sans serif" => Family::SansSerif,
+        "monospace" => Family::Monospace,
+        "cursive" => Family::Cursive,
+        "fantasy" => Family::Fantasy,
+        _ => Family::Name(name),
+    }
+}
+
+fn map_point(t: &Transform, p: Point) -> Point {
+    let mut sp = tiny_skia::Point { x: p.x as f32, y: p.y as f32 };
+    t.map_point(&mut sp);
+    Point::new(sp.x as f64, sp.y as f64)
+}
+
+/// The bounding box of a rectangle mapped through a general (possibly
+/// rotated) transform, like `QTransform::mapRect(QRectF)`.
+fn map_rect(t: &Transform, r: &Rect) -> Rect {
+    let corners = [
+        Point::new(r.left(), r.top()),
+        Point::new(r.right(), r.top()),
+        Point::new(r.right(), r.bottom()),
+        Point::new(r.left(), r.bottom()),
+    ];
+    let mapped: Vec<Point> = corners.iter().map(|&p| map_point(t, p)).collect();
+    let xmin = mapped.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+    let xmax = mapped.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+    let ymin = mapped.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+    let ymax = mapped.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+    Rect::from_ltrb(xmin, ymin, xmax, ymax)
+}
+
+fn map_path(t: &Transform, path: &Path) -> Path {
+    let mut out = Path::new();
+    for cmd in &path.commands {
+        match *cmd {
+            PathCommand::MoveTo(p) => out.move_to(map_point(t, p)),
+            PathCommand::LineTo(p) => out.line_to(map_point(t, p)),
+            PathCommand::CubicTo(c1, c2, end) => {
+                out.cubic_to(map_point(t, c1), map_point(t, c2), map_point(t, end))
+            }
+            PathCommand::Close => out.close_subpath(),
+        }
+    }
+    out
+}
+
+/// Converts a glyph's outline (font design units, y pointing up) into our
+/// path IR (paper coordinates, y pointing down), positioned at `origin` in
+/// `INTERNAL_FONT_SIZE`-scaled units. Quadratic segments (TrueType glyphs)
+/// are degree-elevated to cubic, since our `Path` only has `cubic_to`.
+struct GlyphOutlineBuilder {
+    path: Path,
+    scale: f64,
+    origin: Point,
+    current: Point,
+}
+
+impl GlyphOutlineBuilder {
+    fn map(&self, x: f32, y: f32) -> Point {
+        Point::new(self.origin.x + x as f64 * self.scale, self.origin.y - y as f64 * self.scale)
+    }
+}
+
+impl rustybuzz::ttf_parser::OutlineBuilder for GlyphOutlineBuilder {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let p = self.map(x, y);
+        self.path.move_to(p);
+        self.current = p;
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        let p = self.map(x, y);
+        self.path.line_to(p);
+        self.current = p;
+    }
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let q = self.map(x1, y1);
+        let end = self.map(x, y);
+        let c1 = self.current + (q - self.current) * (2.0 / 3.0);
+        let c2 = end + (q - end) * (2.0 / 3.0);
+        self.path.cubic_to(c1, c2, end);
+        self.current = end;
+    }
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let c1 = self.map(x1, y1);
+        let c2 = self.map(x2, y2);
+        let end = self.map(x, y);
+        self.path.cubic_to(c1, c2, end);
+        self.current = end;
+    }
+    fn close(&mut self) {
+        self.path.close_subpath();
+    }
+}
+
+/// Shapes one line of text, returning its total advance width (in
+/// `INTERNAL_FONT_SIZE` units, including `letter_spacing` after every
+/// glyph) and each glyph's id and advance.
+fn shape_line(face: &rustybuzz::Face, text: &str, kerning: bool, letter_spacing: f64) -> (f64, Vec<(u32, f64)>) {
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(text);
+    buffer.set_direction(rustybuzz::Direction::LeftToRight);
+
+    let features: Vec<rustybuzz::Feature> = if !kerning {
+        vec![rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(b"kern"), 0, ..)]
+    } else {
+        Vec::new()
+    };
+
+    let units_per_em = face.units_per_em() as f64;
+    let font_scale = if units_per_em > 0.0 { INTERNAL_FONT_SIZE / units_per_em } else { 1.0 };
+
+    let glyph_buffer = rustybuzz::shape(face, &features, buffer);
+    let infos = glyph_buffer.glyph_infos();
+    let positions = glyph_buffer.glyph_positions();
+
+    let mut width = 0.0;
+    let mut glyphs = Vec::with_capacity(infos.len());
+    for (info, pos) in infos.iter().zip(positions.iter()) {
+        let advance = pos.x_advance as f64 * font_scale;
+        glyphs.push((info.glyph_id, advance));
+        width += advance + letter_spacing;
+    }
+    (width, glyphs)
+}
+
+struct TextLayout {
+    /// In `INTERNAL_FONT_SIZE` units, anchored at the object's origin.
+    text_path: Path,
+    line_below_path: Path,
+}
+
+fn build_text_layout(data: &[u8], face_index: u32, symbol: &TextSymbol, text_object: &TextObject) -> Option<TextLayout> {
+    let face = rustybuzz::Face::from_slice(data, face_index)?;
+    let units_per_em = face.units_per_em() as f64;
+    if units_per_em <= 0.0 { return None; }
+    let font_scale = INTERNAL_FONT_SIZE / units_per_em;
+
+    let ascender = face.ascender() as f64 * font_scale;
+    let descender = face.descender() as f64 * font_scale;
+    let line_gap = face.line_gap() as f64 * font_scale;
+    // Approximates QFontMetricsF::lineSpacing() (leading + ascent + descent).
+    let natural_line_spacing = ascender - descender + line_gap;
+
+    // Letter spacing is measured from a space glyph's raw advance, mirroring
+    // Mapper's `font.setLetterSpacing(AbsoluteSpacing, plain.horizontalAdvance(" ") * character_spacing)`.
+    let (space_advance, _) = shape_line(&face, " ", true, 0.0);
+    let letter_spacing = space_advance * symbol.character_spacing;
+
+    let line_spacing = symbol.line_spacing * natural_line_spacing;
+    let inverse_scale = INTERNAL_FONT_SIZE / symbol.font_size;
+    let mut paragraph_spacing = symbol.paragraph_spacing * inverse_scale;
+    if symbol.line_below {
+        paragraph_spacing += (symbol.line_below_distance + symbol.line_below_width) * inverse_scale;
+    }
+
+    let lines: Vec<&str> = text_object.text.split('\n').collect();
+    let num_lines = lines.len();
+    let height = ascender + (num_lines as f64 - 1.0) * (line_spacing + paragraph_spacing);
+
+    let delta_y = match text_object.v_align {
+        v_align::VCENTER => -0.5 * height,
+        v_align::BOTTOM => -height,
+        _ => 0.0,
+    };
+
+    let mut text_path = Path::new();
+    let mut line_below_path = Path::new();
+    let mut line_y = if text_object.v_align == v_align::BASELINE { 0.0 } else { ascender };
+    line_y += delta_y;
+
+    for line in &lines {
+        let (width, glyphs) = shape_line(&face, line, symbol.kerning, letter_spacing);
+        let line_x = match text_object.h_align {
+            h_align::HCENTER => -0.5 * width,
+            h_align::RIGHT => -width,
+            _ => 0.0,
+        };
+
+        if !line.is_empty() {
+            let mut pen_x = line_x;
+            for (glyph_id, advance) in &glyphs {
+                let origin = Point::new(pen_x, line_y);
+                let mut builder = GlyphOutlineBuilder { path: Path::new(), scale: font_scale, origin, current: Point::ZERO };
+                face.outline_glyph(rustybuzz::ttf_parser::GlyphId(*glyph_id as u16), &mut builder);
+                text_path.add_path(&builder.path);
+                pen_x += advance + letter_spacing;
+            }
+        }
+
+        if symbol.line_below && symbol.line_below_width > 0.0 {
+            let y0 = line_y + symbol.line_below_distance * inverse_scale;
+            let h = symbol.line_below_width * inverse_scale;
+            line_below_path.move_to(Point::new(line_x, y0));
+            line_below_path.line_to(Point::new(line_x + width, y0));
+            line_below_path.line_to(Point::new(line_x + width, y0 + h));
+            line_below_path.line_to(Point::new(line_x, y0 + h));
+            line_below_path.close_subpath();
+        }
+
+        line_y += line_spacing + paragraph_spacing;
+    }
+
+    Some(TextLayout { text_path, line_below_path })
+}
+
+pub fn add_text(renderer: &mut Renderer, symbol: &TextSymbol, object: &Object, text_object: &TextObject) {
+    if object.coords.is_empty() || text_object.text.is_empty() || symbol.font_size <= 0.0 {
+        return;
+    }
+
+    let db = font_db();
+    let query = Query {
+        families: &[family_for(&symbol.font_family), Family::SansSerif],
+        weight: if symbol.bold { Weight::BOLD } else { Weight::NORMAL },
+        style: if symbol.italic { Style::Italic } else { Style::Normal },
+        stretch: Stretch::Normal,
+    };
+    let font_id = match db.query(&query) {
+        Some(id) => id,
+        None => return,
+    };
+
+    let layout = match db.with_face_data(font_id, |data, face_index| build_text_layout(data, face_index, symbol, text_object)) {
+        Some(Some(l)) => l,
+        _ => return,
+    };
+
+    let scale = symbol.font_size / INTERNAL_FONT_SIZE;
+    let inverse_scale = 1.0 / scale;
+
+    let origin = object.coords[0].pos();
+    let mut transform = Transform::from_translate(origin.x as f32, origin.y as f32);
+    transform = transform.pre_scale(scale as f32, scale as f32);
+    if symbol.is_rotatable && object.rotation != 0.0 {
+        transform = transform.pre_rotate((-object.rotation).to_degrees() as f32);
+    }
+
+    // Mapper takes the extent of a text renderable from the control points
+    // of the glyph outlines, and maps that rectangle rather than the
+    // glyphs. The path itself stays in the units of the internal font size
+    // and is drawn under the transform, so that curves are flattened at the
+    // size at which they end up on the image.
+    let text_extent = map_rect(&transform, &layout.text_path.control_point_rect());
+
+    if symbol.framing && is_color(symbol.framing_color) {
+        if symbol.framing_mode == 1 && symbol.framing_line_half_width > 0.0 {
+            let fw = symbol.framing_line_half_width;
+            let framing_extent = text_extent.adjusted(-fw, -fw, fw, fw);
+            renderer.stroke(
+                layout.text_path.clone(), symbol.framing_color,
+                2.0 * fw * inverse_scale, PenCap::Round, PenJoin::Round,
+                Some(framing_extent), Some(transform),
+            );
+        } else if symbol.framing_mode == 2 {
+            let shadow = transform.pre_translate(
+                (inverse_scale * symbol.framing_shadow_x_offset) as f32,
+                (inverse_scale * symbol.framing_shadow_y_offset) as f32,
+            );
+            let shadow_extent = map_rect(&shadow, &layout.text_path.control_point_rect());
+            renderer.fill_winding(layout.text_path.clone(), symbol.framing_color, Some(shadow_extent), Some(shadow));
+        }
+    }
+
+    renderer.fill_winding(layout.text_path.clone(), symbol.color, Some(text_extent), Some(transform));
+
+    if !layout.line_below_path.is_empty() {
+        renderer.fill(map_path(&transform, &layout.line_below_path), symbol.line_below_color, None, None);
+    }
+}
