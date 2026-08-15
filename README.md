@@ -68,7 +68,6 @@ Mirrors the original's five translation units, plus one new module for text:
 | `bin/create_benchmark.rs` | — | New. Builds such an archive: collects the maps, has the C++ renderer draw the reference images, and names everything the way `benchmark` expects. See below. |
 | `all_symbols.rs` | `create_map_with_all_symbols.cpp` | Makes one map per symbol of a map, each carrying a grid of test objects. The suites this project measures itself on are built out of these, so it is ported the same way the renderer is — and it *uses* the renderer: a cell of the grid is as wide as what its object draws, so laying the grid out means building every object's renderables to measure them. |
 | `xml_writer.rs` | `Object::save()`, `XMLFileFormat` | New. Writes a map file, for `all_symbols` — the only maps this project writes are ones it has just generated. The colours and symbols go out as the source file's own bytes rather than as anything this project reassembles, so nothing a symbol holds and the renderer ignores can be lost on the way. |
-| `bin/create_map_with_all_symbols.rs` | `create_map_with_all_symbols.cpp` | The CLI of the above, same arguments as the C++ tool. |
 
 
 ## Fidelity
@@ -136,13 +135,11 @@ the difference up.
 
 ## One map per symbol
 
-`create_map_with_all_symbols` takes a symbol set and writes a folder holding
-one map per symbol of it, each with a grid of objects drawn with that symbol
-alone, and a `.txt` next to it saying what is in each cell of the grid:
-
-```bash
-./target/release/create_map_with_all_symbols examples/ISOM.omap ISOM_symbols
-```
+`mti::all_symbols` takes a symbol set and writes one map per symbol of it,
+each with a grid of objects drawn with that symbol alone, and a `.txt` next
+to it saying what is in each cell of the grid. It has no CLI of its own —
+`create_benchmark` calls it whenever it is pointed at a single map file
+rather than a folder (see *Making a benchmark archive*, below).
 
 A line symbol gets a straight line, a closed polygonal square, a closed
 bezier circle, an open bezier S and an open zigzag, at 5, 50 and 100 m on the
@@ -219,10 +216,8 @@ from, and there are two ways to answer it:
 - **a folder** — searched, subfolders included, for every `.omap` and
   `.xmap` in it. This is how a suite of real maps becomes a suite.
 - **a map file** — taken apart into one map per symbol, each carrying a grid
-  of shapes, sizes and rotations that symbol is drawn on. That is
-  `create_map_with_all_symbols`' work, and this project has its own (below),
-  so nothing outside is needed for it. `--symbols-tool <path>` runs the C++
-  one instead, which is how the two are checked against each other.
+  of shapes, sizes and rotations that symbol is drawn on, by this project's
+  own `mti::all_symbols` (see *One map per symbol*, above).
 
 Either way the maps are renamed to the rules below — spaces become
 underscores, and the ordinals are handed out from zero — rendered one by one,
@@ -232,7 +227,7 @@ a few hundred megabytes of maps which are usually not ours to distribute.
 
 ```
 benchmarks/benchmark_forest_sample.zip
-    benchmark_forest_sample/README.txt      what the archive is and how it was made
+    benchmark_forest_sample/info.txt        what the archive is and how it was made
     benchmark_forest_sample/maps/           the maps
     benchmark_forest_sample/expected/       one reference image per map
     benchmark_forest_sample/index/          what is on each generated map
@@ -240,19 +235,20 @@ benchmarks/benchmark_forest_sample.zip
 
 `-r` and `-f` are passed to the renderer, and are what the archive is ground
 truth for: reference images drawn with a 50 m frame line up with nothing
-drawn with a 20 m one, so `README.txt` records both, along with the renderer,
-its version, the source and the date. Run the archive back with the same two.
+drawn with a 20 m one, so `info.txt` records both, along with the renderer,
+its version, the source and the date. `benchmark` reads them back out of
+`info.txt` on its own, so the archive runs without passing `-r`/`-f` by hand.
 
 A map the renderer cannot draw is left out rather than put in without a
 reference image: the ordinals are handed out after the rendering, so what is
-left has no hole in it, and `README.txt` says which maps went missing and
+left has no hole in it, and `info.txt` says which maps went missing and
 why. The exit code is 2 when that happened, 1 on a setup error, 0 otherwise.
 
 `index/` is only there for a generated suite: it is the companion
-description `create_map_with_all_symbols` writes for each map, saying which
-symbol the map is for and what each row and column of its grid is. Nothing
-reads it — it is for whoever is looking at a difference and wants to know
-what they are looking at.
+description `mti::all_symbols` writes for each map, saying which symbol the
+map is for and what each row and column of its grid is. Nothing reads it —
+it is for whoever is looking at a difference and wants to know what they are
+looking at.
 
 
 ## Running a benchmark archive
@@ -432,11 +428,10 @@ than 7 per channel).
 ```bash
 cargo test        # unit tests (geometry, qbezier, xml_reader, xml_writer,
                   # naming, all_symbols, differences) + CLI integration tests
-                  # for map_to_image, benchmark, create_benchmark and
-                  # create_map_with_all_symbols
+                  # for map_to_image, benchmark and create_benchmark
 
-./target/release/create_map_with_all_symbols examples/ISOM.omap    # one map per symbol
 ./target/release/create_benchmark ../build/src/map_to_image maps/  # build a suite
+./target/release/create_benchmark ../build/src/map_to_image ISOM.omap  # one map per symbol
 ./target/release/benchmark suite.zip                 # a whole benchmark suite
 ./target/release/benchmark --filter 501 suite.zip    # only maps whose name contains "501"
 ```

@@ -14,6 +14,18 @@ fn benchmark() -> Command {
 /// Writes a zip holding `maps/` and `expected/` under `root`, from
 /// (name, contents) pairs.
 fn archive(path: &Path, root: &str, maps: &[(&str, Vec<u8>)], expected: &[(&str, Vec<u8>)]) {
+    archive_with_info(path, root, maps, expected, None);
+}
+
+/// The same, with an `info.txt` alongside `maps/` and `expected/` when
+/// `resolution_and_frame` is given, the way create_benchmark writes one.
+fn archive_with_info(
+    path: &Path,
+    root: &str,
+    maps: &[(&str, Vec<u8>)],
+    expected: &[(&str, Vec<u8>)],
+    resolution_and_frame: Option<(f64, f64)>,
+) {
     let file = std::fs::File::create(path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default();
@@ -22,6 +34,10 @@ fn archive(path: &Path, root: &str, maps: &[(&str, Vec<u8>)], expected: &[(&str,
             zip.start_file(format!("{root}{folder}/{name}"), options).unwrap();
             zip.write_all(contents).unwrap();
         }
+    }
+    if let Some((resolution, frame)) = resolution_and_frame {
+        zip.start_file(format!("{root}info.txt"), options).unwrap();
+        write!(zip, "resolution {resolution}\nframe {frame}\n").unwrap();
     }
     zip.finish().unwrap();
 }
@@ -116,10 +132,54 @@ fn an_archive_which_follows_the_rules_is_run_as_it_is() {
             "no setting line {wanted:?} in:\n{info}"
         );
     };
-    setting("resolution", "3 pixels per meter on the ground");
+    setting("resolution", "3 pixels per meter on the ground (default; the archive carries no info.txt)");
     setting("tolerance", "3");
     setting("crop size", "128 pixels");
     setting("antialiasing", "classified and set aside");
+}
+
+/// Passing -r/-f by hand is how a run silently drifts from what the
+/// reference images were drawn at; the archive's own info.txt is what
+/// create_benchmark leaves behind so that does not have to happen.
+#[test]
+fn resolution_and_frame_are_read_from_the_archives_own_info_txt() {
+    let dir = tempfile::tempdir().unwrap();
+    let zip = dir.path().join("suite.zip");
+
+    let reference = {
+        let out = dir.path().join("reference.png");
+        Command::cargo_bin("map_to_image")
+            .unwrap()
+            .arg("tests/data/empty.xmap")
+            .arg(&out)
+            .args(["-r", "10", "-f", "5"])
+            .assert()
+            .success();
+        std::fs::read(out).unwrap()
+    };
+    archive_with_info(
+        &zip,
+        "",
+        &[("000__empty.xmap", map("tests/data/empty.xmap"))],
+        &[("000__empty.png", reference)],
+        Some((10.0, 5.0)),
+    );
+
+    let results = dir.path().join("Results");
+    benchmark()
+        .arg("--results")
+        .arg(&results)
+        .arg(&zip)
+        .assert()
+        .success()
+        // Rendered at the default resolution and frame this pair would not
+        // match: only reading 10 and 5 back out of info.txt makes it identical.
+        .stdout(predicates::str::contains("1 image: 1 identical, 0 antialiasing only, 0 differing"));
+
+    let run = run_folder(&results);
+    let info = std::fs::read_to_string(run.join("info.txt")).unwrap();
+    assert!(info.contains("10 pixels per meter on the ground (from the archive)"), "{info}");
+    assert!(info.contains("5 meters on the ground (from the archive)"), "{info}");
 }
 
 /// Also the archive-under-a-top-level-folder case, which is how a folder

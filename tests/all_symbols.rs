@@ -1,28 +1,21 @@
-//! End to end tests for `create_map_with_all_symbols`: a symbol set goes in,
-//! one map per symbol comes out.
+//! End to end tests for `mti::all_symbols::create_maps`: a symbol set goes
+//! in, one map per symbol comes out.
 //!
 //! The maps are checked by reading them back with this project's own reader
 //! and rendering them, which is the property that matters — a generated map
 //! is only worth generating if a renderer can draw the symbol it was made
-//! for from it.
+//! for from it. `create_benchmark`, the only thing that calls this function,
+//! has its own tests for turning the result into an archive; these are the
+//! ones for what ends up in each generated map.
 
-use std::path::{Path, PathBuf};
-
-use assert_cmd::Command;
+use std::path::Path;
 
 /// The symbol set the tests generate from: five symbols, one of each type
 /// except combined.
 const SOURCE: &str = "tests/data/shapes.xmap";
 
-fn generate(into: &Path) -> String {
-    let output = Command::cargo_bin("create_map_with_all_symbols")
-        .unwrap()
-        .arg(SOURCE)
-        .arg(into)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    String::from_utf8_lossy(&output.stdout).into_owned()
+fn generate(into: &Path) -> mti::all_symbols::Summary {
+    mti::all_symbols::create_maps(Path::new(SOURCE), into, |_, _| {}).unwrap()
 }
 
 fn names(folder: &Path) -> Vec<String> {
@@ -38,7 +31,7 @@ fn names(folder: &Path) -> Vec<String> {
 fn every_symbol_gets_a_map_and_a_description() {
     let dir = tempfile::tempdir().unwrap();
     let into = dir.path().join("symbols");
-    let said = generate(&into);
+    let summary = generate(&into);
 
     // Numbered by the symbol's place in the source, then its type, its number
     // and its name, with everything a file name cannot hold replaced.
@@ -57,7 +50,8 @@ fn every_symbol_gets_a_map_and_a_description() {
             "005_text_105_Contour_value.txt",
         ]
     );
-    assert!(said.contains("5 symbol(s) written, map scale 1:10000"), "{said}");
+    assert_eq!(summary.written, 5);
+    assert_eq!(summary.scale_denominator, 10000);
 }
 
 #[test]
@@ -119,29 +113,11 @@ fn the_description_says_what_is_in_each_cell_of_the_grid() {
 }
 
 #[test]
-fn the_output_folder_defaults_to_the_map_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("a map.xmap");
-    std::fs::copy(SOURCE, &source).unwrap();
-
-    Command::cargo_bin("create_map_with_all_symbols").unwrap().arg(&source).assert().success();
-
-    let expected: PathBuf = dir.path().join("a map_symbols");
-    assert!(expected.is_dir(), "{} was not made", expected.display());
-    assert!(expected.join("003_line_505_Path.omap").is_file());
-}
-
-#[test]
 fn a_map_which_is_not_one_is_reported() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("not a map.omap");
     std::fs::write(&source, "this is not XML").unwrap();
 
-    Command::cargo_bin("create_map_with_all_symbols")
-        .unwrap()
-        .arg(&source)
-        .arg(dir.path().join("out"))
-        .assert()
-        .code(2)
-        .stderr(predicates::str::contains("Error:"));
+    let result = mti::all_symbols::create_maps(&source, &dir.path().join("out"), |_, _| {});
+    assert!(result.is_err());
 }

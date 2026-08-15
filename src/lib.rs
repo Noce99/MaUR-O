@@ -16,3 +16,4 @@ pub mod progress;
 pub mod report;
 pub mod naming;
 pub mod differences;
+pub mod archive_info;

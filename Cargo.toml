@@ -21,10 +21,6 @@ path = "src/bin/benchmark.rs"
 name = "create_benchmark"
 path = "src/bin/create_benchmark.rs"
 
-[[bin]]
-name = "create_map_with_all_symbols"
-path = "src/bin/create_map_with_all_symbols.rs"
-
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }

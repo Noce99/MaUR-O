@@ -35,6 +35,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+use mti::archive_info;
 use mti::differences::{self, Options};
 use mti::naming::{self, Plan};
 use mti::progress::{stage, Progress};
@@ -72,13 +73,19 @@ struct Args {
     #[arg(long)]
     names_only: bool,
 
-    /// Resolution of the renderings, in pixels per meter on the ground.
-    #[arg(short = 'r', long, default_value_t = DEFAULT_RESOLUTION)]
-    resolution: f64,
+    /// Resolution to render at, in pixels per meter on the ground. Matching
+    /// the reference images is what makes the comparison mean anything, so
+    /// this defaults to what the archive's own info.txt says, made at the
+    /// archive's creation, rather than to a fixed value; only pass it to
+    /// override that, which turns every pixel of the comparison wrong.
+    #[arg(short = 'r', long, value_name = "N")]
+    resolution: Option<f64>,
 
     /// Width of the white frame added on each side, in meters on the ground.
-    #[arg(short = 'f', long, default_value_t = DEFAULT_FRAME)]
-    frame: f64,
+    /// Defaults to the archive's own info.txt for the same reason as
+    /// --resolution.
+    #[arg(short = 'f', long, value_name = "N")]
+    frame: Option<f64>,
 
     /// Per pixel difference, summed over red, green and blue, which does not
     /// count as a difference.
@@ -181,6 +188,37 @@ fn read_contents(archive: &Path) -> Result<Contents, String> {
     Ok(Contents { root, maps, expected })
 }
 
+/// Where a rendering setting came from, for `info.txt`'s own record of the run.
+enum Source {
+    /// Given on the command line, overriding whatever the archive says.
+    CommandLine,
+    /// The archive's own info.txt, made when it was created.
+    Archive,
+    /// Neither said anything, so the built-in default was used.
+    Default,
+}
+
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Source::CommandLine => "override",
+            Source::Archive => "from the archive",
+            Source::Default => "default; the archive carries no info.txt",
+        })
+    }
+}
+
+/// Resolves one setting: what was asked for on the command line, if
+/// anything, otherwise what the archive says, if it says anything, otherwise
+/// the built-in default.
+fn resolve(asked: Option<f64>, archived: Option<f64>, default: f64) -> (f64, Source) {
+    match (asked, archived) {
+        (Some(value), _) => (value, Source::CommandLine),
+        (None, Some(value)) => (value, Source::Archive),
+        (None, None) => (default, Source::Default),
+    }
+}
+
 /// Writes what the run was asked to do: every setting, with what it means.
 ///
 /// A results table read a month later is worth what is known about how it was
@@ -193,6 +231,8 @@ fn write_info(
     run: &Path,
     started: chrono::DateTime<chrono::Local>,
     maps: usize,
+    resolution: (f64, &Source),
+    frame: (f64, &Source),
 ) -> Result<(), String> {
     let mut text = format!("Benchmark settings: {title}\n\n");
     text.push_str(&format!("  archive     {}\n", args.archive.display()));
@@ -212,7 +252,7 @@ fn write_info(
             vec![
                 (
                     "resolution",
-                    format!("{} pixels per meter on the ground", args.resolution),
+                    format!("{} pixels per meter on the ground ({})", resolution.0, resolution.1),
                     "How many image pixels one meter of terrain becomes. It is a ground measure, \
                      not a paper one: the map's own scale (1:15000 and so on) converts it to the \
                      paper millimetres the map file is drawn in, so the same value gives images \
@@ -222,7 +262,7 @@ fn write_info(
                 ),
                 (
                     "frame",
-                    format!("{} meters on the ground", args.frame),
+                    format!("{} meters on the ground ({})", frame.0, frame.1),
                     "The width of the white margin added on each side of the map's own extent. \
                      It sets the image size together with the resolution, so a rendering only \
                      lines up with a reference image made with the same frame: a different one \
@@ -447,7 +487,13 @@ fn extract(archive: &Path, contents: &Contents, plan: &Plan, into: &Path) -> Res
 
 /// Renders every map of `maps` into `predictions`. Returns the maps which
 /// could not be rendered, with the reason.
-fn render_all(maps: &Path, predictions: &Path, args: &Args) -> Result<Vec<(String, String)>, String> {
+fn render_all(
+    maps: &Path,
+    predictions: &Path,
+    resolution: f64,
+    frame: f64,
+    filter: &str,
+) -> Result<Vec<(String, String)>, String> {
     std::fs::create_dir_all(predictions).map_err(|e| e.to_string())?;
 
     // Sorted by name, which the naming rules make the order of the suite.
@@ -455,7 +501,7 @@ fn render_all(maps: &Path, predictions: &Path, args: &Args) -> Result<Vec<(Strin
     for entry in std::fs::read_dir(maps).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-        if !name.contains(&args.filter) {
+        if !name.contains(filter) {
             continue;
         }
         files.insert(name.to_string(), path);
@@ -467,7 +513,7 @@ fn render_all(maps: &Path, predictions: &Path, args: &Args) -> Result<Vec<(Strin
     let mut progress = Progress::new("Rendering", total);
     for (name, path) in &files {
         let stem = Path::new(name).file_stem().unwrap().to_string_lossy();
-        match render_map(path, args.resolution, args.frame) {
+        match render_map(path, resolution, frame) {
             Ok(rendering) => {
                 for warning in &rendering.warnings {
                     warnings.push(format!("{name}: {warning}"));
@@ -501,6 +547,10 @@ fn run() -> Result<ExitCode, String> {
     // Read before anything is created, so that an archive which is not one
     // does not leave an empty run folder behind.
     let contents = read_contents(&args.archive)?;
+    let archived = archive_info::read(&args.archive, &contents.root)?;
+    let (resolution, resolution_source) =
+        resolve(args.resolution, archived.map(|i| i.resolution), DEFAULT_RESOLUTION);
+    let (frame, frame_source) = resolve(args.frame, archived.map(|i| i.frame), DEFAULT_FRAME);
 
     let title = args.archive.file_stem().unwrap_or_default().to_string_lossy().to_string();
     let started = chrono::Local::now();
@@ -513,7 +563,15 @@ fn run() -> Result<ExitCode, String> {
 
     // Written before anything else, so that a run which is interrupted still
     // says what it was asked to do.
-    write_info(&args, &title, &run, started, contents.maps.len())?;
+    write_info(
+        &args,
+        &title,
+        &run,
+        started,
+        contents.maps.len(),
+        (resolution, &resolution_source),
+        (frame, &frame_source),
+    )?;
 
     stage(1, STAGES, "Check the benchmark archive naming rules");
     let plan = naming::plan(&contents.maps, &contents.expected);
@@ -539,7 +597,7 @@ fn run() -> Result<ExitCode, String> {
 
     stage(2, STAGES, "Map rendering");
     let predictions = run.join("predictions");
-    let failures = render_all(&unpacked.path().join("maps"), &predictions, &args)?;
+    let failures = render_all(&unpacked.path().join("maps"), &predictions, resolution, frame, &args.filter)?;
     println!();
 
     stage(3, STAGES, "Renders comparison with expected ones");
@@ -573,6 +631,13 @@ fn run() -> Result<ExitCode, String> {
         println!();
     } else {
         println!(", {} not rendered", report.missing.len());
+    }
+    if !report.no_overview.is_empty() {
+        println!(
+            "  {} map{} too large for a side_by_side.png; only the crops were written",
+            report.no_overview.len(),
+            if report.no_overview.len() == 1 { "" } else { "s" }
+        );
     }
     println!("  Per map: {}", results.display());
     println!();

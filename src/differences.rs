@@ -15,6 +15,11 @@
 //! crop_2_XxY.png      the second worst region, and so on
 //! ```
 //!
+//! `side_by_side.png` is missing where the map is too large for it to be
+//! worth a second decode just to shrink — see [`MAX_OVERVIEW_BYTES`] — and
+//! the pair is listed in [`Report::no_overview`] instead; the crops, which
+//! is what a difference is actually diagnosed from, are written all the same.
+//!
 //! The crop file names carry the top left corner of the region in the image,
 //! so a region can be found again in the full size images.
 //!
@@ -58,6 +63,15 @@ const BLOCK: u32 = 16;
 
 /// The gap between the panels of a composed image.
 const GAP: u32 = 8;
+
+/// Above this many decoded bytes, [`write_side_by_side`] is skipped rather
+/// than run: it reads a whole image a second time only to shrink it into an
+/// overview, and for a big enough map that second decode is real memory and
+/// real time spent on a preview the crops already make unnecessary. 512MiB
+/// is the `image` crate's own default decode limit — the point past which it
+/// considers a single image large — reused here for the same reasoning
+/// applied to a redundant decode rather than the mandatory first one.
+const MAX_OVERVIEW_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -115,6 +129,9 @@ pub struct Report {
     pub antialiasing_only: usize,
     /// Reference images with no rendering next to them, by name.
     pub missing: Vec<String>,
+    /// Differing pairs too large for [`write_side_by_side`]'s overview, by
+    /// name: their differences/ folder holds the crops and no side_by_side.png.
+    pub no_overview: Vec<String>,
     /// One row per pair actually compared, in the order the suite runs.
     /// [`write_results`] sorts a copy for the table; this stays as it ran.
     pub rows: Vec<Row>,
@@ -537,8 +554,17 @@ fn whole(path: &Path, height: u32, width: u32, limit: u32) -> Result<RgbImage, S
 /// Where a rendering has an alpha channel it is dropped rather than
 /// composited, which is what Pillow's own conversion to RGB does, and what a
 /// straight per-channel comparison of the two buffers sees.
+///
+/// Without limits: the `image` crate refuses by default to decode past 512MiB,
+/// a guard against a hostile file, which a map rendered by this project's own
+/// `benchmark` and `create_benchmark` is not. A real map at a fine resolution
+/// clears that on its own — the images compared here are not.
 pub fn open_image(path: &Path) -> Result<RgbImage, String> {
-    image::open(path)
+    let mut reader =
+        image::ImageReader::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    reader.no_limits();
+    reader
+        .decode()
         .map(|image| image.to_rgb8())
         .map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
@@ -600,6 +626,12 @@ fn write_diff(mask: &Mask, folder: &Path) -> Result<(), String> {
     let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
     writer.write_image_data(&mask.bits).map_err(|e| e.to_string())?;
     writer.finish().map_err(|e| e.to_string())
+}
+
+/// Whether either image of the pair is too large, decoded, to be worth
+/// reading a second time for [`write_side_by_side`]'s overview.
+fn too_big_for_overview(sizes: [(u32, u32); 2]) -> bool {
+    sizes.iter().any(|&(w, h)| w as u64 * h as u64 * 3 > MAX_OVERVIEW_BYTES)
 }
 
 /// Writes both images whole, expected on the left, predicted on the right.
@@ -722,7 +754,11 @@ pub fn compare(expected: &Path, predictions: &Path, output: &Path, options: &Opt
         ];
         drop(expected_image);
         drop(predicted_image);
-        write_side_by_side([reference, &rendering], sizes, mask.height, mask.width, &folder, options)?;
+        if too_big_for_overview(sizes) {
+            report.no_overview.push(name.clone());
+        } else {
+            write_side_by_side([reference, &rendering], sizes, mask.height, mask.width, &folder, options)?;
+        }
 
         report.differing += 1;
         progress.tick();
@@ -869,6 +905,13 @@ pub fn write_results(report: &Report, title: &str, options: &Options, path: &Pat
     if !report.missing.is_empty() {
         text.push_str("\nNot rendered, so not compared:\n");
         for name in &report.missing {
+            text.push_str(&format!("  {name}\n"));
+        }
+    }
+
+    if !report.no_overview.is_empty() {
+        text.push_str("\nToo large for a side_by_side.png; only the crops were written:\n");
+        for name in &report.no_overview {
             text.push_str(&format!("  {name}\n"));
         }
     }
@@ -1243,5 +1286,19 @@ mod tests {
         assert_eq!(python_round(2.5), 2.0);
         assert_eq!(python_round(-0.5), 0.0);
         assert_eq!(python_round(2.4), 2.0);
+    }
+
+    #[test]
+    fn a_pair_within_the_overview_budget_is_not_too_big() {
+        // A little under 512MiB of RGB8 each, comfortably below the limit.
+        assert!(!too_big_for_overview([(10_000, 17_000), (10_000, 17_000)]));
+    }
+
+    #[test]
+    fn either_image_past_the_overview_budget_makes_the_pair_too_big() {
+        // Just over 512MiB of RGB8 — the real map that motivated this was
+        // 11292x15972, well past it.
+        assert!(too_big_for_overview([(10_000, 17_900), (1, 1)]));
+        assert!(too_big_for_overview([(1, 1), (10_000, 17_900)]));
     }
 }

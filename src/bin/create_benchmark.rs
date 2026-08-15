@@ -14,9 +14,7 @@
 //! * a **folder** is searched, subfolders included, for every `.omap` and
 //!   `.xmap` in it;
 //! * a **map file** is taken apart into one map per symbol by
-//!   [`mti::all_symbols`], this project's port of the C++
-//!   `create_map_with_all_symbols`. `--symbols-tool` runs that C++ tool
-//!   instead, which is how the two are checked against each other.
+//!   [`mti::all_symbols`].
 //!
 //! Either way the maps are renamed to the rules in [`mti::naming`] — a zero
 //! padded ordinal, `__`, and a name free of spaces — rendered one by one, and
@@ -24,7 +22,7 @@
 //!
 //! ```text
 //! benchmarks/<archive>.zip
-//!     <archive>/README.txt      what the archive is and how it was made
+//!     <archive>/info.txt        what the archive is and how it was made
 //!     <archive>/maps/           the maps, under their corrected names
 //!     <archive>/expected/       one reference image per map
 //!     <archive>/index/          what is on each generated map, when there is one
@@ -35,7 +33,7 @@
 //!
 //! A map the renderer cannot draw is left out of the archive rather than put
 //! in it without a reference image: the ordinals are handed out after the
-//! rendering, so what is left has no hole in it. The README says which maps
+//! rendering, so what is left has no hole in it. `info.txt` says which maps
 //! went missing and why.
 //!
 //! Exit codes: 0 success, 1 usage or setup error, 2 a map failed to render.
@@ -72,9 +70,8 @@ type Rendered = (Vec<Entry>, Vec<(String, String)>);
 enum Origin {
     /// Every map found in a folder.
     Folder,
-    /// One map per symbol of a map file, made here, or by the outside tool
-    /// named.
-    Symbols(Option<PathBuf>),
+    /// One map per symbol of a map file.
+    Symbols,
 }
 
 #[derive(Parser)]
@@ -112,11 +109,6 @@ struct Args {
     /// Width of the white frame added on each side, in meters on the ground.
     #[arg(short = 'f', long, default_value_t = DEFAULT_FRAME)]
     frame: f64,
-
-    /// Make the per-symbol maps by running this outside tool, the C++
-    /// create_map_with_all_symbols, rather than with the built-in one.
-    #[arg(long, value_name = "PATH")]
-    symbols_tool: Option<PathBuf>,
 
     /// Only use maps whose name contains this.
     #[arg(long, default_value = "", value_name = "TEXT")]
@@ -265,8 +257,8 @@ fn complaints(stderr: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// Makes one map per symbol of `source`, into `into`, with this project's own
-/// [`all_symbols`](mti::all_symbols).
+/// Makes one map per symbol of `source`, into `into`, with
+/// [`mti::all_symbols`].
 fn generate_symbol_maps(source: &Path, into: &Path) -> Result<Vec<PathBuf>, String> {
     let mut progress: Option<Progress> = None;
     let summary = mti::all_symbols::create_maps(source, into, |_, total| {
@@ -291,45 +283,6 @@ fn generate_symbol_maps(source: &Path, into: &Path) -> Result<Vec<PathBuf>, Stri
     walk(into, &mut paths)?;
     if paths.is_empty() {
         return Err(format!("no maps could be made out of {}", source.display()));
-    }
-    Ok(paths)
-}
-
-/// The same, by running an outside tool instead: the C++
-/// `create_map_with_all_symbols`, which is where the Rust one was ported
-/// from, and which `--symbols-tool` exists to be able to check it against.
-fn generate_symbol_maps_with(tool: &Path, source: &Path, into: &Path) -> Result<Vec<PathBuf>, String> {
-    let output = Command::new(tool)
-        .arg(source)
-        .arg(into)
-        .output()
-        .map_err(|e| format!("cannot run {}: {e}", tool.display()))?;
-    if !output.status.success() {
-        let mut reason = complaints(&output.stderr).join("; ");
-        if reason.is_empty() {
-            reason = output.status.to_string();
-        }
-        return Err(format!("{} failed on {}: {reason}", tool.display(), source.display()));
-    }
-
-    // The tool says which symbols it could make nothing of, one line each,
-    // and finishes with a summary. Both are worth passing on: a suite which
-    // is short of a dozen symbols should say so before it is measured.
-    let notes = String::from_utf8_lossy(&output.stdout);
-    let skipped = notes.lines().filter(|line| line.starts_with("Note: Skipped symbol")).count();
-    if let Some(summary) = notes.lines().rev().find(|line| !line.trim().is_empty()) {
-        if let Some((_, tail)) = summary.split_once(": ") {
-            println!("  {tail}");
-        }
-    }
-    if skipped > 0 {
-        println!("  {skipped} symbol{} could not be turned into objects", if skipped == 1 { "" } else { "s" });
-    }
-
-    let mut paths = Vec::new();
-    walk(into, &mut paths)?;
-    if paths.is_empty() {
-        return Err(format!("{} made no maps out of {}", tool.display(), source.display()));
     }
     Ok(paths)
 }
@@ -423,7 +376,7 @@ fn write_archive(
     entries: &BTreeMap<String, Entry>,
     plan: &Plan,
     images: &Path,
-    about: &str,
+    info: &str,
 ) -> Result<(), String> {
     let file = std::fs::File::create(archive).map_err(|e| format!("cannot write {}: {e}", archive.display()))?;
     let mut writer = zip::ZipWriter::new(std::io::BufWriter::new(file));
@@ -449,10 +402,14 @@ fn write_archive(
             .map_err(|e| format!("cannot write {root}/{folder}: {e}"))?;
     }
 
+    // What the archive is and how it was made, for a person opening it; its
+    // first lines are also where benchmark reads the resolution and the
+    // frame back out of, so that a run measures at what the reference images
+    // were actually drawn at without those two having to be typed in by hand.
     writer
-        .start_file(format!("{root}/README.txt"), options)
-        .map_err(|e| format!("cannot write {root}/README.txt: {e}"))?;
-    std::io::Write::write_all(&mut writer, about.as_bytes()).map_err(|e| e.to_string())?;
+        .start_file(format!("{root}/info.txt"), options)
+        .map_err(|e| format!("cannot write {root}/info.txt: {e}"))?;
+    std::io::Write::write_all(&mut writer, info.as_bytes()).map_err(|e| e.to_string())?;
 
     // Maps first and then images, so that the archive lists in the order it
     // is read in rather than in pairs.
@@ -490,14 +447,18 @@ fn write_archive(
     Ok(())
 }
 
-/// The note the archive carries about itself.
+/// The note the archive carries about itself, as `info.txt`.
 ///
 /// The reference images are only ground truth for the settings they were
 /// drawn at: a benchmark run at another resolution or another frame compares
 /// them against images of another size, and every pixel is then wrong. The
 /// archive is passed around and run months later, so it says what it was made
-/// with rather than leaving it to be remembered.
-fn about_text(
+/// with rather than leaving it to be remembered — and says it in a shape
+/// [`mti::archive_info::parse`] can read the resolution and the frame back
+/// out of: both are on their own line, first word the key, straight after the
+/// heading and before the first blank line, which is the only part of the
+/// file a program ever looks at.
+fn info_text(
     args: &Args,
     root: &str,
     source: &Path,
@@ -506,18 +467,14 @@ fn about_text(
     maps: usize,
     failures: &[(String, String)],
 ) -> String {
-    let mut text = format!("Benchmark archive: {root}\n\n");
+    let mut text = format!("Benchmark archive: {root}\n");
     text.push_str(&format!("  maps        {maps}\n"));
     text.push_str(&format!("  source      {}\n", source.display()));
     match origin {
         Origin::Folder => text.push_str("  mode        every map found in the source folder\n"),
-        Origin::Symbols(None) => text.push_str(&format!(
+        Origin::Symbols => text.push_str(&format!(
             "  mode        one map per symbol of the source map, made by create_benchmark {}\n",
             env!("CARGO_PKG_VERSION")
-        )),
-        Origin::Symbols(Some(tool)) => text.push_str(&format!(
-            "  mode        one map per symbol of the source map, made by {}\n",
-            tool.display()
         )),
     }
     text.push_str(&format!("  renderer    {} ({renderer_version})\n", args.renderer.display()));
@@ -546,7 +503,7 @@ fn about_text(
         text.push_str(&report::wrap(paragraph, report::WIDTH, "  "));
         text.push_str("\n\n");
     }
-    if matches!(origin, Origin::Symbols(_)) {
+    if matches!(origin, Origin::Symbols) {
         text.push_str(&report::wrap(
             "index/ holds, for each map, what is on it: the symbol it was made for, and what \
              each row and column of its grid of objects is. Nothing reads it; it is there for \
@@ -606,7 +563,7 @@ fn run() -> Result<ExitCode, String> {
         return Err(format!("the frame cannot be {} meters", args.frame));
     }
 
-    // Absolute from here on: the README says where the maps came from, and a
+    // Absolute from here on: info.txt says where the maps came from, and a
     // relative path in it means nothing to whoever opens the archive next.
     let source = args
         .source
@@ -654,19 +611,9 @@ fn run() -> Result<ExitCode, String> {
         (source.clone(), paths)
     } else {
         let generated = working.path().join("symbols");
-        let paths = match &args.symbols_tool {
-            None => {
-                println!("  one map per symbol of {}", source.display());
-                origin = Origin::Symbols(None);
-                generate_symbol_maps(&source, &generated)?
-            }
-            Some(tool) => {
-                let version = tool_version(tool)?;
-                println!("  {} ({version})", tool.display());
-                origin = Origin::Symbols(Some(tool.clone()));
-                generate_symbol_maps_with(tool, &source, &generated)?
-            }
-        };
+        println!("  one map per symbol of {}", source.display());
+        origin = Origin::Symbols;
+        let paths = generate_symbol_maps(&source, &generated)?;
         println!("  {} maps, one per symbol of {}", paths.len(), source.display());
         (generated, paths)
     };
@@ -701,7 +648,7 @@ fn run() -> Result<ExitCode, String> {
     let renamed = plan.maps.iter().filter(|renaming| renaming.changed()).count();
     println!("  {} maps, {renamed} renamed to the naming rules", plan.maps.len());
 
-    let about = about_text(
+    let info = info_text(
         &args,
         &root,
         &source,
@@ -710,7 +657,7 @@ fn run() -> Result<ExitCode, String> {
         plan.maps.len(),
         &failures,
     );
-    write_archive(&archive, &root, &entries, &plan, &images, &about)?;
+    write_archive(&archive, &root, &entries, &plan, &images, &info)?;
 
     let written = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
     println!("  {}: {} maps, {}", archive.display(), plan.maps.len(), size(written));

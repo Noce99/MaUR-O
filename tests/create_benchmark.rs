@@ -40,24 +40,6 @@ printf 'image of %s' "$1" > "$2"
     )
 }
 
-/// A stand-in for `create_map_with_all_symbols`: three maps, each with the
-/// description file the real tool writes next to it.
-fn stub_symbols_tool(dir: &Path) -> PathBuf {
-    script(
-        dir,
-        "stub_symbols",
-        r#"#!/bin/sh
-if [ "$1" = "--version" ]; then echo "stub_symbols 1.2.3"; exit 0; fi
-mkdir -p "$2" || exit 1
-for i in 1 2 3; do
-    printf 'map of symbol %s' "$i" > "$2/00${i}_line_10${i}_A symbol.omap"
-    printf 'what is on map %s' "$i" > "$2/00${i}_line_10${i}_A symbol.txt"
-done
-echo "$2: 3 symbol(s) written, map scale 1:15000"
-"#,
-    )
-}
-
 /// Writes a map file, making the folders above it as needed.
 fn map(root: &Path, relative: &str, contents: &str) {
     let path = root.join(relative);
@@ -105,7 +87,7 @@ fn a_folder_becomes_an_archive_which_follows_the_naming_rules() {
         "suite/expected/000__first_map.png",
         "suite/expected/001__second_map.png",
         "suite/expected/002__third_map.png",
-        "suite/README.txt",
+        "suite/info.txt",
     ] {
         assert!(names.contains(&wanted.to_string()), "{wanted} is not in {names:?}");
     }
@@ -177,8 +159,8 @@ fn a_map_which_cannot_be_rendered_leaves_no_hole_in_the_ordinals() {
     assert!(names.contains(&"suite/maps/000__a.omap".to_string()), "{names:?}");
     assert!(names.contains(&"suite/maps/001__z.omap".to_string()), "{names:?}");
     assert!(!names.iter().any(|name| name.contains("unrenderable")), "{names:?}");
-    // The README is where a reader finds out what became of the third map.
-    assert!(contents(&archive, "suite/README.txt").contains("unrenderable: Error: Failed to load"));
+    // info.txt is where a reader finds out what became of the third map.
+    assert!(contents(&archive, "suite/info.txt").contains("unrenderable: Error: Failed to load"));
 }
 
 #[test]
@@ -199,14 +181,11 @@ fn two_maps_of_the_same_name_are_told_apart_by_their_folder() {
 }
 
 #[test]
-fn a_map_file_needs_no_outside_tool_to_become_one_map_per_symbol() {
+fn a_map_file_becomes_one_map_per_symbol_with_its_description() {
     let dir = tempfile::tempdir().unwrap();
     let renderer = stub_renderer(dir.path());
     let archive = dir.path().join("symbols.zip");
 
-    // No --symbols-tool: the maps are made by this project's own
-    // create_map_with_all_symbols, and only the reference images come from
-    // the renderer.
     create_benchmark()
         .arg(&renderer)
         .arg("tests/data/shapes.xmap")
@@ -226,37 +205,7 @@ fn a_map_file_needs_no_outside_tool_to_become_one_map_per_symbol() {
     ] {
         assert!(names.contains(&wanted.to_string()), "{wanted} is not in {names:?}");
     }
-    assert!(contents(&archive, "symbols/README.txt").contains("one map per symbol"));
-}
-
-#[test]
-fn a_map_file_becomes_one_map_per_symbol_with_its_description() {
-    let dir = tempfile::tempdir().unwrap();
-    let renderer = stub_renderer(dir.path());
-    let symbols = stub_symbols_tool(dir.path());
-    let source = dir.path().join("all symbols.omap");
-    std::fs::write(&source, "the source map").unwrap();
-    let archive = dir.path().join("symbols.zip");
-
-    create_benchmark()
-        .arg(&renderer)
-        .arg(&source)
-        .arg("--symbols-tool")
-        .arg(&symbols)
-        .arg("-o")
-        .arg(&archive)
-        .assert()
-        .success();
-
-    let names = entries(&archive);
-    for wanted in [
-        "symbols/maps/000__line_101_A_symbol.omap",
-        "symbols/expected/001__line_102_A_symbol.png",
-        "symbols/index/002__line_103_A_symbol.txt",
-    ] {
-        assert!(names.contains(&wanted.to_string()), "{wanted} is not in {names:?}");
-    }
-    assert_eq!(contents(&archive, "symbols/index/002__line_103_A_symbol.txt"), "what is on map 3");
+    assert!(contents(&archive, "symbols/info.txt").contains("one map per symbol"));
 }
 
 #[test]
@@ -276,10 +225,18 @@ fn the_settings_the_images_were_drawn_at_are_written_down() {
         .assert()
         .success();
 
-    let about = contents(&archive, "suite/README.txt");
-    assert!(about.contains("5 pixels per meter"), "{about}");
-    assert!(about.contains("10 meters on the ground"), "{about}");
-    assert!(about.contains("stub_renderer 1.2.3"), "{about}");
+    let info = contents(&archive, "suite/info.txt");
+    assert!(info.contains("5 pixels per meter"), "{info}");
+    assert!(info.contains("10 meters on the ground"), "{info}");
+    assert!(info.contains("stub_renderer 1.2.3"), "{info}");
+
+    // benchmark reads these two back out of the header, so the line has to
+    // start with the key and a bare number, whatever it says after that.
+    let starts_with = |key: &str, value: &str| {
+        info.lines().any(|line| line.split_whitespace().take(2).collect::<Vec<_>>() == [key, value])
+    };
+    assert!(starts_with("resolution", "5"), "{info}");
+    assert!(starts_with("frame", "10"), "{info}");
 }
 
 #[test]
