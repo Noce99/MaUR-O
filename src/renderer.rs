@@ -14,8 +14,21 @@ use crate::geometry::*;
 use crate::map::*;
 use crate::text;
 
-/// The pen miter limit used by Mapper, in units of half the pen width.
+/// Mapper's own `LineSymbol::miterLimit()`, in units of half the pen width.
 const MITER_LIMIT: f64 = 1.0;
+
+/// Qt's `QPen` miter join, which Mapper's own renderer uses, does not fall
+/// back to a bevel past the miter limit: it keeps the miter direction but
+/// clips its tip at a fixed distance -- `2 * half_width * MITER_LIMIT` --
+/// beyond the vertex, along the tangent (see `extent_include_join` in
+/// geometry.rs, ported from the same Mapper source and validated against it
+/// pixel-for-pixel down to 1-degree corners). That is tiny_skia's
+/// `LineJoin::MiterClip`, not `LineJoin::Miter` (which clips by switching to
+/// a bevel, a visibly different shape for sharp angles -- confirmed to
+/// collapse small, thick-stroked shapes like a five-pointed star into a
+/// round blob). `MiterClip`'s `miter_limit` uses the same
+/// ratio-to-full-pen-width convention as the clip distance above.
+const TINY_SKIA_MITER_LIMIT: f64 = 2.0 * MITER_LIMIT;
 
 fn pen_cap(style: i32) -> PenCap {
     match style {
@@ -117,6 +130,16 @@ struct Renderable {
     pen_width: f64,
     cap: PenCap,
     join: PenJoin,
+    /// Whether a `PenJoin::Miter` join is realized as tiny_skia's
+    /// `LineJoin::MiterClip` (`true`, matching Mapper's own miter join --
+    /// see `TINY_SKIA_MITER_LIMIT`) or its plain `LineJoin::Miter` (`false`).
+    /// Set to `false` only for a border line whose flattened path contains a
+    /// cusp (see `has_sharp_fold` in geometry.rs): a border is shifted off
+    /// its main line by a fixed amount that can exceed the local radius of
+    /// curvature on a tight curve, folding the shifted path onto itself, and
+    /// `MiterClip` reacts to the resulting near-reversal join with a wildly
+    /// overlong spike where plain `Miter` cleanly falls back to a bevel.
+    miter_clip: bool,
     /// `QPainterPath` defaults to `Qt::OddEvenFill` (which is how a hole
     /// punched by a `HolePoint`-flagged inner loop works); text explicitly
     /// opts into `Qt::WindingFill` so that overlapping glyph contours don't
@@ -186,11 +209,23 @@ impl<'m> Renderer<'m> {
         self.include(b);
         self.renderables.push(Renderable {
             path, color, clip: self.current_clip, pen_width: 0.0,
-            cap: PenCap::Flat, join: PenJoin::Miter, fill_rule, transform,
+            cap: PenCap::Flat, join: PenJoin::Miter, miter_clip: true, fill_rule, transform,
         });
     }
 
     pub(crate) fn stroke(&mut self, path: Path, color: i32, width: f64, cap: PenCap, join: PenJoin,
+              bounds: Option<Rect>, transform: Option<Transform>) {
+        self.stroke_impl(path, color, width, cap, join, true, bounds, transform);
+    }
+
+    /// Like [`Self::stroke`], but for a border line shifted off a main line
+    /// (see the `miter_clip` field doc on [`Renderable`]).
+    fn stroke_no_miter_clip(&mut self, path: Path, color: i32, width: f64, cap: PenCap, join: PenJoin,
+              bounds: Option<Rect>, transform: Option<Transform>) {
+        self.stroke_impl(path, color, width, cap, join, false, bounds, transform);
+    }
+
+    fn stroke_impl(&mut self, path: Path, color: i32, width: f64, cap: PenCap, join: PenJoin, miter_clip: bool,
               bounds: Option<Rect>, transform: Option<Transform>) {
         if self.map.color(color).is_none() || width <= 0.0 || path.is_empty() { return; }
         if let Some(b) = bounds {
@@ -207,7 +242,7 @@ impl<'m> Renderer<'m> {
             self.include(extent);
         }
         self.renderables.push(Renderable {
-            path, color, clip: self.current_clip, pen_width: width, cap, join,
+            path, color, clip: self.current_clip, pen_width: width, cap, join, miter_clip,
             fill_rule: FillRule::EvenOdd, transform,
         });
     }
@@ -966,8 +1001,14 @@ impl<'m> Renderer<'m> {
     fn stroke_border(&mut self, border: &Border, border_join: PenJoin, border_coords: &CoordList) {
         if border_coords.len() < 2 { return; }
         let half_width = if border.color >= 0 { border.width / 2.0 } else { 0.0 };
-        let bounds = stroked_path_extent(border_coords, &flatten(border_coords), half_width, PenCap::Flat, border_join);
-        self.stroke(to_painter_path(border_coords, true), border.color, border.width, PenCap::Flat, border_join, Some(bounds), None);
+        let flattened = flatten(border_coords);
+        let bounds = stroked_path_extent(border_coords, &flattened, half_width, PenCap::Flat, border_join);
+        let path = to_painter_path(border_coords, true);
+        if has_sharp_fold(&flattened, half_width) {
+            self.stroke_no_miter_clip(path, border.color, border.width, PenCap::Flat, border_join, Some(bounds), None);
+        } else {
+            self.stroke(path, border.color, border.width, PenCap::Flat, border_join, Some(bounds), None);
+        }
     }
 
     fn add_border(&mut self, symbol: &LineSymbol, part_coords: &CoordList, render_parts: &[PathPart], border: &Border, sign: f64) {
@@ -1243,13 +1284,14 @@ impl<'m> Renderer<'m> {
             if renderable.pen_width > 0.0 {
                 let stroke = Stroke {
                     width: renderable.pen_width as f32,
-                    miter_limit: MITER_LIMIT as f32,
+                    miter_limit: TINY_SKIA_MITER_LIMIT as f32,
                     line_cap: match renderable.cap {
                         PenCap::Flat => tiny_skia::LineCap::Butt,
                         PenCap::Round => tiny_skia::LineCap::Round,
                         PenCap::Square => tiny_skia::LineCap::Square,
                     },
                     line_join: match renderable.join {
+                        PenJoin::Miter if renderable.miter_clip => tiny_skia::LineJoin::MiterClip,
                         PenJoin::Miter => tiny_skia::LineJoin::Miter,
                         PenJoin::Bevel => tiny_skia::LineJoin::Bevel,
                         PenJoin::Round => tiny_skia::LineJoin::Round,

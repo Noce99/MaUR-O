@@ -398,6 +398,71 @@ pub fn flatten(coords: &CoordList) -> Vec<PathPart> {
     parts
 }
 
+/// Below this dot product between two consecutive edge directions, a vertex
+/// folds back on itself closely enough to count as a cusp: matches
+/// tiny_skia's own `AngleType::Nearly180` threshold (`(1.0 + dot)
+/// .is_nearly_zero()` at `1.0 / 4096.0`), since that is the failure mode
+/// this constant exists to detect (see [`has_sharp_fold`]).
+const NEARLY_REVERSED_DOT: f64 = -1.0 + 1.0 / 4096.0;
+
+/// The circumradius of the circle through three points, or `f64::INFINITY`
+/// for (near-)collinear ones, which have none.
+fn circumradius(a: Point, b: Point, c: Point) -> f64 {
+    let ab = distance(b - a);
+    let bc = distance(c - b);
+    let ca = distance(a - c);
+    let area2 = ((b - a).x * (c - a).y - (b - a).y * (c - a).x).abs();
+    if area2 < 1e-12 { f64::INFINITY } else { ab * bc * ca / (2.0 * area2) }
+}
+
+/// Whether stroking the given flattened parts at the given half width can
+/// hit tiny_skia's `LineJoin::MiterClip` failure mode: either a cusp (an
+/// interior vertex whose incoming and outgoing edges point in very nearly
+/// opposite directions), or a bend along a curve tighter than the pen is
+/// wide.
+///
+/// A line offset sideways by more than its local radius of curvature (as a
+/// border is, off its main line) folds onto itself; on a straight polyline
+/// that shows up directly as a cusp, but a curve making of several bezier
+/// segments spreads the same fold across the join between two of them --
+/// which is a real vertex of the path, not one of the interpolated points
+/// within a segment, but still surrounded by curve on at least one side.
+/// Either way the circumradius through the point and its two neighbors (the
+/// radius of curvature it approximates) comes out below the half width
+/// doing the offending offsetting; a plain sharp vertex -- like a star's
+/// point, where curvature is not the issue -- has no curve segment on
+/// either side, so checking it only next to one does not misfire there.
+/// Either failure mode makes `MiterClip` -- otherwise the right match for
+/// Mapper's own miter join, see `TINY_SKIA_MITER_LIMIT` in renderer.rs --
+/// compute a clip point via a formula that divides by (near) zero and
+/// spikes wildly off to one side, unlike Mapper's own renderer. Callers use
+/// this to fall back to a plain, spike-free `LineJoin::Miter` instead, only
+/// where that can actually occur.
+pub fn has_sharp_fold(parts: &[PathPart], half_width: f64) -> bool {
+    let is_fold = |prev: Point, next: Point| {
+        let prev = prev.normalized();
+        let next = next.normalized();
+        prev.dot(next) < NEARLY_REVERSED_DOT
+    };
+    for part in parts {
+        let points = &part.points;
+        let curve = &part.curve_points;
+        let n = points.len();
+        if n < 3 { continue; }
+        for i in 1..n - 1 {
+            if is_fold(points[i] - points[i - 1], points[i + 1] - points[i]) { return true; }
+            if (curve[i] || curve[i - 1] || curve[i + 1])
+                && circumradius(points[i - 1], points[i], points[i + 1]) < half_width {
+                return true;
+            }
+        }
+        if part.closed && points[0] == points[n - 1] && n >= 3 {
+            if is_fold(points[0] - points[n - 2], points[1] - points[0]) { return true; }
+        }
+    }
+    false
+}
+
 /// Converts a coordinate list to a path, preserving bezier curves.
 ///
 /// With `honor_gaps`, the sections between two gap points are left out, as
