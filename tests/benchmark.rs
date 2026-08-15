@@ -82,7 +82,7 @@ fn an_archive_which_follows_the_rules_is_run_as_it_is() {
         .assert()
         .success()
         .stdout(predicates::str::contains("names are as they should be"))
-        .stdout(predicates::str::contains("1 image: 1 identical, 0 differing"));
+        .stdout(predicates::str::contains("1 image: 1 identical, 0 antialiasing only, 0 differing"));
 
     assert!(!zip.with_file_name("suite_corrected.zip").exists(), "nothing to correct");
 
@@ -100,14 +100,26 @@ fn an_archive_which_follows_the_rules_is_run_as_it_is() {
         .lines()
         .find(|line| line.contains("000__empty"))
         .unwrap_or_else(|| panic!("no row for the map in:\n{results_txt}"));
-    // An identical pair: nothing wrong, and so nothing to average over.
-    assert_eq!(row.split_whitespace().collect::<Vec<_>>(), ["0.0000%", "0", "n/a", "000__empty"]);
+    // An identical pair: real, antialiasing, wrong, largest, mean, name.
+    assert_eq!(
+        row.split_whitespace().collect::<Vec<_>>(),
+        ["0.0000%", "0.0000%", "0.0000%", "0", "n/a", "000__empty"]
+    );
 
-    // The settings are recorded whether or not anything went wrong.
+    // The settings are recorded whether or not anything went wrong. Matched
+    // without their column padding, which is as wide as the longest name.
     let info = std::fs::read_to_string(run.join("info.txt")).unwrap();
-    assert!(info.contains("resolution  3 pixels per meter on the ground"), "{info}");
-    assert!(info.contains("tolerance   0"), "{info}");
-    assert!(info.contains("crop size   128 pixels"), "{info}");
+    let setting = |name: &str, value: &str| {
+        let wanted = format!("{name} {value}");
+        assert!(
+            info.lines().any(|line| line.split_whitespace().collect::<Vec<_>>().join(" ") == wanted),
+            "no setting line {wanted:?} in:\n{info}"
+        );
+    };
+    setting("resolution", "3 pixels per meter on the ground");
+    setting("tolerance", "3");
+    setting("crop size", "128 pixels");
+    setting("antialiasing", "classified and set aside");
 }
 
 /// Also the archive-under-a-top-level-folder case, which is how a folder
@@ -131,7 +143,7 @@ fn a_differing_pair_gets_the_whole_report() {
         .arg(&zip)
         .assert()
         .success()
-        .stdout(predicates::str::contains("1 image: 0 identical, 1 differing"));
+        .stdout(predicates::str::contains("1 image: 0 identical, 0 antialiasing only, 1 differing"));
 
     let run = run_folder(&results);
     // The map is a white square and the reference a small green one, so every
@@ -144,14 +156,17 @@ fn a_differing_pair_gets_the_whole_report() {
         .split_whitespace()
         .map(str::to_string)
         .collect();
-    assert_eq!(row.len(), 6, "{row:?}");
+    // real, antialiasing, wrong, largest, mean, ±, sd, name.
+    assert_eq!(row.len(), 8, "{row:?}");
+    // The two images are different sizes, so most of it is real.
     assert!(row[0].ends_with('%') && row[0] != "0.0000%", "{row:?}");
-    assert!(row[1].parse::<i32>().unwrap() > 0, "{row:?}");
+    assert!(row[2].ends_with('%') && row[2] != "0.0000%", "{row:?}");
+    assert!(row[3].parse::<i32>().unwrap() > 0, "{row:?}");
     // The mean is over the wrong pixels only, so it cannot be below the
     // tolerance the pixels had to clear to be counted.
-    assert!(row[2].parse::<f64>().unwrap() > 0.0, "{row:?}");
-    assert_eq!(row[3], "±", "{row:?}");
-    assert_eq!(row[5], "000__empty");
+    assert!(row[4].parse::<f64>().unwrap() > 0.0, "{row:?}");
+    assert_eq!(row[5], "±", "{row:?}");
+    assert_eq!(row[7], "000__empty");
 
     let report = run.join("differences/000__empty");
     assert!(report.join("diff.png").is_file());

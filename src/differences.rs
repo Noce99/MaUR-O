@@ -9,7 +9,8 @@
 //!
 //! ```text
 //! side_by_side.png    the whole of both images, expected left, predicted right
-//! diff.png            black where the two agree, red where they do not
+//! diff.png            black where the two agree, red where they really differ,
+//!                     dim orange where antialiasing explains it
 //! crop_1_XxY.png      the worst region, expected, predicted and diff, enlarged
 //! crop_2_XxY.png      the second worst region, and so on
 //! ```
@@ -21,9 +22,16 @@
 //! identical to it, and both are labelling rather than measurement: the text
 //! in the grey bars is rasterized by `tiny-skia` instead of FreeType, and
 //! the overview in `side_by_side.png` is scaled down by the `image` crate's
-//! Lanczos filter instead of Pillow's. The difference mask, which regions
-//! are cropped and where, and every file name are computed exactly as the
-//! Python does.
+//! Lanczos filter instead of Pillow's.
+//!
+//! One thing is a deliberate departure from it. Almost every pixel these
+//! benchmarks report is an edge that both renderers drew and disagreed about
+//! the coverage of, which buries the handful that mean something; so every
+//! differing pixel is classified, by [`is_antialiasing`], into one two
+//! rasterizers can legitimately disagree about and one they cannot. Only the
+//! second kind chooses which regions get cropped out, and a pair with none
+//! of them gets no folder at all. Run with `keep_antialiasing` for the
+//! Python's own behaviour of reporting every differing pixel.
 
 use std::path::{Path, PathBuf};
 
@@ -38,6 +46,11 @@ const LABEL_FOREGROUND: Rgb<u8> = Rgb([255, 255, 255]);
 
 /// The colour a differing pixel gets in diff.png and in the crops.
 const DIFFERENCE_COLOUR: Rgb<u8> = Rgb([255, 0, 0]);
+
+/// The colour a pixel gets when its difference is put down to antialiasing:
+/// dimmer than the real ones, so that a crop full of it reads at a glance as
+/// a crop with nothing in it.
+const ANTIALIASING_COLOUR: Rgb<u8> = Rgb([160, 80, 0]);
 
 /// The side of a block the difference mask is scored in, when looking for
 /// the regions worth cropping out.
@@ -63,20 +76,43 @@ pub struct Options {
     pub overview: u32,
     /// Only compare images whose name contains this.
     pub filter: String,
+    /// Count differences antialiasing explains as real ones, i.e. turn the
+    /// classification off and report every differing pixel.
+    pub keep_antialiasing: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { tolerance: 0, crops: 0, crop_size: 128, zoom: 512, overview: 2000, filter: String::new() }
+        Options {
+            tolerance: DEFAULT_TOLERANCE,
+            crops: 0,
+            crop_size: 128,
+            zoom: 512,
+            overview: 2000,
+            filter: String::new(),
+            keep_antialiasing: false,
+        }
     }
 }
+
+/// The error a pixel is allowed before it counts as wrong.
+///
+/// One per channel: a flat area of one colour comes out of two renderers a
+/// unit apart per channel often enough, from nothing more than where each
+/// one's float-to-integer conversion of the same colour lands. Summed over
+/// red, green and blue that is 3, and forgiving it stops a whole area being
+/// reported over a rounding difference nobody can see.
+pub const DEFAULT_TOLERANCE: i32 = 3;
 
 /// What a run of [`compare`] found.
 #[derive(Debug, Default)]
 pub struct Report {
     pub total: usize,
     pub identical: usize,
+    /// Pairs with at least one real difference. Only these get a folder.
     pub differing: usize,
+    /// Pairs which differ, but only in ways antialiasing explains.
+    pub antialiasing_only: usize,
     /// Reference images with no rendering next to them, by name.
     pub missing: Vec<String>,
     /// One row per pair actually compared, in the order the suite runs.
@@ -88,8 +124,10 @@ pub struct Report {
 #[derive(Debug, Clone)]
 pub struct Row {
     pub name: String,
-    /// The fraction of the union of the two images which differs.
+    /// The fraction of the union of the two images which differs at all.
     pub differing: f64,
+    /// The fraction which differs in a way antialiasing does not explain.
+    pub real: f64,
     /// The largest per-pixel error, summed over red, green and blue, so from
     /// 0 to 765.
     pub largest: i32,
@@ -118,41 +156,61 @@ pub struct Comparison {
     pub error: Option<(f64, f64)>,
 }
 
-/// Which pixels of a pair of images differ.
+/// The two images agree at this pixel, within the tolerance.
+pub const AGREE: u8 = 0;
+/// They disagree, but only in a way two rasterizers can disagree about an
+/// edge they both drew. See [`is_antialiasing`].
+pub const ANTIALIASING: u8 = 1;
+/// They disagree in a way antialiasing does not explain.
+pub const REAL: u8 = 2;
+
+/// Which pixels of a pair of images differ, and what their difference was
+/// put down to.
 ///
 /// The mask covers the union of the two images: where they do not overlap,
-/// every pixel counts as differing.
+/// every pixel counts as differing, and as a real difference rather than an
+/// antialiasing one — a rendering of the wrong size is not an edge effect.
 pub struct Mask {
     pub width: u32,
     pub height: u32,
-    /// One byte per pixel, 1 where the two differ, row by row.
+    /// One byte per pixel, row by row: [`AGREE`], [`ANTIALIASING`] or [`REAL`].
     bits: Vec<u8>,
 }
 
 impl Mask {
-    fn at(&self, x: u32, y: u32) -> bool {
-        self.bits[(y as usize) * (self.width as usize) + x as usize] != 0
+    fn class(&self, x: u32, y: u32) -> u8 {
+        self.bits[(y as usize) * (self.width as usize) + x as usize]
     }
 
     fn any(&self) -> bool {
-        self.bits.iter().any(|&b| b != 0)
+        self.bits.iter().any(|&b| b != AGREE)
     }
 
+    /// How many pixels differ at all, however the difference is explained.
     fn count(&self) -> u64 {
-        self.bits.iter().map(|&b| b as u64).sum()
+        self.bits.iter().filter(|&&b| b != AGREE).count() as u64
+    }
+
+    /// How many differ in a way antialiasing does not explain.
+    pub fn count_real(&self) -> u64 {
+        self.bits.iter().filter(|&&b| b == REAL).count() as u64
     }
 
     fn size(&self) -> u64 {
         (self.width as u64) * (self.height as u64)
     }
 
-    /// How many pixels differ inside a square region.
+    /// How many real differences are inside a square region.
+    ///
+    /// Antialiasing is deliberately not counted: the regions to crop out are
+    /// chosen by this, and a crop of an edge both renderers drew is a crop
+    /// nobody needs to open.
     fn count_in(&self, x: u32, y: u32, size: u32) -> u64 {
         let mut total = 0;
         for row in y..(y + size).min(self.height) {
             let start = (row as usize) * (self.width as usize);
             for column in x..(x + size).min(self.width) {
-                total += self.bits[start + column as usize] as u64;
+                total += u64::from(self.bits[start + column as usize] == REAL);
             }
         }
         total
@@ -171,19 +229,93 @@ fn python_round(value: f64) -> f64 {
     }
 }
 
+/// Whether `image` has a colour step somewhere in the 3x3 window around
+/// (x, y) — that is, whether it drew an edge there.
+///
+/// Measured as the range the window's colours span, summed over red, green
+/// and blue, against the same tolerance a pixel is judged by, so that a flat
+/// area which merely rounds differently across it is not an edge.
+///
+/// The window is clipped to the region the two images share, so nothing is
+/// ever explained by a pixel only one of them has.
+fn has_edge(image: &RgbImage, x: u32, y: u32, width: u32, height: u32, tolerance: i32) -> bool {
+    let mut low = [255u8; 3];
+    let mut high = [0u8; 3];
+    for row in y.saturating_sub(1)..=(y + 1).min(height - 1) {
+        for column in x.saturating_sub(1)..=(x + 1).min(width - 1) {
+            let pixel = image.get_pixel(column, row);
+            for channel in 0..3 {
+                low[channel] = low[channel].min(pixel[channel]);
+                high[channel] = high[channel].max(pixel[channel]);
+            }
+        }
+    }
+    (0..3).map(|channel| high[channel] as i32 - low[channel] as i32).sum::<i32>() > tolerance
+}
+
+/// Whether the disagreement at (x, y) is one two rasterizers can have about
+/// an edge they both drew.
+///
+/// Antialiasing happens only at an edge, so a pixel qualifies only where
+/// *both* renderings have one. Requiring it of both is what carries the
+/// weight: where only one of them has an edge, one of them drew something
+/// the other did not, and that is never an edge effect. A missing symbol, an
+/// extra mark, a shape well out of place and a rendering of the wrong size
+/// all fail on that.
+///
+/// An earlier version of this asked something stricter — that each image's
+/// colour lie inside the range the other takes in the window, on the grounds
+/// that a coverage disagreement can only remix colours both images have
+/// there. It reads well and it does not work, because it needs the colours
+/// being mixed to be visible somewhere nearby. A map is full of features
+/// thinner than a pixel: at a road's casing the pixels are 59% asphalt, 24%
+/// white and 17% black, from a gap of white paper narrower than one pixel,
+/// so pure white appears nowhere in the neighbourhood at any window size and
+/// the blend sits outside the range of everything on either side of it. That
+/// left a quarter of the suite reporting road casings as real differences.
+///
+/// What this cannot do, and no local test can, is tell antialiasing from a
+/// shape drawn under a pixel out of place: a line one pixel to the left has
+/// exactly the signature of a coverage disagreement. The 3x3 window is
+/// therefore also the statement of how much positional disagreement is
+/// forgiven — one pixel, which is how far either rasterizer spreads an edge.
+/// By the same token a colour error confined to the pixels of an edge is
+/// forgiven; over any area more than a pixel wide the interior has no edge
+/// in either image, so it is still reported.
+pub fn is_antialiasing(
+    expected: &RgbImage,
+    predicted: &RgbImage,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    tolerance: i32,
+) -> bool {
+    has_edge(expected, x, y, width, height, tolerance)
+        && has_edge(predicted, x, y, width, height, tolerance)
+}
+
 /// Which pixels differ, by how much at the worst pixel, and by how much on
 /// average.
 ///
 /// The difference of a pixel is summed over red, green and blue, the way the
 /// C++ project's `tests/image_compare.cpp` measures it, so that a tolerance
 /// means the same thing here as it does there.
-pub fn difference_mask(expected: &RgbImage, predicted: &RgbImage, tolerance: i32) -> Comparison {
+pub fn difference_mask(
+    expected: &RgbImage,
+    predicted: &RgbImage,
+    tolerance: i32,
+    keep_antialiasing: bool,
+) -> Comparison {
     let width = expected.width().max(predicted.width());
     let height = expected.height().max(predicted.height());
     let shared_width = expected.width().min(predicted.width());
     let shared_height = expected.height().min(predicted.height());
 
-    let mut bits = vec![1u8; (width as usize) * (height as usize)];
+    // Everything starts real; only the shared region is looked at below, and
+    // what is left over is the size mismatch, which antialiasing cannot
+    // account for.
+    let mut bits = vec![REAL; (width as usize) * (height as usize)];
     let mut largest = 0;
     // Summed over the wrong pixels only. The error is at most 765 over at
     // most a few hundred megapixels, so neither sum can come close to
@@ -199,12 +331,22 @@ pub fn difference_mask(expected: &RgbImage, predicted: &RgbImage, tolerance: i32
                 + (a[2] as i32 - b[2] as i32).abs();
             largest = largest.max(distance);
             if distance > tolerance {
-                bits[row + x as usize] = 1;
+                let antialiasing = !keep_antialiasing
+                    && is_antialiasing(
+                        expected,
+                        predicted,
+                        x,
+                        y,
+                        shared_width,
+                        shared_height,
+                        tolerance,
+                    );
+                bits[row + x as usize] = if antialiasing { ANTIALIASING } else { REAL };
                 wrong += 1;
                 sum += distance as u64;
                 sum_of_squares += (distance as u64) * (distance as u64);
             } else {
-                bits[row + x as usize] = 0;
+                bits[row + x as usize] = AGREE;
             }
         }
     }
@@ -239,7 +381,9 @@ pub fn worst_regions(mask: &Mask, count: usize, size: u32) -> Vec<(u32, u32, u64
     for y in 0..mask.height {
         let block_row = (y / BLOCK) as usize * blocks_x as usize;
         for x in 0..mask.width {
-            if mask.at(x, y) {
+            // Real differences only: a region is worth cropping out for what
+            // is wrong in it, not for the edges both renderers drew.
+            if mask.class(x, y) == REAL {
                 scores[block_row + (x / BLOCK) as usize] += 1;
             }
         }
@@ -305,13 +449,16 @@ fn crop(image: &RgbImage, x: u32, y: u32, size: u32) -> RgbImage {
     result
 }
 
-/// The same region of the difference mask, black and red.
+/// The same region of the difference mask: black where the two agree, red
+/// where they really differ, dim orange where antialiasing explains it.
 fn crop_of_mask(mask: &Mask, x: u32, y: u32, size: u32) -> RgbImage {
     let mut result = RgbImage::from_pixel(size.max(1), size.max(1), Rgb([0, 0, 0]));
     for row in 0..size.min(mask.height.saturating_sub(y)) {
         for column in 0..size.min(mask.width.saturating_sub(x)) {
-            if mask.at(x + column, y + row) {
-                result.put_pixel(column, row, DIFFERENCE_COLOUR);
+            match mask.class(x + column, y + row) {
+                REAL => result.put_pixel(column, row, DIFFERENCE_COLOUR),
+                ANTIALIASING => result.put_pixel(column, row, ANTIALIASING_COLOUR),
+                _ => {}
             }
         }
     }
@@ -427,7 +574,7 @@ fn write_crops(
         let labels = [
             "expected".to_string(),
             "predicted".to_string(),
-            format!("diff  {differing} pixels"),
+            format!("diff  {differing} real px"),
         ];
         let name = format!("crop_{:0digits$}_{x}x{y}.png", number + 1, digits = digits);
         compose(&panels, &labels).save(folder.join(name)).map_err(|e| e.to_string())?;
@@ -435,16 +582,21 @@ fn write_crops(
     Ok(())
 }
 
-/// Writes the mask as a black and red image.
+/// Writes the mask as a black, orange and red image.
 ///
 /// A palette image, because the full size difference of a large map is a
-/// hundred megapixels of no more than two colours.
+/// hundred megapixels of no more than three colours — and because the
+/// mask's bytes are already the palette indices.
 fn write_diff(mask: &Mask, folder: &Path) -> Result<(), String> {
     let file = std::fs::File::create(folder.join("diff.png")).map_err(|e| e.to_string())?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), mask.width, mask.height);
     encoder.set_color(png::ColorType::Indexed);
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_palette(vec![0, 0, 0, DIFFERENCE_COLOUR[0], DIFFERENCE_COLOUR[1], DIFFERENCE_COLOUR[2]]);
+    encoder.set_palette(vec![
+        0, 0, 0,
+        ANTIALIASING_COLOUR[0], ANTIALIASING_COLOUR[1], ANTIALIASING_COLOUR[2],
+        DIFFERENCE_COLOUR[0], DIFFERENCE_COLOUR[1], DIFFERENCE_COLOUR[2],
+    ]);
     let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
     writer.write_image_data(&mask.bits).map_err(|e| e.to_string())?;
     writer.finish().map_err(|e| e.to_string())
@@ -522,12 +674,19 @@ pub fn compare(expected: &Path, predictions: &Path, output: &Path, options: &Opt
 
         let expected_image = open_image(reference)?;
         let predicted_image = open_image(&rendering)?;
-        let measured = difference_mask(&expected_image, &predicted_image, options.tolerance);
+        let measured = difference_mask(
+            &expected_image,
+            &predicted_image,
+            options.tolerance,
+            options.keep_antialiasing,
+        );
         let mask = measured.mask;
+        let real = mask.count_real();
 
         report.rows.push(Row {
             name: name.clone(),
             differing: mask.count() as f64 / mask.size() as f64,
+            real: real as f64 / mask.size() as f64,
             largest: measured.largest,
             error: measured.error,
         });
@@ -539,6 +698,14 @@ pub fn compare(expected: &Path, predictions: &Path, output: &Path, options: &Opt
         }
         if !mask.any() {
             report.identical += 1;
+            progress.tick();
+            continue;
+        }
+        // A pair whose every difference is an edge both renderers drew has
+        // nothing in it to look at, so it gets no folder — which is what
+        // makes what is left in differences/ a short list worth opening.
+        if real == 0 {
+            report.antialiasing_only += 1;
             progress.tick();
             continue;
         }
@@ -572,10 +739,11 @@ pub fn write_results(report: &Report, title: &str, options: &Options, path: &Pat
     let mut text = String::new();
     text.push_str(&format!("Benchmark results: {title}\n\n"));
     text.push_str(&format!(
-        "{} image{} compared: {} identical, {} differing",
+        "{} image{} compared: {} identical, {} antialiasing only, {} differing",
         report.total,
         if report.total == 1 { "" } else { "s" },
         report.identical,
+        report.antialiasing_only,
         report.differing
     ));
     if report.missing.is_empty() {
@@ -592,38 +760,73 @@ pub fn write_results(report: &Report, title: &str, options: &Options, path: &Pat
     text.push_str(&crate::report::paragraph(
         "\"wrong\" is the share of wrong pixels over the union of the two images, so where the \
          two disagree about the size of the map, every pixel outside the overlap counts as wrong. \
-         The table is sorted by it, worst first, so the maps worth looking at are at the top.",
+         It splits into \"antialiasing\" and \"real\".",
+    ));
+    if options.keep_antialiasing {
+        text.push_str(&crate::report::paragraph(
+            "This run was made with --keep-antialiasing, so nothing was put down to antialiasing \
+             and every wrong pixel is counted as real.",
+        ));
+    } else {
+        text.push_str(&crate::report::paragraph(
+            "A pixel counts as \"antialiasing\" when both renderings have a colour step in the 3x3 \
+             window around it, i.e. when both of them drew an edge there. Along an edge a pixel's \
+             colour is a blend of what lies on either side, mixed in proportion to how much of the \
+             pixel the shape covers, and two rasterizers work that coverage out differently. \
+             Requiring it of both is what carries the weight: where only one has an edge, one of \
+             them drew something the other did not. Everything else is \"real\": a missing symbol, \
+             an extra mark, a shape well out of place, an area filled in the wrong colour, or a \
+             rendering of the wrong size.",
+        ));
+        text.push_str(&crate::report::paragraph(
+            "That 3x3 window is also the limit of what this can tell apart. A shape drawn under a \
+             pixel out of place has exactly the signature of a coverage disagreement, and no local \
+             test can separate the two, so up to a pixel of positional disagreement is forgiven — \
+             which is about as far as either rasterizer spreads an edge. By the same token a \
+             colour error confined to the pixels of an edge is forgiven, though over any area more \
+             than a pixel wide the interior has no edge in either image and is still reported. A \
+             systematic bias, say every edge coming out lighter than Qt draws it, would also land \
+             under antialiasing; that is what the \"wrong\" column is still there for. Run with \
+             --keep-antialiasing to see every difference again.",
+        ));
+    }
+    text.push_str(&crate::report::paragraph(
+        "The table is sorted by \"real\", worst first, so the maps worth looking at are at the \
+         top. Only those with a real difference get a folder in differences/.",
     ));
     text.push_str(&crate::report::paragraph(&format!(
-        "\"mean error of wrong px\" averages the error over the wrong pixels alone, and comes \
-         with its standard deviation. Every pixel at or below the tolerance is left out of it{}. \
-         It says how wrong the pixels which are wrong actually are: an average over all pixels \
-         would mostly measure how much blank paper a map has, since the two renderings agree on \
-         all of it. Pixels outside the overlap count as wrong above but have no error to \
-         measure, so they are not in this average either. It reads \"n/a\" where no pixel was \
-         wrong.",
+        "\"mean error of wrong px\" averages the error over the wrong pixels alone — both kinds, \
+         so it mostly says how far apart the two rasterizers are along an edge — and comes with \
+         its standard deviation. Every pixel at or below the tolerance is left out of it{}. An \
+         average over all pixels would instead mostly measure how much blank paper a map has, \
+         since the two renderings agree on all of it. Pixels outside the overlap count as wrong \
+         above but have no error to measure, so they are not in this average either. It reads \
+         \"n/a\" where no pixel was wrong.",
         // At the default tolerance those are exactly the pixels which match.
         if options.tolerance == 0 { ", which at a tolerance of 0 means every pixel that matches exactly" } else { "" }
     )));
 
-    // Worst first: the top of the table is then the maps worth looking at,
-    // and the tail is the ones which came out right. Ties are broken by name
-    // so that two runs of the same suite list them in the same order.
+    // Worst first, by the real differences rather than by all of them: the
+    // top of the table is then the maps worth looking at. Ties fall back on
+    // the total and then on the name, so two runs of the same suite list
+    // them in the same order.
     let mut ordered: Vec<&Row> = report.rows.iter().collect();
+    let worst_first = |a: f64, b: f64| b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal);
     ordered.sort_by(|a, b| {
-        b.differing
-            .partial_cmp(&a.differing)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        worst_first(a.real, b.real)
+            .then_with(|| worst_first(a.differing, b.differing))
             .then_with(|| a.name.cmp(&b.name))
     });
 
     // The cells are built first so that every column is exactly as wide as
     // the widest thing in it, header included, and the last one is not padded
     // at all — trailing spaces on a map name are only there to be deleted.
-    let cells: Vec<[String; 4]> = ordered
+    let cells: Vec<[String; 6]> = ordered
         .iter()
         .map(|row| {
             [
+                format!("{:.4}%", 100.0 * row.real),
+                format!("{:.4}%", 100.0 * (row.differing - row.real)),
                 format!("{:.4}%", 100.0 * row.differing),
                 row.largest.to_string(),
                 match row.error {
@@ -635,7 +838,7 @@ pub fn write_results(report: &Report, title: &str, options: &Options, path: &Pat
         })
         .collect();
 
-    let headings = ["wrong", "largest", "mean error of wrong px", "map"];
+    let headings = ["real", "antialiasing", "wrong", "largest", "mean error of wrong px", "map"];
     let mut widths = headings.map(str::len);
     for row in &cells {
         for (width, cell) in widths.iter_mut().zip(row) {
@@ -643,15 +846,15 @@ pub fn write_results(report: &Report, title: &str, options: &Options, path: &Pat
         }
     }
 
-    let mut line = |row: &[String; 4]| {
+    let last = headings.len() - 1;
+    let mut line = |row: &[String; 6]| {
         let columns: Vec<String> = row
             .iter()
             .zip(widths)
             .enumerate()
             // Numbers right, the name left, and nothing padded after it.
-            .map(|(column, (cell, width))| match column {
-                3 => cell.clone(),
-                _ => format!("{cell:>width$}"),
+            .map(|(column, (cell, width))| {
+                if column == last { cell.clone() } else { format!("{cell:>width$}") }
             })
             .collect();
         text.push_str(columns.join("  ").trim_end());
@@ -829,7 +1032,7 @@ mod tests {
 
     #[test]
     fn identical_images_have_an_empty_mask() {
-        let measured = difference_mask(&image(4, 4, [1, 2, 3]), &image(4, 4, [1, 2, 3]), 0);
+        let measured = difference_mask(&image(4, 4, [1, 2, 3]), &image(4, 4, [1, 2, 3]), 0, true);
         assert!(!measured.mask.any());
         assert_eq!(measured.largest, 0);
         // No wrong pixel, so there is nothing to average.
@@ -840,14 +1043,14 @@ mod tests {
     fn a_difference_within_the_tolerance_does_not_count() {
         let a = image(4, 4, [100, 100, 100]);
         let b = image(4, 4, [110, 110, 110]);
-        let measured = difference_mask(&a, &b, 30);
+        let measured = difference_mask(&a, &b, 30, true);
         assert_eq!(measured.largest, 30);
         assert!(!measured.mask.any(), "a distance of exactly the tolerance is not a difference");
         // Nothing is wrong at that tolerance, so nothing is averaged either,
         // even though every pixel does differ a little.
         assert_eq!(measured.error, None);
 
-        let measured = difference_mask(&a, &b, 29);
+        let measured = difference_mask(&a, &b, 29, true);
         assert_eq!(measured.mask.count(), 16);
         // Now every pixel is wrong, all by the same amount.
         assert_eq!(measured.error, Some((30.0, 0.0)));
@@ -860,7 +1063,7 @@ mod tests {
         // Two of the four pixels agree; the other two are off by 100 and 300.
         a.put_pixel(2, 0, Rgb([0, 0, 100]));
         a.put_pixel(3, 0, Rgb([100, 100, 100]));
-        let measured = difference_mask(&a, &b, 0);
+        let measured = difference_mask(&a, &b, 0, true);
         assert_eq!(measured.largest, 300);
         assert_eq!(measured.mask.count(), 2);
         // The mean of 100 and 300, not of 0, 0, 100 and 300 (which is 100).
@@ -874,14 +1077,122 @@ mod tests {
         a.put_pixel(2, 0, Rgb([0, 0, 100]));
         a.put_pixel(3, 0, Rgb([100, 100, 100]));
         // The pixel off by 100 is now within tolerance, so only the 300 is left.
-        let measured = difference_mask(&a, &b, 100);
+        let measured = difference_mask(&a, &b, 100, true);
         assert_eq!(measured.mask.count(), 1);
         assert_eq!(measured.error, Some((300.0, 0.0)));
     }
 
+    /// A one-pixel-wide edge from `left` to `right`, with the middle pixel
+    /// blended between them by `coverage`.
+    fn edge(coverage: f64, left: u8, right: u8) -> RgbImage {
+        let blend = (left as f64 + (right as f64 - left as f64) * coverage).round() as u8;
+        let mut result = RgbImage::new(5, 3);
+        for y in 0..3 {
+            for x in 0..5 {
+                let value = match x {
+                    0 | 1 => left,
+                    2 => blend,
+                    _ => right,
+                };
+                result.put_pixel(x, y, Rgb([value; 3]));
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn the_same_edge_covered_differently_is_antialiasing() {
+        // Both drew the edge in the same place; they only disagree about how
+        // much of the middle pixel the shape covers.
+        let a = edge(0.4, 255, 0);
+        let b = edge(0.6, 255, 0);
+        let measured = difference_mask(&a, &b, 0, false);
+        assert_eq!(measured.mask.count(), 3, "the middle column differs");
+        assert_eq!(measured.mask.count_real(), 0, "and it is all antialiasing");
+        // Turning the classification off counts the very same pixels as real.
+        assert_eq!(difference_mask(&a, &b, 0, true).mask.count_real(), 3);
+    }
+
+    #[test]
+    fn an_area_filled_in_the_wrong_colour_is_a_real_difference() {
+        // The right-hand half comes out green instead of black. The column
+        // against the edge is forgiven — both images have an edge there, and
+        // a colour error one pixel wide is exactly what cannot be told from a
+        // coverage disagreement — but the interior, where neither image has
+        // an edge, is reported.
+        let a = edge(0.5, 255, 0);
+        let mut b = a.clone();
+        for y in 0..3 {
+            b.put_pixel(3, y, Rgb([0, 200, 0]));
+            b.put_pixel(4, y, Rgb([0, 200, 0]));
+        }
+        let measured = difference_mask(&a, &b, 0, false);
+        assert_eq!(measured.mask.count(), 6, "both green columns differ");
+        assert_eq!(measured.mask.count_real(), 3, "and the far one has no edge to hide behind");
+    }
+
+    #[test]
+    fn a_shape_displaced_beyond_the_window_is_a_real_difference() {
+        // A dot on blank paper, moved four pixels: at the old and the new
+        // place the other image has nothing but white nearby.
+        let mut a = image(9, 3, [255, 255, 255]);
+        let mut b = image(9, 3, [255, 255, 255]);
+        a.put_pixel(1, 1, Rgb([0, 0, 0]));
+        b.put_pixel(5, 1, Rgb([0, 0, 0]));
+        let measured = difference_mask(&a, &b, 0, false);
+        assert_eq!(measured.mask.count_real(), 2, "the dot is missing here and extra there");
+    }
+
+    #[test]
+    fn a_shape_displaced_inside_the_window_is_forgiven() {
+        // The same dot moved one pixel: indistinguishable from a coverage
+        // disagreement by any local test, and documented as such.
+        let mut a = image(9, 3, [255, 255, 255]);
+        let mut b = image(9, 3, [255, 255, 255]);
+        a.put_pixel(4, 1, Rgb([0, 0, 0]));
+        b.put_pixel(5, 1, Rgb([0, 0, 0]));
+        let measured = difference_mask(&a, &b, 0, false);
+        assert_eq!(measured.mask.count(), 2);
+        assert_eq!(measured.mask.count_real(), 0);
+    }
+
+    #[test]
+    fn a_sub_pixel_feature_no_window_can_see_is_still_antialiasing() {
+        // The case the old, stricter test got wrong: a road casing, where a
+        // gap of white paper narrower than a pixel makes the edge pixel a mix
+        // of black, asphalt and a white that appears nowhere nearby. Both
+        // renderings agree on the black and the asphalt and differ only on
+        // how the sliver of white lands.
+        let (black, asphalt) = (Rgb([0, 0, 0]), Rgb([232, 167, 116]));
+        let mut a = RgbImage::new(3, 3);
+        let mut b = RgbImage::new(3, 3);
+        for x in 0..3 {
+            a.put_pixel(x, 0, black);
+            b.put_pixel(x, 0, black);
+            a.put_pixel(x, 1, Rgb([199, 161, 130]));
+            b.put_pixel(x, 1, Rgb([179, 147, 122]));
+            a.put_pixel(x, 2, asphalt);
+            b.put_pixel(x, 2, asphalt);
+        }
+        let measured = difference_mask(&a, &b, DEFAULT_TOLERANCE, false);
+        assert_eq!(measured.mask.count(), 3, "the blended row differs");
+        assert_eq!(measured.mask.count_real(), 0, "and both drew the same edge there");
+    }
+
+    #[test]
+    fn a_flat_area_off_by_a_rounding_step_is_within_the_default_tolerance() {
+        // One unit per channel is 3 summed, which is what DEFAULT_TOLERANCE
+        // forgives; there is no edge anywhere, so nothing could explain it.
+        let a = image(4, 4, [120, 130, 140]);
+        let b = image(4, 4, [121, 131, 141]);
+        assert!(!difference_mask(&a, &b, DEFAULT_TOLERANCE, false).mask.any());
+        let measured = difference_mask(&a, &b, DEFAULT_TOLERANCE - 1, false);
+        assert_eq!(measured.mask.count_real(), 16, "a flat area is never antialiasing");
+    }
+
     #[test]
     fn pixels_outside_the_overlap_all_differ() {
-        let measured = difference_mask(&image(4, 4, [0, 0, 0]), &image(6, 2, [0, 0, 0]), 0);
+        let measured = difference_mask(&image(4, 4, [0, 0, 0]), &image(6, 2, [0, 0, 0]), 0, true);
         assert_eq!((measured.mask.width, measured.mask.height), (6, 4));
         // The 4x2 overlap agrees, everything else is outside it.
         assert_eq!(measured.mask.count(), 6 * 4 - 4 * 2);
@@ -902,7 +1213,7 @@ mod tests {
         }
         expected.put_pixel(10, 10, Rgb([255, 255, 255]));
 
-        let mask = difference_mask(&expected, &predicted, 0).mask;
+        let mask = difference_mask(&expected, &predicted, 0, true).mask;
         let regions = worst_regions(&mask, 0, 64);
         assert_eq!(regions.len(), 2);
         assert!(regions[0].2 > regions[1].2);

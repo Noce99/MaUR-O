@@ -82,8 +82,13 @@ struct Args {
 
     /// Per pixel difference, summed over red, green and blue, which does not
     /// count as a difference.
-    #[arg(long, default_value_t = 0, value_name = "N")]
+    #[arg(long, default_value_t = differences::DEFAULT_TOLERANCE, value_name = "N")]
     tolerance: i32,
+
+    /// Count differences antialiasing explains as real ones, i.e. report
+    /// every differing pixel rather than only the ones worth looking at.
+    #[arg(long)]
+    keep_antialiasing: bool,
 
     /// How many regions to crop out, 0 for as many as it takes to cover
     /// every difference.
@@ -239,17 +244,42 @@ fn write_info(
         ),
         (
             "Comparison",
-            vec![(
-                "tolerance",
-                args.tolerance.to_string(),
-                "The error a pixel is allowed before it counts as wrong. The error of a pixel is \
-                 its difference summed over red, green and blue, so it runs from 0 to 765. At 0 \
-                 any difference at all is wrong, which is the strictest reading; raising it to \
-                 around 60 ignores the pixel-wide disagreements two rasterizers have along an \
-                 antialiased edge while keeping the real ones. It decides both the \"wrong\" \
-                 column of results.txt and which pixels are red in diff.png."
-                    .to_string(),
-            )],
+            vec![
+                (
+                    "tolerance",
+                    args.tolerance.to_string(),
+                    format!(
+                        "The error a pixel is allowed before it counts as wrong. The error of a \
+                         pixel is its difference summed over red, green and blue, so it runs from \
+                         0 to 765. The default of {} is one unit per channel: two renderers land \
+                         a unit apart on a flat area of one colour often enough, purely from \
+                         where each one's float-to-integer conversion of that colour falls, and \
+                         forgiving it stops a whole area being reported over a rounding \
+                         difference nobody can see. At 0 any difference at all is wrong.",
+                        differences::DEFAULT_TOLERANCE
+                    ),
+                ),
+                (
+                    "antialiasing",
+                    if args.keep_antialiasing {
+                        "counted as real (--keep-antialiasing)".to_string()
+                    } else {
+                        "classified and set aside".to_string()
+                    },
+                    "A wrong pixel is put down to antialiasing when both renderings have a colour \
+                     step in the 3x3 window around it, i.e. when both drew an edge there and can \
+                     only be disagreeing about how much of the pixel it covers. Requiring it of \
+                     both is what carries the weight: where only one has an edge, one of them drew \
+                     something the other did not. Those pixels are counted separately in \
+                     results.txt, drawn dim orange rather than red in diff.png, and not used to \
+                     choose which regions get cropped out; a map whose every difference is one of \
+                     them gets no folder in differences/ at all. Up to a pixel of positional \
+                     disagreement is forgiven along with it, since no local test can tell a shape \
+                     drawn a pixel out of place from a coverage disagreement. \
+                     --keep-antialiasing turns the whole classification off."
+                        .to_string(),
+                ),
+            ],
         ),
         (
             "Difference report",
@@ -302,13 +332,21 @@ fn write_info(
         ),
     ];
 
+    // Wide enough for the longest name, so the values line up down the whole
+    // file rather than down one section of it.
+    let label = sections
+        .iter()
+        .flat_map(|(_, settings)| settings.iter().map(|(name, _, _)| name.len()))
+        .max()
+        .unwrap_or(0);
+
     // Every block below ends with a blank line of its own, so the sections
     // only need one to separate them from what came before.
     text.push('\n');
     for (heading, settings) in &sections {
         text.push_str(&format!("{heading}\n\n"));
         for (name, value, description) in settings {
-            text.push_str(&format!("  {name:<11} {value}\n"));
+            text.push_str(&format!("  {name:<label$} {value}\n"));
             text.push_str(&report::wrap(description, report::WIDTH, "      "));
             text.push_str("\n\n");
         }
@@ -512,6 +550,7 @@ fn run() -> Result<ExitCode, String> {
         zoom: args.zoom,
         overview: args.overview,
         filter: args.filter.clone(),
+        keep_antialiasing: args.keep_antialiasing,
     };
     let report = differences::compare(
         &unpacked.path().join("expected"),
@@ -523,10 +562,11 @@ fn run() -> Result<ExitCode, String> {
     differences::write_results(&report, &title, &options, &results)?;
 
     print!(
-        "  {} image{}: {} identical, {} differing",
+        "  {} image{}: {} identical, {} antialiasing only, {} differing",
         report.total,
         if report.total == 1 { "" } else { "s" },
         report.identical,
+        report.antialiasing_only,
         report.differing
     );
     if report.missing.is_empty() {

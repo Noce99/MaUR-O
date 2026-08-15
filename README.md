@@ -60,7 +60,7 @@ Mirrors the original's five translation units, plus one new module for text:
 | `text.rs` | `Renderer::addText()` in `renderer.cpp` | New module (the original interleaves this into `renderer.cpp`, split out here since font loading/shaping is a distinct concern). Lays out text at a large internal font size and scales down, same as the original. |
 | `render.rs` | — | The map-file-to-pixel-buffer step of `main.cpp`, split out so `map_to_image` and `benchmark` render a map by the same code rather than by two copies of it. |
 | `naming.rs` | — | New. The naming rules a benchmark archive has to follow, and how to repair an archive which breaks them. |
-| `differences.rs` | `../benchmarks/differences.py` | New. A port of the C++ project's Python difference report, so `benchmark` writes it without needing Python, numpy and Pillow. Also measures the per-map error the results table reports. |
+| `differences.rs` | `../benchmarks/differences.py` | New. A port of the C++ project's Python difference report, so `benchmark` writes it without needing Python, numpy and Pillow. Also measures the per-map error the results table reports, and classifies each differing pixel into one two rasterizers can legitimately disagree about and one they cannot — the one deliberate departure from the Python. |
 | `progress.rs` | — | New. The `tqdm`-style progress bar the long stages draw, and the colour their headings use. Both fall back to plain lines when the output is not a terminal. |
 | `report.rs` | — | New. Word wrapping for the plain text files a run writes, which are read in whatever opens a `.txt` and so arrive already folded. |
 | `bin/map_to_image.rs` | `main.cpp` | The CLI. |
@@ -106,7 +106,10 @@ a threshold. Of the 5 which did not pass:
   pixel diffs: geometry, spacing, and color all match; the difference is
   concentrated at antialiased edges (most visibly at *curved* clip-mask
   boundaries), consistent with `tiny-skia`'s rasterizer producing slightly
-  different edge coverage than Qt's — not a placement or logic error.
+  different edge coverage than Qt's — not a placement or logic error. The
+  antialiasing classification described below, written later and
+  independently, agrees: it puts `Stony_ground` at 0.0000% and `stripes` at
+  0.0003% real.
 - **3 are text-heavy maps** where the rendered image is a few percent
   narrower/shorter than the reference. All three request the font family
   `"Sans Serif"` (Qt's own generic name, not CSS's `sans-serif` — both are
@@ -167,36 +170,89 @@ Results/<archive name>_YYYY_MM_DD__hh_mm_ss/
     naming.txt     every naming problem and its fix, when there were any
     results.txt    a row per map: how much differs, and by how much
     predictions/   the rendered maps, one .png per map
-    differences/   one folder per differing pair
+    differences/   one folder per pair with a real difference in it
 ```
 
-`results.txt` is the table worth keeping from a run — the share of pixels
-which differ, the worst single pixel, the mean error with its standard
-deviation, and the map — sorted by the first column, worst first, so the
-maps worth looking at are at the top:
+`results.txt` is the table worth keeping from a run, sorted by its first
+column, worst first, so the maps worth looking at are at the top:
 
 ```
-   wrong  largest  mean error of wrong px  map
---------  -------  ----------------------  ------------------------------------------
-20.9975%       26             1.05 ± 0.66  055__056_area_302.1_Shallow_body_of_water
-20.2424%      152             1.47 ± 3.56  054__055_combined_302_Shallow_body_of_wa...
- 5.6640%      120           40.08 ± 24.41  045__046_area_212_Stony_ground__fight
- 0.0000%        0                     n/a  080__081_area_405_Forest
+   real  antialiasing    wrong  largest  mean error of wrong px  map
+-------  ------------  -------  -------  ----------------------  ---------------------------
+0.0331%       0.4888%  0.5219%       33             8.60 ± 5.35  082__083_area_406.1_Vegetat.
+0.0269%       0.7087%  0.7356%      126           27.74 ± 20.02  003__004_text_102.1_Contour.
+0.0000%       1.4199%  1.4199%      570           45.88 ± 38.40  108__109_line_502_Wide_road
+0.0000%       0.8091%  0.8091%      259           43.65 ± 38.33  000__001_line_101_Contour
 ```
 
 The error of a pixel is its difference summed over red, green and blue, so
 it runs from 0 to 765 — the measure `--tolerance` is given in, and the same
 one the C++ project's `tests/image_compare.cpp` uses, so a tolerance means
-the same thing in both. A pixel is *wrong* when its error is above it. `wrong`
-counts those over the union of the two images, so a size mismatch counts as
-wrong everywhere. The mean and deviation are over the **wrong pixels alone**:
-every pixel at or below the tolerance is left out, which at the default
-tolerance of 0 means every pixel that matches exactly. That is what makes
-the column comparable between maps — an average over all pixels would mostly
-measure how much blank paper a map has, since the two renderings agree on
-all of it. Pixels outside the overlap are counted as wrong but have no error
-to measure, so they are not in the average either; it reads `n/a` where no
-pixel was wrong at all.
+the same thing in both. A pixel is *wrong* when its error is above it, and
+`wrong` counts those over the union of the two images, so a size mismatch
+counts as wrong everywhere.
+
+
+### Antialiasing
+
+Almost every wrong pixel in this suite is an edge that **both** renderers
+drew and disagreed about the coverage of, and there are enough of them to
+bury the handful that mean something. So `wrong` is split.
+
+Along an edge a pixel's colour is a blend of what lies on either side, mixed
+in proportion to how much of the pixel the shape covers, and two rasterizers
+work that coverage out differently. So a pixel counts as `antialiasing` when
+**both** renderings have a colour step in the 3×3 window around it — when
+both of them drew an edge there. Requiring it of both is what carries the
+weight: where only one has an edge, one of them drew something the other did
+not. Everything else is `real`: a missing symbol, an extra mark, a shape
+well out of place, an area filled in the wrong colour, or a rendering of the
+wrong size.
+
+An earlier version of this asked something stricter, and it is worth
+recording why it failed. Since a coverage disagreement can only remix
+colours that are both present, each image's colour ought to lie inside the
+range the other takes in the window. That reads well and does not work: it
+needs the colours being mixed to be *visible* nearby, and a map is full of
+features thinner than a pixel. At a road's casing the edge pixels come out
+59% asphalt, 24% white and 17% black — from a gap of white paper narrower
+than one pixel, so pure white appears nowhere in the neighbourhood at any
+window size, and the blend sits outside the range of everything on either
+side of it. That test reported road casings across a quarter of the suite as
+real differences.
+
+The classification decides what you actually look at: `real` pixels alone
+choose which regions get cropped out, `antialiasing` ones are drawn dim
+orange rather than red in `diff.png`, and a pair whose every difference is
+antialiasing gets no folder in `differences/` at all. On the 169-map suite
+that turns 168 folders into 36 and 171 MB into 24 MB; the contour map's 52
+crops become none at all, and what is left at the top of the table is the
+text maps whose metrics genuinely differ.
+
+Three limits, all worth knowing:
+
+- **A shape drawn under a pixel out of place has exactly the signature of a
+  coverage disagreement**, and no local test can separate them. The 3×3
+  window is therefore also the statement of how much positional disagreement
+  is forgiven: one pixel, about as far as either rasterizer spreads an edge.
+- **A colour error confined to the pixels of an edge** is forgiven for the
+  same reason. Over any area more than a pixel wide the interior has no edge
+  in either image, so it is still reported.
+- **A systematic bias** — every edge coming out lighter than Qt draws it —
+  would land under `antialiasing` too. That is what the `wrong` column is
+  still there for, and why the split is reported rather than the raw number
+  replaced.
+
+`--keep-antialiasing` turns the whole classification off and counts every
+differing pixel as real.
+
+`mean error of wrong px` is over the wrong pixels of **both** kinds, so it
+mostly says how far apart the two rasterizers are along an edge. Every pixel
+at or below the tolerance is left out of it. An average over all pixels
+would instead mostly measure how much blank paper a map has, since the two
+renderings agree on all of it; pixels outside the overlap count as wrong but
+have no error to measure, so they are not in the average either. It reads
+`n/a` where no pixel was wrong at all.
 
 `info.txt` records the settings the run used — resolution, frame, tolerance,
 crops, crop size, zoom, overview, filter — each with a paragraph on what it
@@ -219,7 +275,10 @@ can be found again in the full size images.
 `Results/` is git-ignored and created on demand. Useful options:
 `--names-only` checks and corrects the names without rendering anything;
 `--filter TEXT` limits the run to maps whose name contains `TEXT`;
-`--tolerance` sets how much a pixel may be off before it counts as wrong, and
+`--tolerance` sets how much a pixel may be off before it counts as wrong
+(default 3, one unit per channel, which is where two renderers' float-to-
+integer conversion of the same flat colour lands); `--keep-antialiasing`
+reports every differing pixel instead of classifying them (see below);
 `--crops`, `--crop-size`, `--zoom` and `--overview` control how much gets
 cropped out and how large; `--resolution` and `--frame` are
 `map_to_image`'s. `--results DIR` puts the run folder somewhere else.
