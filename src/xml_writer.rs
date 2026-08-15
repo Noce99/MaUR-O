@@ -356,6 +356,7 @@ mod tests {
             text: "Sample 123".to_string(),
             h_align: 1,
             v_align: 2,
+            box_size: None,
         }));
         object.symbol_id = 0;
         object.rotation = std::f64::consts::PI / 4.0;

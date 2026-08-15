@@ -416,7 +416,7 @@ pub fn flatten(coords: &CoordList) -> Vec<PathPart> {
 /// folds back on itself closely enough to count as a cusp: matches
 /// tiny_skia's own `AngleType::Nearly180` threshold (`(1.0 + dot)
 /// .is_nearly_zero()` at `1.0 / 4096.0`), since that is the failure mode
-/// this constant exists to detect (see [`has_sharp_fold`]).
+/// this constant exists to detect (see [`fold_kind`]).
 const NEARLY_REVERSED_DOT: f64 = -1.0 + 1.0 / 4096.0;
 
 /// The circumradius of the circle through three points, or `f64::INFINITY`
@@ -427,6 +427,30 @@ fn circumradius(a: Point, b: Point, c: Point) -> f64 {
     let ca = distance(a - c);
     let area2 = ((b - a).x * (c - a).y - (b - a).y * (c - a).x).abs();
     if area2 < 1e-12 { f64::INFINITY } else { ab * bc * ca / (2.0 * area2) }
+}
+
+/// What kind of sharp fold, if any, stroking the given flattened parts at
+/// the given half width can hit tiny_skia's `LineJoin::MiterClip` failure
+/// mode with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FoldKind {
+    /// No vertex folds back sharply enough for `MiterClip` to misbehave.
+    None,
+    /// Every fold found is an exact (bit-for-bit) direction reversal at a
+    /// shared vertex -- as when a path is closed by repeating its first
+    /// coordinate as its last, so the closing edge doubles back on the
+    /// opening one precisely. `MiterClip`'s clip-point formula divides by
+    /// the sine of the half-angle between the two edges, which is exactly
+    /// zero here rather than merely close to it; tiny_skia special-cases
+    /// that (unlike the near-zero case below) and produces the short
+    /// rectangular stub Mapper's own miter join draws past the vertex, so
+    /// this case does not need the fallback the other one does.
+    ExactReversal,
+    /// At least one fold is a near-but-not-exact reversal, or a bend along
+    /// a curve tighter than the pen is wide -- both make `MiterClip`
+    /// compute a clip point via a formula that divides by a (near) zero
+    /// that is not exactly zero, and spikes wildly off to one side.
+    Dangerous,
 }
 
 /// Whether stroking the given flattened parts at the given half width can
@@ -446,35 +470,89 @@ fn circumradius(a: Point, b: Point, c: Point) -> f64 {
 /// doing the offending offsetting; a plain sharp vertex -- like a star's
 /// point, where curvature is not the issue -- has no curve segment on
 /// either side, so checking it only next to one does not misfire there.
+///
 /// Either failure mode makes `MiterClip` -- otherwise the right match for
 /// Mapper's own miter join, see `TINY_SKIA_MITER_LIMIT` in renderer.rs --
-/// compute a clip point via a formula that divides by (near) zero and
-/// spikes wildly off to one side, unlike Mapper's own renderer. Callers use
-/// this to fall back to a plain, spike-free `LineJoin::Miter` instead, only
-/// where that can actually occur.
-pub fn has_sharp_fold(parts: &[PathPart], half_width: f64) -> bool {
+/// spike wildly off to one side in `Dangerous` cases; callers fall back to
+/// a plain, spike-free `LineJoin::Miter` there. An `ExactReversal`, though,
+/// is what `MiterClip` gets right and a plain miter falls short on -- a
+/// plain miter draws no protrusion past the vertex at all, where Mapper
+/// draws a short one -- so callers keep `MiterClip` for it.
+pub fn fold_kind(coords: &CoordList, parts: &[PathPart], half_width: f64) -> FoldKind {
     let is_fold = |prev: Point, next: Point| {
         let prev = prev.normalized();
         let next = next.normalized();
         prev.dot(next) < NEARLY_REVERSED_DOT
     };
+    // Exact bit-for-bit opposites add to exactly zero in IEEE754, with no
+    // rounding either from the subtraction that built them (b - a is
+    // exactly -(a - b) for finite doubles) or from this addition.
+    let is_exact_reversal = |prev: Point, next: Point| prev + next == Point::ZERO;
+    // The direction of the edge arriving at flattened vertex `to` from
+    // `from`, and the one leaving a vertex towards its neighbor. A short
+    // curve can flatten to a single interior point -- too coarse a chord to
+    // tell a near-total reversal at the curve's own end from a merely sharp
+    // one -- so where that edge is (part of) a curve, its exact tangent is
+    // taken from the curve's own control points instead: `coord_index` gives
+    // the original coordinate index of a true vertex, and a curve occupies
+    // four consecutive coordinates (start, two controls, end), so the
+    // control point next to either end sits right beside it in `coords`.
+    let incoming = |part: &PathPart, from: usize, to: usize| -> Point {
+        // `to` must be a true vertex for its `coord_index` to be its own --
+        // an interior point of a curve subdivided into more than one
+        // segment carries its curve's start index instead (see
+        // `PathPart::coord_index`), which isn't useful here.
+        if part.curve_points[from] && !part.curve_points[to] {
+            let end = part.coord_index[to];
+            coords[end].pos() - coords[end - 1].pos()
+        } else {
+            part.points[to] - part.points[from]
+        }
+    };
+    let outgoing = |part: &PathPart, from: usize, to: usize| -> Point {
+        if part.curve_points[to] && !part.curve_points[from] {
+            let start = part.coord_index[from];
+            coords[start + 1].pos() - coords[start].pos()
+        } else {
+            part.points[to] - part.points[from]
+        }
+    };
+    let check = |prev: Point, next: Point| -> FoldKind {
+        if is_exact_reversal(prev, next) {
+            FoldKind::ExactReversal
+        } else if is_fold(prev, next) {
+            FoldKind::Dangerous
+        } else {
+            FoldKind::None
+        }
+    };
+    // `Dangerous` always wins over `ExactReversal`, which always wins over
+    // `None`, so the worst kind found anywhere in the path is the answer.
+    let worse = |a: FoldKind, b: FoldKind| if a == FoldKind::Dangerous || b == FoldKind::Dangerous {
+        FoldKind::Dangerous
+    } else if a == FoldKind::ExactReversal || b == FoldKind::ExactReversal {
+        FoldKind::ExactReversal
+    } else {
+        FoldKind::None
+    };
+    let mut found = FoldKind::None;
     for part in parts {
         let points = &part.points;
         let curve = &part.curve_points;
         let n = points.len();
         if n < 3 { continue; }
         for i in 1..n - 1 {
-            if is_fold(points[i] - points[i - 1], points[i + 1] - points[i]) { return true; }
+            found = worse(found, check(incoming(part, i - 1, i), outgoing(part, i, i + 1)));
             if (curve[i] || curve[i - 1] || curve[i + 1])
                 && circumradius(points[i - 1], points[i], points[i + 1]) < half_width {
-                return true;
+                found = FoldKind::Dangerous;
             }
         }
         if part.closed && points[0] == points[n - 1] && n >= 3 {
-            if is_fold(points[0] - points[n - 2], points[1] - points[0]) { return true; }
+            found = worse(found, check(incoming(part, n - 2, n - 1), outgoing(part, 0, 1)));
         }
     }
-    false
+    found
 }
 
 /// Converts a coordinate list to a path, preserving bezier curves.
@@ -483,6 +561,24 @@ pub fn has_sharp_fold(parts: &[PathPart], half_width: f64) -> bool {
 /// they are when a line is drawn; without, gap flags are ignored, as they
 /// are when an area is filled.
 pub fn to_painter_path(coords: &CoordList, honor_gaps: bool) -> Path {
+    to_painter_path_impl(coords, honor_gaps, false)
+}
+
+/// Like [`to_painter_path`], but flattens curves into line segments instead
+/// of keeping them as `cubic_to` commands.
+///
+/// tiny_skia's own curve-aware stroker can leave a small gap unfilled at the
+/// centre of a closed loop stroked wider than its own curve radius -- the
+/// same geometry [`fold_kind`] already watches for -- where its
+/// straight-segment stroker (used once a curve is flattened first) handles
+/// the identical shape correctly. Callers fall back to this only where that
+/// can occur, since flattening ahead of time gives up the adaptive
+/// flattening tiny_skia would otherwise do at the output resolution.
+pub fn to_flattened_painter_path(coords: &CoordList, honor_gaps: bool) -> Path {
+    to_painter_path_impl(coords, honor_gaps, true)
+}
+
+fn to_painter_path_impl(coords: &CoordList, honor_gaps: bool, flatten_curves: bool) -> Path {
     let mut path = Path::new();
     for range in part_ranges(coords) {
         let last = range.end - 1;
@@ -522,7 +618,19 @@ pub fn to_painter_path(coords: &CoordList, honor_gaps: bool) -> Path {
             }
 
             if coords[i - 1].is_curve_start() && i + 2 <= last {
-                part_path.cubic_to(coords[i].pos(), coords[i + 1].pos(), coords[i + 2].pos());
+                if flatten_curves {
+                    let mut pts = Vec::new();
+                    let mut params = Vec::new();
+                    flatten_cubic(&mut pts, &mut params,
+                        coords[i - 1].pos(), coords[i].pos(), coords[i + 1].pos(), coords[i + 2].pos(),
+                        0.0, 1.0, 0);
+                    for p in pts {
+                        part_path.line_to(p);
+                    }
+                    part_path.line_to(coords[i + 2].pos());
+                } else {
+                    part_path.cubic_to(coords[i].pos(), coords[i + 1].pos(), coords[i + 2].pos());
+                }
                 i += 2;
             } else {
                 part_path.line_to(coords[i].pos());

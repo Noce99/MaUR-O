@@ -245,27 +245,45 @@ fn build_text_layout(data: &[u8], face_index: u32, symbol: &TextSymbol, text_obj
         paragraph_spacing += (symbol.line_below_distance + symbol.line_below_width) * inverse_scale;
     }
 
+    // A box (two coordinates, one the anchor and one its size) does not
+    // just word-wrap -- unimplemented here, since none of this renderer's
+    // reference maps carry a box text long enough to need it -- it also
+    // moves a `Top` or `Baseline`-anchored line up, and a `Bottom`-anchored
+    // one down, by half the box height, and shifts a `Left`- or
+    // `Right`-anchored line sideways by half the box width. `HCenter`,
+    // already centered on the text's own width, is unaffected.
+    let (box_width, box_height) = match text_object.box_size {
+        Some((w, h)) => (inverse_scale * w, inverse_scale * h),
+        None => (0.0, 0.0),
+    };
+    let has_box = text_object.box_size.is_some();
+
     let lines: Vec<&str> = text_object.text.split('\n').collect();
     let num_lines = lines.len();
     let height = ascender + (num_lines as f64 - 1.0) * (line_spacing + paragraph_spacing);
 
     let delta_y = match text_object.v_align {
         v_align::VCENTER => -0.5 * height,
-        v_align::BOTTOM => -height,
+        v_align::BOTTOM => -height + 0.5 * box_height,
         _ => 0.0,
+    };
+    let box_offset_y = if has_box && matches!(text_object.v_align, v_align::TOP | v_align::BASELINE) {
+        -0.5 * box_height
+    } else {
+        0.0
     };
 
     let mut text_path = Path::new();
     let mut line_below_path = Path::new();
     let mut line_y = if text_object.v_align == v_align::BASELINE { 0.0 } else { ascender };
-    line_y += delta_y;
+    line_y += box_offset_y + delta_y;
 
     for line in &lines {
         let (width, glyphs) = shape_line(&face, line, symbol.kerning, letter_spacing);
         let line_x = match text_object.h_align {
             h_align::HCENTER => -0.5 * width,
-            h_align::RIGHT => -width,
-            _ => 0.0,
+            h_align::RIGHT => 0.5 * box_width - width,
+            _ => -0.5 * box_width,
         };
 
         if !line.is_empty() {

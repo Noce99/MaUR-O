@@ -633,6 +633,13 @@ pub struct TextObject {
     pub text: String,
     pub h_align: i32,
     pub v_align: i32,
+    /// The size of the object's box, in mm, for one carrying a second
+    /// coordinate: `None` for one with a single anchor point instead.
+    /// `TextObject::hasSingleAnchor()`'s absence shifts a `Top` or
+    /// `Baseline`-anchored line up, and a `Bottom`-anchored one down, by
+    /// half the box height, so the box does not just widen or narrow the
+    /// text -- it moves it, even where nothing wraps.
+    pub box_size: Option<(f64, f64)>,
 }
 
 impl Default for TextObject {
@@ -641,6 +648,7 @@ impl Default for TextObject {
             text: String::new(),
             h_align: h_align::LEFT,
             v_align: v_align::BASELINE,
+            box_size: None,
         }
     }
 }

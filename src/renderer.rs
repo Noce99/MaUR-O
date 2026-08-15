@@ -133,12 +133,14 @@ struct Renderable {
     /// Whether a `PenJoin::Miter` join is realized as tiny_skia's
     /// `LineJoin::MiterClip` (`true`, matching Mapper's own miter join --
     /// see `TINY_SKIA_MITER_LIMIT`) or its plain `LineJoin::Miter` (`false`).
-    /// Set to `false` only for a border line whose flattened path contains a
-    /// cusp (see `has_sharp_fold` in geometry.rs): a border is shifted off
-    /// its main line by a fixed amount that can exceed the local radius of
-    /// curvature on a tight curve, folding the shifted path onto itself, and
-    /// `MiterClip` reacts to the resulting near-reversal join with a wildly
-    /// overlong spike where plain `Miter` cleanly falls back to a bevel.
+    /// Set to `false` only where `fold_kind` (in geometry.rs) finds a
+    /// `Dangerous` cusp: a near-but-not-exact reversal, or a border shifted
+    /// off its main line by more than the local radius of curvature on a
+    /// tight curve, folding the shifted path onto itself. `MiterClip`
+    /// reacts to either with a wildly overlong spike where plain `Miter`
+    /// cleanly falls back to a bevel. An `ExactReversal` cusp keeps
+    /// `MiterClip`, which -- unlike a plain miter -- renders it the way
+    /// Mapper does.
     miter_clip: bool,
     /// `QPainterPath` defaults to `Qt::OddEvenFill` (which is how a hole
     /// punched by a `HolePoint`-flagged inner loop works); text explicitly
@@ -1018,7 +1020,20 @@ impl<'m> Renderer<'m> {
             // the image size.
             let half_width = if symbol.color >= 0 { symbol.line_width / 2.0 } else { 0.0 };
             let bounds = stroked_path_extent(part_coords, &render_parts, half_width, cap, join);
-            self.stroke(to_painter_path(part_coords, true), symbol.color, symbol.line_width, cap, join, Some(bounds), None);
+            match fold_kind(part_coords, &render_parts, half_width) {
+                FoldKind::Dangerous => {
+                    let path = to_flattened_painter_path(part_coords, true);
+                    self.stroke_no_miter_clip(path, symbol.color, symbol.line_width, cap, join, Some(bounds), None);
+                }
+                FoldKind::ExactReversal => {
+                    let path = to_flattened_painter_path(part_coords, true);
+                    self.stroke(path, symbol.color, symbol.line_width, cap, join, Some(bounds), None);
+                }
+                FoldKind::None => {
+                    let path = to_painter_path(part_coords, true);
+                    self.stroke(path, symbol.color, symbol.line_width, cap, join, Some(bounds), None);
+                }
+            }
         }
 
         if !create_border { return; }
@@ -1032,11 +1047,19 @@ impl<'m> Renderer<'m> {
         let half_width = if border.color >= 0 { border.width / 2.0 } else { 0.0 };
         let flattened = flatten(border_coords);
         let bounds = stroked_path_extent(border_coords, &flattened, half_width, PenCap::Flat, border_join);
-        let path = to_painter_path(border_coords, true);
-        if has_sharp_fold(&flattened, half_width) {
-            self.stroke_no_miter_clip(path, border.color, border.width, PenCap::Flat, border_join, Some(bounds), None);
-        } else {
-            self.stroke(path, border.color, border.width, PenCap::Flat, border_join, Some(bounds), None);
+        match fold_kind(border_coords, &flattened, half_width) {
+            FoldKind::Dangerous => {
+                let path = to_flattened_painter_path(border_coords, true);
+                self.stroke_no_miter_clip(path, border.color, border.width, PenCap::Flat, border_join, Some(bounds), None);
+            }
+            FoldKind::ExactReversal => {
+                let path = to_flattened_painter_path(border_coords, true);
+                self.stroke(path, border.color, border.width, PenCap::Flat, border_join, Some(bounds), None);
+            }
+            FoldKind::None => {
+                let path = to_painter_path(border_coords, true);
+                self.stroke(path, border.color, border.width, PenCap::Flat, border_join, Some(bounds), None);
+            }
         }
     }
 

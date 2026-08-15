@@ -868,8 +868,12 @@ impl<'a> XmlMapReader<'a> {
 
         // A text object may carry a second coordinate holding the size of
         // its box.
-        if matches!(object.kind, ObjectKind::Text(_)) && object.coords.len() > 1 {
-            object.coords.truncate(1);
+        if let ObjectKind::Text(t) = &mut object.kind {
+            if object.coords.len() > 1 {
+                let size = object.coords[1].pos();
+                t.box_size = Some((size.x, size.y));
+                object.coords.truncate(1);
+            }
         }
 
         Ok(Some(object))

@@ -653,6 +653,7 @@ fn add_text_objects(sheet: &mut Sheet, symbol: &SymbolRef) {
             // without the attributes would mean.
             h_align: h_align::HCENTER,
             v_align: v_align::VCENTER,
+            box_size: None,
         }));
         object.coords = vec![Coord::new(0.0, 0.0, 0)];
         object.symbol_index = Some(symbol.index);
