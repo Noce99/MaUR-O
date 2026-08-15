@@ -7,13 +7,11 @@ compile_commands.json
 
 
 target/
-benchmarks/maps/
-benchmarks/expected/
-benchmarks/predictions/
-benchmarks/differences/
 
+# Where the `benchmark` tool puts one folder per run.
+Results/
+
+# Benchmark suites: the maps are not ours to distribute.
 OMOLOGATE
 benchmark*.zip
-
-# Python bytecode, from importing benchmarks/differences.py
-__pycache__/
+examples

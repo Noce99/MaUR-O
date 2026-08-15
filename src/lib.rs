@@ -9,3 +9,8 @@ pub mod geometry;
 pub mod xml_reader;
 pub mod text;
 pub mod renderer;
+pub mod render;
+pub mod progress;
+pub mod report;
+pub mod naming;
+pub mod differences;
