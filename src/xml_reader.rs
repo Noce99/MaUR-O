@@ -630,6 +630,7 @@ impl<'a> XmlMapReader<'a> {
         let a = area_mut(symbol);
         a.is_rotatable = attr_bool(start, "rotatable", false);
         a.color = attr_int(start, "inner_color", -1);
+        a.minimum_area = attr_int(start, "min_area", 0);
 
         loop {
             match self.xml.next()? {
@@ -906,6 +907,107 @@ pub fn read_xml_map(path: &Path) -> Result<(Map, Vec<String>), String> {
     let mut reader = XmlMapReader::new(&content);
     reader.read()?;
     Ok((reader.map, reader.warnings))
+}
+
+/// One element of a source file, exactly as that file spells it.
+#[derive(Debug, Clone)]
+pub struct Fragment {
+    /// The value of the element's `id` attribute, -1 where it has none.
+    pub id: i32,
+    /// The element and everything in it, from `<` to the last `>`.
+    pub text: String,
+}
+
+/// The colours and symbols of a map file, as the file's own bytes.
+///
+/// [`Map`] holds what the renderer needs of a symbol, which is not all a
+/// symbol is: a description, an icon, the settings of a personality the
+/// renderer ignores. A tool which writes a *new map file* out of an existing
+/// symbol has to keep all of it, and the way to be sure it does is to not
+/// take the symbol apart at all — to copy the source's own bytes for it.
+/// That also means such a tool cannot lose in translation what the reader
+/// above never had, which is the difference between a symbol which renders
+/// the same and a symbol which is the same.
+///
+/// The lists are in document order, so `symbols[i]` belongs to
+/// [`Map::symbols`]`[i]` for a file whose symbols the reader all understood;
+/// `id` is what an object or a combined symbol's part refers to a symbol by,
+/// and is the reliable way to pair the two up.
+#[derive(Debug, Default)]
+pub struct Fragments {
+    pub colors: Vec<Fragment>,
+    pub symbols: Vec<Fragment>,
+}
+
+impl Fragments {
+    /// The symbol with this `id`, as the file spells it.
+    pub fn symbol(&self, id: i32) -> Option<&Fragment> {
+        self.symbols.iter().find(|fragment| fragment.id == id)
+    }
+}
+
+/// Reads the colour and symbol elements of a map file verbatim.
+///
+/// A second pass over the file, deliberately: it works on the raw event
+/// stream rather than on the normalized one the reader above uses, because
+/// what it is after is byte offsets, and the normalization exists precisely
+/// to hide where one element ends and the next begins.
+pub fn read_fragments(path: &Path) -> Result<Fragments, String> {
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut reader = Reader::from_str(&content);
+    let mut fragments = Fragments::default();
+
+    // The name of every element still open, so that a `<color>` inside
+    // `<colors>` can be told from one somewhere else, and the depth a capture
+    // began at can be recognised when it closes.
+    let mut open: Vec<String> = Vec::new();
+    // Where the element being captured began, how deep it is, what its id
+    // says, and where it goes when it closes.
+    let mut capture: Option<(usize, usize, i32, bool)> = None;
+
+    loop {
+        let begins = reader.buffer_position() as usize;
+        let event = reader.read_event().map_err(|e| format!("{}: {e}", path.display()))?;
+        let (start, closes) = match &event {
+            Event::Start(start) => (Some(start.clone()), false),
+            // A self-closing element opens and closes in one event.
+            Event::Empty(start) => (Some(start.clone()), true),
+            Event::End(_) => (None, true),
+            Event::Eof => break,
+            _ => continue,
+        };
+
+        if let Some(start) = start {
+            let name = local_name(&start);
+            let inside = open.last().map(String::as_str);
+            if capture.is_none() {
+                let wanted = match (name.as_str(), inside) {
+                    ("color", Some("colors")) => Some(false),
+                    ("symbol", Some("symbols")) => Some(true),
+                    _ => None,
+                };
+                if let Some(is_symbol) = wanted {
+                    capture = Some((begins, open.len(), attr_int(&start, "id", -1), is_symbol));
+                }
+            }
+            open.push(name);
+        }
+
+        if closes {
+            let depth = open.len().saturating_sub(1);
+            open.pop();
+            if let Some((from, at, id, is_symbol)) = capture {
+                if at == depth {
+                    let text = content[from..reader.buffer_position() as usize].to_string();
+                    let list = if is_symbol { &mut fragments.symbols } else { &mut fragments.colors };
+                    list.push(Fragment { id, text });
+                    capture = None;
+                }
+            }
+        }
+    }
+
+    Ok(fragments)
 }
 
 #[cfg(test)]

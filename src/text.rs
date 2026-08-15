@@ -331,7 +331,14 @@ pub fn add_text(renderer: &mut Renderer, symbol: &TextSymbol, object: &Object, t
     let origin = object.coords[0].pos();
     let mut transform = Transform::from_translate(origin.x as f32, origin.y as f32);
     transform = transform.pre_scale(scale as f32, scale as f32);
-    if symbol.is_rotatable && object.rotation != 0.0 {
+    // Whether the symbol says it is rotatable does not come into it: a text
+    // object carries its own rotation, and `TextRenderable`'s constructor
+    // applies it whenever there is one. (A point symbol is the other way
+    // round, and `Renderer::add_symbol` follows it there.) So a text object
+    // turned 45 degrees is drawn turned even where its symbol is not marked
+    // rotatable — which also makes it that much wider, and a map laid out
+    // around such an object that much wider again.
+    if object.rotation != 0.0 {
         transform = transform.pre_rotate((-object.rotation).to_degrees() as f32);
     }
 

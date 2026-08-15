@@ -69,6 +69,20 @@ impl Rect {
     }
 }
 
+/// `qRound`: a whole number, halves rounded **up**, i.e. toward positive
+/// infinity, which is not what Rust's own `round` does.
+///
+/// Qt spells it as a branch on the sign, and the negative branch comes out at
+/// `floor(d + 0.5)` rather than at the away-from-zero rounding it looks like:
+/// `qRound(-1237.5)` is `-1237`, where `(-1237.5f64).round()` is `-1238`. It
+/// matters wherever a shape is quantized to the whole 1/1000 mm a map
+/// coordinate holds: a shape centred on the origin has its two halves rounded
+/// in opposite directions, so the whole shape comes out a unit wider under
+/// the wrong rule.
+pub fn qround(value: f64) -> f64 {
+    (value + 0.5).floor()
+}
+
 fn rect_include(rect: &mut Rect, point: Point) {
     if point.x < rect.left() { rect.set_left(point.x); }
     else if point.x > rect.right() { rect.set_right(point.x); }

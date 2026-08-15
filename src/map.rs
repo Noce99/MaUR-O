@@ -447,6 +447,14 @@ pub struct AreaSymbol {
     pub is_rotatable: bool,
 
     pub color: i32,
+    /// The area below which an object of this symbol is undersized, in the
+    /// file's own unit: `0.001` of it is a square millimeter on the paper.
+    ///
+    /// Advisory, and so unused by the renderer: Mapper reports an undersized
+    /// area and draws it anyway. Kept in the file's unit, and as the integer
+    /// the file holds, so that the tools which do read it (`all_symbols`)
+    /// compute with it exactly as `AreaSymbol::getMinimumArea()` does.
+    pub minimum_area: i32,
     pub patterns: Vec<FillPattern>,
 }
 

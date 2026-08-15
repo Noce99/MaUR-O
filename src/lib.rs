@@ -7,6 +7,8 @@ pub mod map;
 pub mod qbezier;
 pub mod geometry;
 pub mod xml_reader;
+pub mod xml_writer;
+pub mod all_symbols;
 pub mod text;
 pub mod renderer;
 pub mod render;

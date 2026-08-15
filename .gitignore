@@ -15,3 +15,6 @@ Results/
 OMOLOGATE
 benchmark*.zip
 examples
+
+# Where the `create_benchmark` tool puts the archives it builds.
+benchmarks/

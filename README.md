@@ -65,6 +65,10 @@ Mirrors the original's five translation units, plus one new module for text:
 | `report.rs` | — | New. Word wrapping for the plain text files a run writes, which are read in whatever opens a `.txt` and so arrive already folded. |
 | `bin/map_to_image.rs` | `main.cpp` | The CLI. |
 | `bin/benchmark.rs` | — | New. Runs a whole benchmark suite out of a zip archive, see below. |
+| `bin/create_benchmark.rs` | — | New. Builds such an archive: collects the maps, has the C++ renderer draw the reference images, and names everything the way `benchmark` expects. See below. |
+| `all_symbols.rs` | `create_map_with_all_symbols.cpp` | Makes one map per symbol of a map, each carrying a grid of test objects. The suites this project measures itself on are built out of these, so it is ported the same way the renderer is — and it *uses* the renderer: a cell of the grid is as wide as what its object draws, so laying the grid out means building every object's renderables to measure them. |
+| `xml_writer.rs` | `Object::save()`, `XMLFileFormat` | New. Writes a map file, for `all_symbols` — the only maps this project writes are ones it has just generated. The colours and symbols go out as the source file's own bytes rather than as anything this project reassembles, so nothing a symbol holds and the renderer ignores can be lost on the way. |
+| `bin/create_map_with_all_symbols.rs` | `create_map_with_all_symbols.cpp` | The CLI of the above, same arguments as the C++ tool. |
 
 
 ## Fidelity
@@ -120,6 +124,135 @@ a threshold. Of the 5 which did not pass:
 
 To look at the same 5 maps, or any others, run `benchmark` over the suite
 and read its difference report.
+
+One rendering bug was found later, by the comparison in *One map per symbol*
+below rather than by any of this: a text object's rotation is applied by
+Mapper whether or not its text symbol is marked rotatable, and `text.rs` was
+checking the symbol first. A map with a rotated text object in a
+non-rotatable text symbol therefore rendered its text unrotated. Fixed;
+`ISOM.omap` has one such symbol (`704 Control number`), and it is what turned
+the difference up.
+
+
+## One map per symbol
+
+`create_map_with_all_symbols` takes a symbol set and writes a folder holding
+one map per symbol of it, each with a grid of objects drawn with that symbol
+alone, and a `.txt` next to it saying what is in each cell of the grid:
+
+```bash
+./target/release/create_map_with_all_symbols examples/ISOM.omap ISOM_symbols
+```
+
+A line symbol gets a straight line, a closed polygonal square, a closed
+bezier circle, an open bezier S and an open zigzag, at 5, 50 and 100 m on the
+ground, plus a pair of lines around its minimum length. An area symbol gets a
+square and a circle at each of the eight rotations of its fill pattern, a
+square with a hole and a five-pointed star, plus a pair of squares around its
+minimum area. A point symbol gets one object per rotation, a text symbol a
+sample text per rotation, and a combined symbol the shapes of every
+personality it contains.
+
+The grid is what makes this more than a loop: a column is as wide as the
+widest thing in it, and how wide an object is means how wide it *draws* —
+line width, symbol elements and all. So the layout runs the renderer over
+every object to measure it, and a generated map is laid out by the same code
+which draws it.
+
+It is a port of the C++ tool of the same name, and is held to that tool's
+output. Over `examples/ISOM.omap`, 169 symbols:
+
+| | |
+| --- | --- |
+| the `.txt` describing the grid | **169 of 169 byte-identical** |
+| the symbol list of the generated map (which symbols, in which order, renumbered) | **169 of 169 identical** |
+| the objects: coordinates, flags, rotations, symbol references | **158 of 169 byte-identical** |
+| the image the C++ `map_to_image` draws from the generated map | **159 of 169 pixel-identical**, the rest under 0.9% of pixels |
+
+The 11 maps whose objects differ are not shaped differently: every one is the
+same shape placed a few units — thousandths of a millimetre on the paper —
+away from where the C++ put it, because the extent it was centred by came out
+that much different. Ten are within 20 units, which at the benchmark's own
+resolution is under a pixel. Three of those are text symbols, where the
+extent is a font metric and this project resolves the font itself (see
+*Fidelity*); the rest are a rounded extent falling on the other side of a
+whole unit. The eleventh is a 5 m circle drawn with a dashed line whose
+minimum length is 79.5 m, i.e. a circle shorter than one dash of it: it lands
+195 units out, and draws nothing either way — the image the C++ renderer
+makes of that map is pixel-identical all the same.
+
+Two differences that were real, both found by this comparison and both fixed:
+Qt's `qRound` rounds a half **up**, not away from zero, so a shape centred on
+the origin came out a unit wide in the wrong direction (`geometry::qround`);
+and `TextRenderable` applies a text object's rotation whether or not its
+symbol is marked rotatable, which `text.rs` was checking first — a map with a
+rotated text object in a non-rotatable text symbol rendered unrotated here
+and rotated in Mapper.
+
+What the two tools write is not byte-identical, and is not meant to be: this
+one copies the source file's own bytes for a symbol rather than reassembling
+it from what the renderer understood of it, and it keeps every colour of the
+source (a symbol names a colour by its position in the list, so dropping the
+unused ones would mean renumbering the rest). The symbols themselves *are*
+renumbered — a combined symbol names its parts by position, and
+`CombinedSymbol::loadingFinishedEvent` rejects the whole file if one is out
+of range.
+
+
+## Making a benchmark archive
+
+An archive is maps plus what the C++ renderer draws from them, so making one
+means having that renderer draw them. `create_benchmark` is pointed at it and
+at the maps:
+
+```bash
+cargo build --release
+./target/release/create_benchmark \
+    ../build/src/map_to_image \
+    ../examples/forest\ sample.omap
+```
+
+The first argument is the ground truth: the C++/Qt `map_to_image` executable,
+whose output the reference images are. The second says where the maps come
+from, and there are two ways to answer it:
+
+- **a folder** — searched, subfolders included, for every `.omap` and
+  `.xmap` in it. This is how a suite of real maps becomes a suite.
+- **a map file** — taken apart into one map per symbol, each carrying a grid
+  of shapes, sizes and rotations that symbol is drawn on. That is
+  `create_map_with_all_symbols`' work, and this project has its own (below),
+  so nothing outside is needed for it. `--symbols-tool <path>` runs the C++
+  one instead, which is how the two are checked against each other.
+
+Either way the maps are renamed to the rules below — spaces become
+underscores, and the ordinals are handed out from zero — rendered one by one,
+and written to `benchmarks/benchmark_<source name>.zip`, or wherever `-o`
+says. The folder is made if it is not there, and is gitignored: an archive is
+a few hundred megabytes of maps which are usually not ours to distribute.
+
+```
+benchmarks/benchmark_forest_sample.zip
+    benchmark_forest_sample/README.txt      what the archive is and how it was made
+    benchmark_forest_sample/maps/           the maps
+    benchmark_forest_sample/expected/       one reference image per map
+    benchmark_forest_sample/index/          what is on each generated map
+```
+
+`-r` and `-f` are passed to the renderer, and are what the archive is ground
+truth for: reference images drawn with a 50 m frame line up with nothing
+drawn with a 20 m one, so `README.txt` records both, along with the renderer,
+its version, the source and the date. Run the archive back with the same two.
+
+A map the renderer cannot draw is left out rather than put in without a
+reference image: the ordinals are handed out after the rendering, so what is
+left has no hole in it, and `README.txt` says which maps went missing and
+why. The exit code is 2 when that happened, 1 on a setup error, 0 otherwise.
+
+`index/` is only there for a generated suite: it is the companion
+description `create_map_with_all_symbols` writes for each map, saying which
+symbol the map is for and what each row and column of its grid is. Nothing
+reads it — it is for whoever is looking at a difference and wants to know
+what they are looking at.
 
 
 ## Running a benchmark archive
@@ -297,9 +430,13 @@ than 7 per channel).
 ## Testing
 
 ```bash
-cargo test        # unit tests (geometry, qbezier, xml_reader, naming, differences)
-                  # + CLI integration tests for map_to_image and benchmark
+cargo test        # unit tests (geometry, qbezier, xml_reader, xml_writer,
+                  # naming, all_symbols, differences) + CLI integration tests
+                  # for map_to_image, benchmark, create_benchmark and
+                  # create_map_with_all_symbols
 
+./target/release/create_map_with_all_symbols examples/ISOM.omap    # one map per symbol
+./target/release/create_benchmark ../build/src/map_to_image maps/  # build a suite
 ./target/release/benchmark suite.zip                 # a whole benchmark suite
 ./target/release/benchmark --filter 501 suite.zip    # only maps whose name contains "501"
 ```

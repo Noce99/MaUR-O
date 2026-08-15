@@ -183,6 +183,35 @@ impl<'m> Renderer<'m> {
         self.extent
     }
 
+    /// The bounding box of one object of `map`, as `Object::getExtent()`
+    /// gives it: the union of the object's renderables, the ones inside a
+    /// clip path left out (see [`Self::include`]).
+    ///
+    /// The renderables are built and thrown away again, which is what makes
+    /// this the extent of that object rather than of the map so far. A
+    /// generated map is laid out by these — a column is as wide as its widest
+    /// object — so this is arithmetic, not drawing.
+    ///
+    /// A hidden symbol is measured like any other, as `Object::update()`
+    /// measures it: what it draws is decided when the map is drawn, not when
+    /// its objects are measured, and a hidden symbol's objects have an extent
+    /// there all the same. (This renderer folds the two together, since a
+    /// hidden symbol contributes nothing to an image either way.)
+    pub fn object_extent(map: &'m Map, object: &Object) -> Rect {
+        let mut renderer = Renderer {
+            map,
+            renderables: Vec::new(),
+            clips: Vec::new(),
+            extent: Rect::default(),
+            current_clip: None,
+        };
+        if let Some(index) = object.symbol_index {
+            let symbol = &map.symbols[index];
+            renderer.add_symbol(symbol, object, &object.coords);
+        }
+        renderer.extent
+    }
+
     fn include(&mut self, bounds: Rect) {
         // A clipped renderable is a fill pattern, which cannot reach beyond
         // the area carrying it. Mapper leaves it out of the extent for that
