@@ -25,6 +25,17 @@ tiny-skia = "0.11"
 fontdb = "0.21"
 rustybuzz = "0.20"
 
+# Resolves font family names (including generic ones like "Sans Serif") the
+# same way Qt does on Linux: through the system's actual fontconfig library.
+# `fontdb`'s own bundled fontconfig-parser reimplements just enough of
+# fontconfig's config-file format to enumerate installed fonts, but not its
+# full alias/substitution algorithm (e.g. it does not walk /etc/fonts/conf.d/
+# includes), so it can resolve a generic family to a different font than the
+# real fontconfig does. Gated the same way fontdb gates its own fontconfig
+# feature.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
+fontconfig = "0.11"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

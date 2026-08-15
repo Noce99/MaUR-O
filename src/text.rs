@@ -3,10 +3,15 @@
 //!
 //! The text is laid out at a large font size (matching Mapper's own
 //! `internal_font_size`) and scaled down afterwards, so the result does not
-//! depend on hinting. Font matching goes through `fontdb` (which uses
-//! fontconfig on Linux, matching how Qt resolves font families); shaping
-//! goes through `rustybuzz`, a pure-Rust port of HarfBuzz -- the same
-//! shaping engine family Qt5 uses by default, which should make kerning and
+//! depend on hinting. Family names are resolved through the system's
+//! fontconfig library (the same one Qt calls into on Linux), then handed to
+//! `fontdb` to actually load the matched font file: `fontdb`'s own bundled
+//! fontconfig-parser only reimplements enough of fontconfig's config-file
+//! format to enumerate installed fonts, not its full alias/substitution
+//! algorithm, so it can resolve a generic family like "Sans Serif" to a
+//! different concrete font than Qt does on the same machine. Shaping goes
+//! through `rustybuzz`, a pure-Rust port of HarfBuzz -- the same shaping
+//! engine family Qt5 uses by default, which should make kerning and
 //! advances closer to Qt's own than a naive per-glyph-advance layout would
 //! be. Glyph outlines come from `ttf-parser`.
 //!
@@ -48,6 +53,49 @@ fn family_for(name: &str) -> Family<'_> {
         "fantasy" => Family::Fantasy,
         _ => Family::Name(name),
     }
+}
+
+/// Resolves `name` (a font family, possibly one of Qt's generic names) to
+/// the concrete family fontconfig would substitute it with for the given
+/// style, the same way Qt's `QFontEngine` does under the hood. Returns
+/// `None` if fontconfig is unavailable or the lookup fails, in which case
+/// callers fall back to `fontdb`'s own (less faithful) generic-family
+/// resolution.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+fn fontconfig_family_for(name: &str, bold: bool, italic: bool) -> Option<String> {
+    use std::ffi::CString;
+
+    static FC: OnceLock<Option<fontconfig::Fontconfig>> = OnceLock::new();
+    let fc = FC.get_or_init(fontconfig::Fontconfig::new).as_ref()?;
+
+    // fontconfig expects the CSS/hyphenated spelling of the generic names.
+    let pattern_family = match name.to_ascii_lowercase().as_str() {
+        "serif" => "serif",
+        "sans-serif" | "sans serif" => "sans-serif",
+        "monospace" => "monospace",
+        "cursive" => "cursive",
+        "fantasy" => "fantasy",
+        _ => name,
+    };
+    let style = match (bold, italic) {
+        (true, true) => Some("Bold Italic"),
+        (true, false) => Some("Bold"),
+        (false, true) => Some("Italic"),
+        (false, false) => None,
+    };
+
+    let mut pattern = fontconfig::Pattern::new(fc).ok()?;
+    pattern.add_string(fontconfig::FC_FAMILY, &CString::new(pattern_family).ok()?).ok()?;
+    if let Some(style) = style {
+        pattern.add_string(fontconfig::FC_STYLE, &CString::new(style).ok()?).ok()?;
+    }
+    let matched = pattern.font_match().ok()?;
+    matched.get_string(fontconfig::FC_FAMILY).ok().map(str::to_owned)
+}
+
+#[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android")))))]
+fn fontconfig_family_for(_name: &str, _bold: bool, _italic: bool) -> Option<String> {
+    None
 }
 
 fn map_point(t: &Transform, p: Point) -> Point {
@@ -253,8 +301,16 @@ pub fn add_text(renderer: &mut Renderer, symbol: &TextSymbol, object: &Object, t
     }
 
     let db = font_db();
+    let resolved = fontconfig_family_for(&symbol.font_family, symbol.bold, symbol.italic);
+    let mut families = Vec::with_capacity(3);
+    if let Some(name) = &resolved {
+        families.push(Family::Name(name));
+    }
+    families.push(family_for(&symbol.font_family));
+    families.push(Family::SansSerif);
+
     let query = Query {
-        families: &[family_for(&symbol.font_family), Family::SansSerif],
+        families: &families,
         weight: if symbol.bold { Weight::BOLD } else { Weight::NORMAL },
         style: if symbol.italic { Style::Italic } else { Style::Normal },
         stretch: Stretch::Normal,
