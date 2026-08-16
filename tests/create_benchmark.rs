@@ -107,12 +107,13 @@ fn an_archive_nobody_named_lands_in_a_folder_of_its_own() {
     let here = dir.path().join("somewhere else");
     std::fs::create_dir(&here).unwrap();
 
-    // Named after the source, in benchmarks/, which is made on the way.
+    // Named after the source and the resolution, in benchmarks/, which is
+    // made on the way.
     create_benchmark().current_dir(&here).arg(&renderer).arg(&source).assert().success();
 
-    let archive = here.join("benchmarks").join("benchmark_a_suite.zip");
+    let archive = here.join("benchmarks").join("benchmark_a_suite_3_px_m.zip");
     assert!(archive.is_file(), "{} was not written", archive.display());
-    assert!(entries(&archive).contains(&"benchmark_a_suite/maps/000__a.omap".to_string()));
+    assert!(entries(&archive).contains(&"benchmark_a_suite_3_px_m/maps/000__a.omap".to_string()));
 }
 
 #[test]

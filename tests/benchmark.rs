@@ -138,9 +138,10 @@ fn an_archive_which_follows_the_rules_is_run_as_it_is() {
     setting("antialiasing", "classified and set aside");
 }
 
-/// Passing -r/-f by hand is how a run silently drifts from what the
-/// reference images were drawn at; the archive's own info.txt is what
-/// create_benchmark leaves behind so that does not have to happen.
+/// Resolution and frame are always read from the archive's own info.txt,
+/// which create_benchmark writes when it makes the archive — benchmark has
+/// no flag of its own to override them, which is what keeps a run from
+/// silently drifting from what the reference images were drawn at.
 #[test]
 fn resolution_and_frame_are_read_from_the_archives_own_info_txt() {
     let dir = tempfile::tempdir().unwrap();

@@ -565,6 +565,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "maur-o"
+version = "1.0.0"
+dependencies = [
+ "assert_cmd",
+ "chrono",
+ "clap",
+ "fontconfig",
+ "fontdb",
+ "image",
+ "png 0.17.16",
+ "predicates",
+ "quick-xml",
+ "rustybuzz",
+ "tempfile",
+ "tiny-skia",
+ "zip",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -785,25 +804,6 @@ name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
-
-[[package]]
-name = "rust_omap_renderer"
-version = "1.0.0"
-dependencies = [
- "assert_cmd",
- "chrono",
- "clap",
- "fontconfig",
- "fontdb",
- "image",
- "png 0.17.16",
- "predicates",
- "quick-xml",
- "rustybuzz",
- "tempfile",
- "tiny-skia",
- "zip",
-]
 
 [[package]]
 name = "rustix"

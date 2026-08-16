@@ -94,7 +94,8 @@ struct Args {
     source: PathBuf,
 
     /// The archive to write. Defaults to benchmarks/benchmark_<source
-    /// name>.zip. Whichever folder it names is made if it is not there.
+    /// name>_<resolution>_px_m.zip. Whichever folder it names is made if it
+    /// is not there.
     #[arg(short = 'o', long, value_name = "FILE")]
     output: Option<PathBuf>,
 
@@ -544,13 +545,13 @@ fn size(bytes: u64) -> String {
     }
 }
 
-/// The archive to write when none was asked for: named after the source, in
-/// [`ARCHIVES`].
-fn default_archive(source: &Path) -> PathBuf {
+/// The archive to write when none was asked for: named after the source and
+/// the resolution it was rendered at, in [`ARCHIVES`].
+fn default_archive(source: &Path, resolution: f64) -> PathBuf {
     let name = if source.is_dir() { source.file_name() } else { source.file_stem() };
     let name = name.map_or_else(|| "maps".to_string(), |n| n.to_string_lossy().into_owned());
     let name: String = name.chars().map(|c| if c.is_whitespace() { '_' } else { c }).collect();
-    Path::new(ARCHIVES).join(format!("benchmark_{name}.zip"))
+    Path::new(ARCHIVES).join(format!("benchmark_{name}_{resolution}_px_m.zip"))
 }
 
 fn run() -> Result<ExitCode, String> {
@@ -570,7 +571,7 @@ fn run() -> Result<ExitCode, String> {
         .canonicalize()
         .map_err(|e| format!("cannot use {}: {e}", args.source.display()))?;
 
-    let archive = args.output.clone().unwrap_or_else(|| default_archive(&source));
+    let archive = args.output.clone().unwrap_or_else(|| default_archive(&source, args.resolution));
     if archive.exists() && !args.force {
         return Err(format!("{} is already there; --force replaces it", archive.display()));
     }

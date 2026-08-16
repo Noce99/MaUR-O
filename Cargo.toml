@@ -1,5 +1,5 @@
 [package]
-name = "rust_omap_renderer"
+name = "maur-o"
 version = "1.0.0"
 edition = "2021"
 description = "Renders OpenOrienteering Mapper maps to raster images"

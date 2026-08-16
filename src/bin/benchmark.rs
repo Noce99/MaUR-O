@@ -73,20 +73,6 @@ struct Args {
     #[arg(long)]
     names_only: bool,
 
-    /// Resolution to render at, in pixels per meter on the ground. Matching
-    /// the reference images is what makes the comparison mean anything, so
-    /// this defaults to what the archive's own info.txt says, made at the
-    /// archive's creation, rather than to a fixed value; only pass it to
-    /// override that, which turns every pixel of the comparison wrong.
-    #[arg(short = 'r', long, value_name = "N")]
-    resolution: Option<f64>,
-
-    /// Width of the white frame added on each side, in meters on the ground.
-    /// Defaults to the archive's own info.txt for the same reason as
-    /// --resolution.
-    #[arg(short = 'f', long, value_name = "N")]
-    frame: Option<f64>,
-
     /// Per pixel difference, summed over red, green and blue, which does not
     /// count as a difference.
     #[arg(long, default_value_t = differences::DEFAULT_TOLERANCE, value_name = "N")]
@@ -190,32 +176,27 @@ fn read_contents(archive: &Path) -> Result<Contents, String> {
 
 /// Where a rendering setting came from, for `info.txt`'s own record of the run.
 enum Source {
-    /// Given on the command line, overriding whatever the archive says.
-    CommandLine,
     /// The archive's own info.txt, made when it was created.
     Archive,
-    /// Neither said anything, so the built-in default was used.
+    /// The archive carries no info.txt, so the built-in default was used.
     Default,
 }
 
 impl std::fmt::Display for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Source::CommandLine => "override",
             Source::Archive => "from the archive",
             Source::Default => "default; the archive carries no info.txt",
         })
     }
 }
 
-/// Resolves one setting: what was asked for on the command line, if
-/// anything, otherwise what the archive says, if it says anything, otherwise
-/// the built-in default.
-fn resolve(asked: Option<f64>, archived: Option<f64>, default: f64) -> (f64, Source) {
-    match (asked, archived) {
-        (Some(value), _) => (value, Source::CommandLine),
-        (None, Some(value)) => (value, Source::Archive),
-        (None, None) => (default, Source::Default),
+/// Resolves one setting: what the archive says, if it says anything,
+/// otherwise the built-in default.
+fn resolve(archived: Option<f64>, default: f64) -> (f64, Source) {
+    match archived {
+        Some(value) => (value, Source::Archive),
+        None => (default, Source::Default),
     }
 }
 
@@ -548,9 +529,8 @@ fn run() -> Result<ExitCode, String> {
     // does not leave an empty run folder behind.
     let contents = read_contents(&args.archive)?;
     let archived = archive_info::read(&args.archive, &contents.root)?;
-    let (resolution, resolution_source) =
-        resolve(args.resolution, archived.map(|i| i.resolution), DEFAULT_RESOLUTION);
-    let (frame, frame_source) = resolve(args.frame, archived.map(|i| i.frame), DEFAULT_FRAME);
+    let (resolution, resolution_source) = resolve(archived.map(|i| i.resolution), DEFAULT_RESOLUTION);
+    let (frame, frame_source) = resolve(archived.map(|i| i.frame), DEFAULT_FRAME);
 
     let title = args.archive.file_stem().unwrap_or_default().to_string_lossy().to_string();
     let started = chrono::Local::now();
