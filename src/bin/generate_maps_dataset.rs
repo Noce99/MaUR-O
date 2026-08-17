@@ -11,10 +11,9 @@
 //! `background cell size` meters, whose cells are pieces of terrain with
 //! wandering boundaries rather than squares.
 //!
-//! What a map is made of is decided in three steps, and the third — filling
-//! the cells in and drawing over them — is not written yet. Until it is, a
-//! generated map is its layout and nothing else, with every cell outlined in
-//! a single line symbol so that the shapes can be looked at:
+//! Every cell is filled with one piece of ground cover: an opaque area symbol
+//! of the set, drawn uniformly at random. What a real map carries *over* its
+//! ground — lines, point symbols, lettering — is not written yet.
 //!
 //! ```text
 //! generate_maps_dataset maps/ISOM_10k.omap dataset
@@ -34,8 +33,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use maur_o::dataset::{
-    create_dataset, Settings, DEFAULT_BORDER_SYMBOL, DEFAULT_CELL_SIZE, DEFAULT_LAYOUT_SIZE,
-    DEFAULT_MAPS,
+    create_dataset, Settings, DEFAULT_CELL_SIZE, DEFAULT_LAYOUT_SIZE, DEFAULT_MAPS,
 };
 use maur_o::progress::Progress;
 
@@ -49,9 +47,9 @@ const DEFAULT_FOLDER: &str = "dataset";
     about = "Generates a folder of random orienteering maps, drawn with the symbols of an \
              existing map.\n\n\
              Each map covers a square of ground divided into cells whose boundaries wander \
-             rather than run along the grid. The step which fills those cells with terrain \
-             is not written yet, so for now every map is its layout, outlined in one line \
-             symbol.\n\n\
+             rather than run along the grid, every cell filled with one of the set's opaque \
+             area symbols. What a map carries over its ground -- lines, point symbols, \
+             lettering -- is not written yet.\n\n\
              The same options give the same maps: everything random comes from the seed."
 )]
 struct Args {
@@ -76,7 +74,7 @@ struct Args {
     maps: usize,
 
     /// Keep to the IOF rules for what may be drawn where. Read by the step
-    /// which fills the cells in, which is not written yet.
+    /// which draws over the cells, which is not written yet.
     #[arg(long)]
     iof_rules: bool,
 
@@ -84,11 +82,6 @@ struct Args {
     /// dataset.
     #[arg(short = 's', long, default_value_t = 0)]
     seed: u64,
-
-    /// The symbol the cell outlines are drawn with, by the name the symbol
-    /// set gives it.
-    #[arg(long, default_value = DEFAULT_BORDER_SYMBOL, value_name = "NAME")]
-    border_symbol: String,
 }
 
 fn run() -> Result<(), (ExitCode, String)> {
@@ -123,7 +116,6 @@ fn run() -> Result<(), (ExitCode, String)> {
         maps: args.maps,
         iof_rules: args.iof_rules,
         seed: args.seed,
-        border_symbol: args.border_symbol,
     };
 
     let mut progress = Progress::new("Maps", settings.maps);
@@ -148,18 +140,24 @@ fn run() -> Result<(), (ExitCode, String)> {
     }
 
     let side = settings.layout_size as u32 * settings.cell_size;
+    let fills = summary.catalogue.opaque_areas.len();
     println!(
-        "{}: {} maps of {} by {} cells, {} by {} meters, outlined in \"{}\"",
+        "{}: {} maps of {} by {} cells, {} by {} meters, filled from {} opaque area{}",
         args.folder.display(),
         summary.written.len(),
         settings.layout_size,
         settings.layout_size,
         side,
         side,
-        summary.border.name,
+        fills,
+        if fills == 1 { "" } else { "s" },
     );
     println!(
-        "  seed {}, IOF rules {} (not read yet: the step which fills the cells in is not written)",
+        "  {} of them fill with a pattern which turns, and were turned at random",
+        summary.turning_fills,
+    );
+    println!(
+        "  seed {}, IOF rules {} (not read yet: the step which draws over the cells is not written)",
         settings.seed,
         if settings.iof_rules { "on" } else { "off" },
     );
