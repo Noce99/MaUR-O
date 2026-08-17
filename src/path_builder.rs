@@ -16,6 +16,20 @@
 use crate::geometry::qround;
 use crate::map::{coord_flag, Coord, CoordList, Point};
 
+/// A position in mm on the paper, as the file holds it.
+///
+/// `MapCoord(qreal, qreal)` rounds millimetres to native units, by the rule
+/// qRound uses rather than by Rust's, see [`qround`]. Anything which puts a
+/// coordinate in a file goes through here, so that a position two shapes
+/// share is the same coordinate in both of them.
+pub fn coord_at(mm: Point) -> Coord {
+    Coord::new(
+        qround(mm.x * 1000.0) / 1000.0,
+        qround(mm.y * 1000.0) / 1000.0,
+        0,
+    )
+}
+
 /// A coordinate list under construction, in the manner of a drawing context:
 /// [`move_to`](Self::move_to) to start a part, [`line_to`](Self::line_to) and
 /// [`curve_to`](Self::curve_to) to extend it, [`close`](Self::close) to shut
@@ -45,11 +59,7 @@ impl PathBuilder {
 
     /// A point in meters on the ground, as the file holds it.
     fn to_coord(&self, point: Point) -> Coord {
-        // MapCoord(qreal, qreal) rounds millimeters to native units, by the
-        // rule qRound uses rather than by Rust's, see [`qround`].
-        let x = qround(point.x * self.mm_per_meter * 1000.0) / 1000.0;
-        let y = qround(point.y * self.mm_per_meter * 1000.0) / 1000.0;
-        Coord::new(x, y, 0)
+        coord_at(point * self.mm_per_meter)
     }
 
     /// Starts a new part. Any previous part becomes a hole of this object.

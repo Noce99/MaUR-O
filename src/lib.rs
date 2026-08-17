@@ -57,11 +57,14 @@
 //! symbol which breaks it. [`dataset`] generates new ones out of nothing but
 //! an existing symbol set, and is what the `generate_maps_dataset` tool is
 //! built on: [`symbol_kinds`] sorts a symbol set into what its symbols are
-//! for, [`layout`] divides a square of ground into cells with wandering
-//! boundaries, each of which is then filled with one of the set's opaque
-//! areas, [`path_builder`] turns a shape in meters into the coordinates a
-//! file holds, and [`random`] is where every choice any of them makes comes
-//! from — seeded by hand, so that a generated map can be generated again.
+//! for and works out what may be drawn over what and still be seen,
+//! [`layout`] divides a square of ground into cells with wandering
+//! boundaries — which are then filled with the set's opaque areas, lined
+//! along their sides, covered with see-through areas and scattered with
+//! point symbols — [`path_builder`] turns a shape in meters into the
+//! coordinates a file holds, and [`random`] is where every choice any of
+//! them makes comes from — seeded by hand, so that a generated map can be
+//! generated again.
 
 // Every public item carries a doc comment; this keeps it that way.
 #![warn(missing_docs)]

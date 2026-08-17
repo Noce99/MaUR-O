@@ -25,8 +25,22 @@
 //! so a combined symbol takes the kind of the strongest personality it is
 //! built out of — an area if any part is one, then a line, then a point,
 //! then text. A part which is itself combined is followed the same way.
+//!
+//! # What shows up over what
+//!
+//! Sorting the set is half of what a generator needs. The other half is
+//! which of those symbols can be drawn *over* which: a map's drawing order
+//! is its colour table, from the last colour up to the first, so a symbol
+//! whose every colour sits below the colour a piece of ground is filled with
+//! is a symbol which is there in the file and nowhere in the picture. A
+//! generated map full of those would be a map which claims to exercise a
+//! symbol it never draws.
+//!
+//! [`Overlays`] is that question answered once, for the two kinds a
+//! generator drops onto filled ground — the transparent areas and the point
+//! symbols — against every opaque area the set holds.
 
-use crate::map::{is_color, Map, Symbol};
+use crate::map::{fill_pattern_type, is_color, Map, PointSymbol, Symbol};
 
 /// How deep a combined symbol's parts are followed before giving up. A symbol
 /// which is its own part is not a thing Mapper writes, but a file is a file.
@@ -73,13 +87,20 @@ pub struct Entry {
     pub code: String,
     /// What the symbol set calls it, e.g. "Paved area, bounding line".
     pub name: String,
+    /// Whether an object drawn with this symbol can be given an angle of its
+    /// own: an area which fills with a pattern that turns, or a point symbol
+    /// which says it is rotatable. A line runs where its path runs, so it
+    /// never turns, and a combined symbol is left alone — the file carries
+    /// no `rotatable` of its own for one.
+    pub turns: bool,
 }
 
 /// A symbol set sorted into the five kinds.
 ///
 /// Hidden and helper symbols are left out of all five: they draw nothing, and
 /// a generated map which used one would come out with an empty cell and no
-/// way to tell that apart from a rendering bug.
+/// way to tell that apart from a rendering bug. So is the OpenOrienteering
+/// logo, see [`is_the_mapper_logo`].
 #[derive(Debug, Default)]
 pub struct Catalogue {
     /// The areas which cover what is under them.
@@ -102,16 +123,24 @@ impl Catalogue {
     pub fn of(map: &Map) -> Catalogue {
         let mut catalogue = Catalogue::default();
         for (index, symbol) in map.symbols.iter().enumerate() {
-            if !symbol.is_visible() {
+            if !symbol.is_visible() || is_the_mapper_logo(symbol) {
                 continue;
             }
+            let kind = kind_of(map, symbol);
             let entry = Entry {
                 index,
                 id: map.symbol_ids.get(index).copied().unwrap_or(-1),
                 code: code_of(symbol).to_string(),
                 name: name_of(symbol).to_string(),
+                turns: match kind {
+                    SymbolKind::OpaqueArea | SymbolKind::TransparentArea => {
+                        has_rotatable_pattern(map, symbol)
+                    }
+                    SymbolKind::Point => matches!(symbol, Symbol::Point(p) if p.is_rotatable),
+                    SymbolKind::Line | SymbolKind::Text => false,
+                },
             };
-            match kind_of(map, symbol) {
+            match kind {
                 SymbolKind::OpaqueArea => catalogue.opaque_areas.push(entry),
                 SymbolKind::TransparentArea => catalogue.transparent_areas.push(entry),
                 SymbolKind::Line => catalogue.lines.push(entry),
@@ -159,6 +188,190 @@ impl Catalogue {
     }
 }
 
+/// Which overlays show up over which ground, for a whole symbol set.
+///
+/// Both lists are indexed by an opaque area's place in
+/// [`Catalogue::opaque_areas`] — the ground a cell is filled with — and hold
+/// the places in [`Catalogue::transparent_areas`] and [`Catalogue::points`]
+/// of the symbols which can be drawn over it and still be seen. A generator
+/// which picks out of those lists cannot draw an invisible object.
+#[derive(Debug, Default)]
+pub struct Overlays {
+    /// For each opaque area, the transparent areas which show up on it.
+    pub transparent_areas: Vec<Vec<usize>>,
+    /// For each opaque area, the point symbols which show up on it.
+    pub points: Vec<Vec<usize>>,
+}
+
+impl Overlays {
+    /// Every pair of an opaque area with something drawn over it, tried.
+    pub fn of(map: &Map, catalogue: &Catalogue) -> Overlays {
+        let over_each = |overlays: &[Entry]| -> Vec<Vec<usize>> {
+            catalogue
+                .opaque_areas
+                .iter()
+                .map(|ground| {
+                    overlays
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, overlay)| {
+                            shows_over(map, &map.symbols[overlay.index], &map.symbols[ground.index])
+                        })
+                        .map(|(at, _)| at)
+                        .collect()
+                })
+                .collect()
+        };
+        Overlays {
+            transparent_areas: over_each(&catalogue.transparent_areas),
+            points: over_each(&catalogue.points),
+        }
+    }
+
+    /// How many of the transparent-area-over-ground pairs show up, of how
+    /// many were tried: every transparent area against every opaque one.
+    pub fn transparent_pairs(&self, catalogue: &Catalogue) -> (usize, usize) {
+        (
+            self.transparent_areas.iter().map(Vec::len).sum(),
+            self.transparent_areas.len() * catalogue.transparent_areas.len(),
+        )
+    }
+
+    /// The same for the point symbols.
+    pub fn point_pairs(&self, catalogue: &Catalogue) -> (usize, usize) {
+        (
+            self.points.iter().map(Vec::len).sum(),
+            self.points.len() * catalogue.points.len(),
+        )
+    }
+}
+
+/// Whether `overlay` drawn over `ground` shows up at all.
+///
+/// A map is drawn from the last colour of its table to the first, so a
+/// colour hides every colour after it in the table. What a piece of ground
+/// hides is decided by the one colour which covers it completely — the
+/// opaque fill which makes it an opaque area in the first place — and an
+/// overlay is seen when it draws any colour above that one. An overlay whose
+/// every colour is below it is drawn into the file and covered up by the
+/// ground it was drawn on.
+pub fn shows_over(map: &Map, overlay: &Symbol, ground: &Symbol) -> bool {
+    let colors = colors_of(map, overlay);
+    match covering_color(map, ground, 0) {
+        // Nothing about the ground covers anything, so whatever the overlay
+        // draws is there to be seen.
+        None => !colors.is_empty(),
+        Some(covering) => colors.iter().any(|&color| color < covering),
+    }
+}
+
+/// Every colour the symbol draws with, itself and everything it is built out
+/// of, as priorities into [`Map::colors`].
+///
+/// Only the colours which reach the paper: a stroke of no width, a dot of no
+/// radius and a colour the table gives no opacity draw nothing, and a
+/// generator which counted them would think an overlay visible which is not.
+pub fn colors_of(map: &Map, symbol: &Symbol) -> Vec<i32> {
+    let mut colors = Vec::new();
+    collect_colors(map, symbol, 0, &mut colors);
+    colors
+}
+
+/// The colour which hides what is under the symbol: the topmost fully opaque
+/// area fill it draws, or `None` for a symbol which hides nothing.
+fn covering_color(map: &Map, symbol: &Symbol, depth: usize) -> Option<i32> {
+    match symbol {
+        // An area with no fill colour is a pattern over bare ground, and one
+        // whose colour is not fully opaque is blended with what it covers;
+        // either way, something under it shows through.
+        Symbol::Area(area) => is_color(area.color)
+            .then_some(area.color)
+            .filter(|&color| map.color(color).is_some_and(|c| c.opacity >= 1.0)),
+        Symbol::Combined(combined) if depth < MAX_PART_DEPTH => map
+            .parts(combined)
+            .iter()
+            // The topmost of them, which is the one that hides the most.
+            .filter_map(|part| covering_color(map, part, depth + 1))
+            .min(),
+        _ => None,
+    }
+}
+
+fn collect_colors(map: &Map, symbol: &Symbol, depth: usize, into: &mut Vec<i32>) {
+    if depth > MAX_PART_DEPTH {
+        return;
+    }
+    match symbol {
+        Symbol::Point(point) => collect_point_colors(map, point, depth, into),
+        Symbol::Line(line) => {
+            if line.line_width > 0.0 {
+                push_color(map, line.color, into);
+            }
+            for border in [&line.border, &line.right_border] {
+                if border.width > 0.0 {
+                    push_color(map, border.color, into);
+                }
+            }
+            for point in [
+                &line.start_symbol,
+                &line.mid_symbol,
+                &line.end_symbol,
+                &line.dash_symbol,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                collect_point_colors(map, point, depth + 1, into);
+            }
+        }
+        Symbol::Area(area) => {
+            push_color(map, area.color, into);
+            for pattern in &area.patterns {
+                if pattern.pattern_type == fill_pattern_type::POINT {
+                    if let Some(point) = &pattern.point {
+                        collect_point_colors(map, point, depth + 1, into);
+                    }
+                } else if pattern.line_width > 0.0 {
+                    push_color(map, pattern.line_color, into);
+                }
+            }
+        }
+        Symbol::Text(text) => {
+            push_color(map, text.color, into);
+            if text.framing {
+                push_color(map, text.framing_color, into);
+            }
+        }
+        Symbol::Combined(combined) => {
+            for part in map.parts(combined) {
+                collect_colors(map, part, depth + 1, into);
+            }
+        }
+    }
+}
+
+fn collect_point_colors(map: &Map, point: &PointSymbol, depth: usize, into: &mut Vec<i32>) {
+    if depth > MAX_PART_DEPTH {
+        return;
+    }
+    if point.inner_radius > 0.0 {
+        push_color(map, point.inner_color, into);
+    }
+    if point.outer_width > 0.0 {
+        push_color(map, point.outer_color, into);
+    }
+    for element in &point.elements {
+        collect_colors(map, &element.symbol, depth + 1, into);
+    }
+}
+
+/// Keeps a colour which the table has something to draw with.
+fn push_color(map: &Map, color: i32, into: &mut Vec<i32>) {
+    if is_color(color) && map.color(color).is_some_and(|c| c.opacity > 0.0) {
+        into.push(color);
+    }
+}
+
 /// What kind `symbol` is.
 pub fn kind_of(map: &Map, symbol: &Symbol) -> SymbolKind {
     match symbol {
@@ -187,17 +400,9 @@ pub fn kind_of(map: &Map, symbol: &Symbol) -> SymbolKind {
 ///
 /// Opaque takes one area part which covers the ground on its own: a symbol
 /// combining a solid fill with a see-through one still hides what is under
-/// it.
+/// it, which is exactly the colour [`covering_color`] looks for.
 fn area_kind(map: &Map, symbol: &Symbol, depth: usize) -> SymbolKind {
-    if contains(map, symbol, depth, &|part| match part {
-        // An area with no fill colour is a pattern over bare ground, and one
-        // whose colour is not fully opaque is blended with what it covers;
-        // either way, something under it shows through.
-        Symbol::Area(area) => {
-            is_color(area.color) && map.color(area.color).is_some_and(|c| c.opacity >= 1.0)
-        }
-        _ => false,
-    }) {
+    if covering_color(map, symbol, depth).is_some() {
         SymbolKind::OpaqueArea
     } else {
         SymbolKind::TransparentArea
@@ -231,6 +436,27 @@ fn contains(map: &Map, symbol: &Symbol, depth: usize, wanted: &dyn Fn(&Symbol) -
     }
 }
 
+/// Whether the symbol is the OpenOrienteering logo.
+///
+/// Every symbol set Mapper ships carries it, as an ordinary point symbol
+/// which says nothing about itself: not hidden, no helper flag, code 999. It
+/// is there to be stamped in a corner of a printed map, and it is not a
+/// thing which stands anywhere on the ground — so a generator which dropped
+/// it into a cell would be testing the renderer against a map no surveyor
+/// could draw.
+///
+/// Matched by name, with the case and the spaces taken out, so that the
+/// "OpenOrienteering Logo" of one set and the "OpenOrienteering Mapper logo"
+/// of the next are both caught.
+fn is_the_mapper_logo(symbol: &Symbol) -> bool {
+    let name: String = name_of(symbol)
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    name.contains("openorienteering") && name.contains("logo")
+}
+
 /// What the symbol set calls a symbol.
 fn name_of(symbol: &Symbol) -> &str {
     match symbol {
@@ -260,7 +486,9 @@ mod tests {
         AreaSymbol, Color, CombinedSymbol, FillPattern, LineSymbol, PointSymbol, TextSymbol,
     };
 
-    /// A map with two colours: an opaque one and a half transparent one.
+    /// A map with three colours, in drawing order from the top: an opaque
+    /// one, a half transparent one, and the opaque one a piece of ground is
+    /// filled with, which everything else is above.
     fn map_with(symbols: Vec<Symbol>) -> Map {
         let mut map = Map::new();
         map.colors = vec![
@@ -273,6 +501,11 @@ mod tests {
                 name: "washed out".to_string(),
                 rgb: (0.0, 0.0, 0.0),
                 opacity: 0.5,
+            },
+            Color {
+                name: "ground".to_string(),
+                rgb: (1.0, 1.0, 0.0),
+                opacity: 1.0,
             },
         ];
         map.symbol_ids = (0..symbols.len() as i32).collect();
@@ -303,6 +536,29 @@ mod tests {
         Symbol::Combined(CombinedSymbol {
             part_ids,
             ..Default::default()
+        })
+    }
+
+    /// A dot of the given colour, which is a point symbol drawing one thing.
+    fn dot(color: i32) -> Symbol {
+        Symbol::Point(PointSymbol {
+            inner_radius: 0.5,
+            inner_color: color,
+            ..PointSymbol::new()
+        })
+    }
+
+    /// An area which is only a pattern of lines of the given colour: it
+    /// covers nothing, and what it draws is that one colour.
+    fn hatching(color: i32) -> Symbol {
+        Symbol::Area(AreaSymbol {
+            color: -1,
+            patterns: vec![FillPattern {
+                line_color: color,
+                line_width: 0.1,
+                ..FillPattern::default()
+            }],
+            ..AreaSymbol::new()
         })
     }
 
@@ -394,6 +650,108 @@ mod tests {
         // A line has no fill to turn.
         let lines = map_with(vec![Symbol::Line(LineSymbol::default())]);
         assert!(!has_rotatable_pattern(&lines, &lines.symbols[0]));
+    }
+
+    #[test]
+    fn a_symbol_draws_with_every_colour_it_is_built_out_of() {
+        // A dot inside a pattern inside an area, and the area itself.
+        let point_pattern = Symbol::Area(AreaSymbol {
+            color: 2,
+            patterns: vec![FillPattern {
+                pattern_type: fill_pattern_type::POINT,
+                point: Some(Box::new(PointSymbol {
+                    inner_radius: 0.5,
+                    inner_color: 0,
+                    ..PointSymbol::new()
+                })),
+                ..FillPattern::default()
+            }],
+            ..AreaSymbol::new()
+        });
+        let map = map_with(vec![point_pattern, dot(1), combined(vec![0, 1])]);
+        assert_eq!(colors_of(&map, &map.symbols[0]), vec![2, 0]);
+        assert_eq!(colors_of(&map, &map.symbols[1]), vec![1]);
+        // A combined symbol draws with everything its parts draw with.
+        assert_eq!(colors_of(&map, &map.symbols[2]), vec![2, 0, 1]);
+
+        // What draws nothing has no colour: a stroke of no width and a dot
+        // of no radius are set down in the file and never reach the paper.
+        let nothing = map_with(vec![
+            Symbol::Line(LineSymbol {
+                color: 0,
+                line_width: 0.0,
+                ..Default::default()
+            }),
+            Symbol::Point(PointSymbol {
+                inner_color: 0,
+                inner_radius: 0.0,
+                ..PointSymbol::new()
+            }),
+        ]);
+        assert!(colors_of(&nothing, &nothing.symbols[0]).is_empty());
+        assert!(colors_of(&nothing, &nothing.symbols[1]).is_empty());
+    }
+
+    #[test]
+    fn an_overlay_shows_up_only_above_the_colour_which_covers_the_ground() {
+        // Two grounds: one filled with the bottom colour, one with the top.
+        let map = map_with(vec![area(2), area(0), dot(1), hatching(1)]);
+        let (low_ground, high_ground) = (&map.symbols[0], &map.symbols[1]);
+        for overlay in [&map.symbols[2], &map.symbols[3]] {
+            // Colour 1 is above colour 2, so it is seen on that ground.
+            assert!(shows_over(&map, overlay, low_ground));
+            // It is below colour 0, so that ground covers it up.
+            assert!(!shows_over(&map, overlay, high_ground));
+        }
+        // The same colour over itself is not something you can see either.
+        assert!(!shows_over(&map, &dot(2), low_ground));
+    }
+
+    #[test]
+    fn the_overlays_of_a_set_are_worked_out_per_ground() {
+        let map = map_with(vec![area(2), area(0), dot(1), hatching(1)]);
+        let catalogue = Catalogue::of(&map);
+        assert_eq!(catalogue.opaque_areas.len(), 2);
+        assert_eq!(catalogue.transparent_areas.len(), 1);
+        assert_eq!(catalogue.points.len(), 1);
+
+        let overlays = Overlays::of(&map, &catalogue);
+        // The first ground takes both overlays, the second takes neither.
+        assert_eq!(overlays.transparent_areas, vec![vec![0], vec![]]);
+        assert_eq!(overlays.points, vec![vec![0], vec![]]);
+        assert_eq!(overlays.transparent_pairs(&catalogue), (1, 2));
+        assert_eq!(overlays.point_pairs(&catalogue), (1, 2));
+    }
+
+    /// The logo is a point symbol like any other as far as the file goes, so
+    /// nothing but its name keeps it off a generated map.
+    #[test]
+    fn the_mapper_logo_is_in_no_kind_at_all() {
+        let named = |name: &str| {
+            Symbol::Point(PointSymbol {
+                name: name.to_string(),
+                code: "999".to_string(),
+                inner_radius: 0.5,
+                inner_color: 0,
+                ..PointSymbol::new()
+            })
+        };
+        let map = map_with(vec![
+            named("OpenOrienteering Logo"),
+            named("OpenOrienteering Mapper logo"),
+            named("openorienteeringmapperlogo"),
+            // A symbol which only sounds like it: what draws the logo is a
+            // symbol of the set, and it is one a map may be drawn with.
+            named("Red for logos"),
+            named("Boulder"),
+        ]);
+        let catalogue = Catalogue::of(&map);
+        let kept: Vec<&str> = catalogue
+            .points
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(kept, vec!["Red for logos", "Boulder"]);
     }
 
     #[test]

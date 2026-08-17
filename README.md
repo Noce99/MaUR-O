@@ -238,33 +238,71 @@ generate_maps_dataset [OPTIONS] <symbol-set> [folder]
 | `-l, --layout-size <CELLS>` | How many cells a map is across; it holds this squared (default `3`). |
 | `-c, --background-cell-size <METERS>` | How wide one cell is, in meters on the ground (default `30`). |
 | `-n, --maps <COUNT>` | How many maps to generate (default `10`). |
-| `--iof-rules` | Keep to the IOF rules for what may be drawn where. Read by the step which draws over the cells — **not written yet**. |
+| `-e, --empty-sides <SHARE>` | The share of cell sides left without a line along them, 0 for a line on every side, 1 for none (default `0.5`). |
+| `-t, --transparent-areas <CHANCE>` | The chance of a cell being covered by a see-through area (default `0.1`). |
+| `-p, --point-symbols <CHANCE>` | The chance of a cell holding a point symbol; two are half as likely as one, three half as likely again (default `0.5`). |
+| `--iof-rules` | Keep to the IOF rules for what may be drawn where — **not read yet**: an overlay is picked for showing up on its ground, not for being allowed there. |
 | `-s, --seed <N>` | What the randomness is seeded with (default `0`). |
 
-A map is built in three steps: the symbol set is sorted into what its symbols
-are *for* (opaque areas, see-through areas, lines, point symbols, text); the
-ground is divided into cells; every cell is filled with one piece of ground
-cover, an opaque area symbol drawn uniformly at random out of the set. Only
-the opaque areas fill a cell, since those are the symbols which hide what is
-under them: whatever is drawn over a cell later, the ground beneath it is
+A map is built in six steps:
+
+1. **the symbol set is sorted** into what its symbols are *for* — opaque
+   areas, see-through areas, lines, point symbols, text — and every
+   see-through area and point symbol is tried against every opaque area, to
+   see whether it would show up on it at all;
+2. **the ground is divided** into cells whose boundaries wander: the corners
+   are pinned to the grid, at `(i · cell size, j · cell size)`, and each
+   boundary between them is a random chain of segments and curves, built
+   once and used by both cells it separates;
+3. **every cell is filled** with one piece of ground cover, an opaque area
+   drawn uniformly at random;
+4. **a line runs along some of the cell sides**, which is what a path, a
+   fence or a stream is: something following the edge of one piece of
+   terrain and the next;
+5. **some cells are covered** by a see-through area;
+6. **point symbols are dropped** into the cells.
+
+Only the opaque areas fill a cell, since those are the symbols which hide
+what is under them: whatever is drawn over a cell, the ground beneath it is
 exactly the one symbol the cell was filled with. Two neighbouring cells are
 sometimes the same symbol — the draws are independent — and the boundary
 between them then stops being visible, which is a shape a real map has too.
 
-A fill whose pattern turns with its object — the dots of rough open land,
-the stripes of undergrowth — is given an angle of its own, drawn uniformly
-out of a whole turn. The symbols whose patterns are fixed keep the angle the
-symbol set drew them at, as they do on a real map. **What a map carries over
-its ground — lines, point symbols, lettering — is not written yet.**
+Hidden and helper symbols are left out of all of it, and so is the
+OpenOrienteering logo: the symbol sets Mapper ships carry it as an ordinary
+point symbol, code 999, with nothing about it to say it is not terrain, and
+a logo standing in a field is not a map anyone could survey.
+
+### What may be drawn over what
+
+A map is drawn from the last colour of its table up to the first, so a
+symbol whose every colour sits below the colour a piece of ground is filled
+with is a symbol which is in the file and nowhere in the picture. Step one
+works that out once, for every see-through area and point symbol against
+every ground, and steps five and six pick out of what it allows — so a
+generated map has nothing on it which the drawing order buries. The tool
+reports how much of the set that leaves:
+
+```
+  538 of 663 transparent areas over a fill show up
+  1673 of 1716 point symbols over a fill show up
+```
+
+Anything which *can* take an angle of its own is given one, drawn uniformly
+out of a whole turn: an area whose pattern turns with its object — the dots
+of rough open land, the stripes of undergrowth — and a point symbol which
+says it is rotatable. The rest keep the angle the symbol set drew them at,
+as they do on a real map. **Lettering is the one kind nothing draws with
+yet.**
 
 ```bash
 cargo build --release
-./target/release/generate_maps_dataset maps/ISOM_10k.omap dataset
-./target/release/map_to_image -r 12 -f 5 dataset/map_002.omap
+./target/release/generate_maps_dataset -l 3 -c 150 maps/ISOM_10k.omap dataset
+./target/release/map_to_image -r 3 -f 10 dataset/map_003.omap
 ```
 
-![A generated map: nine pieces of ground cover — open land, undergrowth, rough open with scattered trees, a building — with wandering boundaries instead of a grid](mds/assets/random_map.png)
-*What those two commands print: the second map of the default dataset, 3 by 3 cells of 30 m, each filled with one opaque area of the ISOM set. The cell corners are pinned to the grid, at `(i · 30 m, j · 30 m)`; everything between two corners is a random chain of straight segments and bezier curves. Two of the fills carry a pattern which turns with its object, and came out at an angle of their own: the white stripes running diagonally across the bottom left cell, and the tilted grid of dots next to it. The two top right cells drew the same symbol, which is what an independent draw does now and then — their shared boundary is there, but there is nothing left to see of it but a hairline.*
+![A generated map: nine pieces of ground cover with wandering boundaries, lines running along most of them, see-through areas over two cells and point symbols scattered about](mds/assets/random_map.png)
+*What those two commands print: a 450 m square in 3 by 3 cells, nine opaque areas for ground, sixteen lines along the boundaries which were not left empty, a boulder field and a marsh over two of the cells, and eight point symbols scattered about.*
 
 It prints the symbol set broken down by kind, what it wrote, and the seed it
 used. The whole dataset follows from that seed: the same options give the

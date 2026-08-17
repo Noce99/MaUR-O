@@ -103,6 +103,29 @@ impl Random {
     pub fn pick<'a, T>(&mut self, from: &'a [T]) -> Option<&'a T> {
         from.get(self.below(from.len()))
     }
+
+    /// How many of a thing to make, where `chance` is the chance of making
+    /// any at all and every further one is half as likely as the one before.
+    ///
+    /// At the 0.5 it is usually asked with: none half the time, one a
+    /// quarter of the time, two an eighth, and so on — `chance / 2^n` for n
+    /// of them. One draw decides it, by which band of `[0, 1)` it lands in;
+    /// the bands close on 1 fast enough that the count is small, and always
+    /// end, since a draw is below 1 and the bands reach it.
+    pub fn halving_count(&mut self, chance: f64) -> usize {
+        let drawn = self.unit();
+        let mut count = 0;
+        // Below this there are none at all; each further band is half the
+        // width of the one before it.
+        let mut upto = 1.0 - chance;
+        let mut band = chance / 2.0;
+        while drawn >= upto {
+            count += 1;
+            upto += band;
+            band /= 2.0;
+        }
+        count
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +186,29 @@ mod tests {
         );
         // Nothing to pick from is nothing picked, rather than a panic.
         assert_eq!(random.pick::<u8>(&[]), None);
+    }
+
+    #[test]
+    fn a_count_halves_in_likelihood_with_every_further_one() {
+        let mut random = Random::from_seed(9);
+        let mut taken = [0; 4];
+        const DRAWS: usize = 100_000;
+        for _ in 0..DRAWS {
+            let count = random.halving_count(0.5);
+            if count < taken.len() {
+                taken[count] += 1;
+            }
+        }
+        // None half the time, one a quarter, two an eighth, three a
+        // sixteenth, give or take the noise of a hundred thousand draws.
+        for (count, share) in [0.5, 0.25, 0.125, 0.0625].into_iter().enumerate() {
+            let seen = taken[count] as f64 / DRAWS as f64;
+            assert!((seen - share).abs() < 0.01, "{count}: {seen} not {share}");
+        }
+
+        // The ends: never any, and always at least one.
+        assert_eq!(random.halving_count(0.0), 0);
+        assert!(random.halving_count(1.0) >= 1);
     }
 
     #[test]

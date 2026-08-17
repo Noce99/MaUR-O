@@ -23,6 +23,18 @@ const NO_SYMBOLS: &str = "tests/data/empty.xmap";
 /// "Rough open land with scattered trees" (1) and "with undergrowth" (2) do.
 const TURNING_PATTERNS: &str = "tests/data/turning_patterns.xmap";
 
+/// Two grounds and two overlays, arranged so that the overlays show up on
+/// "Open land" (id 0) and are covered up by "Bare rock" (id 1). The marsh is
+/// id 2, the boulder id 3 and the path id 4.
+const OVER_AND_UNDER: &str = "tests/data/over_and_under.xmap";
+
+/// Nothing but the ground: no lines along the sides, nothing over the cells.
+const ONLY_THE_GROUND: [&str; 3] = [
+    "--empty-sides=1",
+    "--transparent-areas=0",
+    "--point-symbols=0",
+];
+
 fn generate() -> Command {
     Command::cargo_bin("generate_maps_dataset").unwrap()
 }
@@ -41,35 +53,118 @@ fn attribute(text: &str, name: &str) -> String {
     }
 }
 
-/// How many objects a map file holds.
-fn objects(path: &Path) -> usize {
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
-        .matches("<object ")
-        .count()
+/// Everything drawn on the map, as the `<object ...>` tag of each and the
+/// text up to the next one.
+///
+/// Only what is drawn: the symbol set the file carries holds objects of its
+/// own — the elements a point symbol is built out of — and those are in the
+/// symbol table rather than on the map.
+fn drawn(path: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let parts = text.find("<parts").expect("a map has parts");
+    text[parts..]
+        .split("<object ")
+        .skip(1)
+        .map(|chunk| chunk.to_string())
+        .collect()
+}
+
+/// The drawn objects of the given type: 0 a point, 1 a path.
+fn drawn_of_type(objects: &[String], kind: &str) -> Vec<String> {
+    objects
+        .iter()
+        .filter(|object| attribute(object, "type") == kind)
+        .cloned()
+        .collect()
 }
 
 #[test]
-fn a_dataset_is_one_map_per_ask_and_one_object_per_cell() {
+fn a_dataset_is_one_map_per_ask_and_one_fill_per_cell() {
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join("dataset");
     generate()
         .arg(SYMBOL_SET)
         .arg(&folder)
         .args(["--maps=3", "--layout-size=4"])
+        .args(ONLY_THE_GROUND)
         .assert()
         .success()
         .stdout(predicates::str::contains("3 maps of 4 by 4 cells"))
         // Four cells of the default 30 m.
         .stdout(predicates::str::contains("120 by 120 meters"))
-        .stdout(predicates::str::contains("filled from 1 opaque area"));
+        .stdout(predicates::str::contains("filled from 1 opaque area"))
+        .stdout(predicates::str::contains(
+            "48 fills, 0 lines, 0 transparent areas, 0 point symbols drawn",
+        ));
 
     for name in ["map_001.omap", "map_002.omap", "map_003.omap"] {
         let map = folder.join(name);
         assert!(map.is_file(), "{} is missing", map.display());
-        assert_eq!(objects(&map), 16, "{}", map.display());
+        assert_eq!(drawn(&map).len(), 16, "{}", map.display());
     }
     assert!(!folder.join("map_004.omap").exists());
+}
+
+/// What the three steps after the ground put on a map: a line along the
+/// sides which were not left empty, a see-through area over the cells which
+/// drew one, and the point symbols scattered into them.
+#[test]
+fn every_step_after_the_ground_draws_what_it_was_asked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("dataset");
+    generate()
+        .arg(SYMBOL_SET)
+        .arg(&folder)
+        .args(["--maps=1", "--layout-size=3"])
+        // A line on every side, a transparent area over every cell, and a
+        // point symbol in every cell.
+        .args([
+            "--empty-sides=0",
+            "--transparent-areas=1",
+            "--point-symbols=1",
+        ])
+        .assert()
+        .success();
+
+    let objects = drawn(&folder.join("map_001.omap"));
+    let paths = drawn_of_type(&objects, "1");
+    let points = drawn_of_type(&objects, "0");
+    // Nine fills, nine areas over them, and a line along each of the two by
+    // three by four sides of a three by three layout.
+    assert_eq!(paths.len(), 9 + 9 + 24);
+    let with_symbol = |id: &str| {
+        paths
+            .iter()
+            .filter(|object| attribute(object, "symbol") == id)
+            .count()
+    };
+    assert_eq!(with_symbol("0"), 9, "the opaque areas");
+    assert_eq!(with_symbol("1"), 9, "the transparent areas");
+    assert_eq!(with_symbol("2"), 24, "the lines");
+    // At least one point symbol per cell, and every one of them the only
+    // point symbol the set holds.
+    assert!(points.len() >= 9, "{} point symbols", points.len());
+    assert!(points
+        .iter()
+        .all(|object| attribute(object, "symbol") == "3"));
+}
+
+/// The share of sides left empty is what it says it is.
+#[test]
+fn the_sides_left_empty_are_left_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    for (empty, lines) in [("0", 24), ("1", 0)] {
+        let folder = dir.path().join(format!("dataset{empty}"));
+        generate()
+            .arg(SYMBOL_SET)
+            .arg(&folder)
+            .args(["--maps=1", "--layout-size=3", "--transparent-areas=0"])
+            .args([format!("--empty-sides={empty}"), "--point-symbols=0".into()])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(format!("9 fills, {lines} lines")));
+    }
 }
 
 /// Every cell is filled with an opaque area symbol, and with nothing else:
@@ -83,12 +178,61 @@ fn every_cell_is_filled_with_an_opaque_area() {
         .arg(SYMBOL_SET)
         .arg(&folder)
         .args(["--maps=1"])
+        .args(ONLY_THE_GROUND)
         .assert()
         .success();
 
-    let map = std::fs::read_to_string(folder.join("map_001.omap")).unwrap();
-    assert_eq!(map.matches("<object ").count(), 9);
-    assert_eq!(map.matches("symbol=\"0\"").count(), 9);
+    let objects = drawn(&folder.join("map_001.omap"));
+    assert_eq!(objects.len(), 9);
+    assert!(objects
+        .iter()
+        .all(|object| attribute(object, "symbol") == "0"));
+}
+
+/// Nothing is drawn where it would not be seen. The overlays of this set
+/// draw in a colour above one ground and below the other, so a cell filled
+/// with the second is left bare however much is asked for.
+#[test]
+fn an_overlay_is_drawn_only_where_it_shows_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("dataset");
+    generate()
+        .arg(OVER_AND_UNDER)
+        .arg(&folder)
+        // One cell per map, so the ground of a map is the fill of its only
+        // path object, and everything else on it was drawn over that.
+        .args(["--maps=12", "--layout-size=1", "--empty-sides=1"])
+        .args(["--transparent-areas=1", "--point-symbols=1"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "1 of 2 transparent areas over a fill show up",
+        ))
+        .stdout(predicates::str::contains(
+            "1 of 2 point symbols over a fill show up",
+        ));
+
+    let (mut open, mut rock) = (0, 0);
+    for name in 1..=12 {
+        let objects = drawn(&folder.join(format!("map_{name:03}.omap")));
+        let ground = attribute(&objects[0], "symbol");
+        let overlays: Vec<String> = objects[1..]
+            .iter()
+            .map(|object| attribute(object, "symbol"))
+            .collect();
+        if ground == "0" {
+            // Open land: the marsh over it, and a boulder or two on it.
+            open += 1;
+            assert_eq!(overlays[0], "2", "map_{name:03}.omap");
+            assert!(overlays[1..].iter().all(|symbol| symbol == "3"));
+        } else {
+            // Bare rock covers both of them, so neither was drawn.
+            rock += 1;
+            assert!(overlays.is_empty(), "map_{name:03}.omap: {overlays:?}");
+        }
+    }
+    // Both grounds came up, so both halves of that were really tried.
+    assert!(open > 0 && rock > 0, "{open} open land, {rock} bare rock");
 }
 
 /// A fill whose pattern turns is given an angle of its own, and one whose
@@ -110,15 +254,14 @@ fn a_fill_is_turned_only_where_its_pattern_turns() {
 
     let mut turned = 0;
     for name in 1..=8 {
-        let map = std::fs::read_to_string(folder.join(format!("map_00{name}.omap"))).unwrap();
-        let cells: Vec<&str> = map.split("<object ").skip(1).collect();
+        let cells = drawn(&folder.join(format!("map_00{name}.omap")));
         assert_eq!(cells.len(), 25, "map_00{name}.omap");
         for cell in cells {
             let head = &cell[..cell.find('>').unwrap()];
             // A rotation is carried twice, as Mapper carries it: once as the
             // object's own attribute and once on its <pattern>.
             let rotation = attribute(head, "rotation");
-            let pattern_rotation = attribute(cell, "<pattern rotation");
+            let pattern_rotation = attribute(&cell, "<pattern rotation");
             let turns = attribute(head, "symbol") != "0";
             if turns {
                 // Every angle of a whole turn is allowed; what would mean
@@ -143,26 +286,40 @@ fn a_fill_is_turned_only_where_its_pattern_turns() {
 fn a_generated_map_renders() {
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join("dataset");
+    let render = |name: &str| {
+        Command::cargo_bin("map_to_image")
+            .unwrap()
+            .arg(folder.join(name))
+            .arg(dir.path().join(format!("{name}.png")))
+            .args(["--resolution=2", "--frame=5"])
+            .assert()
+            .success()
+    };
+
     generate()
         .arg(SYMBOL_SET)
         .arg(&folder)
-        .args(["--maps=1"])
+        .args(["--maps=2"])
+        .args(ONLY_THE_GROUND)
         .assert()
         .success();
+    // The 90 m square of the default layout, plus the 5 m frame on each
+    // side. An area fill ends where its outline is, so with nothing but the
+    // ground on it the extent is the square itself.
+    render("map_001.omap").stdout(predicates::str::contains(
+        "100x100 meters, map scale 1:10000",
+    ));
 
-    Command::cargo_bin("map_to_image")
-        .unwrap()
-        .arg(folder.join("map_001.omap"))
-        .arg(dir.path().join("map_001.png"))
-        .args(["--resolution=2", "--frame=5"])
+    // And with everything else on it, which reaches past the square: a line
+    // along the edge is half its width outside it, and so is a point symbol
+    // dropped next to it.
+    generate()
+        .arg(SYMBOL_SET)
+        .arg(&folder)
+        .args(["--maps=2", "--empty-sides=0", "--point-symbols=1"])
         .assert()
-        .success()
-        // The 90 m square of the default layout, plus the 5 m frame on each
-        // side. An area fill ends where its outline is, so the extent is the
-        // square itself.
-        .stdout(predicates::str::contains(
-            "100x100 meters, map scale 1:10000",
-        ));
+        .success();
+    render("map_002.omap").stdout(predicates::str::contains("map scale 1:10000"));
 }
 
 #[test]
@@ -258,5 +415,26 @@ fn a_layout_of_no_cells_is_a_usage_error() {
             .assert()
             .code(1)
             .stderr(predicates::str::contains("greater than zero"));
+    }
+}
+
+/// A share is a share: what is asked for outside `[0, 1]` is a mistake, not
+/// a dataset with a strange number of lines on it.
+#[test]
+fn a_share_outside_zero_to_one_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    for option in [
+        "--empty-sides=1.5",
+        "--empty-sides=-0.1",
+        "--transparent-areas=2",
+        "--point-symbols=-1",
+    ] {
+        generate()
+            .arg(SYMBOL_SET)
+            .arg(dir.path().join("dataset"))
+            .arg(option)
+            .assert()
+            .code(1)
+            .stderr(predicates::str::contains("between zero and one"));
     }
 }
