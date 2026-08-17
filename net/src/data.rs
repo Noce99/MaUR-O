@@ -55,6 +55,26 @@
 //! it does instead of returning `None` is panic, loudly, naming the file:
 //! something changed on disk mid-run, and a short epoch nobody was told about
 //! is the worst of the ways to report it.
+//!
+//! # A map with no `gt/` beside it
+//!
+//! A generated map's objects *are* its answer: every one of them is a cell
+//! filled with one opaque area of the symbol set, at the angle its pattern
+//! was turned to, so the labels [`maur_o::ground_truth::GroundTruth::rasterize`]
+//! writes to `gt/` can be rasterized straight back out of `maps/<name>.omap`
+//! instead, whenever that `.bin` was left out of the folder — dropped to save
+//! the disk it takes, or a dataset moved without it. [`MapDataset::load`]
+//! keeps a map like that rather than leaving it out, and
+//! [`MapDataset::get`] computes its labels afresh every time they are asked
+//! for, the same as it decodes the image afresh: honest work rather than
+//! clever, and one fewer reason a dataset has to be regenerated whole to be
+//! trained on again.
+//!
+//! What that costs beyond reading a `.bin` is a map file to parse and a
+//! handful of cells to rasterize — cheap next to decoding the image beside
+//! it — and one thing a `.bin` never needed: the resolution the image was
+//! drawn at, which a map file says nothing about and which
+//! [`maur_o::dataset::resolution_of`] reads from `classes.json` instead.
 
 use std::path::{Path, PathBuf};
 
@@ -63,9 +83,11 @@ use burn::data::dataset::Dataset;
 use burn::prelude::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 
-use maur_o::dataset::{GROUND_TRUTH_FOLDER, IMAGES_FOLDER};
+use maur_o::dataset::{resolution_of, GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER};
 use maur_o::ground_truth::{GroundTruth, BACKGROUND};
 use maur_o::random::Random;
+use maur_o::symbol_kinds::Catalogue;
+use maur_o::xml_reader::read_xml_map;
 
 /// How many pixels square a crop is.
 ///
@@ -97,16 +119,34 @@ pub struct MapCrop {
     pub size: usize,
 }
 
+/// Where one map's labels come from.
+#[derive(Clone, Debug)]
+enum Labels {
+    /// Written to `gt/<name>.bin` by `generate_maps_dataset`, and read back
+    /// as they are.
+    File(PathBuf),
+    /// Not on disk: rasterized afresh from `maps/<name>.omap` every time they
+    /// are asked for, the same as the image beside them is decoded afresh.
+    /// See [`crate::data`]'s module documentation.
+    FromMap(PathBuf),
+}
+
 /// The maps of a dataset folder, cropped.
 #[derive(Debug)]
 pub struct MapDataset {
     /// The image and the labels of each map, in the order the folder sorts.
-    maps: Vec<(PathBuf, PathBuf)>,
+    maps: Vec<(PathBuf, Labels)>,
     /// How many pixels the maps are across and down — the same for all of
     /// them, which [`MapDataset::load`] is where it is checked.
     size: (usize, usize),
     /// How many opaque areas the labels were written for.
     classes: usize,
+    /// The resolution the images were drawn at, in pixels per meter of
+    /// ground — what rasterizing a [`Labels::FromMap`] needs to land on the
+    /// same pixel grid as the image beside it, and read once for the whole
+    /// dataset since a map file says nothing about it. `None` where every
+    /// map's labels are already on disk and nothing ever asks.
+    resolution: Option<f64>,
     /// How many crops one pass takes from each map.
     crops_per_map: usize,
     /// How many pixels square a crop is.
@@ -121,16 +161,19 @@ pub struct MapDataset {
 
 impl MapDataset {
     /// Every map of the dataset in `folder`, which is what
-    /// `generate_maps_dataset` wrote: the images in `images/` and the labels
-    /// in `gt/`, paired by name.
+    /// `generate_maps_dataset` wrote: the images in `images/`, the maps in
+    /// `maps/`, and the labels in `gt/`, paired by name.
     ///
-    /// A map whose image has no labels beside it is left out rather than
-    /// complained about: that is what a folder generated without
-    /// `--just-opaque-areas` looks like, and the message for it belongs where
-    /// the folder is empty.
+    /// A map whose labels are not in `gt/` is not left out for that alone: it
+    /// is kept wherever `maps/<name>.omap` is there to rasterize them from
+    /// instead, and only left out where neither is. That is what a folder
+    /// generated without `--just-opaque-areas` looks like — the map draws
+    /// more than its ground cover, so there is no answer to make up for it
+    /// either — and the message for it belongs where the folder is empty.
     pub fn load(folder: &Path, seed: u64) -> Result<MapDataset, String> {
         let images = folder.join(IMAGES_FOLDER);
         let labels = folder.join(GROUND_TRUTH_FOLDER);
+        let maps_folder = folder.join(MAPS_FOLDER);
 
         let mut entries: Vec<PathBuf> = std::fs::read_dir(&images)
             .map_err(|e| format!("cannot read {}: {e}", images.display()))?
@@ -142,59 +185,90 @@ impl MapDataset {
         // felt like.
         entries.sort();
 
-        let maps: Vec<(PathBuf, PathBuf)> = entries
+        let maps: Vec<(PathBuf, Labels)> = entries
             .into_iter()
             .filter_map(|image| {
-                let label = labels.join(image.file_stem()?).with_extension("bin");
-                label.is_file().then_some((image, label))
+                let stem = image.file_stem()?;
+                let label = labels.join(stem).with_extension("bin");
+                if label.is_file() {
+                    return Some((image, Labels::File(label)));
+                }
+                let map = maps_folder.join(stem).with_extension("omap");
+                map.is_file().then_some((image, Labels::FromMap(map)))
             })
             .collect();
 
         if maps.is_empty() {
             return Err(format!(
-                "{} holds no map with labels beside it: a dataset is trained on what \
-                 generate_maps_dataset --just-opaque-areas writes, which is {IMAGES_FOLDER}/ and \
-                 {GROUND_TRUTH_FOLDER}/ under one set of names",
+                "{} holds no map with labels beside it, on disk or in its own map file: a \
+                 dataset is trained on what generate_maps_dataset --just-opaque-areas writes, \
+                 which is {IMAGES_FOLDER}/ and either {GROUND_TRUTH_FOLDER}/ or {MAPS_FOLDER}/ \
+                 under one set of names",
                 folder.display()
             ));
         }
 
+        // The resolution a `Labels::FromMap` is rasterized at, read once
+        // rather than per map: it is one dataset-wide setting, and reading it
+        // before there is a map which needs it means a folder missing
+        // `classes.json` is refused here rather than eight minutes into an
+        // epoch, from inside a loader thread.
+        let mut resolution = None;
+        if maps.iter().any(|(_, l)| matches!(l, Labels::FromMap(_))) {
+            resolution = Some(resolution_of(folder)?);
+        }
+
         // Every labels file's header, which is thirty-two bytes of a sixteen
-        // megabyte file. A folder whose maps disagree about their size or
+        // megabyte file — or, for a map computing its own, its catalogue of
+        // opaque areas. A folder whose maps disagree about their size or
         // about how many symbols there are is a folder two runs of the
-        // generator were emptied into, and the time to say so is now — not
-        // eight minutes into an epoch, from inside a loader thread.
+        // generator were emptied into, and the time to say so is now.
         let (mut size, mut classes) = (None, None);
         for (image, label) in &maps {
-            let (height, width, holds) = GroundTruth::size(label)?;
-            let (height, width) = (height as usize, width as usize);
+            let (width, height, holds) = match label {
+                Labels::File(label) => {
+                    let (height, width, holds) = GroundTruth::size(label)?;
+                    (width as usize, height as usize, holds)
+                }
+                Labels::FromMap(map) => {
+                    let (mut parsed, _) = read_xml_map(map)?;
+                    parsed.resolve_references();
+                    let holds = Catalogue::of(&parsed).opaque_areas.len();
+                    let (width, height) = image_size(image)?;
+                    (width, height, holds)
+                }
+            };
 
             if *size.get_or_insert((width, height)) != (width, height) {
                 let (was_width, was_height) = size.expect("just set");
                 return Err(format!(
                     "{} is {width}x{height} where the maps before it are {was_width}x{was_height}: \
                      a dataset trains as one batch of one shape, so its maps have to be one size",
-                    label.display(),
+                    image.display(),
                 ));
             }
             if *classes.get_or_insert(holds) != holds {
                 return Err(format!(
                     "{} was labelled for {holds} symbols where the maps before it hold {}: these \
                      are two datasets in one folder",
-                    label.display(),
+                    image.display(),
                     classes.expect("just set"),
                 ));
             }
             // The picture and the answer have to be the same picture, and a
-            // PNG says how big it is in its own header.
-            let (image_width, image_height) = image_size(image)?;
-            if (image_width, image_height) != (width, height) {
-                return Err(format!(
-                    "{} is {image_width}x{image_height} and {} labels {width}x{height}: the \
-                     answer is not an answer to that picture",
-                    image.display(),
-                    label.display(),
-                ));
+            // PNG says how big it is in its own header. A `Labels::FromMap`
+            // took its size from the picture already, so it agrees by
+            // construction; only a `Labels::File` can disagree.
+            if let Labels::File(label) = label {
+                let (image_width, image_height) = image_size(image)?;
+                if (image_width, image_height) != (width, height) {
+                    return Err(format!(
+                        "{} is {image_width}x{image_height} and {} labels {width}x{height}: the \
+                         answer is not an answer to that picture",
+                        image.display(),
+                        label.display(),
+                    ));
+                }
             }
         }
 
@@ -202,6 +276,7 @@ impl MapDataset {
             maps,
             size: size.expect("there is at least one map"),
             classes: classes.expect("there is at least one map"),
+            resolution,
             crops_per_map: DEFAULT_CROPS_PER_MAP,
             crop: CROP,
             seed,
@@ -255,10 +330,11 @@ impl MapDataset {
         let at = ((self.maps.len() as f64 * share).round() as usize)
             .clamp(1, self.maps.len().saturating_sub(1).max(1));
         let (train, valid) = self.maps.split_at(at);
-        let part = |maps: &[(PathBuf, PathBuf)], seed: u64| MapDataset {
+        let part = |maps: &[(PathBuf, Labels)], seed: u64| MapDataset {
             maps: maps.to_vec(),
             size: self.size,
             classes: self.classes,
+            resolution: self.resolution,
             crops_per_map: self.crops_per_map,
             crop: self.crop,
             seed,
@@ -297,10 +373,20 @@ impl Dataset<MapCrop> for MapDataset {
     /// running loader — and that panics, because the alternative burn offers
     /// is an epoch which stops early and says nothing.
     fn get(&self, index: usize) -> Option<MapCrop> {
-        let (image_path, label_path) = self.maps.get(index / self.crops_per_map)?;
+        let (image_path, labels) = self.maps.get(index / self.crops_per_map)?;
 
-        let truth = GroundTruth::read(label_path)
-            .unwrap_or_else(|e| panic!("cannot read the labels mid-run: {e}"));
+        let truth = match labels {
+            Labels::File(label_path) => GroundTruth::read(label_path)
+                .unwrap_or_else(|e| panic!("cannot read the labels mid-run: {e}")),
+            Labels::FromMap(map_path) => {
+                let (width, height) = self.size;
+                let resolution = self
+                    .resolution
+                    .expect("set in load whenever a map's labels are computed from it");
+                GroundTruth::from_map(map_path, width as u32, height as u32, resolution)
+                    .unwrap_or_else(|e| panic!("cannot compute the labels mid-run: {e}"))
+            }
+        };
         let image = image::open(image_path)
             .unwrap_or_else(|e| panic!("cannot read {} mid-run: {e}", image_path.display()))
             .to_rgb8();
@@ -440,5 +526,67 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(IMAGES_FOLDER)).expect("the images folder");
         let error = MapDataset::load(dir.path(), 0).expect_err("nothing to train on");
         assert!(error.contains("no map with labels"), "{error}");
+    }
+
+    /// A map whose `gt/` label is missing is not left out: its labels are
+    /// computed straight from `maps/<name>.omap` instead, and every crop
+    /// taken from it comes out the same as when the label was read off disk.
+    #[test]
+    fn a_missing_label_is_computed_from_the_map_beside_it() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let folder = dir.path().join("dataset");
+        let settings = maur_o::dataset::Settings {
+            layout_size: 2,
+            cell_size: 20,
+            maps: 2,
+            just_opaque_areas: true,
+            resolution: 2.0,
+            frame: 5.0,
+            ..maur_o::dataset::Settings::default()
+        };
+        maur_o::dataset::create_dataset(
+            Path::new("../tests/data/turning_patterns.xmap"),
+            &folder,
+            &settings,
+            |_, _| {},
+        )
+        .expect("the dataset generates");
+
+        // Read while the labels are still on disk, before they are taken
+        // away: `get` panics on a file which disappears under it, same as it
+        // would mid-run.
+        // A crop smaller than the default 256, since this dataset's images
+        // are only 100 pixels square.
+        let with_labels = MapDataset::load(&folder, 7)
+            .expect("the labels are on disk")
+            .with_crop(32)
+            .expect("32 fits in a 100 pixel map");
+        let from_disk: Vec<MapCrop> = (0..with_labels.len())
+            .map(|index| with_labels.get(index).expect("an item"))
+            .collect();
+
+        std::fs::remove_dir_all(folder.join(GROUND_TRUTH_FOLDER)).expect("gt/ removed");
+        let without_labels = MapDataset::load(&folder, 7)
+            .expect("the labels come from the maps instead")
+            .with_crop(32)
+            .expect("32 fits in a 100 pixel map");
+
+        assert_eq!(without_labels.maps(), with_labels.maps());
+        assert_eq!(without_labels.classes(), with_labels.classes());
+        assert_eq!(without_labels.len(), from_disk.len());
+
+        for (index, from_disk) in from_disk.iter().enumerate() {
+            let from_map = without_labels.get(index).expect("an item");
+            assert_eq!(from_map.class, from_disk.class, "crop {index}");
+            // Not bit for bit: a map file keeps a rotation to six
+            // significant digits, so a sine or cosine worked out from it
+            // carries a hair less precision than one read off the `.bin`.
+            for (at, (&got, &wanted)) in from_map.angle.iter().zip(&from_disk.angle).enumerate() {
+                assert!(
+                    (got - wanted).abs() < 1e-4,
+                    "crop {index} angle {at}: {got} from the map, {wanted} from disk",
+                );
+            }
+        }
     }
 }

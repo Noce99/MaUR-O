@@ -27,8 +27,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # `train` is the learner and its metrics, `vision` nothing this uses -- the
 # dataset here is the one `generate_maps_dataset` wrote. A backend is picked
 # by feature below rather than taken from the defaults, which would pull in
-# every one of them.
-burn = { version = "0.18", default-features = false, features = ["std", "train", "autodiff"] }
+# every one of them. `tui` is the ratatui dashboard `train --dashboard`
+# switches to; built in always, since which renderer runs is a runtime
+# choice, not one worth a build for.
+burn = { version = "0.18", default-features = false, features = ["std", "train", "autodiff", "tui"] }
 
 [features]
 # The pure Rust backend: no GPU, no system library, and it builds and runs
