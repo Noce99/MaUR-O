@@ -1,6 +1,7 @@
 # MaUR-O
 
 [![Crates.io](https://img.shields.io/crates/v/maur-o.svg)][crate]
+[![CI](https://github.com/Noce99/MaUR-O/actions/workflows/ci.yml/badge.svg)](https://github.com/Noce99/MaUR-O/actions/workflows/ci.yml)
 
 This is a **Ma**p **U**tils project written in **R**ust for **O**rienteering.
 
