@@ -304,6 +304,33 @@ impl GroundTruth {
         GroundTruth::from_bytes(&bytes).map_err(|message| format!("{}: {message}", path.display()))
     }
 
+    /// What a labels file says it holds, without reading it: the height, the
+    /// width and the number of one-hot channels, out of the thirty-two byte
+    /// header alone.
+    ///
+    /// A whole file is sixteen megabytes at the size a dataset is generated
+    /// at, and something which only wants to know whether a folder's labels
+    /// agree with each other — and with the images beside them — has no
+    /// business reading all of it, once per map, to find out.
+    pub fn size(path: &Path) -> Result<(u32, u32, usize), String> {
+        use std::io::Read;
+
+        let mut header = [0u8; HEADER_BYTES];
+        File::open(path)
+            .and_then(|mut file| file.read_exact(&mut header))
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        if header[..8] != MAGIC {
+            return Err(format!(
+                "{}: not a MAUROGT2 ground truth file",
+                path.display()
+            ));
+        }
+        let number = |at: usize| {
+            u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+        };
+        Ok((number(8), number(12), number(16) as usize))
+    }
+
     /// Reads back the bytes [`GroundTruth::write`] wrote, whatever they were
     /// read out of.
     pub fn from_bytes(bytes: &[u8]) -> Result<GroundTruth, String> {

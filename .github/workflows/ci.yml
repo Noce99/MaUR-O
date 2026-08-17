@@ -72,3 +72,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check
         run: cargo check --all-targets --locked
+
+  net:
+    # The training crate, which the jobs above leave alone: they run at the
+    # workspace root and build the root package, and burn's dependency tree is
+    # large enough that compiling it on all three platforms would cost more
+    # than it tells us. One platform, and the pure Rust backend -- `wgpu` and
+    # `cuda` want a driver no runner has.
+    name: the U-Net
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build -p maur-o-net --all-targets --locked
+      - name: Test
+        run: cargo test -p maur-o-net --all-targets --locked
+      - name: Clippy
+        run: cargo clippy -p maur-o-net --all-targets --locked -- -D warnings

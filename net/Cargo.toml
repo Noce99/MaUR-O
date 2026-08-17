@@ -1,0 +1,44 @@
+[package]
+name = "maur-o-net"
+version = "0.1.0"
+edition = "2021"
+# What burn asks for. The renderer's own floor is higher (1.88, set by the
+# `image` crate), and this crate depends on it, so 1.88 is what really holds.
+rust-version = "1.85"
+description = "A U-Net trained to read a rendered orienteering map back into the symbols it was drawn with"
+license = "GPL-3.0-or-later"
+# Not a crate anyone installs: it is the training side of this repository,
+# and it is only ever built from a checkout of it.
+publish = false
+
+[lib]
+name = "maur_o_net"
+path = "src/lib.rs"
+
+[[bin]]
+name = "train"
+path = "src/bin/train.rs"
+
+[dependencies]
+maur-o = { path = ".." }
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# `train` is the learner and its metrics, `vision` nothing this uses -- the
+# dataset here is the one `generate_maps_dataset` wrote. A backend is picked
+# by feature below rather than taken from the defaults, which would pull in
+# every one of them.
+burn = { version = "0.18", default-features = false, features = ["std", "train", "autodiff"] }
+
+[features]
+# The pure Rust backend: no GPU, no system library, and it builds and runs
+# anywhere the renderer does. Slow, and right for a first run and for CI.
+default = ["ndarray"]
+ndarray = ["burn/ndarray"]
+# Any GPU with a Vulkan/Metal/DX12 driver, which is what a real run wants.
+wgpu = ["burn/wgpu"]
+# NVIDIA, through CUDA, which is faster again where there is one.
+cuda = ["burn/cuda"]
+
+[dev-dependencies]
+tempfile = "3"
