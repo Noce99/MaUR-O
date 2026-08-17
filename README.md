@@ -28,6 +28,7 @@ set, for when the maps that exist are not enough.
   - [`benchmark`](#benchmark)
   - [`generate_maps_dataset`](#generate_maps_dataset)
     - [A training set](#a-training-set)
+- [Reading a map back: `maur-o-net`](#reading-a-map-back-maur-o-net)
 - [Implementation Details](#implementation-details)
 - [Known Limitations](#known-limitations)
 
@@ -399,6 +400,80 @@ and it is half the size; the pair is worked out where the tensor is.
 let truth = GroundTruth::read(Path::new("dataset/gt/map_001.bin"))?;
 let shape = [truth.height as usize, truth.width as usize, truth.channels()];
 let target = Tensor::<B, 3>::from_floats(truth.one_hot().as_slice(), device).reshape(shape);
+```
+
+## Reading a map back: `maur-o-net`
+
+The renderer turns a map file into a picture. The `net/` crate goes the other
+way — given the picture, which of the symbol set's opaque areas is each pixel,
+and at what angle was its fill pattern turned. It is a **U-Net**, written with
+[burn](https://burn.dev), trained on exactly what
+[`generate_maps_dataset`](#a-training-set) writes.
+
+```bash
+# A few hundred maps, all ground cover, drawn and labelled.
+cargo run --release --bin generate_maps_dataset -- \
+    --just-opaque-areas -n 300 maps/ISOM_10k.omap dataset
+
+# And a network read off them.
+cargo run --release -p maur-o-net --bin train -- dataset runs/first
+```
+
+It is a workspace member rather than part of the `maur-o` crate: burn's
+dependency tree is an order of magnitude larger than the renderer's, and none
+of it belongs in a crate whose job is to draw a map. `cargo build` at the root
+still builds the renderer alone.
+
+**The backend is a build-time choice**, since burn takes it as a type
+parameter: `ndarray` by default — pure Rust, runs anywhere, and far too slow
+for a real run — with `--features wgpu` for any GPU with a Vulkan, Metal or
+DX12 driver and `--features cuda` for an NVIDIA one.
+
+### The shape of it
+
+Four levels down and four back up, base 16 channels doubling at each step, a
+skip connection across each level. Input `[batch, 3, H, W]`; **the head emits
+`on + 3` channels, and an answer is `on + 2`**:
+
+| Channels | What they are |
+| --- | --- |
+| `on + 1` class logits | One per opaque area, plus one for the white frame. A pixel is exactly one of these, so they go under a single softmax and a single cross-entropy. The frame needs a logit here even though it has no channel in a label — all-zeros already means it there, but "no class" is not the *absence* of a logit. |
+| 2 angle | The sine and the cosine, raw. Scored against the label's own pair. |
+
+`UNet::forward` gives the raw `on + 3` for the loss; `UNet::predict` gives the
+`on + 2` in the dataset's own shape — softmax over the class logits with the
+frame's dropped, then the two angle channels — matching a `gt/*.bin` expanded
+by `GroundTruth::one_hot` channel for channel.
+
+### Training
+
+A map is 1650 pixels square and a U-Net is not, so an item is a **256-pixel
+crop** taken at random from inside one, and a batch is a handful of those.
+Cropping is also most of what stands in for having more maps. The train/valid
+split is **by map, not by crop**: two crops of one map overlap as often as
+not, and validating on a crop of a map the network trained on scores memory
+rather than reading.
+
+The loss is cross-entropy on the classes plus weighted squared error on the
+`(sin, cos)` pair. The angle term runs over *every* pixel, not just the turned
+ones — where there is no angle the label is the zero vector, and learning to
+shrink to nothing there is learning that there is nothing to say, which on
+these datasets is four fifths of the picture.
+
+Three numbers per epoch: loss, pixel accuracy (the frame counted as a symbol —
+a network answering "frame" everywhere already scores about a quarter, so read
+it against that), and angle error in degrees, where 0 is perfect and 90 is a
+network pointing anywhere. All three are counted **on the device**: handing
+burn's stock `AccuracyMetric` the logits and targets of a segmentation batch
+would move eighty megabytes to the host every step, on a tensor whose only use
+is to be argmaxed, so what crosses instead is five scalars.
+
+```
+| Split | Metric         | Min.     | Epoch    | Max.     | Epoch    |
+|-------|----------------|----------|----------|----------|----------|
+| Train | Angle error    | 76.180   | 2        | 88.455   | 6        |
+| Train | Loss           | 3.811    | 8        | 3.965    | 1        |
+| Train | Pixel accuracy | 2.355    | 7        | 3.543    | 2        |
 ```
 
 ## Implementation Details

@@ -1,3 +1,11 @@
+# `net` is the one member: a U-Net trained on what `generate_maps_dataset`
+# writes, kept out of this package because burn's dependency tree is an order
+# of magnitude larger than the renderer's and none of it belongs in a crate
+# whose job is to draw a map. `cargo build` here still builds the renderer
+# alone; `cargo build -p maur-o-net` is what asks for the other.
+[workspace]
+members = ["net"]
+
 [package]
 name = "maur-o"
 version = "1.0.0"
