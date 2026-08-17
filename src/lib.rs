@@ -123,6 +123,11 @@
 //! coordinates a file holds, and [`random`] is where every choice any of
 //! them makes comes from — seeded by hand, so that a generated map can be
 //! generated again.
+//!
+//! A generated map is also the one map whose answer is known, which makes a
+//! folder of them a training set: [`ground_truth`] writes down what each
+//! pixel of a generated map's image is, as the tensor a model is scored
+//! against, out of the very decisions the map was drawn from.
 
 // Every public item carries a doc comment; this keeps it that way.
 #![warn(missing_docs)]
@@ -137,6 +142,7 @@ pub mod contour_symbols;
 pub mod contours_to_raster_config;
 pub mod contours_to_raster_svg;
 pub mod course;
+pub mod dataset;
 pub mod dem;
 pub mod dem_from_contours;
 pub mod dem_geo_tiff_evaluator;
@@ -144,8 +150,8 @@ pub mod differences;
 pub mod geometry;
 pub mod geotiff;
 pub mod gravity_model;
+pub mod ground_truth;
 pub mod image_template;
-pub mod dataset;
 pub mod layout;
 pub mod map;
 pub mod map_areas;

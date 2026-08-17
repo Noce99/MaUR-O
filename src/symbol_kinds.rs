@@ -507,6 +507,7 @@ mod tests {
             Color {
                 name: "ground".to_string(),
                 rgb: (1.0, 1.0, 0.0),
+                cmyk: (0.0, 0.0, 1.0, 0.0),
                 opacity: 1.0,
             },
         ];
