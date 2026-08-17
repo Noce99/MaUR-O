@@ -86,13 +86,17 @@ fn vertex_tangents(part: &PathPart, i: usize) -> VertexTangents {
     while k > 0 && incoming.is_none() {
         k -= 1;
         let tangent = points[i] - points[k];
-        if tangent.dot(tangent) > EPS2 { incoming = Some(tangent); }
+        if tangent.dot(tangent) > EPS2 {
+            incoming = Some(tangent);
+        }
     }
     if incoming.is_none() && part.closed && last > i + 1 {
         let mut k = last;
         while k > i && incoming.is_none() {
             let tangent = points[i] - points[k];
-            if tangent.dot(tangent) > EPS2 { incoming = Some(tangent); }
+            if tangent.dot(tangent) > EPS2 {
+                incoming = Some(tangent);
+            }
             k -= 1;
         }
     }
@@ -101,14 +105,18 @@ fn vertex_tangents(part: &PathPart, i: usize) -> VertexTangents {
     let mut k = i + 1;
     while k <= last && outgoing.is_none() {
         let tangent = points[k] - points[i];
-        if tangent.dot(tangent) > EPS2 { outgoing = Some(tangent); }
+        if tangent.dot(tangent) > EPS2 {
+            outgoing = Some(tangent);
+        }
         k += 1;
     }
     if outgoing.is_none() && part.closed {
         let mut k = 0;
         while k < i && outgoing.is_none() {
             let tangent = points[k] - points[i];
-            if tangent.dot(tangent) > EPS2 { outgoing = Some(tangent); }
+            if tangent.dot(tangent) > EPS2 {
+                outgoing = Some(tangent);
+            }
             k += 1;
         }
     }
@@ -126,7 +134,12 @@ fn to_skia_path(path: &Path) -> Option<tiny_skia::Path> {
             PathCommand::MoveTo(p) => builder.move_to(p.x as f32, p.y as f32),
             PathCommand::LineTo(p) => builder.line_to(p.x as f32, p.y as f32),
             PathCommand::CubicTo(c1, c2, end) => builder.cubic_to(
-                c1.x as f32, c1.y as f32, c2.x as f32, c2.y as f32, end.x as f32, end.y as f32,
+                c1.x as f32,
+                c1.y as f32,
+                c2.x as f32,
+                c2.y as f32,
+                end.x as f32,
+                end.y as f32,
             ),
             PathCommand::Close => builder.close(),
         }
@@ -230,47 +243,104 @@ impl<'m> Renderer<'m> {
         // A clipped renderable is a fill pattern, which cannot reach beyond
         // the area carrying it. Mapper leaves it out of the extent for that
         // reason, and the size of the image depends on it.
-        if self.current_clip.is_some() { return; }
+        if self.current_clip.is_some() {
+            return;
+        }
         self.extent = self.extent.united(&bounds);
     }
 
     /// Fills with `Qt::OddEvenFill`, `QPainterPath`'s default -- correct
     /// for every filled shape except text (see `fill_winding`).
-    pub(crate) fn fill(&mut self, path: Path, color: i32, bounds: Option<Rect>, transform: Option<Transform>) {
+    pub(crate) fn fill(
+        &mut self,
+        path: Path,
+        color: i32,
+        bounds: Option<Rect>,
+        transform: Option<Transform>,
+    ) {
         self.fill_impl(path, color, bounds, transform, FillRule::EvenOdd);
     }
 
     /// Fills with `Qt::WindingFill`, as Mapper explicitly sets for text
     /// paths so overlapping glyph contours don't punch accidental holes.
-    pub(crate) fn fill_winding(&mut self, path: Path, color: i32, bounds: Option<Rect>, transform: Option<Transform>) {
+    pub(crate) fn fill_winding(
+        &mut self,
+        path: Path,
+        color: i32,
+        bounds: Option<Rect>,
+        transform: Option<Transform>,
+    ) {
         self.fill_impl(path, color, bounds, transform, FillRule::Winding);
     }
 
-    fn fill_impl(&mut self, path: Path, color: i32, bounds: Option<Rect>, transform: Option<Transform>, fill_rule: FillRule) {
-        if self.map.color(color).is_none() || path.is_empty() { return; }
+    fn fill_impl(
+        &mut self,
+        path: Path,
+        color: i32,
+        bounds: Option<Rect>,
+        transform: Option<Transform>,
+        fill_rule: FillRule,
+    ) {
+        if self.map.color(color).is_none() || path.is_empty() {
+            return;
+        }
         let b = bounds.unwrap_or_else(|| path.control_point_rect());
         self.include(b);
         self.renderables.push(Renderable {
-            path, color, clip: self.current_clip, pen_width: 0.0,
-            cap: PenCap::Flat, join: PenJoin::Miter, miter_clip: true, fill_rule, transform,
+            path,
+            color,
+            clip: self.current_clip,
+            pen_width: 0.0,
+            cap: PenCap::Flat,
+            join: PenJoin::Miter,
+            miter_clip: true,
+            fill_rule,
+            transform,
         });
     }
 
-    pub(crate) fn stroke(&mut self, path: Path, color: i32, width: f64, cap: PenCap, join: PenJoin,
-              bounds: Option<Rect>, transform: Option<Transform>) {
+    pub(crate) fn stroke(
+        &mut self,
+        path: Path,
+        color: i32,
+        width: f64,
+        cap: PenCap,
+        join: PenJoin,
+        bounds: Option<Rect>,
+        transform: Option<Transform>,
+    ) {
         self.stroke_impl(path, color, width, cap, join, true, bounds, transform);
     }
 
     /// Like [`Self::stroke`], but for a border line shifted off a main line
     /// (see the `miter_clip` field doc on [`Renderable`]).
-    fn stroke_no_miter_clip(&mut self, path: Path, color: i32, width: f64, cap: PenCap, join: PenJoin,
-              bounds: Option<Rect>, transform: Option<Transform>) {
+    fn stroke_no_miter_clip(
+        &mut self,
+        path: Path,
+        color: i32,
+        width: f64,
+        cap: PenCap,
+        join: PenJoin,
+        bounds: Option<Rect>,
+        transform: Option<Transform>,
+    ) {
         self.stroke_impl(path, color, width, cap, join, false, bounds, transform);
     }
 
-    fn stroke_impl(&mut self, path: Path, color: i32, width: f64, cap: PenCap, join: PenJoin, miter_clip: bool,
-              bounds: Option<Rect>, transform: Option<Transform>) {
-        if self.map.color(color).is_none() || width <= 0.0 || path.is_empty() { return; }
+    fn stroke_impl(
+        &mut self,
+        path: Path,
+        color: i32,
+        width: f64,
+        cap: PenCap,
+        join: PenJoin,
+        miter_clip: bool,
+        bounds: Option<Rect>,
+        transform: Option<Transform>,
+    ) {
+        if self.map.color(color).is_none() || width <= 0.0 || path.is_empty() {
+            return;
+        }
         if let Some(b) = bounds {
             self.include(b);
         } else {
@@ -280,13 +350,24 @@ impl<'m> Renderer<'m> {
             let mut extent = Rect::default();
             for polygon in path.to_subpath_polygons() {
                 let rect = stroked_polyline_extent(&polygon, half_width, cap, join);
-                extent = if extent.is_null() { rect } else { extent.united(&rect) };
+                extent = if extent.is_null() {
+                    rect
+                } else {
+                    extent.united(&rect)
+                };
             }
             self.include(extent);
         }
         self.renderables.push(Renderable {
-            path, color, clip: self.current_clip, pen_width: width, cap, join, miter_clip,
-            fill_rule: FillRule::EvenOdd, transform,
+            path,
+            color,
+            clip: self.current_clip,
+            pen_width: width,
+            cap,
+            join,
+            miter_clip,
+            fill_rule: FillRule::EvenOdd,
+            transform,
         });
     }
 
@@ -306,7 +387,11 @@ impl<'m> Renderer<'m> {
                     // The rotation of an object turns the symbol clockwise
                     // on the paper, where the y axis points down, hence the
                     // negative sign.
-                    let rotation = if point.is_rotatable { -object.rotation } else { 0.0 };
+                    let rotation = if point.is_rotatable {
+                        -object.rotation
+                    } else {
+                        0.0
+                    };
                     self.add_point(point, first.pos(), rotation, 1.0);
                 }
             }
@@ -337,7 +422,12 @@ impl<'m> Renderer<'m> {
     fn add_point(&mut self, symbol: &PointSymbol, position: Point, rotation: f64, scale: f64) {
         if is_color(symbol.inner_color) && symbol.inner_radius > 0.0 {
             let mut path = Path::new();
-            add_ellipse(&mut path, position, symbol.inner_radius, symbol.inner_radius);
+            add_ellipse(
+                &mut path,
+                position,
+                symbol.inner_radius,
+                symbol.inner_radius,
+            );
             self.fill(path, symbol.inner_color, None, None);
         }
 
@@ -348,11 +438,26 @@ impl<'m> Renderer<'m> {
             // Mapper's extent of a circle is inflated by the full line
             // width, not by half of it.
             let reach = symbol.inner_radius + symbol.outer_width;
-            let bounds = Rect::new(position.x - reach, position.y - reach, 2.0 * reach, 2.0 * reach);
-            self.stroke(path, symbol.outer_color, symbol.outer_width, PenCap::Flat, PenJoin::Miter, Some(bounds), None);
+            let bounds = Rect::new(
+                position.x - reach,
+                position.y - reach,
+                2.0 * reach,
+                2.0 * reach,
+            );
+            self.stroke(
+                path,
+                symbol.outer_color,
+                symbol.outer_width,
+                PenCap::Flat,
+                PenJoin::Miter,
+                Some(bounds),
+                None,
+            );
         }
 
-        if symbol.elements.is_empty() { return; }
+        if symbol.elements.is_empty() {
+            return;
+        }
 
         // The scale enlarges the element coordinates, but not the widths
         // and radii of their symbols. It is used for dash symbols at
@@ -375,7 +480,14 @@ impl<'m> Renderer<'m> {
     /// checking each part against the outline of the area. Port of
     /// Mapper's `PointSymbol::createRenderablesIf*Inside()` family; `mode`
     /// is the `no_clipping` value of the pattern.
-    fn add_point_checked(&mut self, symbol: &PointSymbol, position: Point, rotation: f64, outline: &Path, mode: i32) {
+    fn add_point_checked(
+        &mut self,
+        symbol: &PointSymbol,
+        position: Point,
+        rotation: f64,
+        outline: &Path,
+        mode: i32,
+    ) {
         let contains = |p: Point| -> bool { outline.contains_even_odd(p) };
         let completely = |center: Point, r: f64| {
             contains(Point::new(center.x - r, center.y))
@@ -405,7 +517,12 @@ impl<'m> Renderer<'m> {
 
         if is_color(symbol.inner_color) && symbol.inner_radius > 0.0 && primitives(position) {
             let mut path = Path::new();
-            add_ellipse(&mut path, position, symbol.inner_radius, symbol.inner_radius);
+            add_ellipse(
+                &mut path,
+                position,
+                symbol.inner_radius,
+                symbol.inner_radius,
+            );
             self.fill(path, symbol.inner_color, None, None);
         }
         if is_color(symbol.outer_color) && symbol.outer_width > 0.0 && circle_ok(position) {
@@ -413,8 +530,21 @@ impl<'m> Renderer<'m> {
             let mut path = Path::new();
             add_ellipse(&mut path, position, radius, radius);
             let reach = symbol.inner_radius + symbol.outer_width;
-            let bounds = Rect::new(position.x - reach, position.y - reach, 2.0 * reach, 2.0 * reach);
-            self.stroke(path, symbol.outer_color, symbol.outer_width, PenCap::Flat, PenJoin::Miter, Some(bounds), None);
+            let bounds = Rect::new(
+                position.x - reach,
+                position.y - reach,
+                2.0 * reach,
+                2.0 * reach,
+            );
+            self.stroke(
+                path,
+                symbol.outer_color,
+                symbol.outer_width,
+                PenCap::Flat,
+                PenJoin::Miter,
+                Some(bounds),
+                None,
+            );
         }
 
         let cos_r = rotation.cos();
@@ -476,7 +606,12 @@ fn section_boundaries(part: &PathPart) -> Vec<f64> {
 /// of segments which fits the length best is determined first, and the
 /// segment and end lengths are then adjusted so that the symbols are
 /// distributed evenly.
-fn mid_symbol_positions_section(offset: f64, length: f64, symbol: &LineSymbol, positions: &mut Vec<f64>) {
+fn mid_symbol_positions_section(
+    offset: f64,
+    length: f64,
+    symbol: &LineSymbol,
+    positions: &mut Vec<f64>,
+) {
     let num_gaps = symbol.mid_symbols_per_spot - 1;
     let symbols_length = num_gaps as f64 * symbol.mid_symbol_distance;
     let segment_length = symbol.segment_length;
@@ -504,21 +639,37 @@ fn mid_symbol_positions_section(offset: f64, length: f64, symbol: &LineSymbol, p
         }
 
         let deviation_of = |count: i32| -> f64 {
-            (length - count as f64 * segment_length
-                - (count + 1) as f64 * symbols_length - 2.0 * end_length).abs()
+            (length
+                - count as f64 * segment_length
+                - (count + 1) as f64 * symbols_length
+                - 2.0 * end_length)
+                .abs()
         };
         let lower_deviation = deviation_of(lower_count);
         let higher_deviation = deviation_of(higher_count);
-        let count = if lower_deviation >= higher_deviation { higher_count } else { lower_count };
-        let deviation = if lower_deviation >= higher_deviation { -higher_deviation } else { lower_deviation };
+        let count = if lower_deviation >= higher_deviation {
+            higher_count
+        } else {
+            lower_count
+        };
+        let deviation = if lower_deviation >= higher_deviation {
+            -higher_deviation
+        } else {
+            lower_deviation
+        };
 
         let ideal_length = count as f64 * segment_length + 2.0 * end_length;
-        if ideal_length <= 0.0 { return; }
+        if ideal_length <= 0.0 {
+            return;
+        }
 
         let adjusted_end = end_length + deviation * (end_length / ideal_length);
         let mut adjusted_segment = segment_length + deviation * (segment_length / ideal_length);
-        if adjusted_segment < 0.0 { return; }
-        if !symbol.show_at_least_one_symbol && higher_count <= 0
+        if adjusted_segment < 0.0 {
+            return;
+        }
+        if !symbol.show_at_least_one_symbol
+            && higher_count <= 0
             && length <= 2.0 * end_length - (segment_length + symbols_length) / 2.0
         {
             return;
@@ -531,17 +682,31 @@ fn mid_symbol_positions_section(offset: f64, length: f64, symbol: &LineSymbol, p
     } else {
         if length > symbols_length && lower_count > 0 && higher_count > 0 {
             let deviation_of = |count: i32| -> f64 {
-                (length - count as f64 * segment_length - (count + 1) as f64 * symbols_length).abs() / count as f64
+                (length - count as f64 * segment_length - (count + 1) as f64 * symbols_length).abs()
+                    / count as f64
             };
-            let count = if deviation_of(lower_count) > deviation_of(higher_count) { higher_count } else { lower_count };
-            let adapted_segment = (length - (count + 1) as f64 * symbols_length) / count as f64 + symbols_length;
+            let count = if deviation_of(lower_count) > deviation_of(higher_count) {
+                higher_count
+            } else {
+                lower_count
+            };
+            let adapted_segment =
+                (length - (count + 1) as f64 * symbols_length) / count as f64 + symbols_length;
             if adapted_segment >= symbols_length {
                 for i in 0..=count {
                     for s in 0..symbol.mid_symbols_per_spot {
                         // The outermost symbols are added outside of this loop.
-                        if i == 0 && s == 0 { continue; }
-                        if i == count && s == num_gaps { break; }
-                        positions.push(offset + i as f64 * adapted_segment + s as f64 * symbol.mid_symbol_distance);
+                        if i == 0 && s == 0 {
+                            continue;
+                        }
+                        if i == count && s == num_gaps {
+                            break;
+                        }
+                        positions.push(
+                            offset
+                                + i as f64 * adapted_segment
+                                + s as f64 * symbol.mid_symbol_distance,
+                        );
                     }
                 }
             }
@@ -561,7 +726,12 @@ fn mid_symbol_positions(part: &PathPart, symbol: &LineSymbol) -> Vec<f64> {
 
     let boundaries = section_boundaries(part);
     for i in 0..boundaries.len().saturating_sub(1) {
-        mid_symbol_positions_section(boundaries[i], boundaries[i + 1] - boundaries[i], symbol, &mut positions);
+        mid_symbol_positions_section(
+            boundaries[i],
+            boundaries[i + 1] - boundaries[i],
+            symbol,
+            &mut positions,
+        );
     }
     positions
 }
@@ -569,7 +739,9 @@ fn mid_symbol_positions(part: &PathPart, symbol: &LineSymbol) -> Vec<f64> {
 /// Finds the flattened index of the next dash point at or behind the given
 /// length. Returns the last index of the part when there is none.
 fn split_index_at(part: &PathPart, length: f64) -> usize {
-    if length <= 0.0 || part.lengths.is_empty() { return 0; }
+    if length <= 0.0 || part.lengths.is_empty() {
+        return 0;
+    }
     part.lengths.partition_point(|&x| x < length)
 }
 
@@ -584,17 +756,35 @@ fn find_next_dash_point(part: &PathPart, first: usize) -> usize {
 }
 
 impl<'m> Renderer<'m> {
-    fn place_mid_symbol(&mut self, symbol: &PointSymbol, coords: &CoordList, part: &PathPart, position: f64) {
+    fn place_mid_symbol(
+        &mut self,
+        symbol: &PointSymbol,
+        coords: &CoordList,
+        part: &PathPart,
+        position: f64,
+    ) {
         let location = locate_on_path(coords, part, position);
-        let rotation = if symbol.is_rotatable { tangent_rotation(location.tangent) } else { 0.0 };
+        let rotation = if symbol.is_rotatable {
+            tangent_rotation(location.tangent)
+        } else {
+            0.0
+        };
         self.add_point(symbol, location.pos, rotation, 1.0);
     }
 
     /// Copies a continuous piece of the path, ending it with a gap flag,
     /// and places the mid symbols centered on the piece. Port of Mapper's
     /// `LineSymbol::processContinuousLine()`.
-    fn dashed_continuous_line(&mut self, coords: &CoordList, part: &PathPart, symbol: &LineSymbol,
-                               start: f64, end: f64, set_mid_symbols: bool, out: &mut CoordList) {
+    fn dashed_continuous_line(
+        &mut self,
+        coords: &CoordList,
+        part: &PathPart,
+        symbol: &LineSymbol,
+        start: f64,
+        end: f64,
+        set_mid_symbols: bool,
+        out: &mut CoordList,
+    ) {
         copy_path_slice(coords, part, start, end, out);
         if let Some(last) = out.last_mut() {
             last.flags |= coord_flag::GAP_POINT;
@@ -607,7 +797,9 @@ impl<'m> Renderer<'m> {
 
         let distance = symbol.mid_symbol_distance;
         let mid_symbols_length = (symbol.mid_symbols_per_spot.max(1) - 1) as f64 * distance;
-        if mid_symbols_length > end - start { return; }
+        if mid_symbols_length > end - start {
+            return;
+        }
 
         let mut position = (start + end - mid_symbols_length) / 2.0;
         self.place_mid_symbol(mid_symbol, coords, part, position);
@@ -625,14 +817,25 @@ impl<'m> Renderer<'m> {
     /// Returns where the next section has to take over: a section too
     /// short for dashes, and the last dash before a dash point, are handed
     /// over so that a dash can run continuously across a corner.
-    fn create_dash_groups(&mut self, coords: &CoordList, part: &PathPart, symbol: &LineSymbol, out: &mut CoordList,
-                           line_start: f64, start: f64, end: f64, is_part_start: bool, is_part_end: bool) -> f64 {
+    fn create_dash_groups(
+        &mut self,
+        coords: &CoordList,
+        part: &PathPart,
+        symbol: &LineSymbol,
+        out: &mut CoordList,
+        line_start: f64,
+        start: f64,
+        end: f64,
+        is_part_start: bool,
+        is_part_end: bool,
+    ) -> f64 {
         let mid_symbol = symbol.mid_symbol.as_deref();
-        let mid_symbols = if symbol.mid_symbols_per_spot > 0 && mid_symbol.is_some_and(|m| !m.is_empty()) {
-            symbol.mid_symbol_placement
-        } else {
-            mid_symbol_placement::NO_MID_SYMBOLS
-        };
+        let mid_symbols =
+            if symbol.mid_symbols_per_spot > 0 && mid_symbol.is_some_and(|m| !m.is_empty()) {
+                symbol.mid_symbol_placement
+            } else {
+                mid_symbol_placement::NO_MID_SYMBOLS
+            };
         let mid_symbol_distance_f = symbol.mid_symbol_distance as f32;
         let per_spot = symbol.mid_symbols_per_spot;
 
@@ -665,7 +868,8 @@ impl<'m> Renderer<'m> {
 
         let num_half_groups = (half_first_group as i32) + (half_last_group as i32);
         let num_dashgroups_f = num_half_groups as f32
-            + (length_plus_break - num_half_groups as f32 * dash_length_f / 2.0) / total_group_and_break_length;
+            + (length_plus_break - num_half_groups as f32 * dash_length_f / 2.0)
+                / total_group_and_break_length;
         let lower_dashgroup_count = num_dashgroups_f.floor() as i32;
 
         let minimum_optimum_num_dashes = dashes_in_group * 2 - num_half_groups / 2;
@@ -679,7 +883,8 @@ impl<'m> Renderer<'m> {
                 if line_start < start || start_is_dash_point {
                     set_mid_symbols = false;
                     // Mid symbols at the begin, for explicit dash points.
-                    let mut position = start - (per_spot - 1) as f64 * mid_symbol_distance_f as f64 / 2.0;
+                    let mut position =
+                        start - (per_spot - 1) as f64 * mid_symbol_distance_f as f64 / 2.0;
                     let mut s = 0;
                     while s < per_spot {
                         if position >= 0.0 {
@@ -691,7 +896,8 @@ impl<'m> Renderer<'m> {
                 }
                 if half_first_group {
                     // Mid symbols at the start, for the closing point or dash points.
-                    let mut position = start + (per_spot % 2 + 1) as f64 * mid_symbol_distance_f as f64 / 2.0;
+                    let mut position =
+                        start + (per_spot % 2 + 1) as f64 * mid_symbol_distance_f as f64 / 2.0;
                     let mut s = 1;
                     while s < per_spot && position <= part.length() {
                         self.place_mid_symbol(mid_symbol, coords, part, position);
@@ -704,27 +910,44 @@ impl<'m> Renderer<'m> {
 
         if length <= 0.0
             || (lower_dashgroup_count <= 1
-                && length < minimum_optimum_length - minimum_optimum_num_dashes as f32 * switch_deviation)
+                && length
+                    < minimum_optimum_length - minimum_optimum_num_dashes as f32 * switch_deviation)
         {
             // Too short for dashes.
             if is_part_end {
-                self.dashed_continuous_line(coords, part, symbol, line_start, end, set_mid_symbols, out);
+                self.dashed_continuous_line(
+                    coords,
+                    part,
+                    symbol,
+                    line_start,
+                    end,
+                    set_mid_symbols,
+                    out,
+                );
                 return end;
             }
             return line_start;
         }
 
         let higher_dashgroup_count = num_dashgroups_f.ceil() as i32;
-        let lower_dashgroup_deviation =
-            (length_plus_break - lower_dashgroup_count as f32 * total_group_and_break_length) / lower_dashgroup_count as f32;
+        let lower_dashgroup_deviation = (length_plus_break
+            - lower_dashgroup_count as f32 * total_group_and_break_length)
+            / lower_dashgroup_count as f32;
         let higher_dashgroup_deviation =
-            (higher_dashgroup_count as f32 * total_group_and_break_length - length_plus_break) / higher_dashgroup_count as f32;
-        let num_dashgroups = if lower_dashgroup_deviation > higher_dashgroup_deviation { higher_dashgroup_count } else { lower_dashgroup_count };
+            (higher_dashgroup_count as f32 * total_group_and_break_length - length_plus_break)
+                / higher_dashgroup_count as f32;
+        let num_dashgroups = if lower_dashgroup_deviation > higher_dashgroup_deviation {
+            higher_dashgroup_count
+        } else {
+            lower_dashgroup_count
+        };
 
         let num_half_dashes = 2 * num_dashgroups * dashes_in_group - num_half_groups;
-        let mut adjusted_dash_length =
-            (length - (num_dashgroups - 1) as f32 * break_length_f
-                - num_dashgroups as f32 * total_in_group_break_length) * 2.0 / num_half_dashes as f32;
+        let mut adjusted_dash_length = (length
+            - (num_dashgroups - 1) as f32 * break_length_f
+            - num_dashgroups as f32 * total_in_group_break_length)
+            * 2.0
+            / num_half_dashes as f32;
         adjusted_dash_length = adjusted_dash_length.max(0.0);
 
         let mut cur_length = start as f32;
@@ -741,7 +964,8 @@ impl<'m> Renderer<'m> {
                         position = end as f32;
                     } else if !(is_first_dashgroup && half_first_group) {
                         position += (adjusted_dash_length * dashes_in_group as f32
-                            + in_group_break_length_f * (dashes_in_group - 1) as f32) / 2.0;
+                            + in_group_break_length_f * (dashes_in_group - 1) as f32)
+                            / 2.0;
                     }
                     position -= (mid_symbol_distance_f * (per_spot - 1) as f32) / 2.0;
                     let mut i = 0;
@@ -764,8 +988,13 @@ impl<'m> Renderer<'m> {
                 let has_start = !(is_first_dash && half_first_group);
                 let has_end = !(is_last_dash && half_last_group);
                 let is_half_dash = has_start != has_end;
-                let cur_dash_length = if is_half_dash { adjusted_dash_length / 2.0 } else { adjusted_dash_length };
-                let dash_mid_symbols = mid_symbols == mid_symbol_placement::CENTER_OF_DASH && !is_half_dash;
+                let cur_dash_length = if is_half_dash {
+                    adjusted_dash_length / 2.0
+                } else {
+                    adjusted_dash_length
+                };
+                let dash_mid_symbols =
+                    mid_symbols == mid_symbol_placement::CENTER_OF_DASH && !is_half_dash;
 
                 if !is_first_dash {
                     // The gap before this dash.
@@ -782,7 +1011,15 @@ impl<'m> Renderer<'m> {
                 }
 
                 let dash_end = (cur_length + cur_dash_length) as f64;
-                self.dashed_continuous_line(coords, part, symbol, dash_start, dash_end, dash_mid_symbols, out);
+                self.dashed_continuous_line(
+                    coords,
+                    part,
+                    symbol,
+                    dash_start,
+                    dash_end,
+                    dash_mid_symbols,
+                    out,
+                );
                 cur_length += cur_dash_length;
                 dash_start = dash_end;
 
@@ -794,10 +1031,17 @@ impl<'m> Renderer<'m> {
             if dashgroup < num_dashgroups {
                 if mid_symbols == mid_symbol_placement::CENTER_OF_GAP {
                     if let Some(mid_symbol) = mid_symbol {
-                        let mut position = cur_length + (break_length_f - mid_symbol_distance_f * (per_spot - 1) as f32) / 2.0;
+                        let mut position = cur_length
+                            + (break_length_f - mid_symbol_distance_f * (per_spot - 1) as f32)
+                                / 2.0;
                         for _ in 0..per_spot {
-                            if (position as f64) < start { position += mid_symbol_distance_f; continue; }
-                            if position as f64 > end { break; }
+                            if (position as f64) < start {
+                                position += mid_symbol_distance_f;
+                                continue;
+                            }
+                            if position as f64 > end {
+                                break;
+                            }
                             self.place_mid_symbol(mid_symbol, coords, part, position as f64);
                             position += mid_symbol_distance_f;
                         }
@@ -826,8 +1070,14 @@ impl<'m> Renderer<'m> {
     /// Builds the dashed version of one part: the same geometry, cut into
     /// dashes by gap flags. Port of Mapper's
     /// `LineSymbol::processDashedLine()`.
-    fn dashed_path(&mut self, coords: &CoordList, part: &PathPart, symbol: &LineSymbol,
-                    start_length: f64, end_length: f64) -> CoordList {
+    fn dashed_path(
+        &mut self,
+        coords: &CoordList,
+        part: &PathPart,
+        symbol: &LineSymbol,
+        start_length: f64,
+        end_length: f64,
+    ) -> CoordList {
         let mut out = CoordList::new();
         let mut groups_start_index = split_index_at(part, start_length).max(1) - 1;
         let mut groups_start = start_length;
@@ -838,10 +1088,21 @@ impl<'m> Renderer<'m> {
             let next_index = find_next_dash_point(part, groups_start_index);
             let mut groups_end = part.lengths[next_index];
             is_part_end = next_index >= part.points.len() - 1 || groups_end >= end_length;
-            if is_part_end { groups_end = end_length; }
+            if is_part_end {
+                groups_end = end_length;
+            }
 
-            line_start = self.create_dash_groups(coords, part, symbol, &mut out, line_start,
-                groups_start, groups_end, is_part_start, is_part_end);
+            line_start = self.create_dash_groups(
+                coords,
+                part,
+                symbol,
+                &mut out,
+                line_start,
+                groups_start,
+                groups_end,
+                is_part_start,
+                is_part_end,
+            );
 
             groups_start_index = next_index;
             groups_start = groups_end;
@@ -852,7 +1113,9 @@ impl<'m> Renderer<'m> {
 
     fn add_line(&mut self, symbol: &LineSymbol, coords: &CoordList) {
         let parts = flatten(coords);
-        if parts.is_empty() { return; }
+        if parts.is_empty() {
+            return;
+        }
 
         let cap = pen_cap(symbol.cap_style);
         let join = pen_join(symbol.join_style);
@@ -881,14 +1144,25 @@ impl<'m> Renderer<'m> {
                 end_length = start_length.max(end_length - end_offset);
 
                 if symbol.cap_style == cap_style::POINTED && is_color(symbol.color) {
-                    let cap_fn = |renderer: &mut Self, from: f64, to: f64, is_end: bool, cap_len: f64| {
-                        let outline = pointed_cap_outline(coords, part, from, to, is_end, symbol.line_width / 2.0, cap_len);
-                        let path = to_painter_path(&outline, false);
-                        if path.is_empty() { return; }
-                        let bounds = flattened_extent(&flatten(&outline));
-                        renderer.include(bounds);
-                        renderer.fill(path, symbol.color, Some(bounds), None);
-                    };
+                    let cap_fn =
+                        |renderer: &mut Self, from: f64, to: f64, is_end: bool, cap_len: f64| {
+                            let outline = pointed_cap_outline(
+                                coords,
+                                part,
+                                from,
+                                to,
+                                is_end,
+                                symbol.line_width / 2.0,
+                                cap_len,
+                            );
+                            let path = to_painter_path(&outline, false);
+                            if path.is_empty() {
+                                return;
+                            }
+                            let bounds = flattened_extent(&flatten(&outline));
+                            renderer.include(bounds);
+                            renderer.fill(path, symbol.color, Some(bounds), None);
+                        };
                     // The taper is computed from the offset as configured,
                     // even where the offsets had to be shrunk to fit the
                     // line, so that a very short line keeps a pointed shape.
@@ -900,7 +1174,9 @@ impl<'m> Renderer<'m> {
                     }
                 }
 
-                if !line_fits { continue; }
+                if !line_fits {
+                    continue;
+                }
             }
 
             let part_coords: CoordList;
@@ -924,20 +1200,28 @@ impl<'m> Renderer<'m> {
         }
 
         // The point symbols along the line.
-        let place = |renderer: &mut Self, point: Option<&PointSymbol>, part: &PathPart, position: f64| {
-            let point = match point {
-                Some(p) if !p.is_empty() => p,
-                _ => return,
+        let place =
+            |renderer: &mut Self, point: Option<&PointSymbol>, part: &PathPart, position: f64| {
+                let point = match point {
+                    Some(p) if !p.is_empty() => p,
+                    _ => return,
+                };
+                let location = locate_on_path(coords, part, position);
+                let rotation = if point.is_rotatable {
+                    tangent_rotation(location.tangent)
+                } else {
+                    0.0
+                };
+                renderer.add_point(point, location.pos, rotation, 1.0);
             };
-            let location = locate_on_path(coords, part, position);
-            let rotation = if point.is_rotatable { tangent_rotation(location.tangent) } else { 0.0 };
-            renderer.add_point(point, location.pos, rotation, 1.0);
-        };
 
         // Mid symbols of a dashed line are laid out with the dashes, above.
         if !is_dashed {
             if let Some(mid_symbol) = symbol.mid_symbol.as_deref() {
-                if !mid_symbol.is_empty() && symbol.segment_length > 0.0 && symbol.mid_symbols_per_spot > 0 {
+                if !mid_symbol.is_empty()
+                    && symbol.segment_length > 0.0
+                    && symbol.mid_symbols_per_spot > 0
+                {
                     for part in &parts {
                         for position in mid_symbol_positions(part, symbol) {
                             place(self, Some(mid_symbol), part, position);
@@ -954,10 +1238,14 @@ impl<'m> Renderer<'m> {
             if !dash_point_symbol.is_empty() {
                 for part in &parts {
                     for i in 0..part.dash_points.len() {
-                        if !part.dash_points[i] { continue; }
+                        if !part.dash_points[i] {
+                            continue;
+                        }
                         let is_end = i == 0 || i + 1 == part.dash_points.len();
                         if symbol.suppress_dash_symbol_at_ends {
-                            if is_end { continue; }
+                            if is_end {
+                                continue;
+                            }
                         } else if part.closed && i == 0 {
                             continue;
                         }
@@ -967,8 +1255,12 @@ impl<'m> Renderer<'m> {
                         let mut direction = Point::ZERO;
                         let mut scaling = 1.0f64;
                         match (tangents.incoming, tangents.outgoing) {
-                            (inc, None) => { direction = inc.unwrap_or(Point::ZERO); }
-                            (None, Some(out)) => { direction = out; }
+                            (inc, None) => {
+                                direction = inc.unwrap_or(Point::ZERO);
+                            }
+                            (None, Some(out)) => {
+                                direction = out;
+                            }
                             (Some(inc), Some(out)) => {
                                 let to_coord = unit(inc);
                                 let to_next = unit(out);
@@ -977,13 +1269,22 @@ impl<'m> Renderer<'m> {
                                     scaling = f64::INFINITY;
                                 } else {
                                     direction = unit(to_coord + to_next);
-                                    scaling = 1.0 / (direction.x * to_coord.x + direction.y * to_coord.y);
+                                    scaling =
+                                        1.0 / (direction.x * to_coord.x + direction.y * to_coord.y);
                                 }
                             }
                         }
 
-                        let rotation = if dash_point_symbol.is_rotatable { tangent_rotation(direction) } else { 0.0 };
-                        let scale = if symbol.scale_dash_symbol { scaling.min(2.0 * MITER_LIMIT) } else { 1.0 };
+                        let rotation = if dash_point_symbol.is_rotatable {
+                            tangent_rotation(direction)
+                        } else {
+                            0.0
+                        };
+                        let scale = if symbol.scale_dash_symbol {
+                            scaling.min(2.0 * MITER_LIMIT)
+                        } else {
+                            1.0
+                        };
                         self.add_point(dash_point_symbol, part.points[i], rotation, scale);
                     }
                 }
@@ -997,7 +1298,13 @@ impl<'m> Renderer<'m> {
                 let part = &parts[0];
                 let mut rotation = 0.0;
                 if start_symbol.is_rotatable {
-                    if let Some(tangent) = coord_outgoing_tangent(coords, part.first_coord, part.last_coord, part.closed, part.first_coord) {
+                    if let Some(tangent) = coord_outgoing_tangent(
+                        coords,
+                        part.first_coord,
+                        part.last_coord,
+                        part.closed,
+                        part.first_coord,
+                    ) {
                         rotation = tangent_rotation(tangent);
                     }
                 }
@@ -1009,7 +1316,13 @@ impl<'m> Renderer<'m> {
                 let part = &parts[parts.len() - 1];
                 let mut rotation = 0.0;
                 if end_symbol.is_rotatable {
-                    if let Some(tangent) = coord_incoming_tangent(coords, part.first_coord, part.last_coord, part.closed, part.last_coord) {
+                    if let Some(tangent) = coord_incoming_tangent(
+                        coords,
+                        part.first_coord,
+                        part.last_coord,
+                        part.closed,
+                        part.last_coord,
+                    ) {
                         rotation = tangent_rotation(tangent);
                     }
                 }
@@ -1019,9 +1332,18 @@ impl<'m> Renderer<'m> {
     }
 
     /// Renders one part (or its dashed version) with its border lines.
-    fn render_line_part(&mut self, symbol: &LineSymbol, part_coords: &CoordList, cap: PenCap, join: PenJoin,
-                         create_line: bool, create_border: bool) {
-        if part_coords.len() < 2 { return; }
+    fn render_line_part(
+        &mut self,
+        symbol: &LineSymbol,
+        part_coords: &CoordList,
+        cap: PenCap,
+        join: PenJoin,
+        create_line: bool,
+        create_border: bool,
+    ) {
+        if part_coords.len() < 2 {
+            return;
+        }
 
         let render_parts = flatten(part_coords);
 
@@ -1030,54 +1352,139 @@ impl<'m> Renderer<'m> {
             // at the resolution of the output. The extent, however,
             // follows the flattening and tangents of Mapper, which decide
             // the image size.
-            let half_width = if symbol.color >= 0 { symbol.line_width / 2.0 } else { 0.0 };
+            let half_width = if symbol.color >= 0 {
+                symbol.line_width / 2.0
+            } else {
+                0.0
+            };
             let bounds = stroked_path_extent(part_coords, &render_parts, half_width, cap, join);
             match fold_kind(part_coords, &render_parts, half_width) {
                 FoldKind::Dangerous => {
                     let path = to_flattened_painter_path(part_coords, true);
-                    self.stroke_no_miter_clip(path, symbol.color, symbol.line_width, cap, join, Some(bounds), None);
+                    self.stroke_no_miter_clip(
+                        path,
+                        symbol.color,
+                        symbol.line_width,
+                        cap,
+                        join,
+                        Some(bounds),
+                        None,
+                    );
                 }
                 FoldKind::ExactReversal => {
                     let path = to_flattened_painter_path(part_coords, true);
-                    self.stroke(path, symbol.color, symbol.line_width, cap, join, Some(bounds), None);
+                    self.stroke(
+                        path,
+                        symbol.color,
+                        symbol.line_width,
+                        cap,
+                        join,
+                        Some(bounds),
+                        None,
+                    );
                 }
                 FoldKind::None => {
                     let path = to_painter_path(part_coords, true);
-                    self.stroke(path, symbol.color, symbol.line_width, cap, join, Some(bounds), None);
+                    self.stroke(
+                        path,
+                        symbol.color,
+                        symbol.line_width,
+                        cap,
+                        join,
+                        Some(bounds),
+                        None,
+                    );
                 }
             }
         }
 
-        if !create_border { return; }
+        if !create_border {
+            return;
+        }
 
         self.add_border(symbol, part_coords, &render_parts, &symbol.border, -1.0);
-        self.add_border(symbol, part_coords, &render_parts, &symbol.right_border, 1.0);
+        self.add_border(
+            symbol,
+            part_coords,
+            &render_parts,
+            &symbol.right_border,
+            1.0,
+        );
     }
 
     fn stroke_border(&mut self, border: &Border, border_join: PenJoin, border_coords: &CoordList) {
-        if border_coords.len() < 2 { return; }
-        let half_width = if border.color >= 0 { border.width / 2.0 } else { 0.0 };
+        if border_coords.len() < 2 {
+            return;
+        }
+        let half_width = if border.color >= 0 {
+            border.width / 2.0
+        } else {
+            0.0
+        };
         let flattened = flatten(border_coords);
-        let bounds = stroked_path_extent(border_coords, &flattened, half_width, PenCap::Flat, border_join);
+        let bounds = stroked_path_extent(
+            border_coords,
+            &flattened,
+            half_width,
+            PenCap::Flat,
+            border_join,
+        );
         match fold_kind(border_coords, &flattened, half_width) {
             FoldKind::Dangerous => {
                 let path = to_flattened_painter_path(border_coords, true);
-                self.stroke_no_miter_clip(path, border.color, border.width, PenCap::Flat, border_join, Some(bounds), None);
+                self.stroke_no_miter_clip(
+                    path,
+                    border.color,
+                    border.width,
+                    PenCap::Flat,
+                    border_join,
+                    Some(bounds),
+                    None,
+                );
             }
             FoldKind::ExactReversal => {
                 let path = to_flattened_painter_path(border_coords, true);
-                self.stroke(path, border.color, border.width, PenCap::Flat, border_join, Some(bounds), None);
+                self.stroke(
+                    path,
+                    border.color,
+                    border.width,
+                    PenCap::Flat,
+                    border_join,
+                    Some(bounds),
+                    None,
+                );
             }
             FoldKind::None => {
                 let path = to_painter_path(border_coords, true);
-                self.stroke(path, border.color, border.width, PenCap::Flat, border_join, Some(bounds), None);
+                self.stroke(
+                    path,
+                    border.color,
+                    border.width,
+                    PenCap::Flat,
+                    border_join,
+                    Some(bounds),
+                    None,
+                );
             }
         }
     }
 
-    fn add_border(&mut self, symbol: &LineSymbol, part_coords: &CoordList, render_parts: &[PathPart], border: &Border, sign: f64) {
-        if !border.is_visible() { return; }
-        let border_join = if symbol.join_style == join_style::ROUND { PenJoin::Round } else { PenJoin::Miter };
+    fn add_border(
+        &mut self,
+        symbol: &LineSymbol,
+        part_coords: &CoordList,
+        render_parts: &[PathPart],
+        border: &Border,
+        sign: f64,
+    ) {
+        if !border.is_visible() {
+            return;
+        }
+        let border_join = if symbol.join_style == join_style::ROUND {
+            PenJoin::Round
+        } else {
+            PenJoin::Miter
+        };
         let main_shift = sign * symbol.line_width / 2.0;
         let border_shift = sign * border.shift;
 
@@ -1090,26 +1497,50 @@ impl<'m> Renderer<'m> {
                 ..LineSymbol::default()
             };
             for render_part in render_parts {
-                let dashed = self.dashed_path(part_coords, render_part, &border_symbol, 0.0, render_part.length());
+                let dashed = self.dashed_path(
+                    part_coords,
+                    render_part,
+                    &border_symbol,
+                    0.0,
+                    render_part.length(),
+                );
                 for dashed_part in flatten(&dashed) {
-                    let shifted = shift_coordinates(&dashed, dashed_part.first_coord, dashed_part.last_coord,
-                        dashed_part.closed, main_shift, border_shift, symbol.join_style);
+                    let shifted = shift_coordinates(
+                        &dashed,
+                        dashed_part.first_coord,
+                        dashed_part.last_coord,
+                        dashed_part.closed,
+                        main_shift,
+                        border_shift,
+                        symbol.join_style,
+                    );
                     self.stroke_border(border, border_join, &shifted);
                 }
             }
         } else {
             for render_part in render_parts {
-                let shifted = shift_coordinates(part_coords, render_part.first_coord, render_part.last_coord,
-                    render_part.closed, main_shift, border_shift, symbol.join_style);
+                let shifted = shift_coordinates(
+                    part_coords,
+                    render_part.first_coord,
+                    render_part.last_coord,
+                    render_part.closed,
+                    main_shift,
+                    border_shift,
+                    symbol.join_style,
+                );
                 self.stroke_border(border, border_join, &shifted);
             }
         }
     }
 
     fn add_area(&mut self, symbol: &AreaSymbol, coords: &CoordList, object: &Object) {
-        if coords.len() < 3 { return; }
+        if coords.len() < 3 {
+            return;
+        }
         let path = to_painter_path(coords, false);
-        if path.is_empty() { return; }
+        if path.is_empty() {
+            return;
+        }
         // Mapper measures an area by its flattened outline, not by the
         // exact bezier bounds, and it counts the shape towards the extent
         // even when the area has no color: it is the clip path of the
@@ -1118,7 +1549,9 @@ impl<'m> Renderer<'m> {
         self.include(bounds);
         self.fill(path.clone(), symbol.color, Some(bounds), None);
 
-        if symbol.patterns.is_empty() { return; }
+        if symbol.patterns.is_empty() {
+            return;
+        }
 
         let (delta_rotation, origin) = match &object.kind {
             ObjectKind::Path(p) => (p.pattern_rotation, p.pattern_origin),
@@ -1130,7 +1563,11 @@ impl<'m> Renderer<'m> {
         let clip = self.clips.len() - 1;
         let outer_clip = self.current_clip;
         for pattern in &symbol.patterns {
-            self.current_clip = if pattern.no_clipping != 0 { outer_clip } else { Some(clip) };
+            self.current_clip = if pattern.no_clipping != 0 {
+                outer_clip
+            } else {
+                Some(clip)
+            };
             self.add_pattern(pattern, canvas, clip, delta_rotation, origin);
         }
         self.current_clip = outer_clip;
@@ -1156,19 +1593,36 @@ impl<'m> Renderer<'m> {
         result
     }
 
-    fn add_pattern_line(&mut self, pattern: &FillPattern, first: Point, second: Point, delta_offset: f64,
-                         delta_rotation: f64, outline: &Path) {
+    fn add_pattern_line(
+        &mut self,
+        pattern: &FillPattern,
+        first: Point,
+        second: Point,
+        delta_offset: f64,
+        delta_rotation: f64,
+        outline: &Path,
+    ) {
         if pattern.pattern_type == fill_pattern_type::LINE {
             let mut line = Path::new();
             line.move_to(first);
             line.line_to(second);
-            self.stroke(line, pattern.line_color, pattern.line_width, PenCap::Flat, PenJoin::Miter, None, None);
+            self.stroke(
+                line,
+                pattern.line_color,
+                pattern.line_width,
+                PenCap::Flat,
+                PenJoin::Miter,
+                None,
+                None,
+            );
             return;
         }
 
         let direction_raw = second - first;
         let length = direction_raw.length();
-        if length <= 0.0 { return; }
+        if length <= 0.0 {
+            return;
+        }
         let direction = direction_raw / length;
 
         let step = pattern.point_distance;
@@ -1176,7 +1630,9 @@ impl<'m> Renderer<'m> {
         let start = (along / step).ceil() * step - along;
         // A pattern with a tiny distance on a huge area could produce a
         // practically unbounded number of renderables.
-        if (length - start) / step > 100000.0 { return; }
+        if (length - start) / step > 100000.0 {
+            return;
+        }
 
         let point_symbol = match pattern.point.as_deref() {
             Some(p) => p,
@@ -1186,7 +1642,13 @@ impl<'m> Renderer<'m> {
         let mut current = start;
         while current < length {
             if pattern.no_clipping != 0 {
-                self.add_point_checked(point_symbol, coord, -delta_rotation, outline, pattern.no_clipping);
+                self.add_point_checked(
+                    point_symbol,
+                    coord,
+                    -delta_rotation,
+                    outline,
+                    pattern.no_clipping,
+                );
             } else {
                 self.add_point(point_symbol, coord, -delta_rotation, 1.0);
             }
@@ -1195,19 +1657,42 @@ impl<'m> Renderer<'m> {
         }
     }
 
-    fn add_pattern(&mut self, pattern: &FillPattern, mut canvas: Rect, clip: usize, delta_rotation_in: f64, origin: Point) {
+    fn add_pattern(
+        &mut self,
+        pattern: &FillPattern,
+        mut canvas: Rect,
+        clip: usize,
+        delta_rotation_in: f64,
+        origin: Point,
+    ) {
         // Taken by value up front where needed below: placing symbols may
         // grow the clip vector.
         let outline = self.clips.get(clip).cloned().unwrap_or_default();
-        if pattern.line_spacing <= 0.0 { return; }
-        if pattern.pattern_type == fill_pattern_type::POINT && (pattern.point.is_none() || pattern.point_distance <= 0.0) { return; }
-        if pattern.pattern_type == fill_pattern_type::LINE && (!is_color(pattern.line_color) || pattern.line_width <= 0.0) { return; }
+        if pattern.line_spacing <= 0.0 {
+            return;
+        }
+        if pattern.pattern_type == fill_pattern_type::POINT
+            && (pattern.point.is_none() || pattern.point_distance <= 0.0)
+        {
+            return;
+        }
+        if pattern.pattern_type == fill_pattern_type::LINE
+            && (!is_color(pattern.line_color) || pattern.line_width <= 0.0)
+        {
+            return;
+        }
 
-        let delta_rotation = if pattern.rotatable { delta_rotation_in } else { 0.0 };
+        let delta_rotation = if pattern.rotatable {
+            delta_rotation_in
+        } else {
+            0.0
+        };
 
         // The pattern is symmetric with a period of pi.
         let mut rotation = (pattern.angle + delta_rotation) % std::f64::consts::PI;
-        if rotation < 0.0 { rotation += std::f64::consts::PI; }
+        if rotation < 0.0 {
+            rotation += std::f64::consts::PI;
+        }
 
         // Enlarge the canvas so that symbols reaching into the area are not lost.
         let point_extent = if pattern.pattern_type == fill_pattern_type::POINT {
@@ -1217,7 +1702,12 @@ impl<'m> Renderer<'m> {
             let margin = pattern.line_width / 2.0;
             Rect::new(-margin, -margin, pattern.line_width, pattern.line_width)
         };
-        canvas = canvas.adjusted(-point_extent.right(), -point_extent.bottom(), -point_extent.left(), -point_extent.top());
+        canvas = canvas.adjusted(
+            -point_extent.right(),
+            -point_extent.bottom(),
+            -point_extent.left(),
+            -point_extent.top(),
+        );
 
         // The origin of the object moves the pattern, across the lines and
         // along them. The y axis points down, hence the reflections.
@@ -1238,22 +1728,42 @@ impl<'m> Renderer<'m> {
         if (rotation - std::f64::consts::FRAC_PI_2).abs() < 0.0001 {
             // Special case: vertical lines.
             let signed_offset = -delta_along_line_offset;
-            let first_offset = offset + ((canvas.left() - offset) / pattern.line_spacing).ceil() * pattern.line_spacing;
+            let first_offset = offset
+                + ((canvas.left() - offset) / pattern.line_spacing).ceil() * pattern.line_spacing;
             let mut current = first_offset;
             while current < canvas.right() {
-                self.add_pattern_line(pattern, Point::new(current, canvas.top()), Point::new(current, canvas.bottom()), signed_offset, delta_rotation, &outline);
+                self.add_pattern_line(
+                    pattern,
+                    Point::new(current, canvas.top()),
+                    Point::new(current, canvas.bottom()),
+                    signed_offset,
+                    delta_rotation,
+                    &outline,
+                );
                 current += pattern.line_spacing;
             }
         } else if rotation.abs() < 0.0001 {
             // Special case: horizontal lines.
-            let first_offset = offset + ((canvas.top() - offset) / pattern.line_spacing).ceil() * pattern.line_spacing;
+            let first_offset = offset
+                + ((canvas.top() - offset) / pattern.line_spacing).ceil() * pattern.line_spacing;
             let mut current = first_offset;
             while current < canvas.bottom() {
-                self.add_pattern_line(pattern, Point::new(canvas.left(), current), Point::new(canvas.right(), current), delta_along_line_offset, delta_rotation, &outline);
+                self.add_pattern_line(
+                    pattern,
+                    Point::new(canvas.left(), current),
+                    Point::new(canvas.right(), current),
+                    delta_along_line_offset,
+                    delta_rotation,
+                    &outline,
+                );
                 current += pattern.line_spacing;
             }
         } else {
-            let signed_offset = if rotation < std::f64::consts::FRAC_PI_2 { -delta_along_line_offset } else { delta_along_line_offset };
+            let signed_offset = if rotation < std::f64::consts::FRAC_PI_2 {
+                -delta_along_line_offset
+            } else {
+                delta_along_line_offset
+            };
 
             let xfactor = 1.0 / rotation.sin();
             let yfactor = 1.0 / rotation.cos();
@@ -1263,7 +1773,11 @@ impl<'m> Renderer<'m> {
             let mut offset_y = yfactor * offset;
 
             let upwards = rotation < std::f64::consts::FRAC_PI_2;
-            let corner_y = if upwards { canvas.top() } else { canvas.bottom() };
+            let corner_y = if upwards {
+                canvas.top()
+            } else {
+                canvas.bottom()
+            };
             offset_x += -corner_y / rotation.tan();
             offset_y -= canvas.left() * rotation.tan();
 
@@ -1277,15 +1791,36 @@ impl<'m> Renderer<'m> {
                     start_y += ((start_x - canvas.right()) / dist_x) * dist_y;
                     start_x = canvas.right();
                 }
-                if if upwards { end_y > canvas.bottom() } else { end_y < canvas.top() } {
-                    let limit = if upwards { canvas.bottom() } else { canvas.top() };
+                if if upwards {
+                    end_y > canvas.bottom()
+                } else {
+                    end_y < canvas.top()
+                } {
+                    let limit = if upwards {
+                        canvas.bottom()
+                    } else {
+                        canvas.top()
+                    };
                     end_x += ((end_y - limit) / dist_y) * dist_x;
                     end_y = limit;
                 }
 
-                if if upwards { start_y > canvas.bottom() } else { start_y < canvas.top() } { break; }
+                if if upwards {
+                    start_y > canvas.bottom()
+                } else {
+                    start_y < canvas.top()
+                } {
+                    break;
+                }
 
-                self.add_pattern_line(pattern, Point::new(start_x, start_y), Point::new(end_x, end_y), signed_offset, delta_rotation, &outline);
+                self.add_pattern_line(
+                    pattern,
+                    Point::new(start_x, start_y),
+                    Point::new(end_x, end_y),
+                    signed_offset,
+                    delta_rotation,
+                    &outline,
+                );
 
                 start_x += dist_x;
                 end_y += dist_y;
@@ -1327,9 +1862,18 @@ impl<'m> Renderer<'m> {
             }
 
             let (r, g, b) = map_color.rgb;
-            let a = if map_color.opacity < 1.0 { map_color.opacity as f32 } else { 1.0 };
-            let color = tiny_skia::Color::from_rgba(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0), a.clamp(0.0, 1.0))
-                .unwrap_or(tiny_skia::Color::from_rgba(0.0, 0.0, 0.0, 1.0).unwrap());
+            let a = if map_color.opacity < 1.0 {
+                map_color.opacity as f32
+            } else {
+                1.0
+            };
+            let color = tiny_skia::Color::from_rgba(
+                r.clamp(0.0, 1.0),
+                g.clamp(0.0, 1.0),
+                b.clamp(0.0, 1.0),
+                a.clamp(0.0, 1.0),
+            )
+            .unwrap_or(tiny_skia::Color::from_rgba(0.0, 0.0, 0.0, 1.0).unwrap());
 
             let mut paint = Paint::default();
             paint.set_color(color);
@@ -1364,7 +1908,13 @@ impl<'m> Renderer<'m> {
                 };
                 pixmap.stroke_path(&skia_path, &paint, &stroke, final_transform, mask.as_ref());
             } else {
-                pixmap.fill_path(&skia_path, &paint, renderable.fill_rule, final_transform, mask.as_ref());
+                pixmap.fill_path(
+                    &skia_path,
+                    &paint,
+                    renderable.fill_rule,
+                    final_transform,
+                    mask.as_ref(),
+                );
             }
         }
     }

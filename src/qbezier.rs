@@ -313,7 +313,8 @@ fn shift(orig: &QBezier, offset: f64, threshold: f32) -> ShiftResult {
         let l = (orig.x1 - orig.x2) * (orig.x1 - orig.x2)
             + (orig.y1 - orig.y2) * (orig.y1 - orig.y2) * (orig.x3 - orig.x4) * (orig.x3 - orig.x4)
             + (orig.y3 - orig.y4) * (orig.y3 - orig.y4);
-        let dot = (orig.x1 - orig.x2) * (orig.x3 - orig.x4) + (orig.y1 - orig.y2) * (orig.y3 - orig.y4);
+        let dot =
+            (orig.x1 - orig.x2) * (orig.x3 - orig.x4) + (orig.y1 - orig.y2) * (orig.y3 - orig.y4);
         if dot < 0.0 && dot * dot < 0.8 * l {
             return ShiftResult::Circle;
         }

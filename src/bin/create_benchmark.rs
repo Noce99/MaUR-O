@@ -158,7 +158,10 @@ fn map_suffix(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     MAP_SUFFIXES
         .iter()
-        .find(|suffix| name.len() > suffix.len() && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix))
+        .find(|suffix| {
+            name.len() > suffix.len()
+                && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+        })
         .map(|suffix| name[name.len() - suffix.len()..].to_string())
 }
 
@@ -171,18 +174,26 @@ fn map_suffix(path: &Path) -> Option<String> {
 fn walk(folder: &Path, found: &mut Vec<PathBuf>) -> Result<(), String> {
     let mut files = Vec::new();
     let mut folders = Vec::new();
-    let listing = std::fs::read_dir(folder).map_err(|e| format!("cannot read {}: {e}", folder.display()))?;
+    let listing =
+        std::fs::read_dir(folder).map_err(|e| format!("cannot read {}: {e}", folder.display()))?;
     for entry in listing {
         let entry = entry.map_err(|e| format!("cannot read {}: {e}", folder.display()))?;
         let path = entry.path();
         // Hidden files are the file manager's and the editor's business, and
         // a name which is not text is nothing this tool can put in an archive.
-        if path.file_name().and_then(|n| n.to_str()).unwrap_or(".").starts_with('.') {
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(".")
+            .starts_with('.')
+        {
             continue;
         }
         // The file type of the entry itself, not of what it points at: a
         // symlink back up the tree would otherwise walk for ever.
-        let kind = entry.file_type().map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         if kind.is_dir() {
             folders.push(path);
         } else if map_suffix(&path).is_some() {
@@ -209,13 +220,22 @@ fn entries_from(paths: &[PathBuf], root: &Path) -> Vec<Entry> {
     let mut taken: HashSet<String> = HashSet::new();
     let mut entries = Vec::new();
     for path in paths {
-        let Some(suffix) = map_suffix(path) else { continue };
+        let Some(suffix) = map_suffix(path) else {
+            continue;
+        };
         let relative = path.strip_prefix(root).unwrap_or(path);
         let mut parents: Vec<String> = relative
             .parent()
-            .map(|p| p.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect())
+            .map(|p| {
+                p.components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect()
+            })
             .unwrap_or_default();
-        let file = relative.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let file = relative
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let mut name = file[..file.len() - suffix.len()].to_string();
         while taken.contains(&name) {
             match parents.pop() {
@@ -251,7 +271,11 @@ fn tool_version(tool: &Path) -> Result<String, String> {
         .output()
         .map_err(|e| format!("cannot run {}: {e}", tool.display()))?;
     if !output.status.success() {
-        return Err(format!("{} --version failed: {}", tool.display(), output.status));
+        return Err(format!(
+            "{} --version failed: {}",
+            tool.display(),
+            output.status
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -270,7 +294,9 @@ fn complaints(stderr: &[u8]) -> Vec<String> {
 fn generate_symbol_maps(source: &Path, into: &Path) -> Result<Vec<PathBuf>, String> {
     let mut progress: Option<Progress> = None;
     let summary = maur_o::all_symbols::create_maps(source, into, |_, total| {
-        progress.get_or_insert_with(|| Progress::new("Symbols", total)).tick();
+        progress
+            .get_or_insert_with(|| Progress::new("Symbols", total))
+            .tick();
     })?;
     if let Some(bar) = progress {
         bar.finish();
@@ -285,7 +311,10 @@ fn generate_symbol_maps(source: &Path, into: &Path) -> Result<Vec<PathBuf>, Stri
             if summary.skipped.len() == 1 { "" } else { "s" }
         );
     }
-    println!("  {} symbols, map scale 1:{}", summary.written, summary.scale_denominator);
+    println!(
+        "  {} symbols, map scale 1:{}",
+        summary.written, summary.scale_denominator
+    );
 
     let mut paths = Vec::new();
     walk(into, &mut paths)?;
@@ -307,7 +336,8 @@ fn render_all(
     images: &Path,
     args: &Args,
 ) -> Result<Rendered, String> {
-    std::fs::create_dir_all(images).map_err(|e| format!("cannot make {}: {e}", images.display()))?;
+    std::fs::create_dir_all(images)
+        .map_err(|e| format!("cannot make {}: {e}", images.display()))?;
 
     let mut rendered = Vec::new();
     let mut failures = Vec::new();
@@ -340,7 +370,12 @@ fn render_all(
 }
 
 /// Renders one map, and says what the renderer had to say about it.
-fn render_one(renderer: &Path, map: &Path, image: &Path, args: &Args) -> Result<Vec<String>, String> {
+fn render_one(
+    renderer: &Path,
+    map: &Path,
+    image: &Path,
+    args: &Args,
+) -> Result<Vec<String>, String> {
     let output = Command::new(renderer)
         .arg(map)
         .arg(image)
@@ -352,7 +387,11 @@ fn render_one(renderer: &Path, map: &Path, image: &Path, args: &Args) -> Result<
         .map_err(|e| format!("cannot run {}: {e}", renderer.display()))?;
     let said = complaints(&output.stderr);
     if !output.status.success() {
-        let reason = if said.is_empty() { output.status.to_string() } else { said.join("; ") };
+        let reason = if said.is_empty() {
+            output.status.to_string()
+        } else {
+            said.join("; ")
+        };
         return Err(reason);
     }
     // A renderer which reports success without writing anything would put a
@@ -370,8 +409,11 @@ fn add_file<W: std::io::Write + std::io::Seek>(
     path: &Path,
     options: zip::write::SimpleFileOptions,
 ) -> Result<(), String> {
-    writer.start_file(name, options).map_err(|e| format!("cannot write {name}: {e}"))?;
-    let mut file = std::fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    writer
+        .start_file(name, options)
+        .map_err(|e| format!("cannot write {name}: {e}"))?;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     std::io::copy(&mut file, writer).map_err(|e| format!("cannot write {name}: {e}"))?;
     Ok(())
 }
@@ -386,7 +428,8 @@ fn write_archive(
     images: &Path,
     info: &str,
 ) -> Result<(), String> {
-    let file = std::fs::File::create(archive).map_err(|e| format!("cannot write {}: {e}", archive.display()))?;
+    let file = std::fs::File::create(archive)
+        .map_err(|e| format!("cannot write {}: {e}", archive.display()))?;
     let mut writer = zip::ZipWriter::new(std::io::BufWriter::new(file));
 
     // The entries are stamped with now rather than with the working folder's
@@ -404,7 +447,10 @@ fn write_archive(
     let options = zip::write::SimpleFileOptions::default().last_modified_time(stamp);
 
     let has_index = entries.values().any(|entry| entry.index.is_some());
-    for folder in ["", "maps/", "expected/"].iter().chain(has_index.then_some(&"index/")) {
+    for folder in ["", "maps/", "expected/"]
+        .iter()
+        .chain(has_index.then_some(&"index/"))
+    {
         writer
             .add_directory(format!("{root}/{folder}"), options)
             .map_err(|e| format!("cannot write {root}/{folder}: {e}"))?;
@@ -421,7 +467,10 @@ fn write_archive(
 
     // Maps first and then images, so that the archive lists in the order it
     // is read in rather than in pairs.
-    let described: Vec<&Entry> = entries.values().filter(|entry| entry.index.is_some()).collect();
+    let described: Vec<&Entry> = entries
+        .values()
+        .filter(|entry| entry.index.is_some())
+        .collect();
     let total = plan.maps.len() * 2 + described.len();
     let mut progress = Progress::new("Writing", total);
 
@@ -429,7 +478,12 @@ fn write_archive(
         let entry = entries
             .get(&renaming.original)
             .ok_or_else(|| format!("{} is not one of the maps", renaming.original))?;
-        add_file(&mut writer, &format!("{root}/maps/{}", renaming.corrected), &entry.map, options)?;
+        add_file(
+            &mut writer,
+            &format!("{root}/maps/{}", renaming.corrected),
+            &entry.map,
+            options,
+        )?;
         progress.tick();
     }
     for renaming in &plan.maps {
@@ -437,21 +491,35 @@ fn write_archive(
         let image = plan
             .corrected_expected(&entry.image_name())
             .ok_or_else(|| format!("{} has no reference image", renaming.corrected))?;
-        add_file(&mut writer, &format!("{root}/expected/{image}"), &images.join(entry.image_name()), options)?;
+        add_file(
+            &mut writer,
+            &format!("{root}/expected/{image}"),
+            &images.join(entry.image_name()),
+            options,
+        )?;
         progress.tick();
     }
     for renaming in &plan.maps {
         let entry = entries.get(&renaming.original).expect("checked above");
-        let (Some(index), Some(image)) = (&entry.index, plan.corrected_expected(&entry.image_name())) else {
+        let (Some(index), Some(image)) =
+            (&entry.index, plan.corrected_expected(&entry.image_name()))
+        else {
             continue;
         };
         let described = format!("{}.txt", image.strip_suffix(".png").unwrap_or(image));
-        add_file(&mut writer, &format!("{root}/index/{described}"), index, options)?;
+        add_file(
+            &mut writer,
+            &format!("{root}/index/{described}"),
+            index,
+            options,
+        )?;
         progress.tick();
     }
     progress.finish();
 
-    writer.finish().map_err(|e| format!("cannot write {}: {e}", archive.display()))?;
+    writer
+        .finish()
+        .map_err(|e| format!("cannot write {}: {e}", archive.display()))?;
     Ok(())
 }
 
@@ -485,14 +553,32 @@ fn info_text(
             env!("CARGO_PKG_VERSION")
         )),
     }
-    text.push_str(&format!("  renderer    {} ({renderer_version})\n", args.renderer.display()));
-    text.push_str(&format!("  resolution  {} pixels per meter on the ground\n", args.resolution));
-    text.push_str(&format!("  frame       {} meters on the ground\n", args.frame));
+    text.push_str(&format!(
+        "  renderer    {} ({renderer_version})\n",
+        args.renderer.display()
+    ));
+    text.push_str(&format!(
+        "  resolution  {} pixels per meter on the ground\n",
+        args.resolution
+    ));
+    text.push_str(&format!(
+        "  frame       {} meters on the ground\n",
+        args.frame
+    ));
     if !args.filter.is_empty() {
-        text.push_str(&format!("  filter      only maps whose name contains {:?}\n", args.filter));
+        text.push_str(&format!(
+            "  filter      only maps whose name contains {:?}\n",
+            args.filter
+        ));
     }
-    text.push_str(&format!("  created     {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z")));
-    text.push_str(&format!("  tool        create_benchmark {}\n", env!("CARGO_PKG_VERSION")));
+    text.push_str(&format!(
+        "  created     {}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z")
+    ));
+    text.push_str(&format!(
+        "  tool        create_benchmark {}\n",
+        env!("CARGO_PKG_VERSION")
+    ));
 
     let paragraphs = [
         "maps/ holds the maps and expected/ holds one reference image per map, under the \
@@ -555,9 +641,16 @@ fn size(bytes: u64) -> String {
 /// The archive to write when none was asked for: named after the source and
 /// the resolution it was rendered at, in [`ARCHIVES`].
 fn default_archive(source: &Path, resolution: f64) -> PathBuf {
-    let name = if source.is_dir() { source.file_name() } else { source.file_stem() };
+    let name = if source.is_dir() {
+        source.file_name()
+    } else {
+        source.file_stem()
+    };
     let name = name.map_or_else(|| "maps".to_string(), |n| n.to_string_lossy().into_owned());
-    let name: String = name.chars().map(|c| if c.is_whitespace() { '_' } else { c }).collect();
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_whitespace() { '_' } else { c })
+        .collect();
     Path::new(ARCHIVES).join(format!("benchmark_{name}_{resolution}_px_m.zip"))
 }
 
@@ -565,7 +658,10 @@ fn run() -> Result<ExitCode, String> {
     let args = Args::parse();
 
     if !args.resolution.is_finite() || args.resolution <= 0.0 {
-        return Err(format!("the resolution must be greater than zero, not {}", args.resolution));
+        return Err(format!(
+            "the resolution must be greater than zero, not {}",
+            args.resolution
+        ));
     }
     if !args.frame.is_finite() || args.frame < 0.0 {
         return Err(format!("the frame cannot be {} meters", args.frame));
@@ -578,9 +674,15 @@ fn run() -> Result<ExitCode, String> {
         .canonicalize()
         .map_err(|e| format!("cannot use {}: {e}", args.source.display()))?;
 
-    let archive = args.output.clone().unwrap_or_else(|| default_archive(&source, args.resolution));
+    let archive = args
+        .output
+        .clone()
+        .unwrap_or_else(|| default_archive(&source, args.resolution));
     if archive.exists() && !args.force {
-        return Err(format!("{} is already there; --force replaces it", archive.display()));
+        return Err(format!(
+            "{} is already there; --force replaces it",
+            archive.display()
+        ));
     }
     if archive.is_dir() {
         return Err(format!("{} is a folder", archive.display()));
@@ -590,7 +692,8 @@ fn run() -> Result<ExitCode, String> {
     // been rendered for it.
     let folder = archive.parent().unwrap_or_else(|| Path::new(""));
     if !folder.as_os_str().is_empty() {
-        std::fs::create_dir_all(folder).map_err(|e| format!("cannot make {}: {e}", folder.display()))?;
+        std::fs::create_dir_all(folder)
+            .map_err(|e| format!("cannot make {}: {e}", folder.display()))?;
     }
     let root = archive
         .file_stem()
@@ -622,7 +725,11 @@ fn run() -> Result<ExitCode, String> {
         println!("  one map per symbol of {}", source.display());
         origin = Origin::Symbols;
         let paths = generate_symbol_maps(&source, &generated)?;
-        println!("  {} maps, one per symbol of {}", paths.len(), source.display());
+        println!(
+            "  {} maps, one per symbol of {}",
+            paths.len(),
+            source.display()
+        );
         (generated, paths)
     };
 
@@ -630,7 +737,11 @@ fn run() -> Result<ExitCode, String> {
     if !args.filter.is_empty() {
         let before = entries.len();
         entries.retain(|entry| entry.name.contains(&args.filter));
-        println!("  {} of {before} maps match {:?}", entries.len(), args.filter);
+        println!(
+            "  {} of {before} maps match {:?}",
+            entries.len(),
+            args.filter
+        );
     }
     if entries.is_empty() {
         return Err(format!("there are no maps to put in {}", archive.display()));
@@ -648,13 +759,22 @@ fn run() -> Result<ExitCode, String> {
     stage(3, STAGES, "Write the archive");
     // The names are handed out now rather than before the rendering, so that
     // the maps which could not be drawn leave no hole in the ordinals.
-    let entries: BTreeMap<String, Entry> =
-        rendered.into_iter().map(|entry| (entry.file_name(), entry)).collect();
+    let entries: BTreeMap<String, Entry> = rendered
+        .into_iter()
+        .map(|entry| (entry.file_name(), entry))
+        .collect();
     let map_names: Vec<String> = entries.keys().cloned().collect();
     let image_names: Vec<String> = entries.values().map(Entry::image_name).collect();
     let plan = naming::plan(&map_names, &image_names);
-    let renamed = plan.maps.iter().filter(|renaming| renaming.changed()).count();
-    println!("  {} maps, {renamed} renamed to the naming rules", plan.maps.len());
+    let renamed = plan
+        .maps
+        .iter()
+        .filter(|renaming| renaming.changed())
+        .count();
+    println!(
+        "  {} maps, {renamed} renamed to the naming rules",
+        plan.maps.len()
+    );
 
     let info = info_text(
         &args,
@@ -668,11 +788,25 @@ fn run() -> Result<ExitCode, String> {
     write_archive(&archive, &root, &entries, &plan, &images, &info)?;
 
     let written = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
-    println!("  {}: {} maps, {}", archive.display(), plan.maps.len(), size(written));
+    println!(
+        "  {}: {} maps, {}",
+        archive.display(),
+        plan.maps.len(),
+        size(written)
+    );
     println!();
     println!("Archive in {}", archive.display());
-    println!("Run it with: benchmark -r {} -f {} {}", args.resolution, args.frame, archive.display());
-    Ok(if failures.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(2) })
+    println!(
+        "Run it with: benchmark -r {} -f {} {}",
+        args.resolution,
+        args.frame,
+        archive.display()
+    );
+    Ok(if failures.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
 }
 
 fn main() -> ExitCode {

@@ -53,7 +53,9 @@ fn map(root: &Path, relative: &str, contents: &str) {
 fn entries(archive: &Path) -> Vec<String> {
     let file = std::fs::File::open(archive).unwrap();
     let mut zip = zip::ZipArchive::new(file).unwrap();
-    (0..zip.len()).map(|i| zip.by_index(i).unwrap().name().to_string()).collect()
+    (0..zip.len())
+        .map(|i| zip.by_index(i).unwrap().name().to_string())
+        .collect()
 }
 
 /// What one file of an archive holds.
@@ -62,7 +64,10 @@ fn contents(archive: &Path, name: &str) -> String {
     let file = std::fs::File::open(archive).unwrap();
     let mut zip = zip::ZipArchive::new(file).unwrap();
     let mut text = String::new();
-    zip.by_name(name).unwrap().read_to_string(&mut text).unwrap();
+    zip.by_name(name)
+        .unwrap()
+        .read_to_string(&mut text)
+        .unwrap();
     text
 }
 
@@ -77,7 +82,13 @@ fn a_folder_becomes_an_archive_which_follows_the_naming_rules() {
     map(&source, "deeper/notes.txt", "not a map");
     let archive = dir.path().join("suite.zip");
 
-    create_benchmark().arg(&renderer).arg(&source).arg("-o").arg(&archive).assert().success();
+    create_benchmark()
+        .arg(&renderer)
+        .arg(&source)
+        .arg("-o")
+        .arg(&archive)
+        .assert()
+        .success();
 
     let names = entries(&archive);
     // The ordinals the maps came with order them, and are then handed out
@@ -91,13 +102,22 @@ fn a_folder_becomes_an_archive_which_follows_the_naming_rules() {
         "suite/expected/002__third_map.png",
         "suite/info.txt",
     ] {
-        assert!(names.contains(&wanted.to_string()), "{wanted} is not in {names:?}");
+        assert!(
+            names.contains(&wanted.to_string()),
+            "{wanted} is not in {names:?}"
+        );
     }
     // A map is copied as it is, and its image is what the renderer wrote.
-    assert_eq!(contents(&archive, "suite/maps/000__first_map.omap"), "first");
+    assert_eq!(
+        contents(&archive, "suite/maps/000__first_map.omap"),
+        "first"
+    );
     assert!(contents(&archive, "suite/expected/002__third_map.png").ends_with("10 third map.xmap"));
     // Nothing which is not a map comes along.
-    assert!(!names.iter().any(|name| name.ends_with("notes.txt")), "{names:?}");
+    assert!(
+        !names.iter().any(|name| name.ends_with("notes.txt")),
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -111,7 +131,12 @@ fn an_archive_nobody_named_lands_in_a_folder_of_its_own() {
 
     // Named after the source and the resolution, in benchmarks/, which is
     // made on the way.
-    create_benchmark().current_dir(&here).arg(&renderer).arg(&source).assert().success();
+    create_benchmark()
+        .current_dir(&here)
+        .arg(&renderer)
+        .arg(&source)
+        .assert()
+        .success();
 
     let archive = here.join("benchmarks").join("benchmark_a_suite_3_px_m.zip");
     assert!(archive.is_file(), "{} was not written", archive.display());
@@ -127,7 +152,13 @@ fn the_archive_it_writes_needs_no_correcting() {
         map(&source, name, "map");
     }
     let archive = dir.path().join("suite.zip");
-    create_benchmark().arg(&renderer).arg(&source).arg("-o").arg(&archive).assert().success();
+    create_benchmark()
+        .arg(&renderer)
+        .arg(&source)
+        .arg("-o")
+        .arg(&archive)
+        .assert()
+        .success();
 
     Command::cargo_bin("benchmark")
         .unwrap()
@@ -159,9 +190,18 @@ fn a_map_which_cannot_be_rendered_leaves_no_hole_in_the_ordinals() {
         .stdout(predicates::str::contains("FAILED to render unrenderable"));
 
     let names = entries(&archive);
-    assert!(names.contains(&"suite/maps/000__a.omap".to_string()), "{names:?}");
-    assert!(names.contains(&"suite/maps/001__z.omap".to_string()), "{names:?}");
-    assert!(!names.iter().any(|name| name.contains("unrenderable")), "{names:?}");
+    assert!(
+        names.contains(&"suite/maps/000__a.omap".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"suite/maps/001__z.omap".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name.contains("unrenderable")),
+        "{names:?}"
+    );
     // info.txt is where a reader finds out what became of the third map.
     assert!(contents(&archive, "suite/info.txt").contains("unrenderable: Error: Failed to load"));
 }
@@ -175,12 +215,27 @@ fn two_maps_of_the_same_name_are_told_apart_by_their_folder() {
     map(&source, "south/Contour.omap", "south");
     let archive = dir.path().join("suite.zip");
 
-    create_benchmark().arg(&renderer).arg(&source).arg("-o").arg(&archive).assert().success();
+    create_benchmark()
+        .arg(&renderer)
+        .arg(&source)
+        .arg("-o")
+        .arg(&archive)
+        .assert()
+        .success();
 
     let names = entries(&archive);
-    assert!(names.contains(&"suite/maps/000__Contour.omap".to_string()), "{names:?}");
-    assert!(names.contains(&"suite/maps/001__south_Contour.omap".to_string()), "{names:?}");
-    assert_eq!(contents(&archive, "suite/maps/001__south_Contour.omap"), "south");
+    assert!(
+        names.contains(&"suite/maps/000__Contour.omap".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"suite/maps/001__south_Contour.omap".to_string()),
+        "{names:?}"
+    );
+    assert_eq!(
+        contents(&archive, "suite/maps/001__south_Contour.omap"),
+        "south"
+    );
 }
 
 #[test]
@@ -206,7 +261,10 @@ fn a_map_file_becomes_one_map_per_symbol_with_its_description() {
         "symbols/expected/002__line_505_Path.png",
         "symbols/index/002__line_505_Path.txt",
     ] {
-        assert!(names.contains(&wanted.to_string()), "{wanted} is not in {names:?}");
+        assert!(
+            names.contains(&wanted.to_string()),
+            "{wanted} is not in {names:?}"
+        );
     }
     assert!(contents(&archive, "symbols/info.txt").contains("one map per symbol"));
 }
@@ -236,7 +294,8 @@ fn the_settings_the_images_were_drawn_at_are_written_down() {
     // benchmark reads these two back out of the header, so the line has to
     // start with the key and a bare number, whatever it says after that.
     let starts_with = |key: &str, value: &str| {
-        info.lines().any(|line| line.split_whitespace().take(2).collect::<Vec<_>>() == [key, value])
+        info.lines()
+            .any(|line| line.split_whitespace().take(2).collect::<Vec<_>>() == [key, value])
     };
     assert!(starts_with("resolution", "5"), "{info}");
     assert!(starts_with("frame", "10"), "{info}");
@@ -261,7 +320,14 @@ fn an_archive_which_is_already_there_is_kept_unless_it_is_to_be_replaced() {
         .stderr(predicates::str::contains("--force replaces it"));
     assert_eq!(std::fs::read_to_string(&archive).unwrap(), "not an archive");
 
-    create_benchmark().arg(&renderer).arg(&source).arg("-o").arg(&archive).arg("--force").assert().success();
+    create_benchmark()
+        .arg(&renderer)
+        .arg(&source)
+        .arg("-o")
+        .arg(&archive)
+        .arg("--force")
+        .assert()
+        .success();
     assert!(entries(&archive).contains(&"suite/maps/000__a.omap".to_string()));
 }
 

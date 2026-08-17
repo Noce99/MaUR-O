@@ -65,7 +65,10 @@ pub struct Reason {
 
 impl Reason {
     fn new(kind: &'static str, detail: impl Into<String>) -> Self {
-        Reason { kind, detail: detail.into() }
+        Reason {
+            kind,
+            detail: detail.into(),
+        }
     }
 }
 
@@ -102,7 +105,8 @@ impl Plan {
         let mut problems = Vec::new();
         for (folder, renamings) in [("maps", &self.maps), ("expected", &self.expected)] {
             for renaming in renamings.iter().filter(|r| r.changed()) {
-                let reasons: Vec<&str> = renaming.reasons.iter().map(|r| r.detail.as_str()).collect();
+                let reasons: Vec<&str> =
+                    renaming.reasons.iter().map(|r| r.detail.as_str()).collect();
                 problems.push(format!(
                     "{folder}/{} -> {folder}/{}  ({})",
                     renaming.original,
@@ -112,10 +116,14 @@ impl Plan {
             }
         }
         for name in &self.missing_expected {
-            problems.push(format!("maps/{name} has no reference image in expected/ (not fixable)"));
+            problems.push(format!(
+                "maps/{name} has no reference image in expected/ (not fixable)"
+            ));
         }
         for name in &self.orphan_expected {
-            problems.push(format!("expected/{name} belongs to no map in maps/ (not fixable)"));
+            problems.push(format!(
+                "expected/{name} belongs to no map in maps/ (not fixable)"
+            ));
         }
         problems
     }
@@ -129,7 +137,8 @@ impl Plan {
     ///
     /// [`problems`]: Plan::problems
     pub fn summary(&self) -> Vec<(&'static str, usize)> {
-        let mut counts: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
+        let mut counts: std::collections::BTreeMap<&'static str, usize> =
+            std::collections::BTreeMap::new();
         for renaming in self.maps.iter().chain(&self.expected) {
             for reason in &renaming.reasons {
                 *counts.entry(reason.kind).or_default() += 1;
@@ -139,7 +148,10 @@ impl Plan {
             counts.insert("a map with no reference image", self.missing_expected.len());
         }
         if !self.orphan_expected.is_empty() {
-            counts.insert("a reference image belonging to no map", self.orphan_expected.len());
+            counts.insert(
+                "a reference image belonging to no map",
+                self.orphan_expected.len(),
+            );
         }
         let mut summary: Vec<(&'static str, usize)> = counts.into_iter().collect();
         summary.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
@@ -148,12 +160,18 @@ impl Plan {
 
     /// The corrected name for a file of `maps/`, or `None` if it is not one.
     pub fn corrected_map(&self, original: &str) -> Option<&str> {
-        self.maps.iter().find(|r| r.original == original).map(|r| r.corrected.as_str())
+        self.maps
+            .iter()
+            .find(|r| r.original == original)
+            .map(|r| r.corrected.as_str())
     }
 
     /// The corrected name for a file of `expected/`, or `None` if it is not one.
     pub fn corrected_expected(&self, original: &str) -> Option<&str> {
-        self.expected.iter().find(|r| r.original == original).map(|r| r.corrected.as_str())
+        self.expected
+            .iter()
+            .find(|r| r.original == original)
+            .map(|r| r.corrected.as_str())
     }
 }
 
@@ -164,8 +182,13 @@ impl Plan {
 /// only a known map or image suffix counts as one.
 fn split_suffix(name: &str) -> (&str, &str) {
     for suffix in [".omap", ".xmap", ".png"] {
-        if name.len() > suffix.len() && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix) {
-            return (&name[..name.len() - suffix.len()], &name[name.len() - suffix.len()..]);
+        if name.len() > suffix.len()
+            && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+        {
+            return (
+                &name[..name.len() - suffix.len()],
+                &name[name.len() - suffix.len()..],
+            );
         }
     }
     match name.rfind('.') {
@@ -189,7 +212,11 @@ fn sanitize(rest: &str) -> String {
         .chars()
         .map(|c| if c.is_whitespace() { '_' } else { c })
         .collect();
-    if cleaned.is_empty() { "map".to_string() } else { cleaned }
+    if cleaned.is_empty() {
+        "map".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Works out what every file in an archive should be called.
@@ -228,7 +255,10 @@ pub fn plan(map_files: &[String], expected_files: &[String]) -> Plan {
 
         let mut reasons = Vec::new();
         match ordinal {
-            None => reasons.push(Reason::new("no leading number", "does not start with a number")),
+            None => reasons.push(Reason::new(
+                "no leading number",
+                "does not start with a number",
+            )),
             Some(value) => {
                 if digits.len() != width {
                     reasons.push(Reason::new(
@@ -258,15 +288,27 @@ pub fn plan(map_files: &[String], expected_files: &[String]) -> Plan {
             reasons.push(Reason::new("spaces in the name", "contains spaces"));
         }
 
-        let corrected_stem = format!("{:0width$}{SEPARATOR}{}", index, sanitize(rest), width = width);
+        let corrected_stem = format!(
+            "{:0width$}{SEPARATOR}{}",
+            index,
+            sanitize(rest),
+            width = width
+        );
         let corrected = format!("{corrected_stem}{suffix}");
         // A reason list can be empty while the name still changes (or the
         // other way round) only if something above is wrong; keep the two
         // consistent so that nothing is ever renamed without saying why.
         if corrected != **name && reasons.is_empty() {
-            reasons.push(Reason::new("does not match the naming rules", "does not match the naming rules"));
+            reasons.push(Reason::new(
+                "does not match the naming rules",
+                "does not match the naming rules",
+            ));
         }
-        plan.maps.push(Renaming { original: (*name).clone(), corrected, reasons });
+        plan.maps.push(Renaming {
+            original: (*name).clone(),
+            corrected,
+            reasons,
+        });
 
         let wanted = format!("{stem}.png");
         match expected_files.iter().find(|e| **e == wanted) {
@@ -281,7 +323,11 @@ pub fn plan(map_files: &[String], expected_files: &[String]) -> Plan {
                         format!("follows maps/{}", plan.maps[index].corrected),
                     )]
                 };
-                plan.expected.push(Renaming { original: found.clone(), corrected, reasons });
+                plan.expected.push(Renaming {
+                    original: found.clone(),
+                    corrected,
+                    reasons,
+                });
             }
             None => plan.missing_expected.push((*name).clone()),
         }
@@ -315,7 +361,10 @@ mod tests {
         let expected = names(&["000__a_map.png", "001__another_map.png"]);
         let plan = plan(&maps, &expected);
         assert!(plan.is_valid(), "{:?}", plan.problems());
-        assert_eq!(plan.corrected_map("001__another_map.omap"), Some("001__another_map.omap"));
+        assert_eq!(
+            plan.corrected_map("001__another_map.omap"),
+            Some("001__another_map.omap")
+        );
     }
 
     #[test]
@@ -344,7 +393,10 @@ mod tests {
         let plan = plan(&maps, &expected);
         assert_eq!(plan.maps[1].corrected, "001__b.omap");
         assert!(
-            plan.maps[1].reasons.iter().any(|r| r.kind == "leading number out of sequence"),
+            plan.maps[1]
+                .reasons
+                .iter()
+                .any(|r| r.kind == "leading number out of sequence"),
             "{:?}",
             plan.maps[1]
         );
@@ -356,7 +408,10 @@ mod tests {
         let expected = names(&["000__a map.png"]);
         let plan = plan(&maps, &expected);
         assert_eq!(plan.maps[0].corrected, "000__a_map.omap");
-        assert!(plan.maps[0].reasons.iter().any(|r| r.kind == "spaces in the name"));
+        assert!(plan.maps[0]
+            .reasons
+            .iter()
+            .any(|r| r.kind == "spaces in the name"));
     }
 
     #[test]
@@ -383,7 +438,10 @@ mod tests {
         let plan = plan(&maps, &expected);
         assert_eq!(plan.missing_expected, ["001__b.omap"]);
         assert_eq!(plan.orphan_expected, ["999__stray.png"]);
-        assert_eq!(plan.corrected_expected("999__stray.png"), Some("999__stray.png"));
+        assert_eq!(
+            plan.corrected_expected("999__stray.png"),
+            Some("999__stray.png")
+        );
         assert!(!plan.is_valid());
     }
 

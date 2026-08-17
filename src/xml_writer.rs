@@ -46,7 +46,11 @@ pub fn qt_number(value: f64, significant: usize) -> String {
         return "nan".to_string();
     }
     if value.is_infinite() {
-        return if value > 0.0 { "inf".to_string() } else { "-inf".to_string() };
+        return if value > 0.0 {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        };
     }
     if value == 0.0 {
         return "0".to_string();
@@ -59,8 +63,11 @@ pub fn qt_number(value: f64, significant: usize) -> String {
     let exact = format!("{:.*e}", significant + 20, value.abs());
     let (mantissa, exponent) = exact.split_once('e').expect("a scientific form");
     let mut exponent: i32 = exponent.parse().unwrap_or(0);
-    let mut digits: Vec<u8> =
-        mantissa.bytes().filter(u8::is_ascii_digit).map(|b| b - b'0').collect();
+    let mut digits: Vec<u8> = mantissa
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|b| b - b'0')
+        .collect();
 
     if digits.len() > significant {
         let round_up = digits[significant] >= 5;
@@ -166,7 +173,10 @@ fn write_object(out: &mut String, object: &Object, rotatable: bool) {
         out.push_str(&format!(" rotation=\"{}\"", number(object.rotation)));
     }
     if let ObjectKind::Text(text) = &object.kind {
-        out.push_str(&format!(" h_align=\"{}\" v_align=\"{}\"", text.h_align, text.v_align));
+        out.push_str(&format!(
+            " h_align=\"{}\" v_align=\"{}\"",
+            text.h_align, text.v_align
+        ));
     }
     out.push('>');
 
@@ -178,7 +188,10 @@ fn write_object(out: &mut String, object: &Object, rotatable: bool) {
 
     match &object.kind {
         ObjectKind::Path(path) => {
-            out.push_str(&format!("<pattern rotation=\"{}\">", number(path.pattern_rotation)));
+            out.push_str(&format!(
+                "<pattern rotation=\"{}\">",
+                number(path.pattern_rotation)
+            ));
             out.push_str(&format!(
                 "<coord x=\"{}\" y=\"{}\"/>",
                 native(path.pattern_origin.x),
@@ -256,7 +269,10 @@ impl MapFile<'_> {
         out.push_str("</symbols>\n");
 
         out.push_str("<parts count=\"1\" current=\"0\">\n");
-        out.push_str(&format!("<part name=\"default part\"><objects count=\"{}\">\n", self.objects.len()));
+        out.push_str(&format!(
+            "<part name=\"default part\"><objects count=\"{}\">\n",
+            self.objects.len()
+        ));
         for object in self.objects {
             write_object(&mut out, object, self.rotatable);
             out.push('\n');
@@ -274,7 +290,8 @@ impl MapFile<'_> {
 
     /// Writes the document to a file.
     pub fn write(&self, path: &Path) -> Result<(), String> {
-        let file = std::fs::File::create(path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        let file = std::fs::File::create(path)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         let mut out = std::io::BufWriter::new(file);
         out.write_all(self.to_xml().as_bytes())
             .map_err(|e| format!("cannot write {}: {e}", path.display()))
@@ -392,7 +409,10 @@ mod tests {
         object.coords = vec![Coord::new(0.0, 0.0, 0)];
         let mut out = String::new();
         write_object(&mut out, &object, false);
-        assert!(out.contains("<text>a &lt; b &amp; &quot;c&quot;</text>"), "{out}");
+        assert!(
+            out.contains("<text>a &lt; b &amp; &quot;c&quot;</text>"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -404,6 +424,9 @@ mod tests {
         object.coords = vec![Coord::new(0.0, 0.0, 0)];
         let mut out = String::new();
         write_object(&mut out, &object, true);
-        assert!(out.contains("<pattern rotation=\"1.5708\"><coord x=\"1500\" y=\"-2250\"/></pattern>"), "{out}");
+        assert!(
+            out.contains("<pattern rotation=\"1.5708\"><coord x=\"1500\" y=\"-2250\"/></pattern>"),
+            "{out}"
+        );
     }
 }

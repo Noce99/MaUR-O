@@ -65,26 +65,46 @@ fn run() -> Result<(), (ExitCode, String)> {
         Err(e) => {
             // clap prints its own usage/help text; forward its exit behavior.
             e.print().ok();
-            return Err((ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }), String::new()));
+            return Err((
+                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
+                String::new(),
+            ));
         }
     };
 
     if !args.resolution.is_finite() || args.resolution < 0.0 {
-        return Err((ExitCode::from(1), format!("Error: Invalid value for --resolution: {}", args.resolution)));
+        return Err((
+            ExitCode::from(1),
+            format!("Error: Invalid value for --resolution: {}", args.resolution),
+        ));
     }
     if !args.frame.is_finite() || args.frame < 0.0 {
-        return Err((ExitCode::from(1), format!("Error: Invalid value for --frame: {}", args.frame)));
+        return Err((
+            ExitCode::from(1),
+            format!("Error: Invalid value for --frame: {}", args.frame),
+        ));
     }
     if args.resolution == 0.0 {
-        return Err((ExitCode::from(1), "Error: The resolution must be greater than zero.".to_string()));
+        return Err((
+            ExitCode::from(1),
+            "Error: The resolution must be greater than zero.".to_string(),
+        ));
     }
 
-    let image_path = args.image_file.clone().unwrap_or_else(|| default_output_path(&args.map_file));
+    let image_path = args
+        .image_file
+        .clone()
+        .unwrap_or_else(|| default_output_path(&args.map_file));
 
-    let rendering = render_map(&args.map_file, args.resolution, args.frame).map_err(|e| match e {
-        maur_o::render::Error::Read(message) => (ExitCode::from(2), format!("Error: {message}")),
-        maur_o::render::Error::Geometry(message) => (ExitCode::from(3), format!("Error: {message}")),
-    })?;
+    let rendering =
+        render_map(&args.map_file, args.resolution, args.frame).map_err(|e| match e {
+            maur_o::render::Error::Read(message) => {
+                (ExitCode::from(2), format!("Error: {message}"))
+            }
+            maur_o::render::Error::Geometry(message) => {
+                (ExitCode::from(3), format!("Error: {message}"))
+            }
+        })?;
     for warning in &rendering.warnings {
         eprintln!("Warning: {}", warning);
     }

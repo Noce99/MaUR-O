@@ -280,7 +280,10 @@ fn has_edge(image: &RgbImage, x: u32, y: u32, width: u32, height: u32, tolerance
             }
         }
     }
-    (0..3).map(|channel| high[channel] as i32 - low[channel] as i32).sum::<i32>() > tolerance
+    (0..3)
+        .map(|channel| high[channel] as i32 - low[channel] as i32)
+        .sum::<i32>()
+        > tolerance
 }
 
 /// Whether the disagreement at (x, y) is one two rasterizers can have about
@@ -391,7 +394,15 @@ pub fn difference_mask(
         (mean, variance.sqrt())
     });
 
-    Comparison { mask: Mask { width, height, bits }, largest, error }
+    Comparison {
+        mask: Mask {
+            width,
+            height,
+            bits,
+        },
+        largest,
+        error,
+    }
 }
 
 /// The most differing regions first, as (x, y, differing pixels) tuples.
@@ -520,7 +531,8 @@ fn compose(panels: &[RgbImage], labels: &[String]) -> RgbImage {
     let font_size = (widest / 40).clamp(12, 40);
     let bar = font_size + 8;
 
-    let width: u32 = panels.iter().map(|p| p.width()).sum::<u32>() + GAP * (panels.len() as u32 - 1);
+    let width: u32 =
+        panels.iter().map(|p| p.width()).sum::<u32>() + GAP * (panels.len() as u32 - 1);
     let height = panels.iter().map(|p| p.height()).max().unwrap_or(0) + bar;
     let mut result = canvas(width, height);
 
@@ -542,7 +554,11 @@ fn compose(panels: &[RgbImage], labels: &[String]) -> RgbImage {
 /// where in the map to look, while the crops show the differences themselves.
 fn whole(path: &Path, height: u32, width: u32, limit: u32) -> Result<RgbImage, String> {
     let mut image = open_image(path)?;
-    let scale = if limit > 0 && width > limit { limit as f64 / width as f64 } else { 1.0 };
+    let scale = if limit > 0 && width > limit {
+        limit as f64 / width as f64
+    } else {
+        1.0
+    };
     if scale < 1.0 {
         image = image::imageops::resize(
             &image,
@@ -575,8 +591,8 @@ fn whole(path: &Path, height: u32, width: u32, limit: u32) -> Result<RgbImage, S
 /// `benchmark` and `create_benchmark` is not. A real map at a fine resolution
 /// clears that on its own — the images compared here are not.
 pub fn open_image(path: &Path) -> Result<RgbImage, String> {
-    let mut reader =
-        image::ImageReader::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     reader.no_limits();
     reader
         .decode()
@@ -618,7 +634,9 @@ fn write_crops(
             format!("diff  {differing} real px"),
         ];
         let name = format!("crop_{:0digits$}_{x}x{y}.png", number + 1, digits = digits);
-        compose(&panels, &labels).save(folder.join(name)).map_err(|e| e.to_string())?;
+        compose(&panels, &labels)
+            .save(folder.join(name))
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -634,19 +652,29 @@ fn write_diff(mask: &Mask, folder: &Path) -> Result<(), String> {
     encoder.set_color(png::ColorType::Indexed);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_palette(vec![
-        0, 0, 0,
-        ANTIALIASING_COLOUR[0], ANTIALIASING_COLOUR[1], ANTIALIASING_COLOUR[2],
-        DIFFERENCE_COLOUR[0], DIFFERENCE_COLOUR[1], DIFFERENCE_COLOUR[2],
+        0,
+        0,
+        0,
+        ANTIALIASING_COLOUR[0],
+        ANTIALIASING_COLOUR[1],
+        ANTIALIASING_COLOUR[2],
+        DIFFERENCE_COLOUR[0],
+        DIFFERENCE_COLOUR[1],
+        DIFFERENCE_COLOUR[2],
     ]);
     let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-    writer.write_image_data(&mask.bits).map_err(|e| e.to_string())?;
+    writer
+        .write_image_data(&mask.bits)
+        .map_err(|e| e.to_string())?;
     writer.finish().map_err(|e| e.to_string())
 }
 
 /// Whether either image of the pair is too large, decoded, to be worth
 /// reading a second time for [`write_side_by_side`]'s overview.
 fn too_big_for_overview(sizes: [(u32, u32); 2]) -> bool {
-    sizes.iter().any(|&(w, h)| w as u64 * h as u64 * 3 > MAX_OVERVIEW_BYTES)
+    sizes
+        .iter()
+        .any(|&(w, h)| w as u64 * h as u64 * 3 > MAX_OVERVIEW_BYTES)
 }
 
 /// Writes both images whole, expected on the left, predicted on the right.
@@ -674,7 +702,9 @@ fn write_side_by_side(
         labels.push(format!("{label}  {}x{}{scaled}", size.0, size.1));
         panels.push(panel);
     }
-    compose(&panels, &labels).save(folder.join("side_by_side.png")).map_err(|e| e.to_string())
+    compose(&panels, &labels)
+        .save(folder.join("side_by_side.png"))
+        .map_err(|e| e.to_string())
 }
 
 /// Compares the renderings in `predictions` against the reference images in
@@ -683,7 +713,12 @@ fn write_side_by_side(
 /// Draws a progress bar as it goes and says nothing else: what each pair
 /// measured comes back in the report's rows, for the caller to write out as
 /// a table.
-pub fn compare(expected: &Path, predictions: &Path, output: &Path, options: &Options) -> Result<Report, String> {
+pub fn compare(
+    expected: &Path,
+    predictions: &Path,
+    output: &Path,
+    options: &Options,
+) -> Result<Report, String> {
     for folder in [expected, predictions] {
         if !folder.is_dir() {
             return Err(format!("No such directory: {}", folder.display()));
@@ -695,7 +730,9 @@ pub fn compare(expected: &Path, predictions: &Path, output: &Path, options: &Opt
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|path| path.extension().is_some_and(|e| e == "png"))
         .filter(|path| {
-            path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains(&options.filter))
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.contains(&options.filter))
         })
         .collect();
     references.sort();
@@ -706,7 +743,10 @@ pub fn compare(expected: &Path, predictions: &Path, output: &Path, options: &Opt
 
     std::fs::create_dir_all(output).map_err(|e| e.to_string())?;
 
-    let mut report = Report { total: references.len(), ..Default::default() };
+    let mut report = Report {
+        total: references.len(),
+        ..Default::default()
+    };
     let mut progress = crate::progress::Progress::new("Comparing", references.len());
     for reference in &references {
         let file_name = reference.file_name().unwrap();
@@ -772,7 +812,14 @@ pub fn compare(expected: &Path, predictions: &Path, output: &Path, options: &Opt
         if too_big_for_overview(sizes) {
             report.no_overview.push(name.clone());
         } else {
-            write_side_by_side([reference, &rendering], sizes, mask.height, mask.width, &folder, options)?;
+            write_side_by_side(
+                [reference, &rendering],
+                sizes,
+                mask.height,
+                mask.width,
+                &folder,
+                options,
+            )?;
         }
 
         report.differing += 1;
@@ -786,7 +833,12 @@ pub fn compare(expected: &Path, predictions: &Path, output: &Path, options: &Opt
 ///
 /// Written to a file rather than to the terminal because it is as long as the
 /// suite is, and because it is the thing worth keeping from a run.
-pub fn write_results(report: &Report, title: &str, options: &Options, path: &Path) -> Result<(), String> {
+pub fn write_results(
+    report: &Report,
+    title: &str,
+    options: &Options,
+    path: &Path,
+) -> Result<(), String> {
     let mut text = String::new();
     text.push_str(&format!("Benchmark results: {title}\n\n"));
     text.push_str(&format!(
@@ -854,7 +906,11 @@ pub fn write_results(report: &Report, title: &str, options: &Options, path: &Pat
          above but have no error to measure, so they are not in this average either. It reads \
          \"n/a\" where no pixel was wrong.",
         // At the default tolerance those are exactly the pixels which match.
-        if options.tolerance == 0 { ", which at a tolerance of 0 means every pixel that matches exactly" } else { "" }
+        if options.tolerance == 0 {
+            ", which at a tolerance of 0 means every pixel that matches exactly"
+        } else {
+            ""
+        }
     )));
 
     // Worst first, by the real differences rather than by all of them: the
@@ -889,7 +945,14 @@ pub fn write_results(report: &Report, title: &str, options: &Options, path: &Pat
         })
         .collect();
 
-    let headings = ["real", "antialiasing", "wrong", "largest", "mean error of wrong px", "map"];
+    let headings = [
+        "real",
+        "antialiasing",
+        "wrong",
+        "largest",
+        "mean error of wrong px",
+        "map",
+    ];
     let mut widths = headings.map(str::len);
     for row in &cells {
         for (width, cell) in widths.iter_mut().zip(row) {
@@ -905,7 +968,11 @@ pub fn write_results(report: &Report, title: &str, options: &Options, path: &Pat
             .enumerate()
             // Numbers right, the name left, and nothing padded after it.
             .map(|(column, (cell, width))| {
-                if column == last { cell.clone() } else { format!("{cell:>width$}") }
+                if column == last {
+                    cell.clone()
+                } else {
+                    format!("{cell:>width$}")
+                }
             })
             .collect();
         text.push_str(columns.join("  ").trim_end());
@@ -963,7 +1030,10 @@ fn label_font() -> Option<&'static (Vec<u8>, u32)> {
         // labels at all.
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
-        let id = db.query(&fontdb::Query { families: &[fontdb::Family::Monospace], ..Default::default() })?;
+        let id = db.query(&fontdb::Query {
+            families: &[fontdb::Family::Monospace],
+            ..Default::default()
+        })?;
         db.with_face_data(id, |data, index| (data.to_vec(), index))
     })
     .as_ref()
@@ -1020,15 +1090,23 @@ struct TextBar {
 
 impl TextBar {
     fn new(width: u32, height: u32) -> Self {
-        TextBar { pixmap: Pixmap::new(width.max(1), height.max(1)) }
+        TextBar {
+            pixmap: Pixmap::new(width.max(1), height.max(1)),
+        }
     }
 
     /// Draws `text` with its left edge at `x` and its ascender line at `y`,
     /// which is where Pillow's default text anchor puts them.
     fn draw(&mut self, text: &str, x: f32, y: f32, size: u32) {
-        let Some(pixmap) = self.pixmap.as_mut() else { return };
-        let Some((data, index)) = label_font() else { return };
-        let Some(face) = rustybuzz::Face::from_slice(data, *index) else { return };
+        let Some(pixmap) = self.pixmap.as_mut() else {
+            return;
+        };
+        let Some((data, index)) = label_font() else {
+            return;
+        };
+        let Some(face) = rustybuzz::Face::from_slice(data, *index) else {
+            return;
+        };
 
         let units_per_em = face.units_per_em() as f32;
         if units_per_em <= 0.0 {
@@ -1044,18 +1122,37 @@ impl TextBar {
         buffer.set_direction(rustybuzz::Direction::LeftToRight);
         let shaped = rustybuzz::shape(&face, &[], buffer);
 
-        let mut builder = GlyphOutline { builder: PathBuilder::new(), scale, x, baseline };
+        let mut builder = GlyphOutline {
+            builder: PathBuilder::new(),
+            scale,
+            x,
+            baseline,
+        };
         for (info, position) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
-            face.outline_glyph(rustybuzz::ttf_parser::GlyphId(info.glyph_id as u16), &mut builder);
+            face.outline_glyph(
+                rustybuzz::ttf_parser::GlyphId(info.glyph_id as u16),
+                &mut builder,
+            );
             // Whole pixel advances, as an unhinted FreeType layout also uses.
             builder.x += (position.x_advance as f32 * scale).round();
         }
 
         if let Some(path) = builder.builder.finish() {
             let mut paint = Paint::default();
-            paint.set_color_rgba8(LABEL_FOREGROUND[0], LABEL_FOREGROUND[1], LABEL_FOREGROUND[2], 255);
+            paint.set_color_rgba8(
+                LABEL_FOREGROUND[0],
+                LABEL_FOREGROUND[1],
+                LABEL_FOREGROUND[2],
+                255,
+            );
             paint.anti_alias = true;
-            pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+            pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
         }
     }
 
@@ -1072,7 +1169,10 @@ impl TextBar {
                 // tiny-skia's buffer is premultiplied, which is already the
                 // source term of an over-blend.
                 let destination = target.get_pixel_mut(x, y);
-                for (channel, value) in [source.red(), source.green(), source.blue()].iter().enumerate() {
+                for (channel, value) in [source.red(), source.green(), source.blue()]
+                    .iter()
+                    .enumerate()
+                {
                     let under = destination[channel] as u32 * (255 - alpha);
                     destination[channel] = (*value as u32 + (under + 127) / 255).min(255) as u8;
                 }
@@ -1104,7 +1204,10 @@ mod tests {
         let b = image(4, 4, [110, 110, 110]);
         let measured = difference_mask(&a, &b, 30, true);
         assert_eq!(measured.largest, 30);
-        assert!(!measured.mask.any(), "a distance of exactly the tolerance is not a difference");
+        assert!(
+            !measured.mask.any(),
+            "a distance of exactly the tolerance is not a difference"
+        );
         // Nothing is wrong at that tolerance, so nothing is averaged either,
         // even though every pixel does differ a little.
         assert_eq!(measured.error, None);
@@ -1187,7 +1290,11 @@ mod tests {
         }
         let measured = difference_mask(&a, &b, 0, false);
         assert_eq!(measured.mask.count(), 6, "both green columns differ");
-        assert_eq!(measured.mask.count_real(), 3, "and the far one has no edge to hide behind");
+        assert_eq!(
+            measured.mask.count_real(),
+            3,
+            "and the far one has no edge to hide behind"
+        );
     }
 
     #[test]
@@ -1199,7 +1306,11 @@ mod tests {
         a.put_pixel(1, 1, Rgb([0, 0, 0]));
         b.put_pixel(5, 1, Rgb([0, 0, 0]));
         let measured = difference_mask(&a, &b, 0, false);
-        assert_eq!(measured.mask.count_real(), 2, "the dot is missing here and extra there");
+        assert_eq!(
+            measured.mask.count_real(),
+            2,
+            "the dot is missing here and extra there"
+        );
     }
 
     #[test]
@@ -1235,7 +1346,11 @@ mod tests {
         }
         let measured = difference_mask(&a, &b, DEFAULT_TOLERANCE, false);
         assert_eq!(measured.mask.count(), 3, "the blended row differs");
-        assert_eq!(measured.mask.count_real(), 0, "and both drew the same edge there");
+        assert_eq!(
+            measured.mask.count_real(),
+            0,
+            "and both drew the same edge there"
+        );
     }
 
     #[test]
@@ -1246,7 +1361,11 @@ mod tests {
         let b = image(4, 4, [121, 131, 141]);
         assert!(!difference_mask(&a, &b, DEFAULT_TOLERANCE, false).mask.any());
         let measured = difference_mask(&a, &b, DEFAULT_TOLERANCE - 1, false);
-        assert_eq!(measured.mask.count_real(), 16, "a flat area is never antialiasing");
+        assert_eq!(
+            measured.mask.count_real(),
+            16,
+            "a flat area is never antialiasing"
+        );
     }
 
     #[test]

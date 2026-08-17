@@ -105,7 +105,11 @@ impl Progress {
         self.drawn = Instant::now();
         self.shown = Some(self.current);
 
-        let fraction = if self.total > 0 { self.current as f64 / self.total as f64 } else { 1.0 };
+        let fraction = if self.total > 0 {
+            self.current as f64 / self.total as f64
+        } else {
+            1.0
+        };
         let eighths = (fraction * (WIDTH * 8) as f64).round() as usize;
         let (full, part) = (eighths / 8, eighths % 8);
         let bar = format!(
@@ -116,8 +120,16 @@ impl Progress {
         );
 
         let elapsed = self.start.elapsed().as_secs_f64();
-        let rate = if elapsed > 0.0 { self.current as f64 / elapsed } else { 0.0 };
-        let remaining = if rate > 0.0 { (self.total - self.current) as f64 / rate } else { f64::NAN };
+        let rate = if elapsed > 0.0 {
+            self.current as f64 / elapsed
+        } else {
+            0.0
+        };
+        let remaining = if rate > 0.0 {
+            (self.total - self.current) as f64 / rate
+        } else {
+            f64::NAN
+        };
         let speed = if rate >= 1.0 || rate == 0.0 {
             format!("{rate:.2}it/s")
         } else {

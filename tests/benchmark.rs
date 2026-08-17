@@ -31,7 +31,8 @@ fn archive_with_info(
     let options = zip::write::SimpleFileOptions::default();
     for (folder, files) in [("maps", maps), ("expected", expected)] {
         for (name, contents) in files {
-            zip.start_file(format!("{root}{folder}/{name}"), options).unwrap();
+            zip.start_file(format!("{root}{folder}/{name}"), options)
+                .unwrap();
             zip.write_all(contents).unwrap();
         }
     }
@@ -48,7 +49,12 @@ fn run_folder(results: &Path) -> PathBuf {
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect();
-    assert_eq!(runs.len(), 1, "expected exactly one run folder in {}", results.display());
+    assert_eq!(
+        runs.len(),
+        1,
+        "expected exactly one run folder in {}",
+        results.display()
+    );
     runs.pop().unwrap()
 }
 
@@ -98,16 +104,28 @@ fn an_archive_which_follows_the_rules_is_run_as_it_is() {
         .assert()
         .success()
         .stdout(predicates::str::contains("names are as they should be"))
-        .stdout(predicates::str::contains("1 image: 1 identical, 0 antialiasing only, 0 differing"));
+        .stdout(predicates::str::contains(
+            "1 image: 1 identical, 0 antialiasing only, 0 differing",
+        ));
 
-    assert!(!zip.with_file_name("suite_corrected.zip").exists(), "nothing to correct");
+    assert!(
+        !zip.with_file_name("suite_corrected.zip").exists(),
+        "nothing to correct"
+    );
 
     let run = run_folder(&results);
-    assert!(run.file_name().unwrap().to_string_lossy().starts_with("suite_"));
+    assert!(run
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("suite_"));
     assert!(run.join("predictions/000__empty.png").is_file());
     // An identical pair gets no report of its own, but the folder is there.
     assert!(run.join("differences").is_dir());
-    assert_eq!(std::fs::read_dir(run.join("differences")).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_dir(run.join("differences")).unwrap().count(),
+        0
+    );
     // Nothing was wrong with the names, so there is nothing to write about them.
     assert!(!run.join("naming.txt").exists());
 
@@ -128,11 +146,15 @@ fn an_archive_which_follows_the_rules_is_run_as_it_is() {
     let setting = |name: &str, value: &str| {
         let wanted = format!("{name} {value}");
         assert!(
-            info.lines().any(|line| line.split_whitespace().collect::<Vec<_>>().join(" ") == wanted),
+            info.lines()
+                .any(|line| line.split_whitespace().collect::<Vec<_>>().join(" ") == wanted),
             "no setting line {wanted:?} in:\n{info}"
         );
     };
-    setting("resolution", "3 pixels per meter on the ground (default; the archive carries no info.txt)");
+    setting(
+        "resolution",
+        "3 pixels per meter on the ground (default; the archive carries no info.txt)",
+    );
     setting("tolerance", "3");
     setting("crop size", "128 pixels");
     setting("antialiasing", "classified and set aside");
@@ -175,12 +197,20 @@ fn resolution_and_frame_are_read_from_the_archives_own_info_txt() {
         .success()
         // Rendered at the default resolution and frame this pair would not
         // match: only reading 10 and 5 back out of info.txt makes it identical.
-        .stdout(predicates::str::contains("1 image: 1 identical, 0 antialiasing only, 0 differing"));
+        .stdout(predicates::str::contains(
+            "1 image: 1 identical, 0 antialiasing only, 0 differing",
+        ));
 
     let run = run_folder(&results);
     let info = std::fs::read_to_string(run.join("info.txt")).unwrap();
-    assert!(info.contains("10 pixels per meter on the ground (from the archive)"), "{info}");
-    assert!(info.contains("5 meters on the ground (from the archive)"), "{info}");
+    assert!(
+        info.contains("10 pixels per meter on the ground (from the archive)"),
+        "{info}"
+    );
+    assert!(
+        info.contains("5 meters on the ground (from the archive)"),
+        "{info}"
+    );
 }
 
 /// Also the archive-under-a-top-level-folder case, which is how a folder
@@ -204,7 +234,9 @@ fn a_differing_pair_gets_the_whole_report() {
         .arg(&zip)
         .assert()
         .success()
-        .stdout(predicates::str::contains("1 image: 0 identical, 0 antialiasing only, 1 differing"));
+        .stdout(predicates::str::contains(
+            "1 image: 0 identical, 0 antialiasing only, 1 differing",
+        ));
 
     let run = run_folder(&results);
     // The map is a white square and the reference a small green one, so every
@@ -239,7 +271,12 @@ fn a_differing_pair_gets_the_whole_report() {
         .collect();
     assert_eq!(crops.len(), 2, "{crops:?}");
     // The crop names carry the corner of the region in the image.
-    assert!(crops.iter().all(|name| name.contains('x') && name.ends_with(".png")), "{crops:?}");
+    assert!(
+        crops
+            .iter()
+            .all(|name| name.contains('x') && name.ends_with(".png")),
+        "{crops:?}"
+    );
 }
 
 #[test]
@@ -286,7 +323,10 @@ fn broken_names_are_reported_and_written_out_corrected() {
         "contains spaces",
         "leading number out of sequence",
     ] {
-        assert!(naming.contains(expected), "{expected:?} missing from:\n{naming}");
+        assert!(
+            naming.contains(expected),
+            "{expected:?} missing from:\n{naming}"
+        );
     }
     assert!(!run.join("predictions").exists());
     assert!(!run.join("results.txt").exists());
@@ -297,17 +337,27 @@ fn broken_names_are_reported_and_written_out_corrected() {
     // The corrected archive keeps the top level folder and passes the check.
     let names: Vec<String> = {
         let mut zip = zip::ZipArchive::new(std::fs::File::open(&corrected).unwrap()).unwrap();
-        (0..zip.len()).map(|i| zip.by_index(i).unwrap().name().to_string()).collect()
+        (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect()
     };
-    assert!(names.contains(&"suite/maps/000__a.xmap".to_string()), "{names:?}");
-    assert!(names.contains(&"suite/expected/001__b_map.png".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"suite/maps/000__a.xmap".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"suite/expected/001__b_map.png".to_string()),
+        "{names:?}"
+    );
 
     benchmark()
         .arg("--names-only")
         .arg(&corrected)
         .assert()
         .success()
-        .stdout(predicates::str::contains("3 maps, names are as they should be"));
+        .stdout(predicates::str::contains(
+            "3 maps, names are as they should be",
+        ));
 }
 
 #[test]

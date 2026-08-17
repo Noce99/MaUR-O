@@ -60,7 +60,8 @@ fn a_generated_map_holds_the_symbol_it_was_made_for_and_its_objects() {
     let into = dir.path().join("symbols");
     generate(&into);
 
-    let (mut map, warnings) = maur_o::xml_reader::read_xml_map(&into.join("003_line_505_Path.omap")).unwrap();
+    let (mut map, warnings) =
+        maur_o::xml_reader::read_xml_map(&into.join("003_line_505_Path.omap")).unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
     map.resolve_references();
 
@@ -69,14 +70,30 @@ fn a_generated_map_holds_the_symbol_it_was_made_for_and_its_objects() {
     // Five shapes at three sizes, and this symbol has no minimum length.
     assert_eq!(map.objects.len(), 15);
     for object in &map.objects {
-        assert_eq!(object.symbol_index, Some(0), "an object is drawn with no symbol");
+        assert_eq!(
+            object.symbol_index,
+            Some(0),
+            "an object is drawn with no symbol"
+        );
     }
     // The first row is the straight line, at 5, 50 and 100 m on the ground;
     // at 1:10000 a meter is a tenth of a millimeter of paper.
     let width = |object: &maur_o::map::Object| object.coords[1].x - object.coords[0].x;
-    assert!((width(&map.objects[0]) - 0.5).abs() < 1e-9, "{}", width(&map.objects[0]));
-    assert!((width(&map.objects[1]) - 5.0).abs() < 1e-9, "{}", width(&map.objects[1]));
-    assert!((width(&map.objects[2]) - 10.0).abs() < 1e-9, "{}", width(&map.objects[2]));
+    assert!(
+        (width(&map.objects[0]) - 0.5).abs() < 1e-9,
+        "{}",
+        width(&map.objects[0])
+    );
+    assert!(
+        (width(&map.objects[1]) - 5.0).abs() < 1e-9,
+        "{}",
+        width(&map.objects[1])
+    );
+    assert!(
+        (width(&map.objects[2]) - 10.0).abs() < 1e-9,
+        "{}",
+        width(&map.objects[2])
+    );
 }
 
 #[test]
@@ -85,12 +102,26 @@ fn a_generated_map_renders() {
     let into = dir.path().join("symbols");
     generate(&into);
 
-    for name in ["001_area_401_Open_land", "004_point_109_Small_knoll", "005_text_105_Contour_value"] {
+    for name in [
+        "001_area_401_Open_land",
+        "004_point_109_Small_knoll",
+        "005_text_105_Contour_value",
+    ] {
         let map = into.join(format!("{name}.omap"));
-        let rendering = maur_o::render::render_map(&map, 3.0, 50.0).unwrap_or_else(|e| panic!("{name}: {e}"));
-        assert!(rendering.pixmap.width() > 100, "{name} came out {} wide", rendering.pixmap.width());
+        let rendering =
+            maur_o::render::render_map(&map, 3.0, 50.0).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            rendering.pixmap.width() > 100,
+            "{name} came out {} wide",
+            rendering.pixmap.width()
+        );
         // Something was drawn: the frame alone would leave it all white.
-        let white = rendering.pixmap.data().chunks(4).filter(|p| p[0..3] == [255, 255, 255]).count();
+        let white = rendering
+            .pixmap
+            .data()
+            .chunks(4)
+            .filter(|p| p[0..3] == [255, 255, 255])
+            .count();
         assert!(white < rendering.pixmap.data().len() / 4, "{name} is blank");
     }
 }

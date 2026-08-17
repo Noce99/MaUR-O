@@ -52,46 +52,84 @@ impl Rect {
     }
     /// A rectangle from its four edges, rather than from a corner and a size.
     pub fn from_ltrb(l: f64, t: f64, r: f64, b: f64) -> Rect {
-        Rect { x: l, y: t, w: r - l, h: b - t }
+        Rect {
+            x: l,
+            y: t,
+            w: r - l,
+            h: b - t,
+        }
     }
     /// The left edge.
-    pub fn left(&self) -> f64 { self.x }
+    pub fn left(&self) -> f64 {
+        self.x
+    }
     /// The top edge.
-    pub fn top(&self) -> f64 { self.y }
+    pub fn top(&self) -> f64 {
+        self.y
+    }
     /// The right edge.
-    pub fn right(&self) -> f64 { self.x + self.w }
+    pub fn right(&self) -> f64 {
+        self.x + self.w
+    }
     /// The bottom edge.
-    pub fn bottom(&self) -> f64 { self.y + self.h }
+    pub fn bottom(&self) -> f64 {
+        self.y + self.h
+    }
     /// The width.
-    pub fn width(&self) -> f64 { self.w }
+    pub fn width(&self) -> f64 {
+        self.w
+    }
     /// The height.
-    pub fn height(&self) -> f64 { self.h }
+    pub fn height(&self) -> f64 {
+        self.h
+    }
     /// Whether this is the null rectangle — the empty-accumulator state,
     /// which [`united`](Self::united) treats as "nothing yet" rather than as
     /// a zero-sized rectangle at the origin.
-    pub fn is_null(&self) -> bool { self.w == 0.0 && self.h == 0.0 }
+    pub fn is_null(&self) -> bool {
+        self.w == 0.0 && self.h == 0.0
+    }
 
     /// Moves the left edge to `v`, keeping the right one where it is.
-    pub fn set_left(&mut self, v: f64) { self.w = self.right() - v; self.x = v; }
+    pub fn set_left(&mut self, v: f64) {
+        self.w = self.right() - v;
+        self.x = v;
+    }
     /// Moves the top edge to `v`, keeping the bottom one where it is.
-    pub fn set_top(&mut self, v: f64) { self.h = self.bottom() - v; self.y = v; }
+    pub fn set_top(&mut self, v: f64) {
+        self.h = self.bottom() - v;
+        self.y = v;
+    }
     /// Moves the right edge to `v`.
-    pub fn set_right(&mut self, v: f64) { self.w = v - self.x; }
+    pub fn set_right(&mut self, v: f64) {
+        self.w = v - self.x;
+    }
     /// Moves the bottom edge to `v`.
-    pub fn set_bottom(&mut self, v: f64) { self.h = v - self.y; }
+    pub fn set_bottom(&mut self, v: f64) {
+        self.h = v - self.y;
+    }
 
     /// The rectangle with each edge moved by the given amount. Positive
     /// values move each edge right or down, so growing a rectangle on all
     /// sides takes negative `dl` and `dt`.
     pub fn adjusted(&self, dl: f64, dt: f64, dr: f64, db: f64) -> Rect {
-        Rect::from_ltrb(self.left() + dl, self.top() + dt, self.right() + dr, self.bottom() + db)
+        Rect::from_ltrb(
+            self.left() + dl,
+            self.top() + dt,
+            self.right() + dr,
+            self.bottom() + db,
+        )
     }
 
     /// The smallest rectangle holding both. A null rectangle contributes
     /// nothing, which is what makes this usable as a fold over an extent.
     pub fn united(&self, other: &Rect) -> Rect {
-        if self.is_null() { return *other; }
-        if other.is_null() { return *self; }
+        if self.is_null() {
+            return *other;
+        }
+        if other.is_null() {
+            return *self;
+        }
         Rect::from_ltrb(
             self.left().min(other.left()),
             self.top().min(other.top()),
@@ -116,10 +154,16 @@ pub fn qround(value: f64) -> f64 {
 }
 
 fn rect_include(rect: &mut Rect, point: Point) {
-    if point.x < rect.left() { rect.set_left(point.x); }
-    else if point.x > rect.right() { rect.set_right(point.x); }
-    if point.y < rect.top() { rect.set_top(point.y); }
-    else if point.y > rect.bottom() { rect.set_bottom(point.y); }
+    if point.x < rect.left() {
+        rect.set_left(point.x);
+    } else if point.x > rect.right() {
+        rect.set_right(point.x);
+    }
+    if point.y < rect.top() {
+        rect.set_top(point.y);
+    } else if point.y > rect.bottom() {
+        rect.set_bottom(point.y);
+    }
 }
 
 /// A drawing command, mirroring the subset of `QPainterPath`'s element
@@ -148,19 +192,29 @@ pub struct Path {
 
 impl Path {
     /// An empty path.
-    pub fn new() -> Path { Path::default() }
+    pub fn new() -> Path {
+        Path::default()
+    }
     /// Whether the path holds no commands at all.
-    pub fn is_empty(&self) -> bool { self.commands.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
     /// Starts a new subpath at `p`.
-    pub fn move_to(&mut self, p: Point) { self.commands.push(PathCommand::MoveTo(p)); }
+    pub fn move_to(&mut self, p: Point) {
+        self.commands.push(PathCommand::MoveTo(p));
+    }
     /// Adds a straight segment to `p`.
-    pub fn line_to(&mut self, p: Point) { self.commands.push(PathCommand::LineTo(p)); }
+    pub fn line_to(&mut self, p: Point) {
+        self.commands.push(PathCommand::LineTo(p));
+    }
     /// Adds a cubic bezier through the two control points to `end`.
     pub fn cubic_to(&mut self, c1: Point, c2: Point, end: Point) {
         self.commands.push(PathCommand::CubicTo(c1, c2, end));
     }
     /// Closes the current subpath.
-    pub fn close_subpath(&mut self) { self.commands.push(PathCommand::Close); }
+    pub fn close_subpath(&mut self) {
+        self.commands.push(PathCommand::Close);
+    }
 
     /// Appends another path's subpaths as new subpaths, like
     /// `QPainterPath::addPath`.
@@ -174,7 +228,9 @@ impl Path {
     pub fn connect_path(&mut self, other: &Path) {
         for (i, cmd) in other.commands.iter().enumerate() {
             if i == 0 {
-                if let PathCommand::MoveTo(_) = cmd { continue; }
+                if let PathCommand::MoveTo(_) = cmd {
+                    continue;
+                }
             }
             self.commands.push(*cmd);
         }
@@ -189,21 +245,34 @@ impl Path {
         let (mut xmin, mut xmax, mut ymin, mut ymax) = (0.0, 0.0, 0.0, 0.0);
         let mut consider = |p: Point| {
             if first {
-                xmin = p.x; xmax = p.x; ymin = p.y; ymax = p.y;
+                xmin = p.x;
+                xmax = p.x;
+                ymin = p.y;
+                ymax = p.y;
                 first = false;
             } else {
-                xmin = xmin.min(p.x); xmax = xmax.max(p.x);
-                ymin = ymin.min(p.y); ymax = ymax.max(p.y);
+                xmin = xmin.min(p.x);
+                xmax = xmax.max(p.x);
+                ymin = ymin.min(p.y);
+                ymax = ymax.max(p.y);
             }
         };
         for cmd in &self.commands {
             match *cmd {
                 PathCommand::MoveTo(p) | PathCommand::LineTo(p) => consider(p),
-                PathCommand::CubicTo(c1, c2, end) => { consider(c1); consider(c2); consider(end); }
+                PathCommand::CubicTo(c1, c2, end) => {
+                    consider(c1);
+                    consider(c2);
+                    consider(end);
+                }
                 PathCommand::Close => {}
             }
         }
-        if first { Rect::default() } else { Rect::from_ltrb(xmin, ymin, xmax, ymax) }
+        if first {
+            Rect::default()
+        } else {
+            Rect::from_ltrb(xmin, ymin, xmax, ymax)
+        }
     }
 }
 
@@ -214,10 +283,26 @@ pub fn add_ellipse(path: &mut Path, center: Point, rx: f64, ry: f64) {
     const K: f64 = 0.5522847498;
     let (cx, cy) = (center.x, center.y);
     path.move_to(Point::new(cx + rx, cy));
-    path.cubic_to(Point::new(cx + rx, cy + ry * K), Point::new(cx + rx * K, cy + ry), Point::new(cx, cy + ry));
-    path.cubic_to(Point::new(cx - rx * K, cy + ry), Point::new(cx - rx, cy + ry * K), Point::new(cx - rx, cy));
-    path.cubic_to(Point::new(cx - rx, cy - ry * K), Point::new(cx - rx * K, cy - ry), Point::new(cx, cy - ry));
-    path.cubic_to(Point::new(cx + rx * K, cy - ry), Point::new(cx + rx, cy - ry * K), Point::new(cx + rx, cy));
+    path.cubic_to(
+        Point::new(cx + rx, cy + ry * K),
+        Point::new(cx + rx * K, cy + ry),
+        Point::new(cx, cy + ry),
+    );
+    path.cubic_to(
+        Point::new(cx - rx * K, cy + ry),
+        Point::new(cx - rx, cy + ry * K),
+        Point::new(cx - rx, cy),
+    );
+    path.cubic_to(
+        Point::new(cx - rx, cy - ry * K),
+        Point::new(cx - rx * K, cy - ry),
+        Point::new(cx, cy - ry),
+    );
+    path.cubic_to(
+        Point::new(cx + rx * K, cy - ry),
+        Point::new(cx + rx, cy - ry * K),
+        Point::new(cx + rx, cy),
+    );
     path.close_subpath();
 }
 
@@ -235,7 +320,11 @@ fn part_ranges(coords: &CoordList) -> Vec<PartRange> {
     for i in 0..coords.len() {
         if coords[i].is_hole_point() || i + 1 == coords.len() {
             if i + 1 - begin >= 2 {
-                parts.push(PartRange { begin, end: i + 1, closed: coords[i].is_close_point() });
+                parts.push(PartRange {
+                    begin,
+                    end: i + 1,
+                    closed: coords[i].is_close_point(),
+                });
             }
             begin = i + 1;
         }
@@ -246,7 +335,13 @@ fn part_ranges(coords: &CoordList) -> Vec<PartRange> {
 /// Splits a bezier curve at parameter `p`, returning the two inner control
 /// points of the first section, the split position, and the two inner
 /// control points of the second section — `(o0, o1, o2, o3, o4)`.
-fn split_bezier(c0: Point, c1: Point, c2: Point, c3: Point, p: f32) -> (Point, Point, Point, Point, Point) {
+fn split_bezier(
+    c0: Point,
+    c1: Point,
+    c2: Point,
+    c3: Point,
+    p: f32,
+) -> (Point, Point, Point, Point, Point) {
     if p >= 1.0 {
         (c1, c2, c3, c3, c3)
     } else if p <= 0.0 {
@@ -268,7 +363,17 @@ fn split_bezier(c0: Point, c1: Point, c2: Point, c3: Point, p: f32) -> (Point, P
 /// contributes the midpoint of its two inner control points, rather than a
 /// point on the curve — this is what Mapper does, and dash/symbol placement
 /// follow the resulting polyline, so the vertices have to be the same ones.
-fn flatten_cubic(out: &mut Vec<Point>, out_params: &mut Vec<f32>, c0: Point, c1: Point, c2: Point, c3: Point, p0: f32, p1: f32, depth: i32) {
+fn flatten_cubic(
+    out: &mut Vec<Point>,
+    out_params: &mut Vec<f32>,
+    c0: Point,
+    c1: Point,
+    c2: Point,
+    c3: Point,
+    p0: f32,
+    p1: f32,
+    depth: i32,
+) {
     flatten_cubic_tol(out, out_params, c0, c1, c2, c3, p0, p1, depth, BEZIER_ERROR);
 }
 
@@ -286,7 +391,18 @@ fn flatten_cubic(out: &mut Vec<Point>, out_params: &mut Vec<f32>, c0: Point, c1:
 /// tolerance but on the wrong side of a polygon flattened to it. Hit-testing
 /// isn't performance sensitive the way per-frame flattening is, so it uses a
 /// much tighter tolerance here instead.
-fn flatten_cubic_tol(out: &mut Vec<Point>, out_params: &mut Vec<f32>, c0: Point, c1: Point, c2: Point, c3: Point, p0: f32, p1: f32, depth: i32, error: f64) {
+fn flatten_cubic_tol(
+    out: &mut Vec<Point>,
+    out_params: &mut Vec<f32>,
+    c0: Point,
+    c1: Point,
+    c2: Point,
+    c3: Point,
+    p0: f32,
+    p1: f32,
+    depth: i32,
+    error: f64,
+) {
     let p_half = ((p0 as f64 + p1 as f64) * 0.5) as f32;
     let c12 = (c1 + c2) / 2.0;
 
@@ -294,7 +410,9 @@ fn flatten_cubic_tol(out: &mut Vec<Point>, out_params: &mut Vec<f32>, c0: Point,
     let inner_length_squared = inner.dot(inner);
     if depth >= 48
         || (inner_length_squared <= BEZIER_SEGMENT_MAXLEN_SQUARED
-            && distance(c1 - c0) + distance(c2 - c1) + distance(c3 - c2) - inner_length_squared.sqrt() <= error)
+            && distance(c1 - c0) + distance(c2 - c1) + distance(c3 - c2)
+                - inner_length_squared.sqrt()
+                <= error)
     {
         out.push(c12);
         out_params.push(p_half);
@@ -307,8 +425,30 @@ fn flatten_cubic_tol(out: &mut Vec<Point>, out_params: &mut Vec<f32>, c0: Point,
     let c123 = (c12 + c23) / 2.0;
     let c0123 = (c012 + c123) / 2.0;
 
-    flatten_cubic_tol(out, out_params, c0, c01, c012, c0123, p0, p_half, depth + 1, error);
-    flatten_cubic_tol(out, out_params, c0123, c123, c23, c3, p_half, p1, depth + 1, error);
+    flatten_cubic_tol(
+        out,
+        out_params,
+        c0,
+        c01,
+        c012,
+        c0123,
+        p0,
+        p_half,
+        depth + 1,
+        error,
+    );
+    flatten_cubic_tol(
+        out,
+        out_params,
+        c0123,
+        c123,
+        c23,
+        c3,
+        p_half,
+        p1,
+        depth + 1,
+        error,
+    );
 }
 
 /// One connected part of a path: a polyline, plus the length of each vertex
@@ -355,13 +495,21 @@ impl PathPart {
 
     /// Returns the position at the given length along the part.
     pub fn point_at(&self, position: f64) -> Point {
-        if self.points.is_empty() { return Point::ZERO; }
-        if position <= 0.0 || self.points.len() == 1 { return self.points[0]; }
-        if position >= *self.lengths.last().unwrap() { return *self.points.last().unwrap(); }
+        if self.points.is_empty() {
+            return Point::ZERO;
+        }
+        if position <= 0.0 || self.points.len() == 1 {
+            return self.points[0];
+        }
+        if position >= *self.lengths.last().unwrap() {
+            return *self.points.last().unwrap();
+        }
 
         let i = upper_bound(&self.lengths, position);
         let segment_length = self.lengths[i] - self.lengths[i - 1];
-        if segment_length <= 0.0 { return self.points[i]; }
+        if segment_length <= 0.0 {
+            return self.points[i];
+        }
 
         let t = (position - self.lengths[i - 1]) / segment_length;
         self.points[i - 1] * (1.0 - t) + self.points[i] * t
@@ -369,23 +517,35 @@ impl PathPart {
 
     /// Returns the unit tangent at the given length along the part.
     pub fn tangent_at(&self, position: f64) -> Point {
-        if self.points.len() < 2 { return Point::new(1.0, 0.0); }
+        if self.points.len() < 2 {
+            return Point::new(1.0, 0.0);
+        }
         let mut i = 1usize;
         if position > 0.0 {
-            i = upper_bound(&self.lengths, position).max(1).min(self.points.len() - 1);
+            i = upper_bound(&self.lengths, position)
+                .max(1)
+                .min(self.points.len() - 1);
         }
         let delta = self.points[i] - self.points[i - 1];
         let norm = distance(delta);
-        if norm > 0.0 { delta / norm } else { Point::new(1.0, 0.0) }
+        if norm > 0.0 {
+            delta / norm
+        } else {
+            Point::new(1.0, 0.0)
+        }
     }
 
     /// Returns the polyline between two lengths along the part.
     pub fn slice(&self, from: f64, to: f64) -> Vec<Point> {
         let mut result = Vec::new();
-        if self.points.is_empty() || to <= from { return result; }
+        if self.points.is_empty() || to <= from {
+            return result;
+        }
         let from = from.max(0.0);
         let to = to.min(*self.lengths.last().unwrap());
-        if to <= from { return result; }
+        if to <= from {
+            return result;
+        }
 
         result.push(self.point_at(from));
         for i in 0..self.points.len() {
@@ -425,9 +585,17 @@ pub fn flatten(coords: &CoordList) -> Vec<PathPart> {
         while i + 1 < range.end {
             let previous_size = part.points.len();
             if coords[i].is_curve_start() && i + 3 < range.end {
-                flatten_cubic(&mut part.points, &mut part.params,
-                    coords[i].pos(), coords[i + 1].pos(), coords[i + 2].pos(), coords[i + 3].pos(),
-                    0.0, 1.0, 0);
+                flatten_cubic(
+                    &mut part.points,
+                    &mut part.params,
+                    coords[i].pos(),
+                    coords[i + 1].pos(),
+                    coords[i + 2].pos(),
+                    coords[i + 3].pos(),
+                    0.0,
+                    1.0,
+                    0,
+                );
                 part.curve_points.resize(part.points.len(), true);
                 part.coord_index.resize(part.points.len(), i);
                 part.point_flags.resize(part.points.len(), 0);
@@ -478,7 +646,11 @@ fn circumradius(a: Point, b: Point, c: Point) -> f64 {
     let bc = distance(c - b);
     let ca = distance(a - c);
     let area2 = ((b - a).x * (c - a).y - (b - a).y * (c - a).x).abs();
-    if area2 < 1e-12 { f64::INFINITY } else { ab * bc * ca / (2.0 * area2) }
+    if area2 < 1e-12 {
+        f64::INFINITY
+    } else {
+        ab * bc * ca / (2.0 * area2)
+    }
 }
 
 /// What kind of sharp fold, if any, stroking the given flattened parts at
@@ -580,28 +752,39 @@ pub fn fold_kind(coords: &CoordList, parts: &[PathPart], half_width: f64) -> Fol
     };
     // `Dangerous` always wins over `ExactReversal`, which always wins over
     // `None`, so the worst kind found anywhere in the path is the answer.
-    let worse = |a: FoldKind, b: FoldKind| if a == FoldKind::Dangerous || b == FoldKind::Dangerous {
-        FoldKind::Dangerous
-    } else if a == FoldKind::ExactReversal || b == FoldKind::ExactReversal {
-        FoldKind::ExactReversal
-    } else {
-        FoldKind::None
+    let worse = |a: FoldKind, b: FoldKind| {
+        if a == FoldKind::Dangerous || b == FoldKind::Dangerous {
+            FoldKind::Dangerous
+        } else if a == FoldKind::ExactReversal || b == FoldKind::ExactReversal {
+            FoldKind::ExactReversal
+        } else {
+            FoldKind::None
+        }
     };
     let mut found = FoldKind::None;
     for part in parts {
         let points = &part.points;
         let curve = &part.curve_points;
         let n = points.len();
-        if n < 3 { continue; }
+        if n < 3 {
+            continue;
+        }
         for i in 1..n - 1 {
-            found = worse(found, check(incoming(part, i - 1, i), outgoing(part, i, i + 1)));
+            found = worse(
+                found,
+                check(incoming(part, i - 1, i), outgoing(part, i, i + 1)),
+            );
             if (curve[i] || curve[i - 1] || curve[i + 1])
-                && circumradius(points[i - 1], points[i], points[i + 1]) < half_width {
+                && circumradius(points[i - 1], points[i], points[i + 1]) < half_width
+            {
                 found = FoldKind::Dangerous;
             }
         }
         if part.closed && points[0] == points[n - 1] && n >= 3 {
-            found = worse(found, check(incoming(part, n - 2, n - 1), outgoing(part, 0, 1)));
+            found = worse(
+                found,
+                check(incoming(part, n - 2, n - 1), outgoing(part, 0, 1)),
+            );
         }
     }
     found
@@ -673,9 +856,17 @@ fn to_painter_path_impl(coords: &CoordList, honor_gaps: bool, flatten_curves: bo
                 if flatten_curves {
                     let mut pts = Vec::new();
                     let mut params = Vec::new();
-                    flatten_cubic(&mut pts, &mut params,
-                        coords[i - 1].pos(), coords[i].pos(), coords[i + 1].pos(), coords[i + 2].pos(),
-                        0.0, 1.0, 0);
+                    flatten_cubic(
+                        &mut pts,
+                        &mut params,
+                        coords[i - 1].pos(),
+                        coords[i].pos(),
+                        coords[i + 1].pos(),
+                        coords[i + 2].pos(),
+                        0.0,
+                        1.0,
+                        0,
+                    );
                     for p in pts {
                         part_path.line_to(p);
                     }
@@ -710,12 +901,16 @@ fn to_painter_path_impl(coords: &CoordList, honor_gaps: bool, flatten_curves: bo
 /// Converts a polyline to a path.
 pub fn polyline_to_path(polyline: &[Point], closed: bool) -> Path {
     let mut path = Path::new();
-    if polyline.is_empty() { return path; }
+    if polyline.is_empty() {
+        return path;
+    }
     path.move_to(polyline[0]);
     for &p in &polyline[1..] {
         path.line_to(p);
     }
-    if closed { path.close_subpath(); }
+    if closed {
+        path.close_subpath();
+    }
     path
 }
 
@@ -746,18 +941,28 @@ pub enum PenJoin {
 }
 
 /// The incoming direction at a coordinate, skipping degenerate segments.
-pub fn coord_incoming_tangent(coords: &CoordList, first: usize, last: usize, closed: bool, i: usize) -> Option<Point> {
+pub fn coord_incoming_tangent(
+    coords: &CoordList,
+    first: usize,
+    last: usize,
+    closed: bool,
+    i: usize,
+) -> Option<Point> {
     let mut k = i;
     while k > first {
         k -= 1;
         let tangent = coords[i].pos() - coords[k].pos();
-        if tangent.dot(tangent) > TANGENT_EPSILON_SQUARED { return Some(tangent); }
+        if tangent.dot(tangent) > TANGENT_EPSILON_SQUARED {
+            return Some(tangent);
+        }
     }
     if closed && last > i + 1 {
         let mut k = last;
         while k > i {
             let tangent = coords[i].pos() - coords[k].pos();
-            if tangent.dot(tangent) > TANGENT_EPSILON_SQUARED { return Some(tangent); }
+            if tangent.dot(tangent) > TANGENT_EPSILON_SQUARED {
+                return Some(tangent);
+            }
             k -= 1;
         }
     }
@@ -765,18 +970,28 @@ pub fn coord_incoming_tangent(coords: &CoordList, first: usize, last: usize, clo
 }
 
 /// The outgoing direction at a coordinate, skipping degenerate segments.
-pub fn coord_outgoing_tangent(coords: &CoordList, first: usize, last: usize, closed: bool, i: usize) -> Option<Point> {
+pub fn coord_outgoing_tangent(
+    coords: &CoordList,
+    first: usize,
+    last: usize,
+    closed: bool,
+    i: usize,
+) -> Option<Point> {
     let mut k = i + 1;
     while k <= last {
         let tangent = coords[k].pos() - coords[i].pos();
-        if tangent.dot(tangent) > TANGENT_EPSILON_SQUARED { return Some(tangent); }
+        if tangent.dot(tangent) > TANGENT_EPSILON_SQUARED {
+            return Some(tangent);
+        }
         k += 1;
     }
     if closed {
         let mut k = first;
         while k < i {
             let tangent = coords[k].pos() - coords[i].pos();
-            if tangent.dot(tangent) > TANGENT_EPSILON_SQUARED { return Some(tangent); }
+            if tangent.dot(tangent) > TANGENT_EPSILON_SQUARED {
+                return Some(tangent);
+            }
             k += 1;
         }
     }
@@ -785,7 +1000,13 @@ pub fn coord_outgoing_tangent(coords: &CoordList, first: usize, last: usize, clo
 
 /// The combined tangent Mapper uses for the direction of a cap: the sum of
 /// the normalized incoming and outgoing directions where both exist.
-fn combined_tangent(coords: &CoordList, first: usize, last: usize, closed: bool, i: usize) -> Point {
+fn combined_tangent(
+    coords: &CoordList,
+    first: usize,
+    last: usize,
+    closed: bool,
+    i: usize,
+) -> Point {
     let to_coord = coord_incoming_tangent(coords, first, last, closed, i);
     let to_next = coord_outgoing_tangent(coords, first, last, closed, i);
     match to_next {
@@ -798,7 +1019,14 @@ fn combined_tangent(coords: &CoordList, first: usize, last: usize, closed: bool,
 }
 
 /// Adds the cap at one end of a stroked path to the extent.
-fn extent_include_cap(extent: &mut Rect, coord: Point, tangent: Point, half_width: f64, cap: PenCap, end_cap: bool) {
+fn extent_include_cap(
+    extent: &mut Rect,
+    coord: Point,
+    tangent: Point,
+    half_width: f64,
+    cap: PenCap,
+    end_cap: bool,
+) {
     if half_width < 0.0005 {
         rect_include(extent, coord);
         return;
@@ -815,14 +1043,23 @@ fn extent_include_cap(extent: &mut Rect, coord: Point, tangent: Point, half_widt
 
     if cap == PenCap::Square {
         let mut back = right.perp_right_unit();
-        if end_cap { back = -back; }
+        if end_cap {
+            back = -back;
+        }
         rect_include(extent, coord + (back - right) * half_width);
         rect_include(extent, coord + (back + right) * half_width);
     }
 }
 
 /// Adds the join at an interior vertex of a stroked path to the extent.
-fn extent_include_join(extent: &mut Rect, coord: Point, incoming: Point, outgoing: Point, half_width: f64, join: PenJoin) {
+fn extent_include_join(
+    extent: &mut Rect,
+    coord: Point,
+    incoming: Point,
+    outgoing: Point,
+    half_width: f64,
+    join: PenJoin,
+) {
     if half_width < 0.0005 {
         rect_include(extent, coord);
         return;
@@ -882,7 +1119,15 @@ fn extent_include_join(extent: &mut Rect, coord: Point, incoming: Point, outgoin
 /// polyline is wrapped in `Coord`s with `flags: 0`, which every check below
 /// treats exactly as it treats a coordinate carrying no flags, so the two
 /// callers share one implementation rather than a copy each.
-fn stroked_part_extent(coords: &CoordList, first: usize, last: usize, closed: bool, half_width: f64, cap: PenCap, join: PenJoin) -> Rect {
+fn stroked_part_extent(
+    coords: &CoordList,
+    first: usize,
+    last: usize,
+    closed: bool,
+    half_width: f64,
+    cap: PenCap,
+    join: PenJoin,
+) -> Rect {
     let join_at = |extent: &mut Rect, i: usize| {
         let to_coord = coord_incoming_tangent(coords, first, last, closed, i);
         let to_next = coord_outgoing_tangent(coords, first, last, closed, i);
@@ -899,7 +1144,14 @@ fn stroked_part_extent(coords: &CoordList, first: usize, last: usize, closed: bo
     let mut extent = Rect::new(p_first.x, p_first.y, 0.0001, 0.0001);
     let mut gap = coords[first].is_gap_point();
     let mut hole = false;
-    extent_include_cap(&mut extent, p_first, combined_tangent(coords, first, last, closed, first), half_width, cap, false);
+    extent_include_cap(
+        &mut extent,
+        p_first,
+        combined_tangent(coords, first, last, closed, first),
+        half_width,
+        cap,
+        false,
+    );
 
     let mut i = first + 1;
     while i <= last {
@@ -909,13 +1161,27 @@ fn stroked_part_extent(coords: &CoordList, first: usize, last: usize, closed: bo
                 hole = true;
             } else if coords[i].is_gap_point() {
                 gap = false;
-                extent_include_cap(&mut extent, coords[i].pos(), combined_tangent(coords, first, last, closed, i), half_width, cap, false);
+                extent_include_cap(
+                    &mut extent,
+                    coords[i].pos(),
+                    combined_tangent(coords, first, last, closed, i),
+                    half_width,
+                    cap,
+                    false,
+                );
             }
             i += 1;
             continue;
         }
         if hole {
-            extent_include_cap(&mut extent, coords[i].pos(), combined_tangent(coords, first, last, closed, i), half_width, cap, false);
+            extent_include_cap(
+                &mut extent,
+                coords[i].pos(),
+                combined_tangent(coords, first, last, closed, i),
+                half_width,
+                cap,
+                false,
+            );
             hole = false;
             i += 1;
             continue;
@@ -925,13 +1191,23 @@ fn stroked_part_extent(coords: &CoordList, first: usize, last: usize, closed: bo
             i += 2;
         }
 
-        if coords[i].is_hole_point() { hole = true; }
-        else if coords[i].is_gap_point() { gap = true; }
+        if coords[i].is_hole_point() {
+            hole = true;
+        } else if coords[i].is_gap_point() {
+            gap = true;
+        }
 
         if (i < last && !hole && !gap) || (i == last && closed) {
             join_at(&mut extent, i);
         } else {
-            extent_include_cap(&mut extent, coords[i].pos(), combined_tangent(coords, first, last, closed, i), half_width, cap, true);
+            extent_include_cap(
+                &mut extent,
+                coords[i].pos(),
+                combined_tangent(coords, first, last, closed, i),
+                half_width,
+                cap,
+                true,
+            );
         }
         i += 1;
     }
@@ -944,14 +1220,30 @@ fn stroked_part_extent(coords: &CoordList, first: usize, last: usize, closed: bo
 /// of a bezier curve the pen only extends perpendicular to the flattened
 /// polyline. The parts must be the result of `flatten()` on the same
 /// coordinates.
-pub fn stroked_path_extent(coords: &CoordList, parts: &[PathPart], half_width: f64, cap: PenCap, join: PenJoin) -> Rect {
+pub fn stroked_path_extent(
+    coords: &CoordList,
+    parts: &[PathPart],
+    half_width: f64,
+    cap: PenCap,
+    join: PenJoin,
+) -> Rect {
     let mut extent = Rect::default();
     for (part_index, range) in part_ranges(coords).into_iter().enumerate() {
-        let mut part_extent = stroked_part_extent(coords, range.begin, range.end - 1, range.closed, half_width, cap, join);
+        let mut part_extent = stroked_part_extent(
+            coords,
+            range.begin,
+            range.end - 1,
+            range.closed,
+            half_width,
+            cap,
+            join,
+        );
 
         if let Some(part) = parts.get(part_index) {
             for i in 1..part.points.len() - 1 {
-                if !part.curve_points[i] { continue; }
+                if !part.curve_points[i] {
+                    continue;
+                }
                 let pos = part.points[i];
                 let to_coord = (pos - part.points[i - 1]).with_length(1.0);
                 let to_next = (part.points[i + 1] - pos).with_length(1.0);
@@ -962,16 +1254,29 @@ pub fn stroked_path_extent(coords: &CoordList, parts: &[PathPart], half_width: f
             }
         }
 
-        extent = if extent.is_null() { part_extent } else { extent.united(&part_extent) };
+        extent = if extent.is_null() {
+            part_extent
+        } else {
+            extent.united(&part_extent)
+        };
     }
     extent
 }
 
 /// The extent of a plain polyline stroked with the given pen, as above.
-pub fn stroked_polyline_extent(polygon: &[Point], half_width: f64, cap: PenCap, join: PenJoin) -> Rect {
+pub fn stroked_polyline_extent(
+    polygon: &[Point],
+    half_width: f64,
+    cap: PenCap,
+    join: PenJoin,
+) -> Rect {
     let count = polygon.len();
-    if count == 0 { return Rect::default(); }
-    if count == 1 { return Rect::new(polygon[0].x, polygon[0].y, 0.0001, 0.0001); }
+    if count == 0 {
+        return Rect::default();
+    }
+    if count == 1 {
+        return Rect::new(polygon[0].x, polygon[0].y, 0.0001, 0.0001);
+    }
     let closed = polygon[0] == polygon[count - 1];
     let coords: CoordList = polygon.iter().map(|p| Coord::new(p.x, p.y, 0)).collect();
     stroked_part_extent(&coords, 0, count - 1, closed, half_width, cap, join)
@@ -981,10 +1286,18 @@ pub fn stroked_polyline_extent(polygon: &[Point], half_width: f64, cap: PenCap, 
 pub fn flattened_extent(parts: &[PathPart]) -> Rect {
     let mut extent = Rect::default();
     for part in parts {
-        if part.points.is_empty() { continue; }
+        if part.points.is_empty() {
+            continue;
+        }
         let mut part_extent = Rect::new(part.points[0].x, part.points[0].y, 0.0001, 0.0001);
-        for &p in &part.points { rect_include(&mut part_extent, p); }
-        extent = if extent.is_null() { part_extent } else { extent.united(&part_extent) };
+        for &p in &part.points {
+            rect_include(&mut part_extent, p);
+        }
+        extent = if extent.is_null() {
+            part_extent
+        } else {
+            extent.united(&part_extent)
+        };
     }
     extent
 }
@@ -1017,7 +1330,14 @@ fn split_at(coords: &CoordList, part: &PathPart, length: f64) -> Split {
         }
     };
     if size == 0 {
-        return Split { upper: 0, param: 0.0, pos: Point::ZERO, edge: 0, on_curve: false, at_node: true };
+        return Split {
+            upper: 0,
+            param: 0.0,
+            pos: Point::ZERO,
+            edge: 0,
+            on_curve: false,
+            at_node: true,
+        };
     }
     if length <= 0.0 || size == 1 {
         return set_at_point(0);
@@ -1027,7 +1347,9 @@ fn split_at(coords: &CoordList, part: &PathPart, length: f64) -> Split {
     }
 
     let mut index = part.lengths.partition_point(|&x| x < length);
-    if index < 1 { index = 1; }
+    if index < 1 {
+        index = 1;
+    }
     let prev = index - 1;
     let segment_length = (part.lengths[index] - part.lengths[prev]) as f32;
 
@@ -1046,16 +1368,38 @@ fn split_at(coords: &CoordList, part: &PathPart, length: f64) -> Split {
     if is_curve {
         let prev_param = part.params[prev];
         let mut current_param = part.params[index];
-        if current_param == 0.0 { current_param = 1.0; }
+        if current_param == 0.0 {
+            current_param = 1.0;
+        }
         let param = prev_param + (current_param - prev_param) * factor;
         if param >= 1.0 {
             return set_at_point(index);
         }
-        let (_o0, _o1, o2, _o3, _o4) = split_bezier(coords[edge].pos(), coords[edge + 1].pos(), coords[edge + 2].pos(), coords[edge + 3].pos(), param);
-        Split { upper: index, param, pos: o2, edge, on_curve: true, at_node: false }
+        let (_o0, _o1, o2, _o3, _o4) = split_bezier(
+            coords[edge].pos(),
+            coords[edge + 1].pos(),
+            coords[edge + 2].pos(),
+            coords[edge + 3].pos(),
+            param,
+        );
+        Split {
+            upper: index,
+            param,
+            pos: o2,
+            edge,
+            on_curve: true,
+            at_node: false,
+        }
     } else {
         let pos = part.points[prev] + (part.points[index] - part.points[prev]) * factor as f64;
-        Split { upper: index, param: 0.0, pos, edge, on_curve: false, at_node: false }
+        Split {
+            upper: index,
+            param: 0.0,
+            pos,
+            edge,
+            on_curve: false,
+            at_node: false,
+        }
     }
 }
 
@@ -1074,7 +1418,10 @@ pub struct PathLocation {
 /// how Mapper places symbols along a line.
 pub fn locate_on_path(coords: &CoordList, part: &PathPart, length: f64) -> PathLocation {
     if part.points.is_empty() {
-        return PathLocation { pos: Point::ZERO, tangent: Point::ZERO };
+        return PathLocation {
+            pos: Point::ZERO,
+            tangent: Point::ZERO,
+        };
     }
 
     let split = split_at(coords, part, length);
@@ -1085,8 +1432,20 @@ pub fn locate_on_path(coords: &CoordList, part: &PathPart, length: f64) -> PathL
     let size = part.points.len();
 
     if split.at_node {
-        let out = coord_outgoing_tangent(coords, part.first_coord, part.last_coord, part.closed, split.edge);
-        let inc = coord_incoming_tangent(coords, part.first_coord, part.last_coord, part.closed, split.edge);
+        let out = coord_outgoing_tangent(
+            coords,
+            part.first_coord,
+            part.last_coord,
+            part.closed,
+            split.edge,
+        );
+        let inc = coord_incoming_tangent(
+            coords,
+            part.first_coord,
+            part.last_coord,
+            part.closed,
+            split.edge,
+        );
         let tangent = out.map(unit).unwrap_or(Point::ZERO) + inc.map(unit).unwrap_or(Point::ZERO);
         return PathLocation { pos, tangent };
     }
@@ -1095,22 +1454,40 @@ pub fn locate_on_path(coords: &CoordList, part: &PathPart, length: f64) -> PathL
     let mut forward_found = false;
     if split.on_curve {
         let e = split.edge;
-        let (_o0, _o1, o2, o3, o4) = split_bezier(coords[e].pos(), coords[e + 1].pos(), coords[e + 2].pos(), coords[e + 3].pos(), split.param);
+        let (_o0, _o1, o2, o3, o4) = split_bezier(
+            coords[e].pos(),
+            coords[e + 1].pos(),
+            coords[e + 2].pos(),
+            coords[e + 3].pos(),
+            split.param,
+        );
         for candidate in [o3 - pos, o4 - pos, coords[e + 3].pos() - pos] {
-            if significant(candidate) { forward = candidate; forward_found = true; break; }
+            if significant(candidate) {
+                forward = candidate;
+                forward_found = true;
+                break;
+            }
         }
         let _ = o2;
     }
     if !forward_found {
         for k in split.upper..size {
             let candidate = part.points[k] - pos;
-            if significant(candidate) { forward = candidate; forward_found = true; break; }
+            if significant(candidate) {
+                forward = candidate;
+                forward_found = true;
+                break;
+            }
         }
     }
     if !forward_found && part.closed {
         for k in 0..split.upper {
             let candidate = part.points[k] - pos;
-            if significant(candidate) { forward = candidate; forward_found = true; break; }
+            if significant(candidate) {
+                forward = candidate;
+                forward_found = true;
+                break;
+            }
         }
     }
 
@@ -1118,27 +1495,52 @@ pub fn locate_on_path(coords: &CoordList, part: &PathPart, length: f64) -> PathL
     let mut backward_found = false;
     if split.on_curve {
         let e = split.edge;
-        let (o0, o1, _o2, _o3, _o4) = split_bezier(coords[e].pos(), coords[e + 1].pos(), coords[e + 2].pos(), coords[e + 3].pos(), split.param);
+        let (o0, o1, _o2, _o3, _o4) = split_bezier(
+            coords[e].pos(),
+            coords[e + 1].pos(),
+            coords[e + 2].pos(),
+            coords[e + 3].pos(),
+            split.param,
+        );
         for candidate in [pos - o1, pos - o0, pos - coords[e].pos()] {
-            if significant(candidate) { backward = candidate; backward_found = true; break; }
+            if significant(candidate) {
+                backward = candidate;
+                backward_found = true;
+                break;
+            }
         }
     }
     if !backward_found {
         let backward_from = split.upper - 1;
         for k in (0..=backward_from).rev() {
             let candidate = pos - part.points[k];
-            if significant(candidate) { backward = candidate; backward_found = true; break; }
+            if significant(candidate) {
+                backward = candidate;
+                backward_found = true;
+                break;
+            }
         }
     }
     if !backward_found && part.closed {
         for k in (split.upper + 1..size).rev() {
             let candidate = pos - part.points[k];
-            if significant(candidate) { backward = candidate; backward_found = true; break; }
+            if significant(candidate) {
+                backward = candidate;
+                backward_found = true;
+                break;
+            }
         }
     }
 
-    let tangent = (if forward_found { unit(forward) } else { Point::ZERO })
-        + (if backward_found { unit(backward) } else { Point::ZERO });
+    let tangent = (if forward_found {
+        unit(forward)
+    } else {
+        Point::ZERO
+    }) + (if backward_found {
+        unit(backward)
+    } else {
+        Point::ZERO
+    });
     PathLocation { pos, tangent }
 }
 
@@ -1148,11 +1550,15 @@ pub fn locate_on_path(coords: &CoordList, part: &PathPart, length: f64) -> PathL
 /// dash on a curve is itself a curve.
 pub fn slice_path(coords: &CoordList, part: &PathPart, from: f64, to: f64) -> Path {
     let mut path = Path::new();
-    if part.points.is_empty() || part.lengths.is_empty() { return path; }
+    if part.points.is_empty() || part.lengths.is_empty() {
+        return path;
+    }
 
     let from = from.max(0.0);
     let to = to.min(*part.lengths.last().unwrap());
-    if to <= from { return path; }
+    if to <= from {
+        return path;
+    }
 
     let a = split_at(coords, part, from);
     let b = split_at(coords, part, to);
@@ -1160,8 +1566,13 @@ pub fn slice_path(coords: &CoordList, part: &PathPart, from: f64, to: f64) -> Pa
 
     let pos = |i: usize| coords[i].pos();
     let curve_piece = |path: &mut Path, edge: usize, t0: f32, start: Point, t1: f32, end: Point| {
-        let (_o0, _o1, o2, o3, o4) = split_bezier(pos(edge), pos(edge + 1), pos(edge + 2), pos(edge + 3), t0);
-        let remainder = if t1 >= 1.0 || t0 >= 1.0 { 1.0 } else { (t1 - t0) / (1.0 - t0) };
+        let (_o0, _o1, o2, o3, o4) =
+            split_bezier(pos(edge), pos(edge + 1), pos(edge + 2), pos(edge + 3), t0);
+        let remainder = if t1 >= 1.0 || t0 >= 1.0 {
+            1.0
+        } else {
+            (t1 - t0) / (1.0 - t0)
+        };
         if remainder >= 1.0 {
             path.cubic_to(o3, o4, end);
             return;
@@ -1206,7 +1617,13 @@ pub fn slice_path(coords: &CoordList, part: &PathPart, from: f64, to: f64) -> Pa
         }
         if coords[cursor].is_curve_start() && cursor + 3 <= part.last_coord {
             if !b.at_node && b.edge == cursor {
-                let (o0, o1, _o2, _o3, _o4) = split_bezier(pos(cursor), pos(cursor + 1), pos(cursor + 2), pos(cursor + 3), b.param);
+                let (o0, o1, _o2, _o3, _o4) = split_bezier(
+                    pos(cursor),
+                    pos(cursor + 1),
+                    pos(cursor + 2),
+                    pos(cursor + 3),
+                    b.param,
+                );
                 path.cubic_to(o0, o1, b.pos);
                 return path;
             }
@@ -1231,8 +1648,16 @@ pub fn slice_path(coords: &CoordList, part: &PathPart, from: f64, to: f64) -> Pa
 /// flags of the coordinates are carried along, which is what dashed lines
 /// are made of: the whole path is copied slice by slice, with gap flags
 /// added at the cuts.
-pub fn copy_path_slice(coords: &CoordList, part: &PathPart, from: f64, to: f64, out: &mut CoordList) {
-    if part.points.is_empty() || part.lengths.is_empty() { return; }
+pub fn copy_path_slice(
+    coords: &CoordList,
+    part: &PathPart,
+    from: f64,
+    to: f64,
+    out: &mut CoordList,
+) {
+    if part.points.is_empty() || part.lengths.is_empty() {
+        return;
+    }
 
     let from = from.max(0.0);
     let to = to.min(*part.lengths.last().unwrap());
@@ -1240,7 +1665,10 @@ pub fn copy_path_slice(coords: &CoordList, part: &PathPart, from: f64, to: f64, 
     let b = split_at(coords, part, to.max(from));
 
     const COPIED_FLAGS_AT_START: i32 = coord_flag::GAP_POINT | coord_flag::DASH_POINT;
-    const COPIED_FLAGS_AT_END: i32 = coord_flag::GAP_POINT | coord_flag::DASH_POINT | coord_flag::HOLE_POINT | coord_flag::CLOSE_POINT;
+    const COPIED_FLAGS_AT_END: i32 = coord_flag::GAP_POINT
+        | coord_flag::DASH_POINT
+        | coord_flag::HOLE_POINT
+        | coord_flag::CLOSE_POINT;
 
     let pos = |i: usize| coords[i].pos();
     let push = |out: &mut CoordList, p: Point, flags: i32| out.push(Coord::new(p.x, p.y, flags));
@@ -1250,7 +1678,8 @@ pub fn copy_path_slice(coords: &CoordList, part: &PathPart, from: f64, to: f64, 
     let (mut a_cs0, mut a_cs1) = (Point::ZERO, Point::ZERO);
     if a_curve {
         let e = a.edge;
-        let (_o0, _o1, _o2, o3, o4) = split_bezier(pos(e), pos(e + 1), pos(e + 2), pos(e + 3), a.param);
+        let (_o0, _o1, _o2, o3, o4) =
+            split_bezier(pos(e), pos(e + 1), pos(e + 2), pos(e + 3), a.param);
         a_cs0 = o3;
         a_cs1 = o4;
     }
@@ -1260,7 +1689,11 @@ pub fn copy_path_slice(coords: &CoordList, part: &PathPart, from: f64, to: f64, 
     if b.on_curve {
         b_curve = true;
         b_arriving_edge = Some(b.edge);
-    } else if b.at_node && b.edge >= 3 && b.edge >= part.first_coord + 3 && coords[b.edge - 3].is_curve_start() {
+    } else if b.at_node
+        && b.edge >= 3
+        && b.edge >= part.first_coord + 3
+        && coords[b.edge - 3].is_curve_start()
+    {
         b_curve = true;
         b_arriving_edge = Some(b.edge - 3);
     }
@@ -1272,8 +1705,13 @@ pub fn copy_path_slice(coords: &CoordList, part: &PathPart, from: f64, to: f64, 
                 b_ce1 = a_cs1;
             } else {
                 let e = a.edge;
-                let remainder = if a.param >= 1.0 { 1.0 } else { (b.param - a.param) / (1.0 - a.param) };
-                let (q0, q1, _q2, _q3, _q4) = split_bezier(a.pos, a_cs0, a_cs1, pos(e + 3), remainder);
+                let remainder = if a.param >= 1.0 {
+                    1.0
+                } else {
+                    (b.param - a.param) / (1.0 - a.param)
+                };
+                let (q0, q1, _q2, _q3, _q4) =
+                    split_bezier(a.pos, a_cs0, a_cs1, pos(e + 3), remainder);
                 b_ce0 = q0;
                 b_ce1 = q1;
             }
@@ -1282,7 +1720,8 @@ pub fn copy_path_slice(coords: &CoordList, part: &PathPart, from: f64, to: f64, 
             b_ce1 = pos(b.edge - 1);
         } else {
             let e = b.edge;
-            let (o0, o1, _o2, _o3, _o4) = split_bezier(pos(e), pos(e + 1), pos(e + 2), pos(e + 3), b.param);
+            let (o0, o1, _o2, _o3, _o4) =
+                split_bezier(pos(e), pos(e + 1), pos(e + 2), pos(e + 3), b.param);
             b_ce0 = o0;
             b_ce1 = o1;
         }
@@ -1334,20 +1773,42 @@ pub fn copy_path_slice(coords: &CoordList, part: &PathPart, from: f64, to: f64, 
         push(out, b_ce1, 0);
     }
 
-    push(out, b.pos, if b.at_node { coords[b.edge].flags & COPIED_FLAGS_AT_END } else { 0 });
+    push(
+        out,
+        b.pos,
+        if b.at_node {
+            coords[b.edge].flags & COPIED_FLAGS_AT_END
+        } else {
+            0
+        },
+    );
 }
 
 /// Returns the outline of a pointed line cap, as a closed polygon.
 ///
 /// A pointed cap tapers the line from its full width down to zero over the
 /// length of the cap.
-pub fn pointed_cap_outline(coords: &CoordList, part: &PathPart, cap_start: f64, cap_end: f64, is_end: bool, line_half_width: f64, cap_length: f64) -> CoordList {
-    let tan_angle = if cap_length > 0.0 { line_half_width / cap_length } else { 0.0 };
+pub fn pointed_cap_outline(
+    coords: &CoordList,
+    part: &PathPart,
+    cap_start: f64,
+    cap_end: f64,
+    is_end: bool,
+    line_half_width: f64,
+    cap_length: f64,
+) -> CoordList {
+    let tan_angle = if cap_length > 0.0 {
+        line_half_width / cap_length
+    } else {
+        0.0
+    };
 
     let mut middle = CoordList::new();
     copy_path_slice(coords, part, cap_start, cap_end, &mut middle);
     let size = middle.len();
-    if size < 2 { return middle; }
+    if size < 2 {
+        return middle;
+    }
 
     let mut lengths = vec![0.0f64; size];
     {
@@ -1356,7 +1817,9 @@ pub fn pointed_cap_outline(coords: &CoordList, part: &PathPart, cap_start: f64, 
             let mut last_length = 0.0f64;
             let mut next = 0usize;
             for i in 0..mp.points.len() {
-                if mp.curve_points[i] { continue; }
+                if mp.curve_points[i] {
+                    continue;
+                }
                 let coord_i = mp.coord_index[i];
                 while next <= coord_i && next < size {
                     lengths[next] = last_length;
@@ -1385,8 +1848,16 @@ pub fn pointed_cap_outline(coords: &CoordList, part: &PathPart, cap_start: f64, 
 
     let mut i = 0usize;
     while i < size {
-        let dist_from_start = if is_end { total - lengths[i] } else { lengths[i] };
-        let mut factor = if cap_length > 0.0 { dist_from_start / cap_length } else { 1.0 };
+        let dist_from_start = if is_end {
+            total - lengths[i]
+        } else {
+            lengths[i]
+        };
+        let mut factor = if cap_length > 0.0 {
+            dist_from_start / cap_length
+        } else {
+            1.0
+        };
         factor = factor.min(1.0).max(0.0);
 
         let to_coord_opt = coord_incoming_tangent(&middle, 0, last, false, i);
@@ -1410,7 +1881,9 @@ pub fn pointed_cap_outline(coords: &CoordList, part: &PathPart, cap_start: f64, 
         };
         let right_vector = unit(perp_right(to_next_final));
 
-        let radius = (line_half_width * factor * scaling).max(0.0).min(line_half_width * 2.0);
+        let radius = (line_half_width * factor * scaling)
+            .max(0.0)
+            .min(line_half_width * 2.0);
 
         let pos = middle[i].pos();
         middle[i].flags &= !(coord_flag::HOLE_POINT | coord_flag::CLOSE_POINT);
@@ -1473,7 +1946,11 @@ pub fn pointed_cap_outline(coords: &CoordList, part: &PathPart, cap_start: f64, 
     // Concatenate: down the right side, back up the left side.
     let mut outline = CoordList::with_capacity(2 * right_coords.len());
     for i in 0..right_coords.len() {
-        outline.push(Coord::new(right_coords[i].x, right_coords[i].y, out_flags[i]));
+        outline.push(Coord::new(
+            right_coords[i].x,
+            right_coords[i].y,
+            out_flags[i],
+        ));
     }
 
     let left_size = left_coords.len();
@@ -1482,7 +1959,11 @@ pub fn pointed_cap_outline(coords: &CoordList, part: &PathPart, cap_start: f64, 
         while i > 0 {
             i -= 1;
             if i >= 3 && (out_flags[i - 3] & coord_flag::CURVE_START) != 0 {
-                outline.push(Coord::new(left_coords[i].x, left_coords[i].y, coord_flag::CURVE_START));
+                outline.push(Coord::new(
+                    left_coords[i].x,
+                    left_coords[i].y,
+                    coord_flag::CURVE_START,
+                ));
                 outline.push(Coord::new(left_coords[i - 1].x, left_coords[i - 1].y, 0));
                 outline.push(Coord::new(left_coords[i - 2].x, left_coords[i - 2].y, 0));
                 i -= 2;
@@ -1495,11 +1976,18 @@ pub fn pointed_cap_outline(coords: &CoordList, part: &PathPart, cap_start: f64, 
         while i > 0 {
             i -= 1;
             if i >= 3 && (out_flags[i - 3] & coord_flag::CURVE_START) != 0 {
-                outline.push(Coord::new(left_coords[i].x, left_coords[i].y, coord_flag::CURVE_START));
+                outline.push(Coord::new(
+                    left_coords[i].x,
+                    left_coords[i].y,
+                    coord_flag::CURVE_START,
+                ));
                 outline.push(Coord::new(left_coords[i - 1].x, left_coords[i - 1].y, 0));
                 outline.push(Coord::new(left_coords[i - 2].x, left_coords[i - 2].y, 0));
                 i -= 2;
-            } else if i >= 2 && i == left_size - 2 && (out_flags[i - 2] & coord_flag::CURVE_START) != 0 {
+            } else if i >= 2
+                && i == left_size - 2
+                && (out_flags[i - 2] & coord_flag::CURVE_START) != 0
+            {
                 let flags = outline.last().unwrap().flags | coord_flag::CURVE_START;
                 outline.last_mut().unwrap().flags = flags;
                 outline.push(Coord::new(left_coords[i].x, left_coords[i].y, 0));
@@ -1522,7 +2010,15 @@ pub fn pointed_cap_outline(coords: &CoordList, part: &PathPart, cap_start: f64, 
 /// shift of the border itself, because a corner treats the two
 /// differently. Bezier curves are shifted as curves via [`QBezier::shifted`];
 /// the flags of the coordinates are carried along.
-pub fn shift_coordinates(coords: &CoordList, first: usize, last: usize, closed: bool, main_shift: f64, border_shift: f64, join_style_value: i32) -> CoordList {
+pub fn shift_coordinates(
+    coords: &CoordList,
+    first: usize,
+    last: usize,
+    closed: bool,
+    main_shift: f64,
+    border_shift: f64,
+    join_style_value: i32,
+) -> CoordList {
     const CURVE_THRESHOLD: f32 = 0.03;
     const MAX_OFFSET: usize = 16;
     // LineSymbol::miterLimit() is 1 in Mapper.
@@ -1546,12 +2042,24 @@ pub fn shift_coordinates(coords: &CoordList, first: usize, last: usize, closed: 
 
         let mut vector_in = coord_incoming_tangent(coords, first, last, closed, i);
         let mut vector_out = coord_outgoing_tangent(coords, first, last, closed, i);
-        if vector_in.is_none() { vector_in = vector_out; }
-        if vector_out.is_none() { vector_out = vector_in; }
+        if vector_in.is_none() {
+            vector_in = vector_out;
+        }
+        if vector_out.is_none() {
+            vector_out = vector_in;
+        }
         let ok_in = vector_in.is_some();
         let ok_out = vector_out.is_some();
-        let tangent_in = if ok_in { vector_in.unwrap().normalized() } else { Point::ZERO };
-        let tangent_out = if ok_out { vector_out.unwrap().normalized() } else { Point::ZERO };
+        let tangent_in = if ok_in {
+            vector_in.unwrap().normalized()
+        } else {
+            Point::ZERO
+        };
+        let tangent_out = if ok_out {
+            vector_out.unwrap().normalized()
+        } else {
+            Point::ZERO
+        };
 
         // Always overwritten in one of the branches below. The branches are
         // laid out the way Mapper's are, so that they stay readable side by
@@ -1581,7 +2089,11 @@ pub fn shift_coordinates(coords: &CoordList, first: usize, last: usize, closed: 
                     offset = phi1.tan() * border_shift.abs();
 
                     if i > first && !offset.is_nan() {
-                        push(&mut out, coord + tangent_in.perp_right() * shift + tangent_in * offset, 0);
+                        push(
+                            &mut out,
+                            coord + tangent_in.perp_right() * shift + tangent_in * offset,
+                            0,
+                        );
                         if join_style_value == join_style::ROUND {
                             push(&mut out, coord + middle0.perp_right() * shift, 0);
                         }
@@ -1596,7 +2108,11 @@ pub fn shift_coordinates(coords: &CoordList, first: usize, last: usize, closed: 
                         offset = MITER_LIMIT * main_shift.abs() + phi1.tan() * border_shift.abs();
 
                         if i > first && !offset.is_nan() {
-                            push(&mut out, coord + tangent_in.perp_right() * shift + tangent_in * offset, 0);
+                            push(
+                                &mut out,
+                                coord + tangent_in.perp_right() * shift + tangent_in * offset,
+                                0,
+                            );
                         }
                     } else {
                         let phi = middle0.perp_right().dot(tangent_in).acos();
@@ -1604,14 +2120,21 @@ pub fn shift_coordinates(coords: &CoordList, first: usize, last: usize, closed: 
                     }
                 }
 
-                if offset.is_nan() { offset = 0.0; }
+                if offset.is_nan() {
+                    offset = 0.0;
+                }
                 segment_start = coord + right_vector * shift - tangent_out * offset;
-            } else if i > first + 2 && coords[i - 3].is_curve_start() && coords[i].is_curve_start() {
+            } else if i > first + 2 && coords[i - 3].is_curve_start() && coords[i].is_curve_start()
+            {
                 // Inner side of the corner, both sides are beziers.
                 right_vector = middle0.perp_right();
                 let phi = right_vector.dot(tangent_in).acos();
                 let sin_phi = phi.sin();
-                let inset = if sin_phi > 1.0 / MITER_LIMIT { 1.0 / sin_phi } else { MITER_LIMIT };
+                let inset = if sin_phi > 1.0 / MITER_LIMIT {
+                    1.0 / sin_phi
+                } else {
+                    MITER_LIMIT
+                };
                 segment_start = coord + right_vector * (shift * inset);
             } else {
                 // Inner side of the corner, at most one bezier involved.
@@ -1625,7 +2148,11 @@ pub fn shift_coordinates(coords: &CoordList, first: usize, last: usize, closed: 
                     // Critical case.
                     let len_in = vector_in.unwrap().length();
                     let len_out = vector_out.unwrap().length();
-                    let excess = if offset.is_nan() { 0.0 } else { offset.abs() - len_in.min(len_out) };
+                    let excess = if offset.is_nan() {
+                        0.0
+                    } else {
+                        offset.abs() - len_in.min(len_out)
+                    };
 
                     if excess < 0.0 {
                         segment_start = coord + right_vector * shift - tangent_out * offset;
@@ -1643,7 +2170,12 @@ pub fn shift_coordinates(coords: &CoordList, first: usize, last: usize, closed: 
 
         if coords[i].is_curve_start() && i + 3 <= last {
             if shift > 0.0 {
-                let bezier = QBezier::from_points(coords[i + 3].pos(), coords[i + 2].pos(), coords[i + 1].pos(), coord);
+                let bezier = QBezier::from_points(
+                    coords[i + 3].pos(),
+                    coords[i + 2].pos(),
+                    coords[i + 1].pos(),
+                    coord,
+                );
                 let segments = bezier.shifted(MAX_OFFSET, shift.abs(), CURVE_THRESHOLD);
                 let count = segments.len();
                 for (j, seg) in segments.iter().enumerate().rev() {
@@ -1656,7 +2188,12 @@ pub fn shift_coordinates(coords: &CoordList, first: usize, last: usize, closed: 
                 }
                 let _ = count;
             } else {
-                let bezier = QBezier::from_points(coord, coords[i + 1].pos(), coords[i + 2].pos(), coords[i + 3].pos());
+                let bezier = QBezier::from_points(
+                    coord,
+                    coords[i + 1].pos(),
+                    coords[i + 2].pos(),
+                    coords[i + 3].pos(),
+                );
                 let segments = bezier.shifted(MAX_OFFSET, shift.abs(), CURVE_THRESHOLD);
                 let count = segments.len();
                 for (j, seg) in segments.iter().enumerate() {
@@ -1718,9 +2255,17 @@ mod tests {
         let extent = stroked_path_extent(&coords, &parts, 1.0, PenCap::Flat, PenJoin::Miter);
         // Flat cap: no extension along the line; full extension perpendicular.
         assert!((extent.left() - 0.0).abs() < 1e-6, "left={}", extent.left());
-        assert!((extent.right() - 10.0).abs() < 1e-6, "right={}", extent.right());
+        assert!(
+            (extent.right() - 10.0).abs() < 1e-6,
+            "right={}",
+            extent.right()
+        );
         assert!((extent.top() - -1.0).abs() < 1e-6, "top={}", extent.top());
-        assert!((extent.bottom() - 1.0).abs() < 1e-6, "bottom={}", extent.bottom());
+        assert!(
+            (extent.bottom() - 1.0).abs() < 1e-6,
+            "bottom={}",
+            extent.bottom()
+        );
     }
 
     #[test]
@@ -1728,8 +2273,16 @@ mod tests {
         let coords = vec![Coord::new(0.0, 0.0, 0), Coord::new(10.0, 0.0, 0)];
         let parts = flatten(&coords);
         let extent = stroked_path_extent(&coords, &parts, 1.0, PenCap::Round, PenJoin::Miter);
-        assert!((extent.left() - -1.0).abs() < 1e-6, "left={}", extent.left());
-        assert!((extent.right() - 11.0).abs() < 1e-6, "right={}", extent.right());
+        assert!(
+            (extent.left() - -1.0).abs() < 1e-6,
+            "left={}",
+            extent.left()
+        );
+        assert!(
+            (extent.right() - 11.0).abs() < 1e-6,
+            "right={}",
+            extent.right()
+        );
     }
 
     #[test]
@@ -1757,7 +2310,11 @@ mod tests {
 
     #[test]
     fn copy_path_slice_round_trip_covers_whole_part() {
-        let coords = vec![Coord::new(0.0, 0.0, 0), Coord::new(10.0, 0.0, 0), Coord::new(10.0, 10.0, 0)];
+        let coords = vec![
+            Coord::new(0.0, 0.0, 0),
+            Coord::new(10.0, 0.0, 0),
+            Coord::new(10.0, 10.0, 0),
+        ];
         let parts = flatten(&coords);
         let mut out = CoordList::new();
         copy_path_slice(&coords, &parts[0], 0.0, parts[0].length(), &mut out);
@@ -1787,8 +2344,11 @@ impl Path {
         for cmd in &self.commands {
             match *cmd {
                 PathCommand::MoveTo(p) => {
-                    if current.len() > 1 { result.push(std::mem::take(&mut current)); }
-                    else { current.clear(); }
+                    if current.len() > 1 {
+                        result.push(std::mem::take(&mut current));
+                    } else {
+                        current.clear();
+                    }
                     current.push(p);
                     last = p;
                 }
@@ -1811,7 +2371,9 @@ impl Path {
                 }
             }
         }
-        if current.len() > 1 { result.push(current); }
+        if current.len() > 1 {
+            result.push(current);
+        }
         result
     }
 }
@@ -1838,7 +2400,9 @@ impl Path {
         let mut crossings = 0u32;
         for polygon in self.to_subpath_polygons_tol(CONTAINS_TOLERANCE) {
             let n = polygon.len();
-            if n < 2 { continue; }
+            if n < 2 {
+                continue;
+            }
             for i in 0..n {
                 let a = polygon[i];
                 let b = polygon[(i + 1) % n];

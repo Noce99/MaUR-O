@@ -52,18 +52,27 @@ mod tests {
     #[test]
     fn a_paragraph_is_folded_at_the_width() {
         let text = "one two three four five six seven eight nine ten";
-        assert_eq!(wrap(text, 20, ""), "one two three four\nfive six seven eight\nnine ten");
+        assert_eq!(
+            wrap(text, 20, ""),
+            "one two three four\nfive six seven eight\nnine ten"
+        );
     }
 
     #[test]
     fn the_indent_counts_towards_the_width() {
-        assert_eq!(wrap("one two three four", 12, "  "), "  one two\n  three four");
+        assert_eq!(
+            wrap("one two three four", 12, "  "),
+            "  one two\n  three four"
+        );
     }
 
     #[test]
     fn a_word_longer_than_the_width_is_left_alone_rather_than_cut() {
         // Breaking a path or a file name in half helps nobody.
-        assert_eq!(wrap("a supercalifragilistic b", 10, ""), "a\nsupercalifragilistic\nb");
+        assert_eq!(
+            wrap("a supercalifragilistic b", 10, ""),
+            "a\nsupercalifragilistic\nb"
+        );
     }
 
     #[test]

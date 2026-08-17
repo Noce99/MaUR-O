@@ -53,9 +53,8 @@ pub struct Rendering {
 /// Renders `map_file` at `resolution` pixels per meter on the ground, with a
 /// white frame of `frame` meters on each side.
 pub fn render_map(map_file: &Path, resolution: f64, frame: f64) -> Result<Rendering, Error> {
-    let (map, warnings) = read_xml_map(map_file).map_err(|e| {
-        Error::Read(format!("Failed to load {}: {}", map_file.display(), e))
-    })?;
+    let (map, warnings) = read_xml_map(map_file)
+        .map_err(|e| Error::Read(format!("Failed to load {}: {}", map_file.display(), e)))?;
 
     // Map coordinates are given in mm on the paper. The map scale relates
     // these paper units to the ground.
@@ -69,7 +68,9 @@ pub fn render_map(map_file: &Path, resolution: f64, frame: f64) -> Result<Render
     // empty map, the extent is a null rect at the origin, i.e. the frame
     // alone determines the size of the image.
     let frame_mm = frame * mm_per_meter;
-    let extent = renderer.extent().adjusted(-frame_mm, -frame_mm, frame_mm, frame_mm);
+    let extent = renderer
+        .extent()
+        .adjusted(-frame_mm, -frame_mm, frame_mm, frame_mm);
 
     let width = (extent.width() * pixel_per_mm).round();
     let height = (extent.height() * pixel_per_mm).round();

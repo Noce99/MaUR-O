@@ -96,7 +96,11 @@ struct PathBuilder {
 
 impl PathBuilder {
     fn new(mm_per_meter: f64) -> PathBuilder {
-        PathBuilder { mm_per_meter, coords: Vec::new(), part_start: 0 }
+        PathBuilder {
+            mm_per_meter,
+            coords: Vec::new(),
+            part_start: 0,
+        }
     }
 
     fn to_coord(&self, point: Point) -> Coord {
@@ -192,7 +196,11 @@ fn add_s_curve(builder: &mut PathBuilder, size: f64) {
     let h = size / 2.0;
     builder.move_to(Point::new(-h / 2.0, -h));
     builder.curve_to(Point::new(h, -h), Point::new(h, 0.0), Point::new(0.0, 0.0));
-    builder.curve_to(Point::new(-h, 0.0), Point::new(-h, h), Point::new(h / 2.0, h));
+    builder.curve_to(
+        Point::new(-h, 0.0),
+        Point::new(-h, h),
+        Point::new(h / 2.0, h),
+    );
 }
 
 /// An open polyline with three sharp corners.
@@ -371,9 +379,11 @@ fn has_rotatable_fill_pattern(map: &Map, symbol: &Symbol, depth: usize) -> bool 
 fn minimum_length(map: &Map, symbol: &Symbol, depth: usize) -> f64 {
     match symbol {
         Symbol::Line(line) => line.minimum_length,
-        Symbol::Combined(combined) if depth < MAX_PART_DEPTH => parts(map, combined)
-            .iter()
-            .fold(0.0, |largest: f64, part| largest.max(minimum_length(map, part, depth + 1))),
+        Symbol::Combined(combined) if depth < MAX_PART_DEPTH => {
+            parts(map, combined).iter().fold(0.0, |largest: f64, part| {
+                largest.max(minimum_length(map, part, depth + 1))
+            })
+        }
         _ => 0.0,
     }
 }
@@ -384,9 +394,11 @@ fn minimum_length(map: &Map, symbol: &Symbol, depth: usize) -> f64 {
 fn minimum_area(map: &Map, symbol: &Symbol, depth: usize) -> i32 {
     match symbol {
         Symbol::Area(area) => area.minimum_area,
-        Symbol::Combined(combined) if depth < MAX_PART_DEPTH => parts(map, combined)
-            .iter()
-            .fold(0, |largest, part| largest.max(minimum_area(map, part, depth + 1))),
+        Symbol::Combined(combined) if depth < MAX_PART_DEPTH => {
+            parts(map, combined).iter().fold(0, |largest, part| {
+                largest.max(minimum_area(map, part, depth + 1))
+            })
+        }
         _ => 0,
     }
 }
@@ -452,18 +464,34 @@ fn plain_text_name(name: &str) -> String {
             _ => {}
         }
     }
-    plain.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&")
+    plain
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
 }
 
 /// A file name component which is safe on all supported platforms.
 fn sanitized(text: &str) -> String {
     text.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
 /// A path object of the given shape and size, drawn with `symbol`.
-fn make_path(symbol_index: usize, symbol_id: i32, mm_per_meter: f64, shape: ShapeFunction, size: f64) -> Object {
+fn make_path(
+    symbol_index: usize,
+    symbol_id: i32,
+    mm_per_meter: f64,
+    shape: ShapeFunction,
+    size: f64,
+) -> Object {
     let mut builder = PathBuilder::new(mm_per_meter);
     shape(&mut builder, size);
     let mut object = Object::new(ObjectKind::Path(PathObject::default()));
@@ -495,13 +523,25 @@ fn add_minimum_length_rows(sheet: &mut Sheet, symbol: &SymbolRef, mm_per_meter: 
     }
 
     let minimum_length_m = minimum_length_mm / mm_per_meter;
-    let row = sheet.add_row(format!("minimum length ({} m)", label_number_3(minimum_length_m)));
+    let row = sheet.add_row(format!(
+        "minimum length ({} m)",
+        label_number_3(minimum_length_m)
+    ));
     for (column, factor) in [0.5, 1.5].into_iter().enumerate() {
         sheet.add(
-            make_path(symbol.index, symbol.id, mm_per_meter, add_straight_line, factor * minimum_length_m),
+            make_path(
+                symbol.index,
+                symbol.id,
+                mm_per_meter,
+                add_straight_line,
+                factor * minimum_length_m,
+            ),
             row,
             column,
-            format!("straight line, {}% of the minimum length", label_number(factor * 100.0)),
+            format!(
+                "straight line, {}% of the minimum length",
+                label_number(factor * 100.0)
+            ),
         );
     }
     sheet.notes.push(
@@ -521,14 +561,26 @@ fn add_minimum_area_rows(sheet: &mut Sheet, symbol: &SymbolRef, mm_per_meter: f6
     }
 
     let minimum_area_m2 = minimum_area_mm2 / (mm_per_meter * mm_per_meter);
-    let row = sheet.add_row(format!("minimum area ({} m2)", label_number_3(minimum_area_m2)));
+    let row = sheet.add_row(format!(
+        "minimum area ({} m2)",
+        label_number_3(minimum_area_m2)
+    ));
     for (column, factor) in [0.5, 1.5].into_iter().enumerate() {
         // A square of the requested area.
         sheet.add(
-            make_path(symbol.index, symbol.id, mm_per_meter, add_square, (factor * minimum_area_m2).sqrt()),
+            make_path(
+                symbol.index,
+                symbol.id,
+                mm_per_meter,
+                add_square,
+                (factor * minimum_area_m2).sqrt(),
+            ),
             row,
             column,
-            format!("square, {}% of the minimum area", label_number(factor * 100.0)),
+            format!(
+                "square, {}% of the minimum area",
+                label_number(factor * 100.0)
+            ),
         );
     }
     sheet.notes.push(
@@ -601,7 +653,12 @@ fn add_area_shapes(sheet: &mut Sheet, symbol: &SymbolRef, mm_per_meter: f64) {
                         path.pattern_rotation = rotation_step(step);
                     }
                 }
-                sheet.add(object, row, column, format!("{label}, {} m", label_number(size)));
+                sheet.add(
+                    object,
+                    row,
+                    column,
+                    format!("{label}, {} m", label_number(size)),
+                );
             }
         }
     }
@@ -644,7 +701,9 @@ fn add_point_objects(sheet: &mut Sheet, symbol: &SymbolRef) {
     }
 
     if !rotatable {
-        sheet.notes.push("This point symbol is not rotatable, so a single object was generated.".to_string());
+        sheet.notes.push(
+            "This point symbol is not rotatable, so a single object was generated.".to_string(),
+        );
     }
 }
 
@@ -704,7 +763,9 @@ fn make_sheet(map: &Map, symbol: &SymbolRef, mm_per_meter: f64) -> Sheet {
             // personality, or both. Every contained personality gets its own
             // set of shapes.
             for size in NOMINAL_SIZE {
-                sheet.column_labels.push(format!("{} m", label_number(size)));
+                sheet
+                    .column_labels
+                    .push(format!("{} m", label_number(size)));
             }
             if types & symbol_type::LINE != 0 {
                 add_line_shapes(&mut sheet, symbol, mm_per_meter);
@@ -739,8 +800,11 @@ fn lay_out(map: &Map, sheet: &mut Sheet) {
         num_rows = num_rows.max(cell.row + 1);
     }
 
-    let extents: Vec<crate::geometry::Rect> =
-        sheet.objects.iter().map(|object| Renderer::object_extent(map, object)).collect();
+    let extents: Vec<crate::geometry::Rect> = sheet
+        .objects
+        .iter()
+        .map(|object| Renderer::object_extent(map, object))
+        .collect();
 
     let mut column_width = vec![0.0f64; num_columns];
     let mut row_height = vec![0.0f64; num_rows];
@@ -794,7 +858,9 @@ impl Sheet {
         text.push_str(&format!("Source map:  {}\n", source.display()));
         text.push_str(&format!("Map scale:   1:{scale_denominator}\n"));
         text.push('\n');
-        text.push_str("The objects are arranged on a grid. The origin of the map is the top left\n");
+        text.push_str(
+            "The objects are arranged on a grid. The origin of the map is the top left\n",
+        );
         text.push_str("corner of the first cell; rows run downwards, columns run to the right.\n");
         text.push_str("All sizes are given in meters on the ground.\n");
         text.push('\n');
@@ -813,7 +879,12 @@ impl Sheet {
 
         text.push_str("Cells:\n");
         for cell in &self.cells {
-            text.push_str(&format!("  r{}c{}: {}\n", cell.row + 1, cell.column + 1, cell.description));
+            text.push_str(&format!(
+                "  r{}c{}: {}\n",
+                cell.row + 1,
+                cell.column + 1,
+                cell.description
+            ));
         }
 
         if !self.notes.is_empty() {
@@ -852,7 +923,11 @@ pub struct Summary {
 /// overwritten, but files belonging to symbols the source no longer has are
 /// left where they are: this writes maps, and deciding that a file in a
 /// folder it does not own has become stale is not its call to make.
-pub fn create_maps(source: &Path, into: &Path, mut progress: impl FnMut(usize, usize)) -> Result<Summary, String> {
+pub fn create_maps(
+    source: &Path,
+    into: &Path,
+    mut progress: impl FnMut(usize, usize),
+) -> Result<Summary, String> {
     let (mut map, warnings) = xml_reader::read_xml_map(source)?;
     map.resolve_references();
     let fragments = xml_reader::read_fragments(source)?;
@@ -936,8 +1011,11 @@ fn write_symbol(
     // carry them for the parts to resolve. Renumbered from zero, since a
     // part is named by its position in the list.
     let wanted = wanted_symbols(fragments, id);
-    let mapping: std::collections::HashMap<i32, i32> =
-        wanted.iter().enumerate().map(|(new, &old)| (old, new as i32)).collect();
+    let mapping: std::collections::HashMap<i32, i32> = wanted
+        .iter()
+        .enumerate()
+        .map(|(new, &old)| (old, new as i32))
+        .collect();
     let symbols: Vec<Fragment> = wanted
         .iter()
         .filter_map(|old| fragments.symbol(*old))
@@ -1034,7 +1112,11 @@ fn wanted_symbols(fragments: &Fragments, id: i32) -> Vec<i32> {
 /// The renumbering is not cosmetic: a part reference is a position in the
 /// symbol list, so a symbol which keeps the number it had in a map of 169
 /// symbols refers to nothing at all in a map of three.
-fn renumbered(fragment: &Fragment, new_id: i32, mapping: &std::collections::HashMap<i32, i32>) -> Fragment {
+fn renumbered(
+    fragment: &Fragment,
+    new_id: i32,
+    mapping: &std::collections::HashMap<i32, i32>,
+) -> Fragment {
     let text = &fragment.text;
     let head_end = text.find('>').map_or(text.len(), |at| at + 1);
     let head = &text[..head_end];
@@ -1070,7 +1152,10 @@ fn renumbered(fragment: &Fragment, new_id: i32, mapping: &std::collections::Hash
     }
     out.push_str(rest);
 
-    Fragment { id: new_id, text: out }
+    Fragment {
+        id: new_id,
+        text: out,
+    }
 }
 
 #[cfg(test)]
@@ -1162,7 +1247,10 @@ mod tests {
             colors: Vec::new(),
             symbols: symbols
                 .iter()
-                .map(|(id, text)| Fragment { id: *id, text: (*text).to_string() })
+                .map(|(id, text)| Fragment {
+                    id: *id,
+                    text: (*text).to_string(),
+                })
                 .collect(),
         }
     }
@@ -1182,22 +1270,41 @@ mod tests {
     fn the_parts_are_renumbered_to_where_they_end_up() {
         let set = symbol_set();
         let wanted = wanted_symbols(&set, 3);
-        let mapping: std::collections::HashMap<i32, i32> =
-            wanted.iter().enumerate().map(|(new, &old)| (old, new as i32)).collect();
+        let mapping: std::collections::HashMap<i32, i32> = wanted
+            .iter()
+            .enumerate()
+            .map(|(new, &old)| (old, new as i32))
+            .collect();
         let combined = renumbered(set.symbol(3).unwrap(), 2, &mapping);
         // A part is a position in the symbol list, so 2 and 1 of a map of 169
         // symbols become 1 and 0 of a map of three.
         assert!(combined.text.contains("id=\"2\""), "{}", combined.text);
-        assert!(combined.text.contains("<part symbol=\"1\"/><part symbol=\"0\"/>"), "{}", combined.text);
+        assert!(
+            combined
+                .text
+                .contains("<part symbol=\"1\"/><part symbol=\"0\"/>"),
+            "{}",
+            combined.text
+        );
         // Nothing else about the symbol is touched.
-        assert!(combined.text.contains("code=\"104\" name=\"D\""), "{}", combined.text);
+        assert!(
+            combined.text.contains("code=\"104\" name=\"D\""),
+            "{}",
+            combined.text
+        );
     }
 
     #[test]
     fn a_symbol_which_came_without_an_id_is_given_one() {
-        let fragment = Fragment { id: -1, text: "<symbol type=\"2\" code=\"1\"></symbol>".to_string() };
+        let fragment = Fragment {
+            id: -1,
+            text: "<symbol type=\"2\" code=\"1\"></symbol>".to_string(),
+        };
         let renamed = renumbered(&fragment, 0, &std::collections::HashMap::new());
-        assert_eq!(renamed.text, "<symbol id=\"0\" type=\"2\" code=\"1\"></symbol>");
+        assert_eq!(
+            renamed.text,
+            "<symbol id=\"0\" type=\"2\" code=\"1\"></symbol>"
+        );
     }
 
     #[test]

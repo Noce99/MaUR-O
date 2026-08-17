@@ -197,7 +197,11 @@ fn parse_coord(cursor: &mut &str) -> Option<Coord> {
         flags_tok.parse().unwrap_or(0)
     };
     *cursor = cursor.trim_start_matches(|c: char| c.is_whitespace() || c == ';');
-    Some(Coord::new(MM_PER_UNIT * x as f64, MM_PER_UNIT * y as f64, flags))
+    Some(Coord::new(
+        MM_PER_UNIT * x as f64,
+        MM_PER_UNIT * y as f64,
+        flags,
+    ))
 }
 
 /// Converts CMYK to RGB the way `QColor::toRgb()` does for a color created
@@ -306,106 +310,110 @@ impl<'a> XmlMapReader<'a> {
     }
 
     fn read_map(&mut self) -> Result<(), String> {
-        let mut handler = |this: &mut Self, name: &str, start: &BytesStart| -> Result<bool, String> {
-            match name {
-                "georeferencing" => {
-                    let scale = attr_int(start, "scale", 0);
-                    if scale > 0 {
-                        this.map.scale_denominator = scale;
+        let mut handler =
+            |this: &mut Self, name: &str, start: &BytesStart| -> Result<bool, String> {
+                match name {
+                    "georeferencing" => {
+                        let scale = attr_int(start, "scale", 0);
+                        if scale > 0 {
+                            this.map.scale_denominator = scale;
+                        }
+                        this.xml.skip_current()?;
+                        Ok(true)
                     }
-                    this.xml.skip_current()?;
-                    Ok(true)
+                    "colors" => {
+                        this.read_colors()?;
+                        Ok(true)
+                    }
+                    "symbols" => {
+                        this.read_symbols()?;
+                        Ok(true)
+                    }
+                    "parts" => {
+                        this.read_parts()?;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
                 }
-                "colors" => {
-                    this.read_colors()?;
-                    Ok(true)
-                }
-                "symbols" => {
-                    this.read_symbols()?;
-                    Ok(true)
-                }
-                "parts" => {
-                    this.read_parts()?;
-                    Ok(true)
-                }
-                _ => Ok(false),
-            }
-        };
+            };
         self.read_children(&mut handler)
     }
 
     fn read_colors(&mut self) -> Result<(), String> {
-        let mut handler = |this: &mut Self, name: &str, start: &BytesStart| -> Result<bool, String> {
-            if name != "color" {
-                return Ok(false);
-            }
+        let mut handler =
+            |this: &mut Self, name: &str, start: &BytesStart| -> Result<bool, String> {
+                if name != "color" {
+                    return Ok(false);
+                }
 
-            let priority = attr_int(start, "priority", -1);
-            let mut color = Color {
-                name: attr_str(start, "name").unwrap_or_default(),
-                opacity: attr_double(start, "opacity", 1.0),
-                ..Color::default()
-            };
+                let priority = attr_int(start, "priority", -1);
+                let mut color = Color {
+                    name: attr_str(start, "name").unwrap_or_default(),
+                    opacity: attr_double(start, "opacity", 1.0),
+                    ..Color::default()
+                };
 
-            let c = attr_double(start, "c", 0.0) as f32;
-            let m = attr_double(start, "m", 0.0) as f32;
-            let y = attr_double(start, "y", 0.0) as f32;
-            let k = attr_double(start, "k", 0.0) as f32;
-            let has_cmyk = has_attr(start, "c") || has_attr(start, "k");
+                let c = attr_double(start, "c", 0.0) as f32;
+                let m = attr_double(start, "m", 0.0) as f32;
+                let y = attr_double(start, "y", 0.0) as f32;
+                let k = attr_double(start, "k", 0.0) as f32;
+                let has_cmyk = has_attr(start, "c") || has_attr(start, "k");
 
-            let mut rgb: Option<(f32, f32, f32)> = None;
-            let mut cmyk_from_rgb = false;
-            loop {
-                match this.xml.next()? {
-                    Ev::Start(child) => {
-                        let cname = local_name(&child);
-                        if cname == "rgb" {
-                            let r = attr_double(&child, "r", 0.0) as f32;
-                            let g = attr_double(&child, "g", 0.0) as f32;
-                            let b = attr_double(&child, "b", 0.0) as f32;
-                            rgb = Some((r, g, b));
-                        } else if cname == "cmyk" {
-                            cmyk_from_rgb = attr_str(&child, "method").as_deref() == Some("rgb");
+                let mut rgb: Option<(f32, f32, f32)> = None;
+                let mut cmyk_from_rgb = false;
+                loop {
+                    match this.xml.next()? {
+                        Ev::Start(child) => {
+                            let cname = local_name(&child);
+                            if cname == "rgb" {
+                                let r = attr_double(&child, "r", 0.0) as f32;
+                                let g = attr_double(&child, "g", 0.0) as f32;
+                                let b = attr_double(&child, "b", 0.0) as f32;
+                                rgb = Some((r, g, b));
+                            } else if cname == "cmyk" {
+                                cmyk_from_rgb =
+                                    attr_str(&child, "method").as_deref() == Some("rgb");
+                            }
+                            this.xml.skip_current()?;
                         }
-                        this.xml.skip_current()?;
+                        Ev::End | Ev::Eof => break,
+                        Ev::Text(_) => {}
                     }
-                    Ev::End | Ev::Eof => break,
-                    Ev::Text(_) => {}
                 }
-            }
 
-            if has_cmyk && !cmyk_from_rgb {
-                color.rgb = cmyk_to_rgb(c, m, y, k);
-            } else if let Some(rgb) = rgb {
-                color.rgb = rgb;
-            }
-
-            if priority < 0 {
-                this.map.colors.push(color);
-            } else {
-                let idx = priority as usize;
-                if idx >= this.map.colors.len() {
-                    this.map.colors.resize_with(idx + 1, Color::default);
+                if has_cmyk && !cmyk_from_rgb {
+                    color.rgb = cmyk_to_rgb(c, m, y, k);
+                } else if let Some(rgb) = rgb {
+                    color.rgb = rgb;
                 }
-                this.map.colors[idx] = color;
-            }
-            Ok(true)
-        };
+
+                if priority < 0 {
+                    this.map.colors.push(color);
+                } else {
+                    let idx = priority as usize;
+                    if idx >= this.map.colors.len() {
+                        this.map.colors.resize_with(idx + 1, Color::default);
+                    }
+                    this.map.colors[idx] = color;
+                }
+                Ok(true)
+            };
         self.read_children(&mut handler)
     }
 
     fn read_symbols(&mut self) -> Result<(), String> {
-        let mut handler = |this: &mut Self, name: &str, start: &BytesStart| -> Result<bool, String> {
-            if name != "symbol" {
-                return Ok(false);
-            }
-            let id = attr_int(start, "id", -1);
-            if let Some(symbol) = this.read_symbol(start)? {
-                this.map.symbols.push(symbol);
-                this.map.symbol_ids.push(id);
-            }
-            Ok(true)
-        };
+        let mut handler =
+            |this: &mut Self, name: &str, start: &BytesStart| -> Result<bool, String> {
+                if name != "symbol" {
+                    return Ok(false);
+                }
+                let id = attr_int(start, "id", -1);
+                if let Some(symbol) = this.read_symbol(start)? {
+                    this.map.symbols.push(symbol);
+                    this.map.symbol_ids.push(id);
+                }
+                Ok(true)
+            };
         self.read_children(&mut handler)
     }
 
@@ -417,11 +425,41 @@ impl<'a> XmlMapReader<'a> {
         let is_helper_symbol = attr_bool(start, "is_helper_symbol", false);
 
         let mut symbol = match sym_type {
-            symbol_type::POINT => Symbol::Point(PointSymbol { name, code, is_hidden, is_helper_symbol, ..PointSymbol::new() }),
-            symbol_type::LINE => Symbol::Line(LineSymbol { name, code, is_hidden, is_helper_symbol, ..LineSymbol::default() }),
-            symbol_type::AREA => Symbol::Area(AreaSymbol { name, code, is_hidden, is_helper_symbol, ..AreaSymbol::new() }),
-            symbol_type::TEXT => Symbol::Text(TextSymbol { name, code, is_hidden, is_helper_symbol, ..TextSymbol::default() }),
-            symbol_type::COMBINED => Symbol::Combined(CombinedSymbol { name, code, is_hidden, is_helper_symbol, ..CombinedSymbol::default() }),
+            symbol_type::POINT => Symbol::Point(PointSymbol {
+                name,
+                code,
+                is_hidden,
+                is_helper_symbol,
+                ..PointSymbol::new()
+            }),
+            symbol_type::LINE => Symbol::Line(LineSymbol {
+                name,
+                code,
+                is_hidden,
+                is_helper_symbol,
+                ..LineSymbol::default()
+            }),
+            symbol_type::AREA => Symbol::Area(AreaSymbol {
+                name,
+                code,
+                is_hidden,
+                is_helper_symbol,
+                ..AreaSymbol::new()
+            }),
+            symbol_type::TEXT => Symbol::Text(TextSymbol {
+                name,
+                code,
+                is_hidden,
+                is_helper_symbol,
+                ..TextSymbol::default()
+            }),
+            symbol_type::COMBINED => Symbol::Combined(CombinedSymbol {
+                name,
+                code,
+                is_hidden,
+                is_helper_symbol,
+                ..CombinedSymbol::default()
+            }),
             _ => {
                 self.warn(format!("Skipping a symbol of unknown type {}.", sym_type));
                 self.xml.skip_current()?;
@@ -563,7 +601,8 @@ impl<'a> XmlMapReader<'a> {
             l.mid_symbols_per_spot = attr_int(start, "mid_symbols_per_spot", 1);
             l.mid_symbol_distance = attr_length(start, "mid_symbol_distance", 0.0);
             l.mid_symbol_placement = attr_int(start, "mid_symbol_placement", 0);
-            l.suppress_dash_symbol_at_ends = attr_bool(start, "suppress_dash_symbol_at_ends", false);
+            l.suppress_dash_symbol_at_ends =
+                attr_bool(start, "suppress_dash_symbol_at_ends", false);
             l.scale_dash_symbol = attr_str(start, "scale_dash_symbol").as_deref() != Some("false");
         }
 
@@ -659,7 +698,11 @@ impl<'a> XmlMapReader<'a> {
         }
     }
 
-    fn read_fill_pattern(&mut self, start: &BytesStart, pattern: &mut FillPattern) -> Result<(), String> {
+    fn read_fill_pattern(
+        &mut self,
+        start: &BytesStart,
+        pattern: &mut FillPattern,
+    ) -> Result<(), String> {
         pattern.pattern_type = attr_int(start, "type", fill_pattern_type::LINE);
         pattern.no_clipping = attr_int(start, "no_clipping", 0) & 3;
         // Mapper reads the pattern angle as a float, and the rounding shifts
@@ -784,33 +827,36 @@ impl<'a> XmlMapReader<'a> {
     }
 
     fn read_parts(&mut self) -> Result<(), String> {
-        let mut handler = |this: &mut Self, name: &str, _start: &BytesStart| -> Result<bool, String> {
-            if name != "part" {
-                return Ok(false);
-            }
-            let mut inner = |this2: &mut Self, child: &str, _s: &BytesStart| -> Result<bool, String> {
-                if child != "objects" {
+        let mut handler =
+            |this: &mut Self, name: &str, _start: &BytesStart| -> Result<bool, String> {
+                if name != "part" {
                     return Ok(false);
                 }
-                this2.read_objects()?;
+                let mut inner =
+                    |this2: &mut Self, child: &str, _s: &BytesStart| -> Result<bool, String> {
+                        if child != "objects" {
+                            return Ok(false);
+                        }
+                        this2.read_objects()?;
+                        Ok(true)
+                    };
+                this.read_children(&mut inner)?;
                 Ok(true)
             };
-            this.read_children(&mut inner)?;
-            Ok(true)
-        };
         self.read_children(&mut handler)
     }
 
     fn read_objects(&mut self) -> Result<(), String> {
-        let mut handler = |this: &mut Self, name: &str, start: &BytesStart| -> Result<bool, String> {
-            if name != "object" {
-                return Ok(false);
-            }
-            if let Some(object) = this.read_object(start)? {
-                this.map.objects.push(object);
-            }
-            Ok(true)
-        };
+        let mut handler =
+            |this: &mut Self, name: &str, start: &BytesStart| -> Result<bool, String> {
+                if name != "object" {
+                    return Ok(false);
+                }
+                if let Some(object) = this.read_object(start)? {
+                    this.map.objects.push(object);
+                }
+                Ok(true)
+            };
         self.read_children(&mut handler)
     }
 
@@ -983,7 +1029,9 @@ pub fn read_fragments(path: &Path) -> Result<Fragments, String> {
 
     loop {
         let begins = reader.buffer_position() as usize;
-        let event = reader.read_event().map_err(|e| format!("{}: {e}", path.display()))?;
+        let event = reader
+            .read_event()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         let (start, closes) = match &event {
             Event::Start(start) => (Some(start.clone()), false),
             // A self-closing element opens and closes in one event.
@@ -1015,7 +1063,11 @@ pub fn read_fragments(path: &Path) -> Result<Fragments, String> {
             if let Some((from, at, id, is_symbol)) = capture {
                 if at == depth {
                     let text = content[from..reader.buffer_position() as usize].to_string();
-                    let list = if is_symbol { &mut fragments.symbols } else { &mut fragments.colors };
+                    let list = if is_symbol {
+                        &mut fragments.symbols
+                    } else {
+                        &mut fragments.colors
+                    };
                     list.push(Fragment { id, text });
                     capture = None;
                 }

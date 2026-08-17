@@ -39,8 +39,8 @@ use maur_o::archive_info;
 use maur_o::differences::{self, Options};
 use maur_o::naming::{self, Plan};
 use maur_o::progress::{stage, Progress};
-use maur_o::report;
 use maur_o::render::{render_map, save_pixmap, DEFAULT_FRAME, DEFAULT_RESOLUTION};
+use maur_o::report;
 
 /// How many stages a run has, for the headings.
 const STAGES: usize = 3;
@@ -144,13 +144,17 @@ fn read_contents(archive: &Path) -> Result<Contents, String> {
         if name.starts_with("__MACOSX/") || name.contains("/.") || name.starts_with('.') {
             continue;
         }
-        let Some((parent, file_name)) = parent_and_name(&name) else { continue };
+        let Some((parent, file_name)) = parent_and_name(&name) else {
+            continue;
+        };
         let (folder, root) = match parent.rfind('/') {
             Some(cut) => (&parent[cut + 1..], &parent[..cut + 1]),
             None => (parent, ""),
         };
         let lower = file_name.to_ascii_lowercase();
-        if folder.eq_ignore_ascii_case("maps") && (lower.ends_with(".omap") || lower.ends_with(".xmap")) {
+        if folder.eq_ignore_ascii_case("maps")
+            && (lower.ends_with(".omap") || lower.ends_with(".xmap"))
+        {
             roots.insert(root.to_string());
             maps.push(file_name.to_string());
         } else if folder.eq_ignore_ascii_case("expected") && lower.ends_with(".png") {
@@ -171,7 +175,11 @@ fn read_contents(archive: &Path) -> Result<Contents, String> {
         ));
     }
     let root = roots.into_iter().next().unwrap_or_default();
-    Ok(Contents { root, maps, expected })
+    Ok(Contents {
+        root,
+        maps,
+        expected,
+    })
 }
 
 /// Where a rendering setting came from, for `info.txt`'s own record of the run.
@@ -218,8 +226,14 @@ fn write_info(
     let mut text = format!("Benchmark settings: {title}\n\n");
     text.push_str(&format!("  archive     {}\n", args.archive.display()));
     text.push_str(&format!("  results     {}\n", run.display()));
-    text.push_str(&format!("  started     {}\n", started.format("%Y-%m-%d %H:%M:%S %z")));
-    text.push_str(&format!("  tool        benchmark {}\n", env!("CARGO_PKG_VERSION")));
+    text.push_str(&format!(
+        "  started     {}\n",
+        started.format("%Y-%m-%d %H:%M:%S %z")
+    ));
+    text.push_str(&format!(
+        "  tool        benchmark {}\n",
+        env!("CARGO_PKG_VERSION")
+    ));
     text.push_str(&format!("  maps        {maps} in the archive\n"));
     if args.names_only {
         text.push_str("  mode        --names-only: the names were checked, nothing was rendered\n");
@@ -227,10 +241,11 @@ fn write_info(
 
     // Each setting is its value in words and what the value does, so that the
     // file answers "what was this run" without a manual next to it.
-    let sections: [Section; 3] = [
-        (
-            "Rendering",
-            vec![
+    let sections: [Section; 3] =
+        [
+            (
+                "Rendering",
+                vec![
                 (
                     "resolution",
                     format!("{} pixels per meter on the ground ({})", resolution.0, resolution.1),
@@ -262,10 +277,10 @@ fn write_info(
                         .to_string(),
                 ),
             ],
-        ),
-        (
-            "Comparison",
-            vec![
+            ),
+            (
+                "Comparison",
+                vec![
                 (
                     "tolerance",
                     args.tolerance.to_string(),
@@ -301,10 +316,10 @@ fn write_info(
                         .to_string(),
                 ),
             ],
-        ),
-        (
-            "Difference report",
-            vec![
+            ),
+            (
+                "Difference report",
+                vec![
                 (
                     "crops",
                     if args.crops == 0 {
@@ -350,8 +365,8 @@ fn write_info(
                         .to_string(),
                 ),
             ],
-        ),
-    ];
+            ),
+        ];
 
     // Wide enough for the longest name, so the values line up down the whole
     // file rather than down one section of it.
@@ -383,7 +398,11 @@ fn write_info(
 fn write_naming_report(archive: &Path, plan: &Plan, path: &Path) -> Result<(), String> {
     let problems = plan.problems();
     let mut text = format!("Naming problems in {}\n\n", archive.display());
-    text.push_str(&format!("{} problems, of {} kinds:\n", problems.len(), plan.summary().len()));
+    text.push_str(&format!(
+        "{} problems, of {} kinds:\n",
+        problems.len(),
+        plan.summary().len()
+    ));
     for (kind, count) in plan.summary() {
         text.push_str(&format!("  {count:>5}  {kind}\n"));
     }
@@ -400,7 +419,8 @@ fn write_corrected(archive: &Path, contents: &Contents, plan: &Plan) -> Result<P
     let corrected = archive.with_file_name(format!("{stem}_corrected.zip"));
 
     let source = std::fs::File::open(archive).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(source)).map_err(|e| e.to_string())?;
+    let mut zip =
+        zip::ZipArchive::new(std::io::BufReader::new(source)).map_err(|e| e.to_string())?;
     let target = std::fs::File::create(&corrected)
         .map_err(|e| format!("cannot write {}: {e}", corrected.display()))?;
     let mut writer = zip::ZipWriter::new(std::io::BufWriter::new(target));
@@ -430,7 +450,9 @@ fn write_corrected(archive: &Path, contents: &Contents, plan: &Plan) -> Result<P
         .unwrap_or_else(|| name.clone());
         // Copied compressed as it is: the payload is unchanged, only its name
         // is, and these archives are hundreds of megabytes.
-        writer.raw_copy_file_rename(entry, renamed).map_err(|e| e.to_string())?;
+        writer
+            .raw_copy_file_rename(entry, renamed)
+            .map_err(|e| e.to_string())?;
     }
     writer.finish().map_err(|e| e.to_string())?;
     Ok(corrected)
@@ -450,12 +472,12 @@ fn extract(archive: &Path, contents: &Contents, plan: &Plan, into: &Path) -> Res
         }
         let name = entry.name().replace('\\', "/");
         let target = match parent_and_name(&name) {
-            Some((parent, file_name)) if parent == format!("{}maps", contents.root) => {
-                plan.corrected_map(file_name).map(|c| into.join("maps").join(c))
-            }
-            Some((parent, file_name)) if parent == format!("{}expected", contents.root) => {
-                plan.corrected_expected(file_name).map(|c| into.join("expected").join(c))
-            }
+            Some((parent, file_name)) if parent == format!("{}maps", contents.root) => plan
+                .corrected_map(file_name)
+                .map(|c| into.join("maps").join(c)),
+            Some((parent, file_name)) if parent == format!("{}expected", contents.root) => plan
+                .corrected_expected(file_name)
+                .map(|c| into.join("expected").join(c)),
             _ => None,
         };
         let Some(target) = target else { continue };
@@ -481,7 +503,9 @@ fn render_all(
     let mut files: BTreeMap<String, PathBuf> = BTreeMap::new();
     for entry in std::fs::read_dir(maps).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         if !name.contains(filter) {
             continue;
         }
@@ -529,12 +553,20 @@ fn run() -> Result<ExitCode, String> {
     // does not leave an empty run folder behind.
     let contents = read_contents(&args.archive)?;
     let archived = archive_info::read(&args.archive, &contents.root)?;
-    let (resolution, resolution_source) = resolve(archived.map(|i| i.resolution), DEFAULT_RESOLUTION);
+    let (resolution, resolution_source) =
+        resolve(archived.map(|i| i.resolution), DEFAULT_RESOLUTION);
     let (frame, frame_source) = resolve(archived.map(|i| i.frame), DEFAULT_FRAME);
 
-    let title = args.archive.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let title = args
+        .archive
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let started = chrono::Local::now();
-    let run = args.results.join(format!("{title}_{}", started.format("%Y_%m_%d__%H_%M_%S")));
+    let run = args
+        .results
+        .join(format!("{title}_{}", started.format("%Y_%m_%d__%H_%M_%S")));
     std::fs::create_dir_all(&run).map_err(|e| format!("cannot make {}: {e}", run.display()))?;
 
     println!("I will run the benchmarks on {}", args.archive.display());
@@ -561,7 +593,11 @@ fn run() -> Result<ExitCode, String> {
         let report = run.join("naming.txt");
         write_naming_report(&args.archive, &plan, &report)?;
         let corrected = write_corrected(&args.archive, &contents, &plan)?;
-        println!("  {} problems found and corrected, listed in {}", plan.problems().len(), report.display());
+        println!(
+            "  {} problems found and corrected, listed in {}",
+            plan.problems().len(),
+            report.display()
+        );
         println!("  Corrected archive: {}", corrected.display());
     }
     if args.names_only {
@@ -577,7 +613,13 @@ fn run() -> Result<ExitCode, String> {
 
     stage(2, STAGES, "Map rendering");
     let predictions = run.join("predictions");
-    let failures = render_all(&unpacked.path().join("maps"), &predictions, resolution, frame, &args.filter)?;
+    let failures = render_all(
+        &unpacked.path().join("maps"),
+        &predictions,
+        resolution,
+        frame,
+        &args.filter,
+    )?;
     println!();
 
     stage(3, STAGES, "Renders comparison with expected ones");
@@ -616,13 +658,21 @@ fn run() -> Result<ExitCode, String> {
         println!(
             "  {} map{} too large for a side_by_side.png; only the crops were written",
             report.no_overview.len(),
-            if report.no_overview.len() == 1 { "" } else { "s" }
+            if report.no_overview.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
     }
     println!("  Per map: {}", results.display());
     println!();
     println!("Results in {}", run.display());
-    Ok(if failures.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(2) })
+    Ok(if failures.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
 }
 
 fn main() -> ExitCode {

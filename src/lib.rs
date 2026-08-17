@@ -54,17 +54,17 @@
 // Every public item carries a doc comment; this keeps it that way.
 #![warn(missing_docs)]
 
-pub mod map;
-pub mod qbezier;
+pub mod all_symbols;
+pub mod archive_info;
+pub mod differences;
 pub mod geometry;
+pub mod map;
+pub mod naming;
+pub mod progress;
+pub mod qbezier;
+pub mod render;
+pub mod renderer;
+pub mod report;
+pub mod text;
 pub mod xml_reader;
 pub mod xml_writer;
-pub mod all_symbols;
-pub mod text;
-pub mod renderer;
-pub mod render;
-pub mod progress;
-pub mod report;
-pub mod naming;
-pub mod differences;
-pub mod archive_info;

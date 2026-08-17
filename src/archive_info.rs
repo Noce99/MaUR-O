@@ -37,19 +37,25 @@ pub fn parse(text: &str) -> Option<ArchiveInfo> {
             rest.split_whitespace().next()?.parse::<f64>().ok()
         })
     };
-    Some(ArchiveInfo { resolution: value_of("resolution")?, frame: value_of("frame")? })
+    Some(ArchiveInfo {
+        resolution: value_of("resolution")?,
+        frame: value_of("frame")?,
+    })
 }
 
 /// Reads `info.txt` out of an archive at `root` (with a trailing slash, or
 /// empty at the top of the zip) and parses it. `None` for an archive with no
 /// `info.txt`, which one made before this file existed will not have.
 pub fn read(archive: &Path, root: &str) -> Result<Option<ArchiveInfo>, String> {
-    let file = std::fs::File::open(archive).map_err(|e| format!("cannot open {}: {e}", archive.display()))?;
+    let file = std::fs::File::open(archive)
+        .map_err(|e| format!("cannot open {}: {e}", archive.display()))?;
     let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file))
         .map_err(|e| format!("cannot read {}: {e}", archive.display()))?;
     let mut text = String::new();
     match zip.by_name(&format!("{root}info.txt")) {
-        Ok(mut entry) => std::io::Read::read_to_string(&mut entry, &mut text).map_err(|e| e.to_string())?,
+        Ok(mut entry) => {
+            std::io::Read::read_to_string(&mut entry, &mut text).map_err(|e| e.to_string())?
+        }
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
         Err(e) => return Err(e.to_string()),
     };
@@ -63,18 +69,33 @@ mod tests {
     #[test]
     fn resolution_and_frame_survive_a_round_trip() {
         let written = "Benchmark archive info: suite\n  created    2026-08-15\n  resolution 12.5\n  frame      0.3\n\nMore about the archive.\n";
-        assert_eq!(parse(written), Some(ArchiveInfo { resolution: 12.5, frame: 0.3 }));
+        assert_eq!(
+            parse(written),
+            Some(ArchiveInfo {
+                resolution: 12.5,
+                frame: 0.3
+            })
+        );
     }
 
     #[test]
     fn a_file_without_the_settings_parses_to_nothing() {
-        assert_eq!(parse("Benchmark archive info: suite\n  created 2026-08-15\n"), None);
+        assert_eq!(
+            parse("Benchmark archive info: suite\n  created 2026-08-15\n"),
+            None
+        );
     }
 
     #[test]
     fn a_prose_line_which_happens_to_start_with_the_word_is_not_mistaken_for_the_setting() {
         let text = "Benchmark archive info: suite\n  resolution 12.5\n  frame      0.3\n\n\
                      frame around the described extent is added on every side.\n";
-        assert_eq!(parse(text), Some(ArchiveInfo { resolution: 12.5, frame: 0.3 }));
+        assert_eq!(
+            parse(text),
+            Some(ArchiveInfo {
+                resolution: 12.5,
+                frame: 0.3
+            })
+        );
     }
 }

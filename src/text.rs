@@ -82,7 +82,14 @@ fn family_for(name: &str) -> Family<'_> {
 // Must stay identical to the platform gate on the `fontconfig` dependency in
 // Cargo.toml: the two select the same platforms, and the stub below covers
 // everything else.
-#[cfg(all(unix, not(any(target_vendor = "apple", target_os = "android", target_os = "emscripten"))))]
+#[cfg(all(
+    unix,
+    not(any(
+        target_vendor = "apple",
+        target_os = "android",
+        target_os = "emscripten"
+    ))
+))]
 fn fontconfig_family_for(name: &str, bold: bool, italic: bool) -> Option<String> {
     use std::ffi::CString;
 
@@ -125,23 +132,40 @@ fn fontconfig_family_for(name: &str, bold: bool, italic: bool) -> Option<String>
     };
 
     let mut pattern = fontconfig::Pattern::new(fc).ok()?;
-    pattern.add_string(fontconfig::FC_FAMILY, &CString::new(pattern_family).ok()?).ok()?;
+    pattern
+        .add_string(fontconfig::FC_FAMILY, &CString::new(pattern_family).ok()?)
+        .ok()?;
     if let Some(style) = style {
-        pattern.add_string(fontconfig::FC_STYLE, &CString::new(style).ok()?).ok()?;
+        pattern
+            .add_string(fontconfig::FC_STYLE, &CString::new(style).ok()?)
+            .ok()?;
     }
     let matched = pattern.font_match().ok()?;
-    matched.get_string(fontconfig::FC_FAMILY).ok().map(str::to_owned)
+    matched
+        .get_string(fontconfig::FC_FAMILY)
+        .ok()
+        .map(str::to_owned)
 }
 
 /// The same, where there is no fontconfig to ask. Callers fall back to
 /// `fontdb`'s own generic-family resolution.
-#[cfg(not(all(unix, not(any(target_vendor = "apple", target_os = "android", target_os = "emscripten")))))]
+#[cfg(not(all(
+    unix,
+    not(any(
+        target_vendor = "apple",
+        target_os = "android",
+        target_os = "emscripten"
+    ))
+)))]
 fn fontconfig_family_for(_name: &str, _bold: bool, _italic: bool) -> Option<String> {
     None
 }
 
 fn map_point(t: &Transform, p: Point) -> Point {
-    let mut sp = tiny_skia::Point { x: p.x as f32, y: p.y as f32 };
+    let mut sp = tiny_skia::Point {
+        x: p.x as f32,
+        y: p.y as f32,
+    };
     t.map_point(&mut sp);
     Point::new(sp.x as f64, sp.y as f64)
 }
@@ -191,7 +215,10 @@ struct GlyphOutlineBuilder {
 
 impl GlyphOutlineBuilder {
     fn map(&self, x: f32, y: f32) -> Point {
-        Point::new(self.origin.x + x as f64 * self.scale, self.origin.y - y as f64 * self.scale)
+        Point::new(
+            self.origin.x + x as f64 * self.scale,
+            self.origin.y - y as f64 * self.scale,
+        )
     }
 }
 
@@ -229,19 +256,32 @@ impl rustybuzz::ttf_parser::OutlineBuilder for GlyphOutlineBuilder {
 /// Shapes one line of text, returning its total advance width (in
 /// `INTERNAL_FONT_SIZE` units, including `letter_spacing` after every
 /// glyph) and each glyph's id and advance.
-fn shape_line(face: &rustybuzz::Face, text: &str, kerning: bool, letter_spacing: f64) -> (f64, Vec<(u32, f64)>) {
+fn shape_line(
+    face: &rustybuzz::Face,
+    text: &str,
+    kerning: bool,
+    letter_spacing: f64,
+) -> (f64, Vec<(u32, f64)>) {
     let mut buffer = rustybuzz::UnicodeBuffer::new();
     buffer.push_str(text);
     buffer.set_direction(rustybuzz::Direction::LeftToRight);
 
     let features: Vec<rustybuzz::Feature> = if !kerning {
-        vec![rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(b"kern"), 0, ..)]
+        vec![rustybuzz::Feature::new(
+            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
+            0,
+            ..,
+        )]
     } else {
         Vec::new()
     };
 
     let units_per_em = face.units_per_em() as f64;
-    let font_scale = if units_per_em > 0.0 { INTERNAL_FONT_SIZE / units_per_em } else { 1.0 };
+    let font_scale = if units_per_em > 0.0 {
+        INTERNAL_FONT_SIZE / units_per_em
+    } else {
+        1.0
+    };
 
     let glyph_buffer = rustybuzz::shape(face, &features, buffer);
     let infos = glyph_buffer.glyph_infos();
@@ -263,10 +303,17 @@ struct TextLayout {
     line_below_path: Path,
 }
 
-fn build_text_layout(data: &[u8], face_index: u32, symbol: &TextSymbol, text_object: &TextObject) -> Option<TextLayout> {
+fn build_text_layout(
+    data: &[u8],
+    face_index: u32,
+    symbol: &TextSymbol,
+    text_object: &TextObject,
+) -> Option<TextLayout> {
     let face = rustybuzz::Face::from_slice(data, face_index)?;
     let units_per_em = face.units_per_em() as f64;
-    if units_per_em <= 0.0 { return None; }
+    if units_per_em <= 0.0 {
+        return None;
+    }
     let font_scale = INTERNAL_FONT_SIZE / units_per_em;
 
     let ascender = face.ascender() as f64 * font_scale;
@@ -309,7 +356,8 @@ fn build_text_layout(data: &[u8], face_index: u32, symbol: &TextSymbol, text_obj
         v_align::BOTTOM => -height + 0.5 * box_height,
         _ => 0.0,
     };
-    let box_offset_y = if has_box && matches!(text_object.v_align, v_align::TOP | v_align::BASELINE) {
+    let box_offset_y = if has_box && matches!(text_object.v_align, v_align::TOP | v_align::BASELINE)
+    {
         -0.5 * box_height
     } else {
         0.0
@@ -317,7 +365,11 @@ fn build_text_layout(data: &[u8], face_index: u32, symbol: &TextSymbol, text_obj
 
     let mut text_path = Path::new();
     let mut line_below_path = Path::new();
-    let mut line_y = if text_object.v_align == v_align::BASELINE { 0.0 } else { ascender };
+    let mut line_y = if text_object.v_align == v_align::BASELINE {
+        0.0
+    } else {
+        ascender
+    };
     line_y += box_offset_y + delta_y;
 
     for line in &lines {
@@ -332,8 +384,16 @@ fn build_text_layout(data: &[u8], face_index: u32, symbol: &TextSymbol, text_obj
             let mut pen_x = line_x;
             for (glyph_id, advance) in &glyphs {
                 let origin = Point::new(pen_x, line_y);
-                let mut builder = GlyphOutlineBuilder { path: Path::new(), scale: font_scale, origin, current: Point::ZERO };
-                face.outline_glyph(rustybuzz::ttf_parser::GlyphId(*glyph_id as u16), &mut builder);
+                let mut builder = GlyphOutlineBuilder {
+                    path: Path::new(),
+                    scale: font_scale,
+                    origin,
+                    current: Point::ZERO,
+                };
+                face.outline_glyph(
+                    rustybuzz::ttf_parser::GlyphId(*glyph_id as u16),
+                    &mut builder,
+                );
                 text_path.add_path(&builder.path);
                 pen_x += advance + letter_spacing;
             }
@@ -352,7 +412,10 @@ fn build_text_layout(data: &[u8], face_index: u32, symbol: &TextSymbol, text_obj
         line_y += line_spacing + paragraph_spacing;
     }
 
-    Some(TextLayout { text_path, line_below_path })
+    Some(TextLayout {
+        text_path,
+        line_below_path,
+    })
 }
 
 /// Lays out `text_object` and hands the resulting glyph outlines to
@@ -366,7 +429,12 @@ fn build_text_layout(data: &[u8], face_index: u32, symbol: &TextSymbol, text_obj
 /// millimetres carried on the renderable's transform instead of baked into
 /// the path, so that curves are flattened at the size they are finally drawn
 /// at rather than at the size they were laid out at.
-pub fn add_text(renderer: &mut Renderer, symbol: &TextSymbol, object: &Object, text_object: &TextObject) {
+pub fn add_text(
+    renderer: &mut Renderer,
+    symbol: &TextSymbol,
+    object: &Object,
+    text_object: &TextObject,
+) {
     if object.coords.is_empty() || text_object.text.is_empty() || symbol.font_size <= 0.0 {
         return;
     }
@@ -382,8 +450,16 @@ pub fn add_text(renderer: &mut Renderer, symbol: &TextSymbol, object: &Object, t
 
     let query = Query {
         families: &families,
-        weight: if symbol.bold { Weight::BOLD } else { Weight::NORMAL },
-        style: if symbol.italic { Style::Italic } else { Style::Normal },
+        weight: if symbol.bold {
+            Weight::BOLD
+        } else {
+            Weight::NORMAL
+        },
+        style: if symbol.italic {
+            Style::Italic
+        } else {
+            Style::Normal
+        },
         stretch: Stretch::Normal,
     };
     let font_id = match db.query(&query) {
@@ -391,7 +467,9 @@ pub fn add_text(renderer: &mut Renderer, symbol: &TextSymbol, object: &Object, t
         None => return,
     };
 
-    let layout = match db.with_face_data(font_id, |data, face_index| build_text_layout(data, face_index, symbol, text_object)) {
+    let layout = match db.with_face_data(font_id, |data, face_index| {
+        build_text_layout(data, face_index, symbol, text_object)
+    }) {
         Some(Some(l)) => l,
         _ => return,
     };
@@ -425,9 +503,13 @@ pub fn add_text(renderer: &mut Renderer, symbol: &TextSymbol, object: &Object, t
             let fw = symbol.framing_line_half_width;
             let framing_extent = text_extent.adjusted(-fw, -fw, fw, fw);
             renderer.stroke(
-                layout.text_path.clone(), symbol.framing_color,
-                2.0 * fw * inverse_scale, PenCap::Round, PenJoin::Round,
-                Some(framing_extent), Some(transform),
+                layout.text_path.clone(),
+                symbol.framing_color,
+                2.0 * fw * inverse_scale,
+                PenCap::Round,
+                PenJoin::Round,
+                Some(framing_extent),
+                Some(transform),
             );
         } else if symbol.framing_mode == 2 {
             let shadow = transform.pre_translate(
@@ -435,13 +517,28 @@ pub fn add_text(renderer: &mut Renderer, symbol: &TextSymbol, object: &Object, t
                 (inverse_scale * symbol.framing_shadow_y_offset) as f32,
             );
             let shadow_extent = map_rect(&shadow, &layout.text_path.control_point_rect());
-            renderer.fill_winding(layout.text_path.clone(), symbol.framing_color, Some(shadow_extent), Some(shadow));
+            renderer.fill_winding(
+                layout.text_path.clone(),
+                symbol.framing_color,
+                Some(shadow_extent),
+                Some(shadow),
+            );
         }
     }
 
-    renderer.fill_winding(layout.text_path.clone(), symbol.color, Some(text_extent), Some(transform));
+    renderer.fill_winding(
+        layout.text_path.clone(),
+        symbol.color,
+        Some(text_extent),
+        Some(transform),
+    );
 
     if !layout.line_below_path.is_empty() {
-        renderer.fill(map_path(&transform, &layout.line_below_path), symbol.line_below_color, None, None);
+        renderer.fill(
+            map_path(&transform, &layout.line_below_path),
+            symbol.line_below_color,
+            None,
+            None,
+        );
     }
 }
