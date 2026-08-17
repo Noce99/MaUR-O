@@ -29,8 +29,9 @@
 
 use std::f64::consts::PI;
 
-use crate::map::{CoordList, Point};
-use crate::path_builder::PathBuilder;
+use crate::geometry::flatten;
+use crate::map::{Coord, CoordList, Point};
+use crate::path_builder::{coord_at, PathBuilder};
 use crate::random::Random;
 
 /// How many points a side wanders through, at the fewest and at the most,
@@ -54,6 +55,11 @@ const MAX_SLIDE: f64 = 0.35;
 /// How often a segment between two wandering points is a curve rather than a
 /// straight line.
 const CURVE_CHANCE: f64 = 0.6;
+
+/// How many points of a cell's bounding box are tried before a point symbol
+/// is put in the middle of the cell instead. A cell fills a good half of its
+/// box, so a try lands inside far more often than not.
+const PLACEMENT_TRIES: usize = 32;
 
 /// How far along the way to the next point a curve's control points sit, at
 /// the least and at the most, as a fraction of the segment's length.
@@ -341,6 +347,100 @@ impl Layout {
         }
         outlines
     }
+
+    /// Every side of the layout as an open path, each one once: the
+    /// boundaries the cells share and the four edges of the square.
+    ///
+    /// A boundary belongs to the two cells at once, so it is here once
+    /// rather than twice — something drawn along it is drawn along both
+    /// cells, which is what a fence between two fields is.
+    pub fn side_paths(&self, mm_per_meter: f64) -> Vec<CoordList> {
+        self.horizontal
+            .iter()
+            .chain(&self.vertical)
+            .map(|side| {
+                let mut builder = PathBuilder::new(mm_per_meter);
+                builder.move_to(side.start());
+                side.append_to(&mut builder);
+                builder.coords
+            })
+            .collect()
+    }
+
+    /// The middle of cell `(column, row)`'s grid square, in meters on the
+    /// ground.
+    ///
+    /// Inside the cell whatever its sides did: a side strays at most
+    /// [`MAX_SWAY`] of a cell from the straight line between its corners,
+    /// which leaves the middle of the square well clear of all four.
+    pub fn cell_center(&self, column: usize, row: usize) -> Point {
+        let corner = self.corner(column, row);
+        Point::new(
+            corner.x + self.cell_size / 2.0,
+            corner.y + self.cell_size / 2.0,
+        )
+    }
+
+    /// A coordinate somewhere inside cell `(column, row)`, in what a map file
+    /// holds.
+    ///
+    /// Anywhere in the cell, corners and boundaries included: a point symbol
+    /// dropped near a boundary draws over it, which is where a renderer has
+    /// to decide what covers what. Found by trying points of the cell's
+    /// bounding box until one lands inside the cell itself, and after
+    /// [`PLACEMENT_TRIES`] of those the middle of the square, which is
+    /// inside every cell there can be.
+    pub fn random_point_in_cell(
+        &self,
+        column: usize,
+        row: usize,
+        mm_per_meter: f64,
+        random: &mut Random,
+    ) -> Coord {
+        let outline = self.cell_outline(column, row, mm_per_meter);
+        let flattened = flatten(&outline);
+        if let Some(polygon) = flattened.first().map(|part| part.points.as_slice()) {
+            let (left, top, right, bottom) = bounds(polygon);
+            for _ in 0..PLACEMENT_TRIES {
+                let point = Point::new(random.between(left, right), random.between(top, bottom));
+                if is_inside(polygon, point) {
+                    return coord_at(point);
+                }
+            }
+        }
+        coord_at(self.cell_center(column, row) * mm_per_meter)
+    }
+}
+
+/// The bounding box of a polygon, as left, top, right and bottom.
+fn bounds(polygon: &[Point]) -> (f64, f64, f64, f64) {
+    polygon.iter().fold(
+        (f64::MAX, f64::MAX, f64::MIN, f64::MIN),
+        |(left, top, right, bottom), point| {
+            (
+                left.min(point.x),
+                top.min(point.y),
+                right.max(point.x),
+                bottom.max(point.y),
+            )
+        },
+    )
+}
+
+/// Whether the point is inside the polygon, by the crossing rule: a ray from
+/// the point crosses the outline an odd number of times.
+fn is_inside(polygon: &[Point], point: Point) -> bool {
+    let mut inside = false;
+    for at in 0..polygon.len() {
+        let (from, to) = (polygon[at], polygon[(at + 1) % polygon.len()]);
+        if (from.y > point.y) != (to.y > point.y) {
+            let crossing = from.x + (point.y - from.y) / (to.y - from.y) * (to.x - from.x);
+            if point.x < crossing {
+                inside = !inside;
+            }
+        }
+    }
+    inside
 }
 
 #[cfg(test)]
@@ -488,6 +588,50 @@ mod tests {
         assert!(outline
             .iter()
             .any(|c| c.flags & coord_flag::CURVE_START != 0));
+    }
+
+    /// Each side once, whichever cells it belongs to: a 3 by 3 layout has
+    /// four rows of three sides across and three rows of four down.
+    #[test]
+    fn every_side_is_a_path_of_its_own() {
+        let layout = layout(3, 8);
+        let sides = layout.side_paths(MM_PER_METER);
+        assert_eq!(sides.len(), 2 * 3 * 4);
+        for side in &sides {
+            // An open path: a boundary is drawn along, not filled.
+            assert!(!side.last().unwrap().is_close_point());
+            assert!(side.len() >= 2);
+        }
+        // A side of the grid runs corner to corner, however it wandered on
+        // the way.
+        let first = &sides[0];
+        let (start, end) = (first[0], *first.last().unwrap());
+        assert_eq!((start.x, start.y), (-4.5, -4.5));
+        assert_eq!((end.x, end.y), (-1.5, -4.5));
+    }
+
+    #[test]
+    fn a_point_dropped_in_a_cell_lands_in_that_cell() {
+        let layout = layout(3, 9);
+        let mut random = Random::from_seed(10);
+        let polygon = |column, row| {
+            let outline = layout.cell_outline(column, row, MM_PER_METER);
+            flatten(&outline)[0].points.clone()
+        };
+        let (mine, neighbour) = (polygon(1, 1), polygon(2, 1));
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let point = layout.random_point_in_cell(1, 1, MM_PER_METER, &mut random);
+            let at = Point::new(point.x, point.y);
+            assert!(is_inside(&mine, at), "{at:?} is outside its own cell");
+            // The two cells share the side between them, so a point which
+            // is in one is in neither the other nor the boundary itself.
+            assert!(!is_inside(&neighbour, at), "{at:?} is in the next cell");
+            seen.insert((point.x.to_bits(), point.y.to_bits()));
+        }
+        // Scattered over the cell rather than falling back to its middle.
+        assert!(seen.len() > 190, "{} different points", seen.len());
     }
 
     #[test]

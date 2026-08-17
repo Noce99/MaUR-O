@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A symbol set for the map generator, built so that half of what could be
+  drawn over a piece of ground would be invisible.
+
+  The colours are, from the top of the drawing order down, black, blue and
+  yellow. "Open land" is filled with the bottom one, so anything drawn over
+  it shows; "Bare rock" is filled with the top one, so nothing drawn over it
+  does. Both overlays -- the marsh and the boulder -- draw in blue, which is
+  above the yellow and below the black.
+
+  Nothing is drawn on the map: only the symbols are used.
+-->
+<map xmlns="http://openorienteering.org/apps/mapper/xml/v2" version="9">
+<notes></notes>
+<georeferencing scale="10000">
+ <ref_point x="0" y="0"/>
+</georeferencing>
+<colors count="3">
+ <color priority="0" name="Black" c="0" m="0" y="0" k="1" opacity="1"><rgb method="cmyk" r="0" g="0" b="0"/></color>
+ <color priority="1" name="Blue" c="1" m="0.2" y="0" k="0" opacity="1"><rgb method="cmyk" r="0" g="0.6" b="1"/></color>
+ <color priority="2" name="Yellow" c="0" m="0.27" y="0.79" k="0" opacity="1"><rgb method="cmyk" r="1" g="0.79" b="0.15"/></color>
+</colors>
+<barrier version="6" required="0.6.0">
+ <symbols count="5" id="">
+  <symbol type="4" id="0" code="401" name="Open land">
+   <area_symbol inner_color="2" min_area="0" patterns="0"/>
+  </symbol>
+  <symbol type="4" id="1" code="212" name="Bare rock">
+   <area_symbol inner_color="0" min_area="0" patterns="0"/>
+  </symbol>
+  <symbol type="4" id="2" code="308" name="Marsh">
+   <area_symbol inner_color="-1" min_area="0" patterns="1">
+    <pattern type="1" angle="0" line_spacing="600" line_offset="0" offset_along_line="0" color="1" line_width="150"/>
+   </area_symbol>
+  </symbol>
+  <symbol type="1" id="3" code="204" name="Boulder">
+   <point_symbol rotatable="false" inner_radius="350" inner_color="1" outer_width="0" outer_color="-1" elements="0"/>
+  </symbol>
+  <symbol type="2" id="4" code="505" name="Path">
+   <line_symbol color="0" line_width="250" minimum_length="0" join_style="1" cap_style="0" start_offset="0" end_offset="0" dashed="true" segment_length="0" end_length="0" dash_length="2000" break_length="500" dashes_in_group="1" in_group_break_length="0" mid_symbols_per_spot="1" mid_symbol_distance="0"/>
+  </symbol>
+ </symbols>
+</barrier>
+<parts count="1" current="0">
+ <part name="default">
+  <objects count="0">
+  </objects>
+ </part>
+</parts>
+</map>

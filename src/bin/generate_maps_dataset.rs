@@ -11,9 +11,13 @@
 //! `background cell size` meters, whose cells are pieces of terrain with
 //! wandering boundaries rather than squares.
 //!
-//! Every cell is filled with one piece of ground cover: an opaque area symbol
-//! of the set, drawn uniformly at random. What a real map carries *over* its
-//! ground — lines, point symbols, lettering — is not written yet.
+//! Every cell is filled with one piece of ground cover — an opaque area
+//! symbol of the set, drawn uniformly at random — and then drawn over: a
+//! line along some of the cell sides, a see-through area over some of the
+//! cells, and point symbols scattered into them. Nothing is put where the
+//! drawing order would bury it: an overlay is picked out of the symbols
+//! which show up against the ground under it. Lettering is the one kind
+//! nothing draws with yet.
 //!
 //! ```text
 //! generate_maps_dataset maps/ISOM_10k.omap dataset
@@ -33,7 +37,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use maur_o::dataset::{
-    create_dataset, Settings, DEFAULT_CELL_SIZE, DEFAULT_LAYOUT_SIZE, DEFAULT_MAPS,
+    create_dataset, Settings, DEFAULT_CELL_SIZE, DEFAULT_EMPTY_SIDES, DEFAULT_LAYOUT_SIZE,
+    DEFAULT_MAPS, DEFAULT_POINT_SYMBOLS, DEFAULT_TRANSPARENT_AREAS,
 };
 use maur_o::progress::Progress;
 
@@ -47,9 +52,10 @@ const DEFAULT_FOLDER: &str = "dataset";
     about = "Generates a folder of random orienteering maps, drawn with the symbols of an \
              existing map.\n\n\
              Each map covers a square of ground divided into cells whose boundaries wander \
-             rather than run along the grid, every cell filled with one of the set's opaque \
-             area symbols. What a map carries over its ground -- lines, point symbols, \
-             lettering -- is not written yet.\n\n\
+             rather than run along the grid. Every cell is filled with one of the set's opaque \
+             areas, lines run along some of the boundaries, see-through areas cover some of \
+             the cells and point symbols are scattered into them -- each of them picked out \
+             of the symbols which show up against the ground they land on.\n\n\
              The same options give the same maps: everything random comes from the seed."
 )]
 struct Args {
@@ -73,8 +79,23 @@ struct Args {
     #[arg(short = 'n', long, default_value_t = DEFAULT_MAPS, value_name = "COUNT")]
     maps: usize,
 
-    /// Keep to the IOF rules for what may be drawn where. Read by the step
-    /// which draws over the cells, which is not written yet.
+    /// The share of cell sides left without a line along them, from 0 for a
+    /// line on every side to 1 for none at all.
+    #[arg(short = 'e', long, default_value_t = DEFAULT_EMPTY_SIDES, value_name = "SHARE")]
+    empty_sides: f64,
+
+    /// The chance of a cell being covered by a transparent area.
+    #[arg(short = 't', long, default_value_t = DEFAULT_TRANSPARENT_AREAS, value_name = "CHANCE")]
+    transparent_areas: f64,
+
+    /// The chance of a cell holding a point symbol. Two are half as likely
+    /// as one, three half as likely again, and so on.
+    #[arg(short = 'p', long, default_value_t = DEFAULT_POINT_SYMBOLS, value_name = "CHANCE")]
+    point_symbols: f64,
+
+    /// Keep to the IOF rules for what may be drawn where. Not read yet: what
+    /// goes over a piece of ground is picked for being visible on it, not
+    /// for being allowed there.
     #[arg(long)]
     iof_rules: bool,
 
@@ -110,12 +131,28 @@ fn run() -> Result<(), (ExitCode, String)> {
         }
     }
 
+    for (share, name) in [
+        (args.empty_sides, "--empty-sides"),
+        (args.transparent_areas, "--transparent-areas"),
+        (args.point_symbols, "--point-symbols"),
+    ] {
+        if !(0.0..=1.0).contains(&share) {
+            return Err((
+                ExitCode::from(1),
+                format!("Error: Invalid value for {name}: it must be between zero and one."),
+            ));
+        }
+    }
+
     let settings = Settings {
         layout_size: args.layout_size,
         cell_size: args.background_cell_size,
         maps: args.maps,
         iof_rules: args.iof_rules,
         seed: args.seed,
+        empty_sides: args.empty_sides,
+        transparent_areas: args.transparent_areas,
+        point_symbols: args.point_symbols,
     };
 
     let mut progress = Progress::new("Maps", settings.maps);
@@ -139,6 +176,12 @@ fn run() -> Result<(), (ExitCode, String)> {
         println!("  {:<17} {:>4}", kind.name(), entries.len());
     }
 
+    // What may go over what: the pairs which show up, of the pairs there are.
+    let (shown, tried) = summary.overlays.transparent_pairs(&summary.catalogue);
+    println!("  {shown} of {tried} transparent areas over a fill show up");
+    let (shown, tried) = summary.overlays.point_pairs(&summary.catalogue);
+    println!("  {shown} of {tried} point symbols over a fill show up");
+
     let side = settings.layout_size as u32 * settings.cell_size;
     let fills = summary.catalogue.opaque_areas.len();
     println!(
@@ -154,10 +197,23 @@ fn run() -> Result<(), (ExitCode, String)> {
     );
     println!(
         "  {} of them fill with a pattern which turns, and were turned at random",
-        summary.turning_fills,
+        summary
+            .catalogue
+            .opaque_areas
+            .iter()
+            .filter(|entry| entry.turns)
+            .count(),
     );
     println!(
-        "  seed {}, IOF rules {} (not read yet: the step which draws over the cells is not written)",
+        "  {} fills, {} lines, {} transparent areas, {} point symbols drawn",
+        summary.drawn.fills,
+        summary.drawn.lines,
+        summary.drawn.transparent_areas,
+        summary.drawn.points,
+    );
+    println!(
+        "  seed {}, IOF rules {} (not read yet: an overlay is picked for showing up on its \
+         ground, not for being allowed there)",
         settings.seed,
         if settings.iof_rules { "on" } else { "off" },
     );
