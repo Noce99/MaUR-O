@@ -557,10 +557,8 @@ impl<'a> XmlMapReader<'a> {
             match self.xml.next()? {
                 Ev::Start(child) => {
                     if local_name(&child) == "symbol" && result.is_none() {
-                        if let Some(sym) = self.read_symbol(&child)? {
-                            if let Symbol::Point(p) = sym {
-                                result = Some(Box::new(p));
-                            }
+                        if let Some(Symbol::Point(p)) = self.read_symbol(&child)? {
+                            result = Some(Box::new(p));
                         }
                     } else {
                         self.xml.skip_current()?;
@@ -720,10 +718,8 @@ impl<'a> XmlMapReader<'a> {
             match self.xml.next()? {
                 Ev::Start(child) => {
                     if local_name(&child) == "symbol" && pattern.point.is_none() {
-                        if let Some(sym) = self.read_symbol(&child)? {
-                            if let Symbol::Point(p) = sym {
-                                pattern.point = Some(Box::new(p));
-                            }
+                        if let Some(Symbol::Point(p)) = self.read_symbol(&child)? {
+                            pattern.point = Some(Box::new(p));
                         }
                     } else {
                         self.xml.skip_current()?;

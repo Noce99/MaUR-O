@@ -358,23 +358,29 @@ fn split_bezier(
     }
 }
 
+/// A cubic bezier segment: its start, its two control points, and its end.
+#[derive(Clone, Copy)]
+struct Cubic {
+    c0: Point,
+    c1: Point,
+    c2: Point,
+    c3: Point,
+}
+
+/// Where a flattened curve is written: the points it was flattened into,
+/// and alongside each of them the curve parameter it was taken at.
+struct Flattened<'a> {
+    points: &'a mut Vec<Point>,
+    params: &'a mut Vec<f32>,
+}
+
 /// Appends a flattened cubic bezier curve, excluding both of its end
 /// points. A segment which is short enough and close enough to its chord
 /// contributes the midpoint of its two inner control points, rather than a
 /// point on the curve — this is what Mapper does, and dash/symbol placement
 /// follow the resulting polyline, so the vertices have to be the same ones.
-fn flatten_cubic(
-    out: &mut Vec<Point>,
-    out_params: &mut Vec<f32>,
-    c0: Point,
-    c1: Point,
-    c2: Point,
-    c3: Point,
-    p0: f32,
-    p1: f32,
-    depth: i32,
-) {
-    flatten_cubic_tol(out, out_params, c0, c1, c2, c3, p0, p1, depth, BEZIER_ERROR);
+fn flatten_cubic(out: &mut Flattened, curve: Cubic, p0: f32, p1: f32, depth: i32) {
+    flatten_cubic_tol(out, curve, p0, p1, depth, BEZIER_ERROR);
 }
 
 /// Same recursive flattening as [`flatten_cubic`], but with the chord/arc
@@ -391,18 +397,8 @@ fn flatten_cubic(
 /// tolerance but on the wrong side of a polygon flattened to it. Hit-testing
 /// isn't performance sensitive the way per-frame flattening is, so it uses a
 /// much tighter tolerance here instead.
-fn flatten_cubic_tol(
-    out: &mut Vec<Point>,
-    out_params: &mut Vec<f32>,
-    c0: Point,
-    c1: Point,
-    c2: Point,
-    c3: Point,
-    p0: f32,
-    p1: f32,
-    depth: i32,
-    error: f64,
-) {
+fn flatten_cubic_tol(out: &mut Flattened, curve: Cubic, p0: f32, p1: f32, depth: i32, error: f64) {
+    let Cubic { c0, c1, c2, c3 } = curve;
     let p_half = ((p0 as f64 + p1 as f64) * 0.5) as f32;
     let c12 = (c1 + c2) / 2.0;
 
@@ -414,8 +410,8 @@ fn flatten_cubic_tol(
                 - inner_length_squared.sqrt()
                 <= error)
     {
-        out.push(c12);
-        out_params.push(p_half);
+        out.points.push(c12);
+        out.params.push(p_half);
         return;
     }
 
@@ -425,30 +421,20 @@ fn flatten_cubic_tol(
     let c123 = (c12 + c23) / 2.0;
     let c0123 = (c012 + c123) / 2.0;
 
-    flatten_cubic_tol(
-        out,
-        out_params,
+    let first = Cubic {
         c0,
-        c01,
-        c012,
-        c0123,
-        p0,
-        p_half,
-        depth + 1,
-        error,
-    );
-    flatten_cubic_tol(
-        out,
-        out_params,
-        c0123,
-        c123,
-        c23,
+        c1: c01,
+        c2: c012,
+        c3: c0123,
+    };
+    let second = Cubic {
+        c0: c0123,
+        c1: c123,
+        c2: c23,
         c3,
-        p_half,
-        p1,
-        depth + 1,
-        error,
-    );
+    };
+    flatten_cubic_tol(out, first, p0, p_half, depth + 1, error);
+    flatten_cubic_tol(out, second, p_half, p1, depth + 1, error);
 }
 
 /// One connected part of a path: a polyline, plus the length of each vertex
@@ -586,12 +572,16 @@ pub fn flatten(coords: &CoordList) -> Vec<PathPart> {
             let previous_size = part.points.len();
             if coords[i].is_curve_start() && i + 3 < range.end {
                 flatten_cubic(
-                    &mut part.points,
-                    &mut part.params,
-                    coords[i].pos(),
-                    coords[i + 1].pos(),
-                    coords[i + 2].pos(),
-                    coords[i + 3].pos(),
+                    &mut Flattened {
+                        points: &mut part.points,
+                        params: &mut part.params,
+                    },
+                    Cubic {
+                        c0: coords[i].pos(),
+                        c1: coords[i + 1].pos(),
+                        c2: coords[i + 2].pos(),
+                        c3: coords[i + 3].pos(),
+                    },
                     0.0,
                     1.0,
                     0,
@@ -857,12 +847,16 @@ fn to_painter_path_impl(coords: &CoordList, honor_gaps: bool, flatten_curves: bo
                     let mut pts = Vec::new();
                     let mut params = Vec::new();
                     flatten_cubic(
-                        &mut pts,
-                        &mut params,
-                        coords[i - 1].pos(),
-                        coords[i].pos(),
-                        coords[i + 1].pos(),
-                        coords[i + 2].pos(),
+                        &mut Flattened {
+                            points: &mut pts,
+                            params: &mut params,
+                        },
+                        Cubic {
+                            c0: coords[i - 1].pos(),
+                            c1: coords[i].pos(),
+                            c2: coords[i + 1].pos(),
+                            c3: coords[i + 2].pos(),
+                        },
                         0.0,
                         1.0,
                         0,
@@ -1363,7 +1357,7 @@ fn split_at(coords: &CoordList, part: &PathPart, length: f64) -> Split {
     let is_curve = coords[edge].is_curve_start() && edge + 3 <= part.last_coord;
 
     let mut factor = ((length - part.lengths[prev]) / segment_length as f64) as f32;
-    factor = factor.min(1.0).max(0.0);
+    factor = factor.clamp(0.0, 1.0);
 
     if is_curve {
         let prev_param = part.params[prev];
@@ -1858,7 +1852,7 @@ pub fn pointed_cap_outline(
         } else {
             1.0
         };
-        factor = factor.min(1.0).max(0.0);
+        factor = factor.clamp(0.0, 1.0);
 
         let to_coord_opt = coord_incoming_tangent(&middle, 0, last, false, i);
         let to_next_opt = coord_outgoing_tangent(&middle, 0, last, false, i);
@@ -2031,8 +2025,7 @@ pub fn shift_coordinates(
 
     let shift = main_shift + border_shift;
 
-    let mut out = CoordList::new();
-    out.reserve(4 * (last - first + 1));
+    let mut out = CoordList::with_capacity(4 * (last - first + 1));
     let push = |out: &mut CoordList, p: Point, flags: i32| out.push(Coord::new(p.x, p.y, flags));
 
     let mut i = first;
@@ -2212,6 +2205,116 @@ pub fn shift_coordinates(
     out
 }
 
+impl Path {
+    /// Flattens each subpath into a polyline, like
+    /// `QPainterPath::toSubpathPolygons()`. Used as the stroke-extent
+    /// fallback for un-curved paths (this crate's one no-explicit-bounds
+    /// `stroke()` call site is always a straight two-point segment), so the
+    /// bezier flattening here does not need to match Mapper's exactly.
+    pub fn to_subpath_polygons(&self) -> Vec<Vec<Point>> {
+        self.to_subpath_polygons_tol(BEZIER_ERROR)
+    }
+
+    /// Same as [`to_subpath_polygons`](Self::to_subpath_polygons), but with
+    /// the bezier flattening tolerance passed in. `contains_even_odd` needs
+    /// a much tighter one than [`BEZIER_ERROR`] -- see `flatten_cubic_tol`'s
+    /// doc comment.
+    pub fn to_subpath_polygons_tol(&self, error: f64) -> Vec<Vec<Point>> {
+        let mut result = Vec::new();
+        let mut current: Vec<Point> = Vec::new();
+        let mut last = Point::ZERO;
+        for cmd in &self.commands {
+            match *cmd {
+                PathCommand::MoveTo(p) => {
+                    if current.len() > 1 {
+                        result.push(std::mem::take(&mut current));
+                    } else {
+                        current.clear();
+                    }
+                    current.push(p);
+                    last = p;
+                }
+                PathCommand::LineTo(p) => {
+                    current.push(p);
+                    last = p;
+                }
+                PathCommand::CubicTo(c1, c2, end) => {
+                    let mut pts = Vec::new();
+                    let mut params = Vec::new();
+                    flatten_cubic_tol(
+                        &mut Flattened {
+                            points: &mut pts,
+                            params: &mut params,
+                        },
+                        Cubic {
+                            c0: last,
+                            c1,
+                            c2,
+                            c3: end,
+                        },
+                        0.0,
+                        1.0,
+                        0,
+                        error,
+                    );
+                    current.extend(pts);
+                    current.push(end);
+                    last = end;
+                }
+                PathCommand::Close => {
+                    if let Some(&first) = current.first() {
+                        current.push(first);
+                    }
+                }
+            }
+        }
+        if current.len() > 1 {
+            result.push(current);
+        }
+        result
+    }
+}
+
+impl Path {
+    /// Point-in-path test using the odd-even fill rule -- `QPainterPath`'s
+    /// default (`Qt::OddEvenFill`), which is what `toPainterPath()` (used
+    /// for area outlines) implicitly uses, and what `QPainterPath::contains`
+    /// therefore tests with. Implemented as a standard crossing-number test
+    /// over the flattened subpaths, which handles multi-subpath holes
+    /// correctly under odd-even counting without needing a dedicated
+    /// winding pass.
+    ///
+    /// Flattens at a much tighter tolerance than [`BEZIER_ERROR`], not the
+    /// default one `to_subpath_polygons()` uses for stroke extents: Qt's
+    /// `QPainterPath::contains` tests the true cubic curve, not a flattened
+    /// approximation, so a point pattern's dot can sit a few microns inside
+    /// a curved area boundary -- well within visual tolerance, but wrongly
+    /// outside a polygon flattened to it. This is not performance sensitive
+    /// the way per-frame flattening is (it runs once per pattern point, on
+    /// already-computed outlines), so it can afford to.
+    pub fn contains_even_odd(&self, point: Point) -> bool {
+        const CONTAINS_TOLERANCE: f64 = 1e-9;
+        let mut crossings = 0u32;
+        for polygon in self.to_subpath_polygons_tol(CONTAINS_TOLERANCE) {
+            let n = polygon.len();
+            if n < 2 {
+                continue;
+            }
+            for i in 0..n {
+                let a = polygon[i];
+                let b = polygon[(i + 1) % n];
+                if (a.y > point.y) != (b.y > point.y) {
+                    let x_intersect = a.x + (point.y - a.y) / (b.y - a.y) * (b.x - a.x);
+                    if point.x < x_intersect {
+                        crossings += 1;
+                    }
+                }
+            }
+        }
+        crossings % 2 == 1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2320,100 +2423,5 @@ mod tests {
         copy_path_slice(&coords, &parts[0], 0.0, parts[0].length(), &mut out);
         assert_eq!(out.first().unwrap().pos(), Point::new(0.0, 0.0));
         assert_eq!(out.last().unwrap().pos(), Point::new(10.0, 10.0));
-    }
-}
-
-impl Path {
-    /// Flattens each subpath into a polyline, like
-    /// `QPainterPath::toSubpathPolygons()`. Used as the stroke-extent
-    /// fallback for un-curved paths (this crate's one no-explicit-bounds
-    /// `stroke()` call site is always a straight two-point segment), so the
-    /// bezier flattening here does not need to match Mapper's exactly.
-    pub fn to_subpath_polygons(&self) -> Vec<Vec<Point>> {
-        self.to_subpath_polygons_tol(BEZIER_ERROR)
-    }
-
-    /// Same as [`to_subpath_polygons`](Self::to_subpath_polygons), but with
-    /// the bezier flattening tolerance passed in. `contains_even_odd` needs
-    /// a much tighter one than [`BEZIER_ERROR`] -- see `flatten_cubic_tol`'s
-    /// doc comment.
-    pub fn to_subpath_polygons_tol(&self, error: f64) -> Vec<Vec<Point>> {
-        let mut result = Vec::new();
-        let mut current: Vec<Point> = Vec::new();
-        let mut last = Point::ZERO;
-        for cmd in &self.commands {
-            match *cmd {
-                PathCommand::MoveTo(p) => {
-                    if current.len() > 1 {
-                        result.push(std::mem::take(&mut current));
-                    } else {
-                        current.clear();
-                    }
-                    current.push(p);
-                    last = p;
-                }
-                PathCommand::LineTo(p) => {
-                    current.push(p);
-                    last = p;
-                }
-                PathCommand::CubicTo(c1, c2, end) => {
-                    let mut pts = Vec::new();
-                    let mut params = Vec::new();
-                    flatten_cubic_tol(&mut pts, &mut params, last, c1, c2, end, 0.0, 1.0, 0, error);
-                    current.extend(pts);
-                    current.push(end);
-                    last = end;
-                }
-                PathCommand::Close => {
-                    if let Some(&first) = current.first() {
-                        current.push(first);
-                    }
-                }
-            }
-        }
-        if current.len() > 1 {
-            result.push(current);
-        }
-        result
-    }
-}
-
-impl Path {
-    /// Point-in-path test using the odd-even fill rule -- `QPainterPath`'s
-    /// default (`Qt::OddEvenFill`), which is what `toPainterPath()` (used
-    /// for area outlines) implicitly uses, and what `QPainterPath::contains`
-    /// therefore tests with. Implemented as a standard crossing-number test
-    /// over the flattened subpaths, which handles multi-subpath holes
-    /// correctly under odd-even counting without needing a dedicated
-    /// winding pass.
-    ///
-    /// Flattens at a much tighter tolerance than [`BEZIER_ERROR`], not the
-    /// default one `to_subpath_polygons()` uses for stroke extents: Qt's
-    /// `QPainterPath::contains` tests the true cubic curve, not a flattened
-    /// approximation, so a point pattern's dot can sit a few microns inside
-    /// a curved area boundary -- well within visual tolerance, but wrongly
-    /// outside a polygon flattened to it. This is not performance sensitive
-    /// the way per-frame flattening is (it runs once per pattern point, on
-    /// already-computed outlines), so it can afford to.
-    pub fn contains_even_odd(&self, point: Point) -> bool {
-        const CONTAINS_TOLERANCE: f64 = 1e-9;
-        let mut crossings = 0u32;
-        for polygon in self.to_subpath_polygons_tol(CONTAINS_TOLERANCE) {
-            let n = polygon.len();
-            if n < 2 {
-                continue;
-            }
-            for i in 0..n {
-                let a = polygon[i];
-                let b = polygon[(i + 1) % n];
-                if (a.y > point.y) != (b.y > point.y) {
-                    let x_intersect = a.x + (point.y - a.y) / (b.y - a.y) * (b.x - a.x);
-                    if point.x < x_intersect {
-                        crossings += 1;
-                    }
-                }
-            }
-        }
-        crossings % 2 == 1
     }
 }

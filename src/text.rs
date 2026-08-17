@@ -46,7 +46,7 @@ use tiny_skia::Transform;
 
 use crate::geometry::{Path, PathCommand, PenCap, PenJoin, Rect};
 use crate::map::*;
-use crate::renderer::Renderer;
+use crate::renderer::{Pen, Renderer};
 
 /// The font size used while laying out text, before scaling it down to mm.
 const INTERNAL_FONT_SIZE: f64 = 256.0;
@@ -504,10 +504,12 @@ pub fn add_text(
             let framing_extent = text_extent.adjusted(-fw, -fw, fw, fw);
             renderer.stroke(
                 layout.text_path.clone(),
-                symbol.framing_color,
-                2.0 * fw * inverse_scale,
-                PenCap::Round,
-                PenJoin::Round,
+                Pen {
+                    color: symbol.framing_color,
+                    width: 2.0 * fw * inverse_scale,
+                    cap: PenCap::Round,
+                    join: PenJoin::Round,
+                },
                 Some(framing_extent),
                 Some(transform),
             );

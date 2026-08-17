@@ -386,19 +386,13 @@ fn add_circle(b: &QBezier, offset: f64) -> Option<(QBezier, QBezier)> {
     normals[2] = normals[2] / dist2;
 
     let mut n1 = Point::new(b.x1 - b.x2 - b.x3 + b.x4, b.y1 - b.y2 - b.y3 + b.y4);
-    n1 = n1 / (-1.0 * (n1.x * n1.x + n1.y * n1.y).sqrt());
+    n1 = n1 / -(n1.x * n1.x + n1.y * n1.y).sqrt();
     normals[1] = n1;
 
     let mut angles = [0.0f64; 2];
     let mut sign = 1.0f64;
     for i in 0..2 {
-        let mut cos_a = normals[i].dot(normals[i + 1]);
-        if cos_a > 1.0 {
-            cos_a = 1.0;
-        }
-        if cos_a < -1.0 {
-            cos_a = -1.0;
-        }
+        let cos_a = normals[i].dot(normals[i + 1]).clamp(-1.0, 1.0);
         angles[i] = cos_a.acos() * std::f64::consts::FRAC_1_PI;
     }
 

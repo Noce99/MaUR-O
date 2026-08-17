@@ -147,6 +147,18 @@ fn to_skia_path(path: &Path) -> Option<tiny_skia::Path> {
     builder.finish()
 }
 
+/// How a line is stroked: the four properties a `QPen` carries here.
+#[derive(Clone, Copy)]
+pub(crate) struct Pen {
+    /// Index into the map's colours; a negative one is registration black,
+    /// which Mapper measures with a zero pen width.
+    pub color: i32,
+    /// Stroke width in mm. A pen no wider than zero draws nothing.
+    pub width: f64,
+    pub cap: PenCap,
+    pub join: PenJoin,
+}
+
 struct Renderable {
     path: Path,
     color: i32,
@@ -302,14 +314,11 @@ impl<'m> Renderer<'m> {
     pub(crate) fn stroke(
         &mut self,
         path: Path,
-        color: i32,
-        width: f64,
-        cap: PenCap,
-        join: PenJoin,
+        pen: Pen,
         bounds: Option<Rect>,
         transform: Option<Transform>,
     ) {
-        self.stroke_impl(path, color, width, cap, join, true, bounds, transform);
+        self.stroke_impl(path, pen, true, bounds, transform);
     }
 
     /// Like [`Self::stroke`], but for a border line shifted off a main line
@@ -317,27 +326,27 @@ impl<'m> Renderer<'m> {
     fn stroke_no_miter_clip(
         &mut self,
         path: Path,
-        color: i32,
-        width: f64,
-        cap: PenCap,
-        join: PenJoin,
+        pen: Pen,
         bounds: Option<Rect>,
         transform: Option<Transform>,
     ) {
-        self.stroke_impl(path, color, width, cap, join, false, bounds, transform);
+        self.stroke_impl(path, pen, false, bounds, transform);
     }
 
     fn stroke_impl(
         &mut self,
         path: Path,
-        color: i32,
-        width: f64,
-        cap: PenCap,
-        join: PenJoin,
+        pen: Pen,
         miter_clip: bool,
         bounds: Option<Rect>,
         transform: Option<Transform>,
     ) {
+        let Pen {
+            color,
+            width,
+            cap,
+            join,
+        } = pen;
         if self.map.color(color).is_none() || width <= 0.0 || path.is_empty() {
             return;
         }
@@ -446,10 +455,12 @@ impl<'m> Renderer<'m> {
             );
             self.stroke(
                 path,
-                symbol.outer_color,
-                symbol.outer_width,
-                PenCap::Flat,
-                PenJoin::Miter,
+                Pen {
+                    color: symbol.outer_color,
+                    width: symbol.outer_width,
+                    cap: PenCap::Flat,
+                    join: PenJoin::Miter,
+                },
                 Some(bounds),
                 None,
             );
@@ -538,10 +549,12 @@ impl<'m> Renderer<'m> {
             );
             self.stroke(
                 path,
-                symbol.outer_color,
-                symbol.outer_width,
-                PenCap::Flat,
-                PenJoin::Miter,
+                Pen {
+                    color: symbol.outer_color,
+                    width: symbol.outer_width,
+                    cap: PenCap::Flat,
+                    join: PenJoin::Miter,
+                },
                 Some(bounds),
                 None,
             );
@@ -755,14 +768,29 @@ fn find_next_dash_point(part: &PathPart, first: usize) -> usize {
     last
 }
 
+/// A line being cut into dashes: the object's coordinates, the part they
+/// were flattened into, and the symbol whose dash pattern is followed.
+#[derive(Clone, Copy)]
+struct DashedLine<'a> {
+    coords: &'a CoordList,
+    part: &'a PathPart,
+    symbol: &'a LineSymbol,
+}
+
+/// One section of a dashed line -- the stretch between two dash points --
+/// and whether either of its ends is an end of the part itself, which is
+/// what decides whether the outer dashes are halved.
+#[derive(Clone, Copy)]
+struct DashSection {
+    start: f64,
+    end: f64,
+    is_part_start: bool,
+    is_part_end: bool,
+}
+
 impl<'m> Renderer<'m> {
-    fn place_mid_symbol(
-        &mut self,
-        symbol: &PointSymbol,
-        coords: &CoordList,
-        part: &PathPart,
-        position: f64,
-    ) {
+    fn place_mid_symbol(&mut self, symbol: &PointSymbol, line: DashedLine, position: f64) {
+        let (coords, part) = (line.coords, line.part);
         let location = locate_on_path(coords, part, position);
         let rotation = if symbol.is_rotatable {
             tangent_rotation(location.tangent)
@@ -777,14 +805,17 @@ impl<'m> Renderer<'m> {
     /// `LineSymbol::processContinuousLine()`.
     fn dashed_continuous_line(
         &mut self,
-        coords: &CoordList,
-        part: &PathPart,
-        symbol: &LineSymbol,
+        line: DashedLine,
         start: f64,
         end: f64,
         set_mid_symbols: bool,
         out: &mut CoordList,
     ) {
+        let DashedLine {
+            coords,
+            part,
+            symbol,
+        } = line;
         copy_path_slice(coords, part, start, end, out);
         if let Some(last) = out.last_mut() {
             last.flags |= coord_flag::GAP_POINT;
@@ -802,10 +833,10 @@ impl<'m> Renderer<'m> {
         }
 
         let mut position = (start + end - mid_symbols_length) / 2.0;
-        self.place_mid_symbol(mid_symbol, coords, part, position);
+        self.place_mid_symbol(mid_symbol, line, position);
         for _ in 2..=symbol.mid_symbols_per_spot {
             position += distance;
-            self.place_mid_symbol(mid_symbol, coords, part, position);
+            self.place_mid_symbol(mid_symbol, line, position);
         }
     }
 
@@ -819,16 +850,22 @@ impl<'m> Renderer<'m> {
     /// over so that a dash can run continuously across a corner.
     fn create_dash_groups(
         &mut self,
-        coords: &CoordList,
-        part: &PathPart,
-        symbol: &LineSymbol,
+        line: DashedLine,
         out: &mut CoordList,
         line_start: f64,
-        start: f64,
-        end: f64,
-        is_part_start: bool,
-        is_part_end: bool,
+        section: DashSection,
     ) -> f64 {
+        let DashedLine {
+            coords,
+            part,
+            symbol,
+        } = line;
+        let DashSection {
+            start,
+            end,
+            is_part_start,
+            is_part_end,
+        } = section;
         let mid_symbol = symbol.mid_symbol.as_deref();
         let mid_symbols =
             if symbol.mid_symbols_per_spot > 0 && mid_symbol.is_some_and(|m| !m.is_empty()) {
@@ -888,7 +925,7 @@ impl<'m> Renderer<'m> {
                     let mut s = 0;
                     while s < per_spot {
                         if position >= 0.0 {
-                            self.place_mid_symbol(mid_symbol, coords, part, position);
+                            self.place_mid_symbol(mid_symbol, line, position);
                         }
                         position += mid_symbol_distance_f as f64;
                         s += 2;
@@ -900,7 +937,7 @@ impl<'m> Renderer<'m> {
                         start + (per_spot % 2 + 1) as f64 * mid_symbol_distance_f as f64 / 2.0;
                     let mut s = 1;
                     while s < per_spot && position <= part.length() {
-                        self.place_mid_symbol(mid_symbol, coords, part, position);
+                        self.place_mid_symbol(mid_symbol, line, position);
                         position += mid_symbol_distance_f as f64;
                         s += 2;
                     }
@@ -915,15 +952,7 @@ impl<'m> Renderer<'m> {
         {
             // Too short for dashes.
             if is_part_end {
-                self.dashed_continuous_line(
-                    coords,
-                    part,
-                    symbol,
-                    line_start,
-                    end,
-                    set_mid_symbols,
-                    out,
-                );
+                self.dashed_continuous_line(line, line_start, end, set_mid_symbols, out);
                 return end;
             }
             return line_start;
@@ -971,7 +1000,7 @@ impl<'m> Renderer<'m> {
                     let mut i = 0;
                     while i < per_spot && position as f64 <= end {
                         if position as f64 > start {
-                            self.place_mid_symbol(mid_symbol, coords, part, position as f64);
+                            self.place_mid_symbol(mid_symbol, line, position as f64);
                         }
                         i += 1;
                         position += mid_symbol_distance_f;
@@ -1011,15 +1040,7 @@ impl<'m> Renderer<'m> {
                 }
 
                 let dash_end = (cur_length + cur_dash_length) as f64;
-                self.dashed_continuous_line(
-                    coords,
-                    part,
-                    symbol,
-                    dash_start,
-                    dash_end,
-                    dash_mid_symbols,
-                    out,
-                );
+                self.dashed_continuous_line(line, dash_start, dash_end, dash_mid_symbols, out);
                 cur_length += cur_dash_length;
                 dash_start = dash_end;
 
@@ -1042,7 +1063,7 @@ impl<'m> Renderer<'m> {
                             if position as f64 > end {
                                 break;
                             }
-                            self.place_mid_symbol(mid_symbol, coords, part, position as f64);
+                            self.place_mid_symbol(mid_symbol, line, position as f64);
                             position += mid_symbol_distance_f;
                         }
                     }
@@ -1057,7 +1078,7 @@ impl<'m> Renderer<'m> {
                 let mut position = end as f32 - (per_spot - 1) as f32 * mid_symbol_distance_f / 2.0;
                 let mut s = 0;
                 while s < per_spot {
-                    self.place_mid_symbol(mid_symbol, coords, part, position as f64);
+                    self.place_mid_symbol(mid_symbol, line, position as f64);
                     position += mid_symbol_distance_f;
                     s += 2;
                 }
@@ -1070,14 +1091,8 @@ impl<'m> Renderer<'m> {
     /// Builds the dashed version of one part: the same geometry, cut into
     /// dashes by gap flags. Port of Mapper's
     /// `LineSymbol::processDashedLine()`.
-    fn dashed_path(
-        &mut self,
-        coords: &CoordList,
-        part: &PathPart,
-        symbol: &LineSymbol,
-        start_length: f64,
-        end_length: f64,
-    ) -> CoordList {
+    fn dashed_path(&mut self, line: DashedLine, start_length: f64, end_length: f64) -> CoordList {
+        let part = line.part;
         let mut out = CoordList::new();
         let mut groups_start_index = split_index_at(part, start_length).max(1) - 1;
         let mut groups_start = start_length;
@@ -1093,15 +1108,15 @@ impl<'m> Renderer<'m> {
             }
 
             line_start = self.create_dash_groups(
-                coords,
-                part,
-                symbol,
+                line,
                 &mut out,
                 line_start,
-                groups_start,
-                groups_end,
-                is_part_start,
-                is_part_end,
+                DashSection {
+                    start: groups_start,
+                    end: groups_end,
+                    is_part_start,
+                    is_part_end,
+                },
             );
 
             groups_start_index = next_index;
@@ -1185,7 +1200,15 @@ impl<'m> Renderer<'m> {
                 // layout -- with its mid symbols -- follows Mapper's rules,
                 // worked out in dashed_path().
                 if symbol.dash_length > 0.0 && (create_line || create_border) {
-                    part_coords = self.dashed_path(coords, part, symbol, start_length, end_length);
+                    part_coords = self.dashed_path(
+                        DashedLine {
+                            coords,
+                            part,
+                            symbol,
+                        },
+                        start_length,
+                        end_length,
+                    );
                 } else {
                     continue;
                 }
@@ -1363,10 +1386,12 @@ impl<'m> Renderer<'m> {
                     let path = to_flattened_painter_path(part_coords, true);
                     self.stroke_no_miter_clip(
                         path,
-                        symbol.color,
-                        symbol.line_width,
-                        cap,
-                        join,
+                        Pen {
+                            color: symbol.color,
+                            width: symbol.line_width,
+                            cap,
+                            join,
+                        },
                         Some(bounds),
                         None,
                     );
@@ -1375,10 +1400,12 @@ impl<'m> Renderer<'m> {
                     let path = to_flattened_painter_path(part_coords, true);
                     self.stroke(
                         path,
-                        symbol.color,
-                        symbol.line_width,
-                        cap,
-                        join,
+                        Pen {
+                            color: symbol.color,
+                            width: symbol.line_width,
+                            cap,
+                            join,
+                        },
                         Some(bounds),
                         None,
                     );
@@ -1387,10 +1414,12 @@ impl<'m> Renderer<'m> {
                     let path = to_painter_path(part_coords, true);
                     self.stroke(
                         path,
-                        symbol.color,
-                        symbol.line_width,
-                        cap,
-                        join,
+                        Pen {
+                            color: symbol.color,
+                            width: symbol.line_width,
+                            cap,
+                            join,
+                        },
                         Some(bounds),
                         None,
                     );
@@ -1434,10 +1463,12 @@ impl<'m> Renderer<'m> {
                 let path = to_flattened_painter_path(border_coords, true);
                 self.stroke_no_miter_clip(
                     path,
-                    border.color,
-                    border.width,
-                    PenCap::Flat,
-                    border_join,
+                    Pen {
+                        color: border.color,
+                        width: border.width,
+                        cap: PenCap::Flat,
+                        join: border_join,
+                    },
                     Some(bounds),
                     None,
                 );
@@ -1446,10 +1477,12 @@ impl<'m> Renderer<'m> {
                 let path = to_flattened_painter_path(border_coords, true);
                 self.stroke(
                     path,
-                    border.color,
-                    border.width,
-                    PenCap::Flat,
-                    border_join,
+                    Pen {
+                        color: border.color,
+                        width: border.width,
+                        cap: PenCap::Flat,
+                        join: border_join,
+                    },
                     Some(bounds),
                     None,
                 );
@@ -1458,10 +1491,12 @@ impl<'m> Renderer<'m> {
                 let path = to_painter_path(border_coords, true);
                 self.stroke(
                     path,
-                    border.color,
-                    border.width,
-                    PenCap::Flat,
-                    border_join,
+                    Pen {
+                        color: border.color,
+                        width: border.width,
+                        cap: PenCap::Flat,
+                        join: border_join,
+                    },
                     Some(bounds),
                     None,
                 );
@@ -1498,9 +1533,11 @@ impl<'m> Renderer<'m> {
             };
             for render_part in render_parts {
                 let dashed = self.dashed_path(
-                    part_coords,
-                    render_part,
-                    &border_symbol,
+                    DashedLine {
+                        coords: part_coords,
+                        part: render_part,
+                        symbol: &border_symbol,
+                    },
                     0.0,
                     render_part.length(),
                 );
@@ -1608,10 +1645,12 @@ impl<'m> Renderer<'m> {
             line.line_to(second);
             self.stroke(
                 line,
-                pattern.line_color,
-                pattern.line_width,
-                PenCap::Flat,
-                PenJoin::Miter,
+                Pen {
+                    color: pattern.line_color,
+                    width: pattern.line_width,
+                    cap: PenCap::Flat,
+                    join: PenJoin::Miter,
+                },
                 None,
                 None,
             );
@@ -1653,7 +1692,7 @@ impl<'m> Renderer<'m> {
                 self.add_point(point_symbol, coord, -delta_rotation, 1.0);
             }
             current += step;
-            coord = coord + direction * step;
+            coord += direction * step;
         }
     }
 
