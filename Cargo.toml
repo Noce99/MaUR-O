@@ -34,6 +34,10 @@ path = "src/bin/benchmark.rs"
 name = "create_benchmark"
 path = "src/bin/create_benchmark.rs"
 
+[[bin]]
+name = "generate_maps_dataset"
+path = "src/bin/generate_maps_dataset.rs"
+
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }

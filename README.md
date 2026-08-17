@@ -15,7 +15,8 @@ Alongside the renderer, it ships a small pair of benchmarking tools that build
 and run suites of maps to measure how closely the renderer's output matches a
 ground-truth reference — useful both for tracking rendering fidelity over time
 and for spotting real regressions among the noise two rasterizers naturally
-disagree on.
+disagree on — and a generator that makes random maps out of an existing symbol
+set, for when the maps that exist are not enough.
 
 ## Table of Contents
 
@@ -25,6 +26,7 @@ disagree on.
   - [`map_to_image`](#map_to_image)
   - [`create_benchmark`](#create_benchmark)
   - [`benchmark`](#benchmark)
+  - [`generate_maps_dataset`](#generate_maps_dataset)
 - [Implementation Details](#implementation-details)
 - [Known Limitations](#known-limitations)
 
@@ -49,10 +51,11 @@ Build everything with:
 cargo build --release
 ```
 
-The three executables are then at:
+The four executables are then at:
 - `target/release/`[`map_to_image`](#map_to_image)
 - `target/release/`[`benchmark`](#benchmark)
 - `target/release/`[`create_benchmark`](#create_benchmark)
+- `target/release/`[`generate_maps_dataset`](#generate_maps_dataset)
 
 ### Fonts and fontconfig
 
@@ -215,6 +218,50 @@ the top, so this is where to look first. For what each column means, see
 
 ![Expected, predicted and diff crop from a real map, showing antialiasing in orange and a real error in red](mds/assets/real_error.png)
 *A crop from `differences/` on a real map: expected (left), predicted (middle), and the diff (right), where orange is just antialiasing — not a bug — and the red cluster is a real error, a pixel one renderer drew and the other did not.*
+
+### `generate_maps_dataset`
+
+Generates a folder of **random maps**, drawn with the symbols of an existing
+map. The maps which exist are somebody's copyright, cover the terrain
+somebody happened to survey, and between them use a fraction of the symbols a
+symbol set holds; generated ones have none of those problems, and can be made
+to put a symbol next to a symbol no surveyor ever would.
+
+```
+generate_maps_dataset [OPTIONS] <symbol-set> [folder]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `<symbol-set>` | The map whose symbols and colours the generated maps are drawn with. Nothing drawn on it is used. |
+| `[folder]` | Where the maps are written (default `dataset`). Created if needed. |
+| `-l, --layout-size <CELLS>` | How many cells a map is across; it holds this squared (default `3`). |
+| `-c, --background-cell-size <METERS>` | How wide one cell is, in meters on the ground (default `30`). |
+| `-n, --maps <COUNT>` | How many maps to generate (default `10`). |
+| `--iof-rules` | Keep to the IOF rules for what may be drawn where. Read by the step which fills the cells in — **not written yet**. |
+| `-s, --seed <N>` | What the randomness is seeded with (default `0`). |
+| `--border-symbol <NAME>` | The symbol the cell outlines are drawn with (default `Paved area, bounding line`). |
+
+A map is built in three steps: the symbol set is sorted into what its symbols
+are *for* (opaque areas, see-through areas, lines, point symbols, text); the
+ground is divided into cells; the cells are filled in and drawn over. **The
+third step is not written yet** — for now a generated map is its layout,
+every cell outlined in one line symbol, so that the shapes can be looked at.
+
+```bash
+cargo build --release
+./target/release/generate_maps_dataset maps/ISOM_10k.omap dataset
+./target/release/map_to_image -r 12 -f 5 dataset/map_001.omap
+```
+
+![A generated layout: a square of ground divided into nine cells whose boundaries wander instead of following the grid](mds/assets/random_layout.png)
+*One generated map at the defaults: 3 by 3 cells of 30 m. The cell corners are pinned to the grid, at `(i · 30 m, j · 30 m)`; everything between two corners is a random chain of straight segments and bezier curves. Two neighbouring cells are built from the same side, run one way and then the other, so the boundary between them is a single line.*
+
+It prints the symbol set broken down by kind, what it wrote, and the seed it
+used. The whole dataset follows from that seed: the same options give the
+same maps, down to the coordinate, and the n-th map is the same map whatever
+number of maps was asked for. Exit codes: `0` success, `1` a usage error, `2`
+the dataset could not be generated.
 
 ## Implementation Details
 

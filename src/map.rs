@@ -981,6 +981,23 @@ impl Map {
         self.colors.get(priority as usize)
     }
 
+    /// The parts of a combined symbol, as the symbols they name.
+    ///
+    /// Only says anything after [`resolve_references`](Self::resolve_references)
+    /// has run; a part naming a symbol the file does not hold is left out,
+    /// since there is nothing to return for it.
+    pub fn parts<'m>(&'m self, combined: &'m CombinedSymbol) -> Vec<&'m Symbol> {
+        combined
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                PartRef::Shared(index) => self.symbols.get(*index),
+                PartRef::Private(index) => combined.owned_parts.get(*index),
+                PartRef::None => None,
+            })
+            .collect()
+    }
+
     /// Resolves the symbol references of objects and combined symbols.
     pub fn resolve_references(&mut self) {
         let mut by_id: HashMap<i32, usize> = HashMap::with_capacity(self.symbols.len());

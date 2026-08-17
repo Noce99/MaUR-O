@@ -19,4 +19,7 @@ examples
 # Where the `create_benchmark` tool puts the archives it builds.
 benchmarks/
 
+# Where the `generate_maps_dataset` tool puts the maps it generates.
+dataset/
+
 a_lot_of_work

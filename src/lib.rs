@@ -50,21 +50,37 @@
 //! pixel that disagrees; and [`archive_info`], [`progress`] and [`report`] are
 //! the small pieces the `create_benchmark` and `benchmark` tools are assembled
 //! from.
+//!
+//! # Generating maps
+//!
+//! The maps which exist are never enough, and never put a symbol next to the
+//! symbol which breaks it. [`dataset`] generates new ones out of nothing but
+//! an existing symbol set, and is what the `generate_maps_dataset` tool is
+//! built on: [`symbol_kinds`] sorts a symbol set into what its symbols are
+//! for, [`layout`] divides a square of ground into cells with wandering
+//! boundaries, [`path_builder`] turns a shape in meters into the coordinates
+//! a file holds, and [`random`] is where every choice any of them makes comes
+//! from — seeded by hand, so that a generated map can be generated again.
 
 // Every public item carries a doc comment; this keeps it that way.
 #![warn(missing_docs)]
 
 pub mod all_symbols;
 pub mod archive_info;
+pub mod dataset;
 pub mod differences;
 pub mod geometry;
+pub mod layout;
 pub mod map;
 pub mod naming;
+pub mod path_builder;
 pub mod progress;
 pub mod qbezier;
+pub mod random;
 pub mod render;
 pub mod renderer;
 pub mod report;
+pub mod symbol_kinds;
 pub mod text;
 pub mod xml_reader;
 pub mod xml_writer;
