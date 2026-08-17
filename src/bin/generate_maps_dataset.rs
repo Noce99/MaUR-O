@@ -19,6 +19,9 @@
 //! which show up against the ground under it. Lettering is the one kind
 //! nothing draws with yet.
 //!
+//! `--just-opaque-areas` stops after the ground: the cells are filled and
+//! nothing is drawn over them, which leaves a map of area fills alone.
+//!
 //! ```text
 //! generate_maps_dataset maps/ISOM_10k.omap dataset
 //! map_to_image dataset/map_001.omap
@@ -93,6 +96,13 @@ struct Args {
     #[arg(short = 'p', long, default_value_t = DEFAULT_POINT_SYMBOLS, value_name = "CHANCE")]
     point_symbols: f64,
 
+    /// Draw nothing but the ground: the cells are filled with opaque areas
+    /// and the lines, the see-through areas and the point symbols are all
+    /// skipped, whatever --empty-sides, --transparent-areas and
+    /// --point-symbols say.
+    #[arg(short = 'j', long)]
+    just_opaque_areas: bool,
+
     /// Keep to the IOF rules for what may be drawn where. Not read yet: what
     /// goes over a piece of ground is picked for being visible on it, not
     /// for being allowed there.
@@ -153,6 +163,7 @@ fn run() -> Result<(), (ExitCode, String)> {
         empty_sides: args.empty_sides,
         transparent_areas: args.transparent_areas,
         point_symbols: args.point_symbols,
+        just_opaque_areas: args.just_opaque_areas,
     };
 
     let mut progress = Progress::new("Maps", settings.maps);
@@ -205,11 +216,16 @@ fn run() -> Result<(), (ExitCode, String)> {
             .count(),
     );
     println!(
-        "  {} fills, {} lines, {} transparent areas, {} point symbols drawn",
+        "  {} fills, {} lines, {} transparent areas, {} point symbols drawn{}",
         summary.drawn.fills,
         summary.drawn.lines,
         summary.drawn.transparent_areas,
         summary.drawn.points,
+        if settings.just_opaque_areas {
+            " (just the opaque areas: nothing was drawn over the ground)"
+        } else {
+            ""
+        },
     );
     println!(
         "  seed {}, IOF rules {} (not read yet: an overlay is picked for showing up on its \
