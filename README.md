@@ -27,6 +27,7 @@ set, for when the maps that exist are not enough.
   - [`create_benchmark`](#create_benchmark)
   - [`benchmark`](#benchmark)
   - [`generate_maps_dataset`](#generate_maps_dataset)
+    - [A training set](#a-training-set)
 - [Implementation Details](#implementation-details)
 - [Known Limitations](#known-limitations)
 
@@ -241,7 +242,10 @@ generate_maps_dataset [OPTIONS] <symbol-set> [folder]
 | `-e, --empty-sides <SHARE>` | The share of cell sides left without a line along them, 0 for a line on every side, 1 for none (default `0.5`). |
 | `-t, --transparent-areas <CHANCE>` | The chance of a cell being covered by a see-through area (default `0.1`). |
 | `-p, --point-symbols <CHANCE>` | The chance of a cell holding a point symbol; two are half as likely as one, three half as likely again (default `0.5`). |
-| `-j, --just-opaque-areas` | Draw nothing but the ground: the cells are filled with opaque areas and the lines, see-through areas and point symbols are all skipped, whatever the three options above say. |
+| `-j, --just-opaque-areas` | Draw nothing but the ground: the cells are filled with opaque areas and the lines, see-through areas and point symbols are all skipped, whatever the three options above say. Also what makes a dataset labelled — see [below](#a-training-set). |
+| `-r, --resolution <PX_PER_M>` | How many pixels of image one meter of ground comes to (default `3`). |
+| `-f, --frame <METERS>` | How much white ground to leave around each map (default `50`). |
+| `--no-images` | Write the maps and nothing else. Drawing them is most of the work; the labels go with the images, having nothing left to be labels of. |
 | `--iof-rules` | Keep to the IOF rules for what may be drawn where — **not read yet**: an overlay is picked for showing up on its ground, not for being allowed there. |
 | `-s, --seed <N>` | What the randomness is seeded with (default `0`). |
 
@@ -303,7 +307,7 @@ yet.**
 ```bash
 cargo build --release
 ./target/release/generate_maps_dataset -l 3 -c 150 maps/ISOM_10k.omap dataset
-./target/release/map_to_image -r 3 -f 10 dataset/map_003.omap
+./target/release/map_to_image -r 3 -f 10 dataset/maps/map_003.omap
 ```
 
 ![A generated map: nine pieces of ground cover with wandering boundaries, lines running along most of them, see-through areas over two cells and point symbols scattered about](mds/assets/random_map.png)
@@ -314,6 +318,88 @@ used. The whole dataset follows from that seed: the same options give the
 same maps, down to the coordinate, and the n-th map is the same map whatever
 number of maps was asked for. Exit codes: `0` success, `1` a usage error, `2`
 the dataset could not be generated.
+
+### A training set
+
+A generated map is the one map whose answer is known: it was not surveyed and
+then labelled, it was drawn from a list of decisions, and the list is still
+there when the image comes out. So the tool writes the picture and the answer
+beside the map, in three folders under one set of names:
+
+```
+dataset/
+  classes.json         what channel each opaque area owns, and the settings
+  maps/map_001.omap    the map, to open in Mapper or render again
+  images/map_001.png   what it looks like: a model's input
+  gt/map_001.bin       what it is, pixel by pixel: the answer
+```
+
+```bash
+./target/release/generate_maps_dataset --just-opaque-areas -n 100 \
+    maps/ISOM_10k.omap dataset
+```
+
+The answer for one pixel is **which of the `on` opaque areas covers it** — a
+one-hot vector, all zeros for the white frame — and **how the ground under it
+was turned**, since an area whose pattern turns is drawn at an angle of its
+own and two pixels of the same symbol at different angles do not look alike.
+That is a tensor of `H × W × (on + 2)`.
+
+The angle is the last two channels, **its sine and then its cosine**, because
+an angle is not a number a model can be scored on as one: a whole turn brings
+a pattern back to where it started, so 0.001 and 0.999 of a turn are a
+pattern a degree apart, and a squared error on the angle itself calls them
+the two furthest apart answers there are. The point on the unit circle has no
+such seam, and the angle comes back out of it as `atan2(sin, cos)`.
+
+A symbol with **no pattern to turn gets `(0, 0)`** rather than a point on the
+circle — the zero vector is no angle at all, which is what there is to say
+about it — and so does the frame. That leaves the two channels able to say
+"no angle here" as well as which angle, and a rotation loss can be masked by
+the length of the target vector.
+
+Every image of one dataset is the same size — they are drawn over the square
+the layout covers plus the frame, known before anything is generated, rather
+than over whatever each map's objects came to — so a folder of them stacks
+into a batch without being cropped first.
+
+Only `--just-opaque-areas` maps are labelled: a pixel's answer is the one
+piece of ground cover under it, and there is no such answer for a pixel a
+line or a point symbol was drawn over.
+
+**On disk it is not that tensor.** A 1650 × 1650 image of a set with thirty
+opaque areas would be 345 MB of mostly zeros; a `gt/*.bin` holds the same
+thing in the form it was decided in — one class index and one angle per
+pixel, six bytes rather than `4 · (on + 2)` — and it is expanded where a
+batch is assembled, costing one image's worth of memory instead of a folder's
+worth of disk. The format is a 32-byte header and two planes:
+
+```
+0..8     b"MAUROGT2"      the format, the trailing digit its version
+8..12    u32              height, in pixels
+12..16   u32              width, in pixels
+16..20   u32              on, the number of one-hot channels
+20..32   zeros            room for what a later version needs
+32..     [u16; H * W]     the class of each pixel, row by row (0xFFFF: frame)
+..       [f32; H * W]     the angle of each pixel, row by row
+```
+
+Little-endian throughout, and a class is a place in the symbol list of
+`classes.json`. An angle is a share of a whole turn in `[0, 1)`, and `-1.0`
+where the symbol has no pattern to turn — the one angle which is not one, and
+which the sine and the cosine come out of as the zero vector. The angle is
+kept rather than its sine and cosine because it is what the map was drawn at
+and it is half the size; the pair is worked out where the tensor is.
+
+`maur_o::ground_truth::GroundTruth` reads and writes it, and
+`GroundTruth::one_hot` is the expansion, so a [burn](https://burn.dev)
+`Dataset` item is:
+
+```rust
+let truth = GroundTruth::read(Path::new("dataset/gt/map_001.bin"))?;
+let shape = [truth.height as usize, truth.width as usize, truth.channels()];
+let target = Tensor::<B, 3>::from_floats(truth.one_hot().as_slice(), device).reshape(shape);
+```
 
 ## Implementation Details
 

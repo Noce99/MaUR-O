@@ -9,6 +9,7 @@ use std::path::Path;
 
 use tiny_skia::{Pixmap, Transform};
 
+use crate::geometry::Rect;
 use crate::renderer::Renderer;
 use crate::xml_reader::read_xml_map;
 
@@ -16,6 +17,25 @@ use crate::xml_reader::read_xml_map;
 pub const DEFAULT_RESOLUTION: f64 = 3.0;
 /// The default width of the white frame around the map, in meters on the ground.
 pub const DEFAULT_FRAME: f64 = 50.0;
+
+/// What ground an image is to cover.
+pub enum Extent {
+    /// Everything the map drew, with a white frame of this many meters on
+    /// the ground around it. What `map_to_image` does, and what a map nobody
+    /// measured beforehand wants: the image is as big as the map turned out
+    /// to be.
+    Frame(f64),
+    /// This rectangle of ground, in meters, whatever the map drew — the
+    /// origin of the rectangle being the map's own origin, x to the right and
+    /// y downwards, as map coordinates run.
+    ///
+    /// For a folder of maps whose ground is known in advance: every image
+    /// comes out the same number of pixels across, which is what anything
+    /// batching them together needs, and what a map draws a hair outside its
+    /// own square — the border line of an area which reaches the edge — is
+    /// still inside the frame rather than cut off.
+    Ground(Rect),
+}
 
 /// Why a map could not be turned into an image. The variants are the two
 /// failures `map_to_image` reports with distinct exit codes.
@@ -45,6 +65,14 @@ pub struct Rendering {
     pub ground_height: i64,
     /// The map scale the file asked for: 15000 for a 1:15000 map.
     pub scale_denominator: i32,
+    /// What takes a coordinate of the map — mm on the paper — to the pixel of
+    /// this image it was drawn at.
+    ///
+    /// The image is one view of a map and anything else drawn against the
+    /// same map has to line up with it pixel for pixel; this is what makes
+    /// that possible without a second, drifting copy of the arithmetic. See
+    /// [`crate::ground_truth`], which rasterizes a map's cells through it.
+    pub page_transform: Transform,
     /// Non-fatal complaints from reading the map file. A map that produced
     /// some was still drawn, but perhaps not in full.
     pub warnings: Vec<String>,
@@ -53,6 +81,16 @@ pub struct Rendering {
 /// Renders `map_file` at `resolution` pixels per meter on the ground, with a
 /// white frame of `frame` meters on each side.
 pub fn render_map(map_file: &Path, resolution: f64, frame: f64) -> Result<Rendering, Error> {
+    render_map_over(map_file, resolution, Extent::Frame(frame))
+}
+
+/// Renders `map_file` at `resolution` pixels per meter on the ground, over
+/// the ground `extent` names.
+pub fn render_map_over(
+    map_file: &Path,
+    resolution: f64,
+    extent: Extent,
+) -> Result<Rendering, Error> {
     let (map, warnings) = read_xml_map(map_file)
         .map_err(|e| Error::Read(format!("Failed to load {}: {}", map_file.display(), e)))?;
 
@@ -64,13 +102,25 @@ pub fn render_map(map_file: &Path, resolution: f64, frame: f64) -> Result<Render
 
     let renderer = Renderer::new(&map);
 
-    // The extent of the map objects, enlarged by the white frame. For an
-    // empty map, the extent is a null rect at the origin, i.e. the frame
-    // alone determines the size of the image.
-    let frame_mm = frame * mm_per_meter;
-    let extent = renderer
-        .extent()
-        .adjusted(-frame_mm, -frame_mm, frame_mm, frame_mm);
+    let extent = match extent {
+        // The extent of the map objects, enlarged by the white frame. For an
+        // empty map, the extent is a null rect at the origin, i.e. the frame
+        // alone determines the size of the image.
+        Extent::Frame(frame) => {
+            let frame_mm = frame * mm_per_meter;
+            renderer
+                .extent()
+                .adjusted(-frame_mm, -frame_mm, frame_mm, frame_mm)
+        }
+        // The ground asked for, whatever the objects came to. Given in
+        // meters, since that is the unit the caller knew it in.
+        Extent::Ground(ground) => Rect::from_ltrb(
+            ground.left() * mm_per_meter,
+            ground.top() * mm_per_meter,
+            ground.right() * mm_per_meter,
+            ground.bottom() * mm_per_meter,
+        ),
+    };
 
     let width = (extent.width() * pixel_per_mm).round();
     let height = (extent.height() * pixel_per_mm).round();
@@ -101,6 +151,7 @@ pub fn render_map(map_file: &Path, resolution: f64, frame: f64) -> Result<Render
         ground_width: (extent.width() / mm_per_meter).round() as i64,
         ground_height: (extent.height() / mm_per_meter).round() as i64,
         scale_denominator,
+        page_transform,
         warnings,
     })
 }

@@ -127,7 +127,7 @@ fn vertex_tangents(part: &PathPart, i: usize) -> VertexTangents {
 /// Converts our path IR to a `tiny_skia::Path`, casting mm coordinates
 /// (f64) to tiny-skia's f32. Returns `None` for an empty or degenerate
 /// path, matching `QPainterPath::isEmpty()` guards at the call sites.
-fn to_skia_path(path: &Path) -> Option<tiny_skia::Path> {
+pub(crate) fn to_skia_path(path: &Path) -> Option<tiny_skia::Path> {
     let mut builder = tiny_skia::PathBuilder::new();
     for cmd in &path.commands {
         match *cmd {

@@ -63,16 +63,57 @@
 //! colour table is the drawing order of a map and a symbol names a colour by
 //! its place in it, so it goes out whole in any case; and a generated map is
 //! meant to be opened, edited and drawn on with the rest of the set.
+//!
+//! # What a dataset is on disk
+//!
+//! A map on its own is a thing to look at. What a model is trained on is a
+//! picture and the answer to it, so a dataset is three folders side by side
+//! and one file naming what the answers mean:
+//!
+//! ```text
+//! dataset/
+//!   classes.json      what the channels of a label are, and the settings
+//!   maps/map_001.omap the map itself, to open in Mapper or render again
+//!   images/map_001.png what it looks like, which is the input
+//!   gt/map_001.bin    what it is, pixel by pixel, which is the answer
+//! ```
+//!
+//! The three share a name, so the answer to an image is the file of the same
+//! stem in `gt/`. The images of one dataset are all the same size: they are
+//! drawn over the square of ground the layout covers plus the frame — known
+//! before anything is generated — rather than over whatever each map's
+//! objects came to, so a folder of them stacks into a batch without being
+//! cropped first. See [`crate::ground_truth`] for what a label holds.
+//!
+//! The answers only exist where [`Settings::just_opaque_areas`] is on, which
+//! is the one map a label can describe so far: every pixel is one piece of
+//! ground cover and nothing is drawn over it.
 
 use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
 
+use crate::geometry::Rect;
+use crate::ground_truth::{Ground, GroundTruth};
 use crate::layout::Layout;
 use crate::map::{CoordList, Object, ObjectKind, PathObject};
 use crate::random::Random;
+use crate::render::{render_map_over, save_pixmap, Extent, DEFAULT_FRAME, DEFAULT_RESOLUTION};
 use crate::symbol_kinds::{Catalogue, Entry, Overlays};
 use crate::xml_reader;
 use crate::xml_writer::MapFile;
+
+/// The subfolder of a dataset holding the map files.
+pub const MAPS_FOLDER: &str = "maps";
+
+/// The subfolder holding the rendered images, which are a model's input.
+pub const IMAGES_FOLDER: &str = "images";
+
+/// The subfolder holding the labels, which are what it is scored against.
+pub const GROUND_TRUTH_FOLDER: &str = "gt";
+
+/// The file naming what a label's channels are, written in the dataset's own
+/// folder.
+pub const CLASSES_FILE: &str = "classes.json";
 
 /// The default number of cells a generated map is across.
 pub const DEFAULT_LAYOUT_SIZE: usize = 3;
@@ -129,7 +170,25 @@ pub struct Settings {
     /// see-through areas and the point symbols — are skipped, whatever
     /// [`Settings::empty_sides`], [`Settings::transparent_areas`] and
     /// [`Settings::point_symbols`] say.
+    ///
+    /// The labels in `gt/` are written only where this is on: a pixel's
+    /// answer is the one piece of ground cover under it, and there is no such
+    /// answer for a pixel a line or a point symbol was drawn over.
     pub just_opaque_areas: bool,
+    /// Whether to draw each map to an image, and to label that image.
+    ///
+    /// Drawing is most of the work of generating a dataset — a default map is
+    /// two and a half million pixels — so turning it off is what somebody
+    /// after the maps alone wants. Without an image there is nothing for a
+    /// label to be a label of, so `gt/` goes with it.
+    pub images: bool,
+    /// How many pixels of image one meter of ground comes to, which is what
+    /// decides how big the images and their labels are.
+    pub resolution: f64,
+    /// How much white ground to leave around the square a map covers, in
+    /// meters. Part of the image and part of the labels, where it is the
+    /// background class.
+    pub frame: f64,
 }
 
 impl Default for Settings {
@@ -144,7 +203,28 @@ impl Default for Settings {
             transparent_areas: DEFAULT_TRANSPARENT_AREAS,
             point_symbols: DEFAULT_POINT_SYMBOLS,
             just_opaque_areas: false,
+            images: true,
+            resolution: DEFAULT_RESOLUTION,
+            frame: DEFAULT_FRAME,
         }
+    }
+}
+
+impl Settings {
+    /// The square of ground every image of the dataset covers: the layout,
+    /// which is centred on the origin, with the frame around it.
+    ///
+    /// Known before a map is generated, and the same for all of them, which
+    /// is what makes the images of one dataset one size.
+    pub fn ground(&self) -> Rect {
+        let half = (self.layout_size * self.cell_size as usize) as f64 / 2.0 + self.frame;
+        Rect::from_ltrb(-half, -half, half, half)
+    }
+
+    /// How many pixels across an image of this dataset comes out, which is
+    /// also how many labels one holds per row.
+    pub fn image_size(&self) -> u32 {
+        (self.ground().width() * self.resolution).round().max(0.0) as u32
     }
 }
 
@@ -161,10 +241,23 @@ pub struct Drawn {
     pub points: usize,
 }
 
+/// The files one generated map came to.
+pub struct Generated {
+    /// The map itself, in `maps/`.
+    pub map: PathBuf,
+    /// The image it was rendered to, in `images/`. Absent where
+    /// [`Settings::images`] is off.
+    pub image: Option<PathBuf>,
+    /// The labels for that image, in `gt/`. Absent unless there is an image
+    /// and [`Settings::just_opaque_areas`] is on, since nothing else has an
+    /// answer to write down yet.
+    pub ground_truth: Option<PathBuf>,
+}
+
 /// What a run came to.
 pub struct Summary {
     /// The maps written, in the order they were generated.
-    pub written: Vec<PathBuf>,
+    pub written: Vec<Generated>,
     /// The symbol set the maps were built from, sorted into kinds.
     pub catalogue: Catalogue,
     /// What of that set may be drawn over what, which is what the generator
@@ -174,15 +267,19 @@ pub struct Summary {
     pub drawn: Drawn,
     /// The scale of the source map, which every generated map inherits.
     pub scale_denominator: i32,
-    /// Complaints from reading the source map.
+    /// How many pixels across every image of the dataset came out.
+    pub image_size: u32,
+    /// Complaints from reading the source map, and from drawing the maps
+    /// which came out of it.
     pub warnings: Vec<String>,
 }
 
 /// A folder of random maps built on the symbol set of `source`, written into
-/// `into`.
+/// `into` — the maps, the images they render to and the labels for those
+/// images, in the three subfolders this module describes.
 ///
-/// `into` is created if it is not there, and a map of a previous run under
-/// the same name is overwritten.
+/// `into` and its subfolders are created if they are not there, and a file of
+/// a previous run under the same name is overwritten.
 pub fn create_dataset(
     source: &Path,
     into: &Path,
@@ -194,6 +291,25 @@ pub fn create_dataset(
     }
     if settings.cell_size == 0 {
         return Err("the cell size must be at least one meter".to_string());
+    }
+    if settings.resolution.is_nan() || settings.resolution <= 0.0 {
+        return Err(format!(
+            "the resolution must be more than zero pixels per meter, not {}",
+            settings.resolution
+        ));
+    }
+    if settings.frame.is_nan() || settings.frame < 0.0 {
+        return Err(format!(
+            "the frame cannot be less than nothing, and is {} meters",
+            settings.frame
+        ));
+    }
+    if settings.image_size() == 0 {
+        return Err(format!(
+            "{} meters of ground at {} pixels per meter is no image at all",
+            settings.ground().width(),
+            settings.resolution
+        ));
     }
     for (share, name) in [
         (settings.empty_sides, "the share of sides left empty"),
@@ -222,7 +338,30 @@ pub fn create_dataset(
     // Step one, the rest of it: what of this set may be drawn over what.
     let overlays = Overlays::of(&map, &catalogue);
 
-    std::fs::create_dir_all(into).map_err(|e| format!("cannot make {}: {e}", into.display()))?;
+    // Only a map of nothing but ground cover has an answer to write down,
+    // and only an image has anything for that answer to be about; a folder
+    // missing either comes out with two of the three, or one.
+    let labelled = settings.images && settings.just_opaque_areas;
+
+    let (maps_folder, images_folder, gt_folder) = (
+        into.join(MAPS_FOLDER),
+        into.join(IMAGES_FOLDER),
+        into.join(GROUND_TRUTH_FOLDER),
+    );
+    for folder in [
+        Some(&maps_folder),
+        settings.images.then_some(&images_folder),
+        labelled.then_some(&gt_folder),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        std::fs::create_dir_all(folder)
+            .map_err(|e| format!("cannot make {}: {e}", folder.display()))?;
+    }
+    if labelled {
+        write_classes(&into.join(CLASSES_FILE), &catalogue, settings)?;
+    }
 
     let generator = Generator {
         catalogue: &catalogue,
@@ -235,14 +374,16 @@ pub fn create_dataset(
 
     let mut written = Vec::with_capacity(settings.maps);
     let mut drawn = Drawn::default();
+    let mut warnings = warnings;
     for index in 0..settings.maps {
         // A seed of its own per map, so that the third map of a dataset is
         // the same map whether ten or a thousand were asked for.
         let mut random = Random::from_seed(settings.seed.wrapping_add(index as u64));
         let layout = Layout::random(settings.layout_size, settings.cell_size as f64, &mut random);
-        let objects = generator.draw(&layout, &mut random, &mut drawn);
+        let (objects, ground) = generator.draw(&layout, &mut random, &mut drawn);
 
-        let path = into.join(map_name(index, settings.maps));
+        let stem = map_stem(index, settings.maps);
+        let map_path = maps_folder.join(format!("{stem}.omap"));
         MapFile {
             scale_denominator: map.scale_denominator,
             colors: &fragments.colors,
@@ -252,8 +393,52 @@ pub fn create_dataset(
             // one, so a rotation written here is a rotation something reads.
             rotatable: true,
         }
-        .write(&path)?;
-        written.push(path);
+        .write(&map_path)?;
+
+        let (mut image, mut ground_truth) = (None, None);
+        if settings.images {
+            // Drawn from the file just written rather than from the objects
+            // in hand: the image belongs to the map somebody else can open,
+            // and any disagreement between the two is a bug worth tripping
+            // over here.
+            let drawing = render_map_over(
+                &map_path,
+                settings.resolution,
+                Extent::Ground(settings.ground()),
+            )
+            .map_err(|e| format!("cannot draw {}: {e}", map_path.display()))?;
+            for warning in drawing.warnings {
+                if !warnings.contains(&warning) {
+                    warnings.push(warning);
+                }
+            }
+
+            let path = images_folder.join(format!("{stem}.png"));
+            save_pixmap(&drawing.pixmap, &path)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            image = Some(path);
+
+            if labelled {
+                // The same pixel grid the image was drawn on, so a label and
+                // the pixel it labels are the same pixel.
+                let path = gt_folder.join(format!("{stem}.bin"));
+                GroundTruth::rasterize(
+                    &ground,
+                    catalogue.opaque_areas.len(),
+                    drawing.pixmap.width(),
+                    drawing.pixmap.height(),
+                    drawing.page_transform,
+                )?
+                .write(&path)?;
+                ground_truth = Some(path);
+            }
+        }
+
+        written.push(Generated {
+            map: map_path,
+            image,
+            ground_truth,
+        });
         progress(index + 1, settings.maps);
     }
 
@@ -263,6 +448,7 @@ pub fn create_dataset(
         overlays,
         drawn,
         scale_denominator: map.scale_denominator,
+        image_size: settings.image_size(),
         warnings,
     })
 }
@@ -281,28 +467,46 @@ impl Generator<'_> {
     /// there: the ground, the lines along the boundaries, the see-through
     /// areas over the ground, and the point symbols scattered on it. Only the
     /// first of them where [`Settings::just_opaque_areas`] is on.
-    fn draw(&self, layout: &Layout, random: &mut Random, drawn: &mut Drawn) -> Vec<Object> {
+    ///
+    /// The ground comes back a second time beside the objects, as the shapes
+    /// and the symbols they were filled with rather than as things to draw:
+    /// that is the answer a label records, and it is known here, where the
+    /// dice were rolled, rather than anywhere downstream of the file.
+    fn draw(
+        &self,
+        layout: &Layout,
+        random: &mut Random,
+        drawn: &mut Drawn,
+    ) -> (Vec<Object>, Vec<Ground>) {
         let outlines = layout.cell_outlines(self.mm_per_meter);
         let mut objects = Vec::with_capacity(outlines.len());
 
         // The ground. The draws are independent, so two cells side by side
         // are sometimes the same ground cover; the shape of the layout is
         // still there, in the boundaries which do show.
-        let ground: Vec<usize> = outlines
+        let ground: Vec<Ground> = outlines
             .iter()
             .map(|outline| {
                 let at = random.below(self.catalogue.opaque_areas.len());
                 let fill = &self.catalogue.opaque_areas[at];
-                objects.push(self.area_object(fill, outline.clone(), random));
+                let object = self.area_object(fill, outline.clone(), random);
+                let cell = Ground {
+                    class: at,
+                    // A symbol with no pattern to turn was given no angle,
+                    // which is not the same as having been given nought.
+                    turn: fill.turns.then_some(object.rotation),
+                    outline: outline.clone(),
+                };
+                objects.push(object);
                 drawn.fills += 1;
-                at
+                cell
             })
             .collect();
 
         // The ground on its own, where that is all which was asked for: a
         // patchwork of the set's opaque areas, with nothing drawn over it.
         if self.settings.just_opaque_areas {
-            return objects;
+            return (objects, ground);
         }
 
         // A line along some of the cell sides. A side belongs to two cells
@@ -325,7 +529,7 @@ impl Generator<'_> {
         // A see-through area over some of the cells, picked out of the ones
         // which show up over that cell's ground rather than out of all of
         // them.
-        for (cell, &at) in ground.iter().enumerate() {
+        for (cell, at) in ground.iter().map(|cell| cell.class).enumerate() {
             if !random.chance(self.settings.transparent_areas) {
                 continue;
             }
@@ -341,7 +545,7 @@ impl Generator<'_> {
         // count gives each of them. One near a boundary draws over it, which
         // is a thing a renderer has to get right and a surveyor draws every
         // day.
-        for (cell, &at) in ground.iter().enumerate() {
+        for (cell, at) in ground.iter().map(|cell| cell.class).enumerate() {
             let (column, row) = (cell % layout.size(), cell / layout.size());
             for _ in 0..random.halving_count(self.settings.point_symbols) {
                 let Some(&over) = random.pick(&self.overlays.points[at]) else {
@@ -360,7 +564,7 @@ impl Generator<'_> {
             }
         }
 
-        objects
+        (objects, ground)
     }
 
     /// A path object drawn with an area symbol, turned to an angle of its own
@@ -394,11 +598,80 @@ fn drawn_with(object: &mut Object, symbol: &Entry) {
     object.symbol_id = symbol.id;
 }
 
-/// The name of the n-th map of a dataset of `total`, zero padded far enough
-/// that the folder sorts the way it was generated.
-pub fn map_name(index: usize, total: usize) -> String {
+/// What the n-th map of a dataset of `total` is called, without a suffix:
+/// the name its map, its image and its labels share, zero padded far enough
+/// that a folder of them sorts the way they were generated.
+pub fn map_stem(index: usize, total: usize) -> String {
     let width = total.max(1).to_string().len().max(3);
-    format!("map_{:0width$}.omap", index + 1, width = width)
+    format!("map_{:0width$}", index + 1, width = width)
+}
+
+/// The file name of the n-th map of a dataset of `total`.
+pub fn map_name(index: usize, total: usize) -> String {
+    format!("{}.omap", map_stem(index, total))
+}
+
+/// Writes what a label's channels mean: one entry per one-hot channel, in the
+/// order the channels run, and the settings the images were drawn at.
+///
+/// A label is a stack of numbers and nothing in it says which number is the
+/// bare rock. This is where that is written down, once for the dataset, since
+/// it is the symbol set which decides it rather than any one map.
+fn write_classes(path: &Path, catalogue: &Catalogue, settings: &Settings) -> Result<(), String> {
+    let classes = catalogue.opaque_areas.len();
+    let mut json = String::from("{\n");
+    json.push_str("  \"format\": \"MAUROGT2\",\n");
+    json.push_str(&format!("  \"classes\": {classes},\n"));
+    json.push_str(&format!("  \"channels\": {},\n", classes + 2));
+    // The angle is the last two channels, its sine and then its cosine: an
+    // angle has a seam where a whole turn brings it back, and a point on the
+    // unit circle has none. The zero vector is no angle at all.
+    json.push_str(&format!("  \"sin_channel\": {classes},\n"));
+    json.push_str(&format!("  \"cos_channel\": {},\n", classes + 1));
+    json.push_str(&format!(
+        "  \"background\": {},\n",
+        crate::ground_truth::BACKGROUND
+    ));
+    json.push_str(&format!("  \"image_size\": {},\n", settings.image_size()));
+    json.push_str(&format!("  \"resolution\": {},\n", settings.resolution));
+    json.push_str(&format!("  \"frame\": {},\n", settings.frame));
+    json.push_str(&format!("  \"cell_size\": {},\n", settings.cell_size));
+    json.push_str(&format!("  \"layout_size\": {},\n", settings.layout_size));
+    json.push_str(&format!("  \"seed\": {},\n", settings.seed));
+    json.push_str("  \"symbols\": [\n");
+    for (channel, entry) in catalogue.opaque_areas.iter().enumerate() {
+        json.push_str(&format!(
+            "    {{\"channel\": {}, \"id\": {}, \"code\": {}, \"name\": {}, \"turns\": {}}}",
+            channel,
+            entry.id,
+            quoted(&entry.code),
+            quoted(&entry.name),
+            entry.turns,
+        ));
+        json.push_str(if channel + 1 == classes { "\n" } else { ",\n" });
+    }
+    json.push_str("  ]\n}\n");
+    std::fs::write(path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// A string as a JSON one. A symbol name is whatever the symbol set called
+/// it, which can be anything at all.
+fn quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -412,5 +685,27 @@ mod tests {
         // Never narrower than three digits, and wider where it must be.
         assert_eq!(map_name(0, 2), "map_001.omap");
         assert_eq!(map_name(999, 1000), "map_1000.omap");
+        // The map, its image and its labels share the stem.
+        assert_eq!(map_stem(0, 10), "map_001");
+    }
+
+    #[test]
+    fn every_image_of_a_dataset_is_the_layout_and_the_frame() {
+        let settings = Settings {
+            layout_size: 3,
+            cell_size: 150,
+            resolution: 3.0,
+            frame: 50.0,
+            ..Settings::default()
+        };
+        // 450 meters of layout and 50 on each side, three pixels to the meter.
+        assert_eq!(settings.ground().width(), 550.0);
+        assert_eq!(settings.image_size(), 1650);
+    }
+
+    #[test]
+    fn a_symbol_name_goes_into_json_as_one() {
+        assert_eq!(quoted(r#"Say "stop""#), r#""Say \"stop\"""#);
+        assert_eq!(quoted("a\tb"), r#""a\tb""#);
     }
 }

@@ -65,6 +65,11 @@
 //! coordinates a file holds, and [`random`] is where every choice any of
 //! them makes comes from — seeded by hand, so that a generated map can be
 //! generated again.
+//!
+//! A generated map is also the one map whose answer is known, which makes a
+//! folder of them a training set: [`ground_truth`] writes down what each
+//! pixel of a generated map's image is, as the tensor a model is scored
+//! against, out of the very decisions the map was drawn from.
 
 // Every public item carries a doc comment; this keeps it that way.
 #![warn(missing_docs)]
@@ -74,6 +79,7 @@ pub mod archive_info;
 pub mod dataset;
 pub mod differences;
 pub mod geometry;
+pub mod ground_truth;
 pub mod layout;
 pub mod map;
 pub mod naming;

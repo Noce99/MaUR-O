@@ -1,5 +1,5 @@
 //! Generates a folder of random orienteering maps out of one map's symbol
-//! set.
+//! set, each of them drawn to an image and labelled pixel by pixel.
 //!
 //! ```text
 //! generate_maps_dataset [OPTIONS] <symbol-set> [folder]
@@ -20,11 +20,19 @@
 //! nothing draws with yet.
 //!
 //! `--just-opaque-areas` stops after the ground: the cells are filled and
-//! nothing is drawn over them, which leaves a map of area fills alone.
+//! nothing is drawn over them, which leaves a map of area fills alone — and
+//! is the one map whose every pixel has an answer, so it is the one which is
+//! labelled.
+//!
+//! A dataset is three folders and a file naming what the labels mean:
 //!
 //! ```text
-//! generate_maps_dataset maps/ISOM_10k.omap dataset
-//! map_to_image dataset/map_001.omap
+//! generate_maps_dataset --just-opaque-areas maps/ISOM_10k.omap dataset
+//!
+//! dataset/classes.json       what channel each opaque area owns
+//! dataset/maps/map_001.omap  the map, to open in Mapper
+//! dataset/images/map_001.png what it looks like: a model's input
+//! dataset/gt/map_001.bin     what it is, pixel by pixel: the answer
 //! ```
 //!
 //! The whole dataset follows from the seed: the same options give the same
@@ -40,10 +48,12 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use maur_o::dataset::{
-    create_dataset, Settings, DEFAULT_CELL_SIZE, DEFAULT_EMPTY_SIDES, DEFAULT_LAYOUT_SIZE,
-    DEFAULT_MAPS, DEFAULT_POINT_SYMBOLS, DEFAULT_TRANSPARENT_AREAS,
+    create_dataset, Generated, Settings, CLASSES_FILE, DEFAULT_CELL_SIZE, DEFAULT_EMPTY_SIDES,
+    DEFAULT_LAYOUT_SIZE, DEFAULT_MAPS, DEFAULT_POINT_SYMBOLS, DEFAULT_TRANSPARENT_AREAS,
+    GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER,
 };
 use maur_o::progress::Progress;
+use maur_o::render::{DEFAULT_FRAME, DEFAULT_RESOLUTION};
 
 /// Where the maps go when no folder is named.
 const DEFAULT_FOLDER: &str = "dataset";
@@ -59,6 +69,9 @@ const DEFAULT_FOLDER: &str = "dataset";
              areas, lines run along some of the boundaries, see-through areas cover some of \
              the cells and point symbols are scattered into them -- each of them picked out \
              of the symbols which show up against the ground they land on.\n\n\
+             The folder comes out as maps/, images/ and, with --just-opaque-areas, gt/: the \
+             map, the picture of it and what each pixel of that picture is, which is a \
+             training set. classes.json says what the labels mean.\n\n\
              The same options give the same maps: everything random comes from the seed."
 )]
 struct Args {
@@ -99,9 +112,25 @@ struct Args {
     /// Draw nothing but the ground: the cells are filled with opaque areas
     /// and the lines, the see-through areas and the point symbols are all
     /// skipped, whatever --empty-sides, --transparent-areas and
-    /// --point-symbols say.
+    /// --point-symbols say. The labels in gt/ are written only for these.
     #[arg(short = 'j', long)]
     just_opaque_areas: bool,
+
+    /// How many pixels of image one meter of ground comes to, which decides
+    /// how big the images and their labels are.
+    #[arg(short = 'r', long, default_value_t = DEFAULT_RESOLUTION, value_name = "PX_PER_M")]
+    resolution: f64,
+
+    /// How much white ground to leave around each map, in meters. It is part
+    /// of the image, and the background class of the labels.
+    #[arg(short = 'f', long, default_value_t = DEFAULT_FRAME, value_name = "METERS")]
+    frame: f64,
+
+    /// Write the maps and nothing else. Drawing them is most of the work, so
+    /// this is what somebody after the map files alone wants; the labels go
+    /// with the images, having nothing left to be labels of.
+    #[arg(long)]
+    no_images: bool,
 
     /// Keep to the IOF rules for what may be drawn where. Not read yet: what
     /// goes over a piece of ground is picked for being visible on it, not
@@ -154,6 +183,19 @@ fn run() -> Result<(), (ExitCode, String)> {
         }
     }
 
+    if args.resolution.is_nan() || args.resolution <= 0.0 {
+        return Err((
+            ExitCode::from(1),
+            "Error: Invalid value for --resolution: it must be greater than zero.".to_string(),
+        ));
+    }
+    if args.frame.is_nan() || args.frame < 0.0 {
+        return Err((
+            ExitCode::from(1),
+            "Error: Invalid value for --frame: it cannot be negative.".to_string(),
+        ));
+    }
+
     let settings = Settings {
         layout_size: args.layout_size,
         cell_size: args.background_cell_size,
@@ -164,6 +206,9 @@ fn run() -> Result<(), (ExitCode, String)> {
         transparent_areas: args.transparent_areas,
         point_symbols: args.point_symbols,
         just_opaque_areas: args.just_opaque_areas,
+        images: !args.no_images,
+        resolution: args.resolution,
+        frame: args.frame,
     };
 
     let mut progress = Progress::new("Maps", settings.maps);
@@ -227,6 +272,40 @@ fn run() -> Result<(), (ExitCode, String)> {
             ""
         },
     );
+
+    // The three folders, and what a training set made of them holds.
+    let count = |files: fn(&Generated) -> bool| summary.written.iter().filter(|g| files(g)).count();
+    println!(
+        "  {MAPS_FOLDER}/ {} maps written",
+        count(|g| g.map.is_file())
+    );
+    let images = count(|g| g.image.is_some());
+    if images == 0 {
+        println!("  {IMAGES_FOLDER}/ nothing: --no-images was asked for");
+    } else {
+        println!(
+            "  {IMAGES_FOLDER}/ {images} images of {} by {} pixels, at {} px/m with a {} m frame",
+            summary.image_size, summary.image_size, settings.resolution, settings.frame,
+        );
+    }
+    let labelled = count(|g| g.ground_truth.is_some());
+    if labelled == 0 {
+        println!(
+            "  {GROUND_TRUTH_FOLDER}/ nothing: a pixel's label is the one piece of ground cover \
+             under it, so only the images of --just-opaque-areas maps are labelled"
+        );
+    } else {
+        println!(
+            "  {GROUND_TRUTH_FOLDER}/ {labelled} labels of {} by {} by {} ({} classes, then the \
+             sine and the cosine of the pattern angle), and {CLASSES_FILE} says which channel is \
+             which",
+            summary.image_size,
+            summary.image_size,
+            fills + 2,
+            fills,
+        );
+    }
+
     println!(
         "  seed {}, IOF rules {} (not read yet: an overlay is picked for showing up on its \
          ground, not for being allowed there)",
