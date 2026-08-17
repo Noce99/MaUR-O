@@ -87,7 +87,11 @@
 //!
 //! The answers only exist where [`Settings::just_opaque_areas`] is on, which
 //! is the one map a label can describe so far: every pixel is one piece of
-//! ground cover and nothing is drawn over it.
+//! ground cover and nothing is drawn over it. [`Settings::ground_truth`] can
+//! turn off writing them to `gt/` regardless, for somebody after the maps and
+//! their images with no use for the answers on disk; `classes.json` still
+//! goes out, since a label can be computed from a map in `maps/` instead of
+//! read from `gt/`.
 
 use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
@@ -182,6 +186,15 @@ pub struct Settings {
     /// after the maps alone wants. Without an image there is nothing for a
     /// label to be a label of, so `gt/` goes with it.
     pub images: bool,
+    /// Whether to write the labels in `gt/`, where [`Settings::images`] and
+    /// [`Settings::just_opaque_areas`] would otherwise have them written.
+    ///
+    /// Off is for somebody after the maps and their images alone, with no use
+    /// for the answers on disk. `classes.json` is written regardless: it is
+    /// what lets a label be computed from `maps/` instead of read from
+    /// `gt/`, which is the one thing a folder without `gt/` still needs from
+    /// the dataset to be trained on.
+    pub ground_truth: bool,
     /// How many pixels of image one meter of ground comes to, which is what
     /// decides how big the images and their labels are.
     pub resolution: f64,
@@ -204,6 +217,7 @@ impl Default for Settings {
             point_symbols: DEFAULT_POINT_SYMBOLS,
             just_opaque_areas: false,
             images: true,
+            ground_truth: true,
             resolution: DEFAULT_RESOLUTION,
             frame: DEFAULT_FRAME,
         }
@@ -338,10 +352,15 @@ pub fn create_dataset(
     // Step one, the rest of it: what of this set may be drawn over what.
     let overlays = Overlays::of(&map, &catalogue);
 
-    // Only a map of nothing but ground cover has an answer to write down,
-    // and only an image has anything for that answer to be about; a folder
-    // missing either comes out with two of the three, or one.
-    let labelled = settings.images && settings.just_opaque_areas;
+    // Only a map of nothing but ground cover has an answer, and only an
+    // image has anything for that answer to be about; a folder missing
+    // either has nothing classes.json could describe, whatever
+    // Settings::ground_truth says. Where there is an answer, classes.json
+    // goes out regardless of ground_truth: it is what lets training compute
+    // a map's labels from maps/ itself, the one thing a folder without gt/
+    // still needs from the dataset.
+    let answerable = settings.images && settings.just_opaque_areas;
+    let labelled = answerable && settings.ground_truth;
 
     let (maps_folder, images_folder, gt_folder) = (
         into.join(MAPS_FOLDER),
@@ -359,7 +378,7 @@ pub fn create_dataset(
         std::fs::create_dir_all(folder)
             .map_err(|e| format!("cannot make {}: {e}", folder.display()))?;
     }
-    if labelled {
+    if answerable {
         write_classes(&into.join(CLASSES_FILE), &catalogue, settings)?;
     }
 
@@ -654,6 +673,31 @@ fn write_classes(path: &Path, catalogue: &Catalogue, settings: &Settings) -> Res
     std::fs::write(path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// The pixels-per-meter a dataset's images were drawn at, out of the
+/// `classes.json` written beside them.
+///
+/// A map file says nothing about the resolution it was rendered to — that is
+/// a rendering choice, not a property of the map — so a label rebuilt from a
+/// map file with [`crate::ground_truth::GroundTruth::from_map`], after its
+/// `.bin` was left out of the folder, has nowhere else to read it from.
+pub fn resolution_of(dataset: &Path) -> Result<f64, String> {
+    let path = dataset.join(CLASSES_FILE);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+
+    let key = "\"resolution\":";
+    let at = text
+        .find(key)
+        .ok_or_else(|| format!("{} names no resolution", path.display()))?;
+    text[at + key.len()..]
+        .trim_start()
+        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .next()
+        .filter(|digits| !digits.is_empty())
+        .and_then(|digits| digits.parse().ok())
+        .ok_or_else(|| format!("{} names no resolution", path.display()))
+}
+
 /// A string as a JSON one. A symbol name is whatever the symbol set called
 /// it, which can be anything at all.
 fn quoted(text: &str) -> String {
@@ -707,5 +751,30 @@ mod tests {
     fn a_symbol_name_goes_into_json_as_one() {
         assert_eq!(quoted(r#"Say "stop""#), r#""Say \"stop\"""#);
         assert_eq!(quoted("a\tb"), r#""a\tb""#);
+    }
+
+    /// The resolution `write_classes` wrote is the resolution `resolution_of`
+    /// reads back, whole or fractional.
+    #[test]
+    fn resolution_of_reads_back_what_write_classes_wrote() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let catalogue = Catalogue::default();
+        for resolution in [3.0, 2.5] {
+            let settings = Settings {
+                resolution,
+                ..Settings::default()
+            };
+            write_classes(&dir.path().join(CLASSES_FILE), &catalogue, &settings)
+                .expect("classes.json writes");
+            assert_eq!(resolution_of(dir.path()), Ok(resolution));
+        }
+    }
+
+    /// A folder with no `classes.json` has no resolution to read, which is
+    /// what a dataset not generated with `--just-opaque-areas` looks like.
+    #[test]
+    fn resolution_of_a_folder_without_classes_json_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        assert!(resolution_of(dir.path()).is_err());
     }
 }

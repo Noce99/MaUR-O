@@ -43,6 +43,9 @@ const ONLY_THE_GROUND: [&str; 3] = [
 /// the images say so by leaving this off.
 const NO_IMAGES: &str = "--no-images";
 
+/// Turns the labels off without turning the images off with them.
+const NO_GT: &str = "--no-gt";
+
 fn generate() -> Command {
     Command::cargo_bin("generate_maps_dataset").unwrap()
 }
@@ -613,6 +616,29 @@ fn no_images_writes_the_maps_and_nothing_else() {
     assert!(map_at(&folder, 1).is_file());
     assert!(!folder.join(IMAGES_FOLDER).exists());
     assert!(!folder.join(GROUND_TRUTH_FOLDER).exists());
+}
+
+/// Asking for no gt leaves the maps and their images alone, and drops only
+/// the labels: somebody after the images with no use for the answers on
+/// disk. classes.json still goes out, since training reads it to compute a
+/// label from a map in maps/ instead of from gt/.
+#[test]
+fn no_gt_writes_the_maps_and_images_but_not_the_labels() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("dataset");
+    generate()
+        .arg(NO_GT)
+        .arg(SYMBOL_SET)
+        .arg(&folder)
+        .args(["--maps=1", "--just-opaque-areas"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("gt/ nothing: --no-gt was asked for"));
+
+    assert!(map_at(&folder, 1).is_file());
+    assert!(folder.join(IMAGES_FOLDER).join("map_001.png").is_file());
+    assert!(!folder.join(GROUND_TRUTH_FOLDER).exists());
+    assert!(folder.join("classes.json").is_file());
 }
 
 /// An image and its labels are the same size whatever landed on the map, so

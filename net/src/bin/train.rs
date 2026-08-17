@@ -8,7 +8,11 @@
 //! The dataset is a folder `generate_maps_dataset --just-opaque-areas` wrote:
 //! `images/` for what the network is shown, `gt/` for what it should say, and
 //! `classes.json` for what the channels of an answer mean — which is where
-//! the number of classes comes from, so it is not an option here.
+//! the number of classes comes from, so it is not an option here. A map whose
+//! labels were left out of `gt/` is not left out of the run: they are
+//! computed straight from `maps/<name>.omap` instead, at the cost of parsing
+//! and rasterizing that map every time they are asked for rather than reading
+//! a `.bin` — see [`maur_o_net::data`].
 //!
 //! ```bash
 //! cargo run --release --bin generate_maps_dataset -- \
@@ -47,7 +51,8 @@ const DEFAULT_RUN: &str = "run";
              drawn with.\n\n\
              The dataset is what `generate_maps_dataset --just-opaque-areas` writes: images/ is \
              what the network is shown, gt/ what it should say, and classes.json says how many \
-             symbols there are to tell apart.\n\n\
+             symbols there are to tell apart. A map left out of gt/ is not left out of the run: \
+             its labels are computed from maps/ instead.\n\n\
              A map is 1650 pixels square and a U-Net is not, so training runs on crops taken at \
              random from inside them -- which is also most of what stands in for having more \
              maps."
@@ -105,6 +110,12 @@ struct Args {
     /// gives the same run.
     #[arg(short = 's', long, default_value_t = 0)]
     seed: u64,
+
+    /// Show a live terminal dashboard of the metrics in place of the plain,
+    /// scrolling log -- a full-screen view of the loss, the accuracy and the
+    /// angle error as they come in, epoch by epoch.
+    #[arg(long)]
+    dashboard: bool,
 }
 
 /// How many opaque areas the dataset holds, out of the `classes.json` the
@@ -212,7 +223,7 @@ fn run() -> Result<(), (ExitCode, String)> {
         args.base_channels,
     );
 
-    train::<Backend>(&args.dataset, &args.run, config, device())
+    train::<Backend>(&args.dataset, &args.run, config, device(), args.dashboard)
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))
 }
 

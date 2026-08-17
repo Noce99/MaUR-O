@@ -62,6 +62,8 @@ use burn::train::metric::state::{FormatOptions, NumericMetricState};
 use burn::train::metric::{
     Adaptor, ItemLazy, LossInput, LossMetric, Metric, MetricEntry, MetricMetadata, Numeric,
 };
+use burn::train::renderer::tui::TuiMetricsRenderer;
+use burn::train::renderer::{MetricState, MetricsRenderer, TrainingProgress};
 use burn::train::{LearnerBuilder, TrainOutput, TrainStep, ValidStep};
 
 use crate::data::{MapBatch, MapBatcher, MapDataset, CROP, DEFAULT_CROPS_PER_MAP};
@@ -450,15 +452,40 @@ pub struct TrainingConfig {
     pub seed: u64,
 }
 
+/// What `train` renders to without `--dashboard`: one line of debug output
+/// per step, printed rather than drawn. Burn's own equivalent,
+/// `CliMetricsRenderer`, is not exported by the crate, and building with the
+/// `tui` feature on -- which the dashboard needs -- would otherwise leave
+/// burn's own terminal detection picking the dashboard the moment this runs
+/// somewhere with a terminal, whether `--dashboard` was asked for or not.
+struct PlainRenderer;
+
+impl MetricsRenderer for PlainRenderer {
+    fn update_train(&mut self, _state: MetricState) {}
+    fn update_valid(&mut self, _state: MetricState) {}
+
+    fn render_train(&mut self, item: TrainingProgress) {
+        println!("{item:?}");
+    }
+
+    fn render_valid(&mut self, item: TrainingProgress) {
+        println!("{item:?}");
+    }
+}
+
 /// Trains a U-Net on the dataset in `dataset`, writing the run — the
 /// checkpoints, the metrics and the configuration — into `into`.
 ///
-/// `into` is created if it is not there.
+/// `into` is created if it is not there. `dashboard` switches the plain,
+/// scrolling metrics log for a live terminal dashboard; it says nothing about
+/// the run itself, which is why it is a parameter here rather than a field of
+/// [`TrainingConfig`], the part of a run's setup that gets written to disk.
 pub fn train<B: AutodiffBackend>(
     dataset: &std::path::Path,
     into: &std::path::Path,
     config: TrainingConfig,
     device: B::Device,
+    dashboard: bool,
 ) -> Result<(), String> {
     if config.crop % (1 << DEPTH) != 0 {
         return Err(format!(
@@ -517,7 +544,7 @@ pub fn train<B: AutodiffBackend>(
             .num_workers(config.workers)
             .build(valid);
 
-    let learner = LearnerBuilder::new(into)
+    let mut builder = LearnerBuilder::new(into)
         .metric_train_numeric(LossMetric::<MetricBackend>::new())
         .metric_valid_numeric(LossMetric::<MetricBackend>::new())
         .metric_train_numeric(PixelAccuracyMetric::<MetricBackend>::new())
@@ -527,14 +554,27 @@ pub fn train<B: AutodiffBackend>(
         .with_file_checkpointer(CompactRecorder::new())
         .devices(vec![device.clone()])
         .num_epochs(config.epochs)
-        .summary()
-        .build(
-            UNetConfig::new(config.classes)
-                .with_base_channels(config.base_channels)
-                .init::<B>(&device),
-            AdamConfig::new().init(),
-            config.learning_rate,
-        );
+        .summary();
+    builder = if dashboard {
+        // The same interrupter the learner would otherwise make for itself,
+        // so Ctrl-C still stops the run through the dashboard rather than
+        // going around it.
+        let interrupter = builder.interrupter();
+        builder.renderer(TuiMetricsRenderer::new(interrupter, None))
+    } else {
+        // Chosen explicitly rather than left to burn's own terminal
+        // detection, which would switch the plain log for the dashboard on
+        // its own the moment this runs in a terminal -- the opposite of
+        // --dashboard being what turns it on.
+        builder.renderer(PlainRenderer)
+    };
+    let learner = builder.build(
+        UNetConfig::new(config.classes)
+            .with_base_channels(config.base_channels)
+            .init::<B>(&device),
+        AdamConfig::new().init(),
+        config.learning_rate,
+    );
 
     let trained = learner.fit(train_loader, valid_loader);
 

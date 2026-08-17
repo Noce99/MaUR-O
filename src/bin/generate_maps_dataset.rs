@@ -132,6 +132,13 @@ struct Args {
     #[arg(long)]
     no_images: bool,
 
+    /// Write the maps and their images, but not the gt/ labels, even where
+    /// --just-opaque-areas would otherwise have them written. classes.json
+    /// still goes out, since it is what lets a label be computed from a map
+    /// in maps/ instead of read from gt/ -- training reads it either way.
+    #[arg(long)]
+    no_gt: bool,
+
     /// Keep to the IOF rules for what may be drawn where. Not read yet: what
     /// goes over a piece of ground is picked for being visible on it, not
     /// for being allowed there.
@@ -207,6 +214,7 @@ fn run() -> Result<(), (ExitCode, String)> {
         point_symbols: args.point_symbols,
         just_opaque_areas: args.just_opaque_areas,
         images: !args.no_images,
+        ground_truth: !args.no_gt,
         resolution: args.resolution,
         frame: args.frame,
     };
@@ -291,8 +299,19 @@ fn run() -> Result<(), (ExitCode, String)> {
     let labelled = count(|g| g.ground_truth.is_some());
     if labelled == 0 {
         println!(
-            "  {GROUND_TRUTH_FOLDER}/ nothing: a pixel's label is the one piece of ground cover \
-             under it, so only the images of --just-opaque-areas maps are labelled"
+            "  {GROUND_TRUTH_FOLDER}/ nothing: {}",
+            if args.no_gt && images > 0 && settings.just_opaque_areas {
+                format!(
+                    "--no-gt was asked for; {CLASSES_FILE} still went out, so a label can be \
+                     computed from a map in {MAPS_FOLDER}/ instead"
+                )
+            } else if args.no_gt {
+                "--no-gt was asked for".to_string()
+            } else {
+                "a pixel's label is the one piece of ground cover under it, so only the images \
+                 of --just-opaque-areas maps are labelled"
+                    .to_string()
+            }
         );
     } else {
         println!(

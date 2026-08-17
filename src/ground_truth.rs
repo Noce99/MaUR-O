@@ -93,6 +93,7 @@
 //! [`GroundTruth::sin_cos`] on its own, over the pixels whose target is not
 //! the zero vector.
 
+use std::collections::HashMap;
 use std::f64::consts::TAU;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -101,8 +102,10 @@ use std::path::Path;
 use tiny_skia::{FillRule, Mask, Transform};
 
 use crate::geometry::to_painter_path;
-use crate::map::CoordList;
+use crate::map::{CoordList, ObjectKind};
 use crate::renderer::to_skia_path;
+use crate::symbol_kinds::Catalogue;
+use crate::xml_reader::read_xml_map;
 
 /// The eight bytes a ground truth file opens with. The digit is the version:
 /// a file which starts with something else is not one of these.
@@ -227,6 +230,94 @@ impl GroundTruth {
             }
         }
         Ok(truth)
+    }
+
+    /// Rebuilds the labels for a map [`crate::dataset::create_dataset`] wrote
+    /// with [`crate::dataset::Settings::just_opaque_areas`] on, straight out
+    /// of the map file itself rather than out of a `.bin`
+    /// [`GroundTruth::write`] wrote beside it.
+    ///
+    /// A map like that *is* its own answer: every object on it is one cell,
+    /// filled with one opaque area of the symbol set and turned to the angle
+    /// its pattern was drawn at, and nothing else was drawn over it. So the
+    /// grounds [`GroundTruth::rasterize`] wants are read straight back out of
+    /// the objects rather than kept from when they were drawn — which is what
+    /// lets a `gt/` folder be left out of a dataset and made up again on
+    /// demand, at the cost of a map file to parse and rasterize instead of a
+    /// `.bin` to read.
+    ///
+    /// `width` and `height` are the image this is to line up with, pixel for
+    /// pixel — they do not come from the map file, which says nothing about
+    /// how many pixels a meter of ground was drawn at. Neither does
+    /// `resolution`: it is one of the settings a dataset's `classes.json`
+    /// exists to remember.
+    ///
+    /// An object drawn with a symbol the catalogue does not carry as an
+    /// opaque area — a line, a point, anything left over from a map not
+    /// generated with `just_opaque_areas` — is skipped rather than
+    /// complained about: it draws nothing a label can say, so it is treated
+    /// as nothing having been drawn there, same as the frame around the map.
+    ///
+    /// Not bit for bit with a `.bin` [`GroundTruth::rasterize`] wrote at
+    /// generation time: a map file keeps a rotation to six significant
+    /// digits, same as Mapper does, rather than the exact angle it was
+    /// turned to — close enough for a network trained on it, not close
+    /// enough for `==`.
+    pub fn from_map(
+        path: &Path,
+        width: u32,
+        height: u32,
+        resolution: f64,
+    ) -> Result<GroundTruth, String> {
+        let (mut map, _) = read_xml_map(path)?;
+        map.resolve_references();
+        let catalogue = Catalogue::of(&map);
+        if catalogue.opaque_areas.is_empty() {
+            return Err(format!(
+                "{} holds no opaque area symbol, so there is no ground cover to label",
+                path.display()
+            ));
+        }
+
+        // Where a symbol's place in `Map::symbols` lands among the opaque
+        // areas — an object names the first, and rasterizing wants the
+        // second — and whether it turns, which is what tells a rotation
+        // worth keeping from an angle nobody asked the symbol for.
+        let channel_of: HashMap<usize, (usize, bool)> = catalogue
+            .opaque_areas
+            .iter()
+            .enumerate()
+            .map(|(channel, entry)| (entry.index, (channel, entry.turns)))
+            .collect();
+
+        let grounds: Vec<Ground> = map
+            .objects
+            .iter()
+            .filter(|object| matches!(object.kind, ObjectKind::Path(_)))
+            .filter_map(|object| {
+                let &(class, turns) = channel_of.get(&object.symbol_index?)?;
+                Some(Ground {
+                    class,
+                    turn: turns.then_some(object.rotation),
+                    outline: object.coords.clone(),
+                })
+            })
+            .collect();
+        if grounds.is_empty() {
+            return Err(format!(
+                "{} draws no opaque area: there is no ground for a label to describe",
+                path.display()
+            ));
+        }
+
+        let page_transform = page_transform_for(map.scale_denominator, resolution, width, height);
+        GroundTruth::rasterize(
+            &grounds,
+            catalogue.opaque_areas.len(),
+            width,
+            height,
+            page_transform,
+        )
     }
 
     /// How many channels the tensor has: one per opaque area of the symbol
@@ -373,6 +464,29 @@ impl GroundTruth {
     }
 }
 
+/// The transform from a map coordinate — mm on the paper — to the pixel of a
+/// `width` by `height` image it lines up with, at `resolution` pixels per
+/// meter of ground and the map's own scale.
+///
+/// The same arithmetic [`crate::render::render_map_over`] uses for
+/// [`crate::render::Extent::Ground`], run backwards from the pixel size an
+/// image already came out as, rather than forwards from a ground rectangle
+/// which is then rounded into one — which is what keeps a label's pixel grid
+/// exactly the image's, rather than a pixel off from rounding the same square
+/// twice.
+fn page_transform_for(
+    scale_denominator: i32,
+    resolution: f64,
+    width: u32,
+    height: u32,
+) -> Transform {
+    let pixel_per_mm = resolution * scale_denominator as f64 / 1000.0;
+    let half_mm = |pixels: u32| pixels as f64 / pixel_per_mm / 2.0;
+    let translate = Transform::from_translate(half_mm(width) as f32, half_mm(height) as f32);
+    let scale = Transform::from_scale(pixel_per_mm as f32, pixel_per_mm as f32);
+    translate.post_concat(scale)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +594,60 @@ mod tests {
         assert_eq!((read.height, read.width, read.classes), (4, 4, 3));
         assert_eq!(read.class_of, truth.class_of);
         assert_eq!(read.rotation, truth.rotation);
+    }
+
+    /// A label rebuilt straight from a map file is the same label
+    /// [`crate::dataset::create_dataset`] rasterized and wrote to disk for
+    /// it: the same classes, the same angles, pixel for pixel.
+    #[test]
+    fn from_map_rebuilds_the_label_a_dataset_wrote_to_disk() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let settings = crate::dataset::Settings {
+            layout_size: 2,
+            cell_size: 20,
+            maps: 3,
+            just_opaque_areas: true,
+            resolution: 2.0,
+            frame: 5.0,
+            ..crate::dataset::Settings::default()
+        };
+        let summary = crate::dataset::create_dataset(
+            Path::new("tests/data/turning_patterns.xmap"),
+            dir.path(),
+            &settings,
+            |_, _| {},
+        )
+        .expect("the dataset generates");
+
+        for generated in &summary.written {
+            let on_disk = GroundTruth::read(generated.ground_truth.as_deref().expect("labelled"))
+                .expect("the labels this generated");
+            let rebuilt = GroundTruth::from_map(
+                &generated.map,
+                on_disk.width,
+                on_disk.height,
+                settings.resolution,
+            )
+            .unwrap_or_else(|e| panic!("{}: {e}", generated.map.display()));
+
+            assert_eq!(
+                rebuilt.class_of,
+                on_disk.class_of,
+                "{}",
+                generated.map.display()
+            );
+            // Not bit for bit: a map file keeps a rotation to six
+            // significant digits, same as Mapper does, where the `.bin`
+            // holds the exact angle it was drawn from.
+            for (at, (&got, &wanted)) in rebuilt.rotation.iter().zip(&on_disk.rotation).enumerate()
+            {
+                assert!(
+                    (got - wanted).abs() < 1e-5,
+                    "{} pixel {at}: {got} rebuilt, {wanted} on disk",
+                    generated.map.display(),
+                );
+            }
+        }
     }
 
     #[test]
