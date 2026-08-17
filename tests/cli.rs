@@ -1,6 +1,11 @@
-//! Ports the quick CLI tests from `tests/CMakeLists.txt`: the tool is
-//! tested through its command line interface, keeping the tests free of
-//! any test framework dependency beyond `assert_cmd`.
+//! The quick checks on `map_to_image`'s command line interface: that it
+//! renders what it is given, and that it says something useful and exits with
+//! the documented code when it cannot.
+//!
+//! Everything is driven through the built binary rather than through the
+//! library, because the interface is the contract here — the exit codes are
+//! documented and scripted against, and a change to one of them is a breaking
+//! change no library-level test would notice.
 
 use assert_cmd::Command;
 

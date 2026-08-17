@@ -6,7 +6,7 @@
 //!
 //! The archive holds a `maps/` folder of `.omap` files and an `expected/`
 //! folder with a reference image for each of them, named by the rules in
-//! [`mti::naming`]. An archive which breaks the rules is not rejected: the
+//! [`maur_o::naming`]. An archive which breaks the rules is not rejected: the
 //! names it should have had are printed, and a corrected copy of the archive
 //! is written next to it as `<name>_corrected.zip`, before the run carries
 //! on with the corrected names.
@@ -19,7 +19,7 @@
 //!     naming.txt      what was wrong with the names, when something was
 //!     results.txt     a row per map: how much differs, and by how much
 //!     predictions/    the rendered maps
-//!     differences/    where they disagree with expected/, see mti::differences
+//!     differences/    where they disagree with expected/, see maur_o::differences
 //! ```
 //!
 //! The three stages announce themselves and then get on with it: the long
@@ -35,12 +35,12 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use mti::archive_info;
-use mti::differences::{self, Options};
-use mti::naming::{self, Plan};
-use mti::progress::{stage, Progress};
-use mti::report;
-use mti::render::{render_map, save_pixmap, DEFAULT_FRAME, DEFAULT_RESOLUTION};
+use maur_o::archive_info;
+use maur_o::differences::{self, Options};
+use maur_o::naming::{self, Plan};
+use maur_o::progress::{stage, Progress};
+use maur_o::report;
+use maur_o::render::{render_map, save_pixmap, DEFAULT_FRAME, DEFAULT_RESOLUTION};
 
 /// How many stages a run has, for the headings.
 const STAGES: usize = 3;

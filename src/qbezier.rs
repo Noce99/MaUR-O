@@ -1,14 +1,25 @@
-//! A faithful port of Qt's private `QBezier::shifted()` — the curve offset
-//! algorithm used to shift a line symbol's border sideways off the main
-//! line, preserving it as a curve rather than flattening first.
+//! Qt's curve offset algorithm: shifting a bezier sideways off the line it
+//! runs along, and keeping it a bezier instead of flattening it first.
 //!
-//! Ported line-for-line from Qt 5.15's
-//! `qtbase/src/gui/painting/qbezier.cpp` (`shift()`, `good_offset()`,
-//! `addCircle()`, `shifted()`) and `qbezier_p.h` (`pointAt()`,
-//! `normalVector()`, `split()`), since this is the one piece of Qt's private
-//! rendering internals `geometry.cpp` depended on directly. Kept as its own
-//! module, independent of the rest of the geometry code, exactly like the
-//! original's dependency on `<private/qbezier_p.h>`.
+//! A line symbol's border is drawn at a fixed distance to either side of the
+//! main line, and where that line curves, so does the border. Offsetting a
+//! cubic bezier has no exact answer — the true offset of a cubic is not a
+//! cubic — so every renderer approximates, and the approximation it picks is
+//! visible in the result. Mapper draws through Qt and inherits Qt's, which
+//! subdivides until each piece's offset is within tolerance and joins the
+//! pieces with arcs.
+//!
+//! So this module reproduces that algorithm rather than choosing a nicer one:
+//! `shift()`, `good_offset()`, `addCircle()` and `shifted()` from Qt 5.15's
+//! `qtbase/src/gui/painting/qbezier.cpp`, plus `pointAt()`, `normalVector()`
+//! and `split()` from `qbezier_p.h`. Matching Qt's subdivision decisions is
+//! what keeps a curved border landing on the same pixels as the reference
+//! rendering instead of drifting a fraction of a millimetre away from it
+//! along every curve.
+//!
+//! It is kept apart from [`crate::geometry`] because it is Qt's, not
+//! Mapper's: a self-contained piece of upstream behaviour with a single
+//! caller, rather than part of how a map is put together.
 
 use crate::map::Point;
 
@@ -28,17 +39,26 @@ fn fuzzy_is_null(d: f64) -> bool {
 /// uses.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct QBezier {
+    /// The start point.
     pub x1: f64,
+    /// The start point.
     pub y1: f64,
+    /// The first control point.
     pub x2: f64,
+    /// The first control point.
     pub y2: f64,
+    /// The second control point.
     pub x3: f64,
+    /// The second control point.
     pub y3: f64,
+    /// The end point.
     pub x4: f64,
+    /// The end point.
     pub y4: f64,
 }
 
 impl QBezier {
+    /// A curve from its start, its two control points and its end.
     pub fn from_points(p1: Point, p2: Point, p3: Point, p4: Point) -> QBezier {
         QBezier {
             x1: p1.x,
@@ -52,19 +72,28 @@ impl QBezier {
         }
     }
 
+    /// The start point.
     pub fn pt1(&self) -> Point {
         Point::new(self.x1, self.y1)
     }
+    /// The first control point.
     pub fn pt2(&self) -> Point {
         Point::new(self.x2, self.y2)
     }
+    /// The second control point.
     pub fn pt3(&self) -> Point {
         Point::new(self.x3, self.y3)
     }
+    /// The end point.
     pub fn pt4(&self) -> Point {
         Point::new(self.x4, self.y4)
     }
 
+    /// The point at parameter `t`, from 0 at the start to 1 at the end.
+    ///
+    /// Evaluated by repeated linear interpolation rather than from the
+    /// expanded polynomial: the two are equal in exact arithmetic but not in
+    /// floating point, and this is the order Qt evaluates in.
     pub fn point_at(&self, t: f64) -> Point {
         let m_t = 1.0 - t;
         let x = {
@@ -86,6 +115,10 @@ impl QBezier {
         Point::new(x, y)
     }
 
+    /// A vector perpendicular to the curve at parameter `t`, in Qt's own
+    /// normal direction — the tangent turned 90 degrees the opposite way from
+    /// [`Point::perp_right`]. Not normalized, and null where the curve is
+    /// degenerate there.
     pub fn normal_vector(&self, t: f64) -> Point {
         let m_t = 1.0 - t;
         let a = m_t * m_t;
@@ -97,6 +130,8 @@ impl QBezier {
         )
     }
 
+    /// Splits the curve in half at `t = 0.5`, by de Casteljau's construction.
+    /// The two halves together trace exactly the same curve.
     pub fn split(&self) -> (QBezier, QBezier) {
         let mid = |a: Point, b: Point| (a + b) * 0.5;
         let mid_12 = mid(self.pt1(), self.pt2());

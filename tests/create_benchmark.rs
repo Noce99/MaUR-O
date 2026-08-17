@@ -1,11 +1,13 @@
 //! End to end tests for the `create_benchmark` tool: maps go in, an archive
 //! `benchmark` can run comes out.
 //!
-//! The ground truth renderer is a stub script rather than the C++ tool the
-//! real thing is pointed at: what is being tested here is what
-//! `create_benchmark` does around a renderer — which maps it finds, what it
-//! calls them, and what it leaves out — and a stub can be told to fail on
-//! cue, which the real renderer cannot.
+//! The ground truth renderer is a stub script rather than the real external
+//! renderer. What is being tested here is what `create_benchmark` does
+//! *around* a renderer — which maps it finds, what it calls them, what it
+//! leaves out — and for that a stub is not a compromise but the better tool:
+//! it can be told to fail on the third map, which is how the interesting
+//! paths get exercised at all, and it keeps the suite from needing a
+//! Qt-linked binary installed to run.
 
 #![cfg(unix)]
 
@@ -26,7 +28,7 @@ fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
-/// A stand-in for the C++ `map_to_image`: it writes a file where the image
+/// A stand-in for the ground truth renderer: it writes a file where the image
 /// goes, and fails on any map whose name says it should.
 fn stub_renderer(dir: &Path) -> PathBuf {
     script(

@@ -57,7 +57,7 @@ One file per concern, plus a few modules only the benchmarking tools need:
 
 ## One map per symbol
 
-`mti::all_symbols` takes a symbol set and writes one map per symbol of it,
+`maur_o::all_symbols` takes a symbol set and writes one map per symbol of it,
 each with a grid of objects drawn with that symbol alone, and a `.txt` next
 to it saying what is in each cell of the grid. It has no CLI of its own —
 `create_benchmark` calls it whenever it is pointed at a single map file
@@ -110,7 +110,7 @@ reference image: the ordinals are handed out after the rendering, so what is
 left has no hole in it, and `info.txt` says which maps went missing and why.
 
 `index/` is only there for a generated suite: it is the companion
-description `mti::all_symbols` writes for each map, saying which symbol the
+description `maur_o::all_symbols` writes for each map, saying which symbol the
 map is for and what each row and column of its grid is. Nothing reads it —
 it is for whoever is looking at a difference and wants to know what they are
 looking at.

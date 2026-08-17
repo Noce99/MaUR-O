@@ -1,12 +1,19 @@
 //! Makes one map per symbol of a map, each carrying a grid of test objects
 //! drawn with that symbol alone.
 //!
-//! Ported from `create_map_with_all_symbols.cpp` in the C++ project, the same
-//! way the renderer was ported from `renderer.cpp`: algorithm for algorithm,
-//! down to the rounding. A benchmark suite is made of these maps, and a suite
-//! is only worth having if the maps in it are the same maps — so the shapes,
-//! the sizes, the rotations, the grid the objects are laid out on and the
-//! order they come in are all the original's, and so are the file names.
+//! This is where a benchmark suite comes from when the source is a single
+//! map. A symbol set like ISOM or ISSprOM holds a few hundred symbols, and
+//! rendering the whole set as one map says only whether the result looks
+//! about right; rendering each symbol alone, on a grid that exercises it at
+//! every size and rotation it has, says which symbol is wrong and in which of
+//! its states. So the suite is one map per symbol, and a difference found in
+//! a run points at a symbol rather than at a map.
+//!
+//! What each map contains is fixed rather than free. A suite is only
+//! comparable with itself over time if the maps in it are the same maps, so
+//! the shapes, the sizes, the rotations, the layout of the grid, the order
+//! the objects come in and the names of the files are all decided here and
+//! kept stable, down to the rounding.
 //!
 //! Each generated map holds
 //!
@@ -29,8 +36,8 @@
 //! are laid out by the same code which draws them.
 //!
 //! What it writes next to each map is a description of that grid, so that a
-//! difference found in a benchmark run can be read as "the circle at 50 m",
-//! see [`Sheet::index`].
+//! difference found in a benchmark run can be read as "the circle at 50 m"
+//! rather than as "something in row three" — see [`Sheet`].
 
 use std::f64::consts::PI;
 use std::path::Path;
@@ -334,7 +341,8 @@ fn parts<'m>(map: &'m Map, combined: &'m CombinedSymbol) -> Vec<&'m Symbol> {
 }
 
 /// Every symbol personality this symbol draws with, as a bit set of
-/// [`symbol_type`] values. A combined symbol contains what its parts contain.
+/// [`crate::map::symbol_type`] values. A combined symbol contains what its
+/// parts contain.
 fn contained_types(map: &Map, symbol: &Symbol, depth: usize) -> i32 {
     let mut types = symbol_type(symbol);
     if let Symbol::Combined(combined) = symbol {
@@ -828,9 +836,11 @@ pub enum Outcome {
 
 /// What a whole run came to.
 pub struct Summary {
+    /// How many maps were written, one per symbol.
     pub written: usize,
     /// The symbols nothing could be generated for, by number and name.
     pub skipped: Vec<String>,
+    /// The scale of the source map, which every generated map inherits.
     pub scale_denominator: i32,
     /// Complaints from reading the source map.
     pub warnings: Vec<String>,
@@ -839,8 +849,9 @@ pub struct Summary {
 /// The symbols of `source`, each in a map of its own, written into `into`.
 ///
 /// `into` is created if it is not there. Files of a previous run are
-/// overwritten; files belonging to symbols which no longer exist are left
-/// behind, as they are by the tool this was ported from.
+/// overwritten, but files belonging to symbols the source no longer has are
+/// left where they are: this writes maps, and deciding that a file in a
+/// folder it does not own has become stale is not its call to make.
 pub fn create_maps(source: &Path, into: &Path, mut progress: impl FnMut(usize, usize)) -> Result<Summary, String> {
     let (mut map, warnings) = xml_reader::read_xml_map(source)?;
     map.resolve_references();

@@ -1,4 +1,4 @@
-//! End to end tests for `mti::all_symbols::create_maps`: a symbol set goes
+//! End to end tests for `maur_o::all_symbols::create_maps`: a symbol set goes
 //! in, one map per symbol comes out.
 //!
 //! The maps are checked by reading them back with this project's own reader
@@ -14,8 +14,8 @@ use std::path::Path;
 /// except combined.
 const SOURCE: &str = "tests/data/shapes.xmap";
 
-fn generate(into: &Path) -> mti::all_symbols::Summary {
-    mti::all_symbols::create_maps(Path::new(SOURCE), into, |_, _| {}).unwrap()
+fn generate(into: &Path) -> maur_o::all_symbols::Summary {
+    maur_o::all_symbols::create_maps(Path::new(SOURCE), into, |_, _| {}).unwrap()
 }
 
 fn names(folder: &Path) -> Vec<String> {
@@ -60,7 +60,7 @@ fn a_generated_map_holds_the_symbol_it_was_made_for_and_its_objects() {
     let into = dir.path().join("symbols");
     generate(&into);
 
-    let (mut map, warnings) = mti::xml_reader::read_xml_map(&into.join("003_line_505_Path.omap")).unwrap();
+    let (mut map, warnings) = maur_o::xml_reader::read_xml_map(&into.join("003_line_505_Path.omap")).unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
     map.resolve_references();
 
@@ -73,7 +73,7 @@ fn a_generated_map_holds_the_symbol_it_was_made_for_and_its_objects() {
     }
     // The first row is the straight line, at 5, 50 and 100 m on the ground;
     // at 1:10000 a meter is a tenth of a millimeter of paper.
-    let width = |object: &mti::map::Object| object.coords[1].x - object.coords[0].x;
+    let width = |object: &maur_o::map::Object| object.coords[1].x - object.coords[0].x;
     assert!((width(&map.objects[0]) - 0.5).abs() < 1e-9, "{}", width(&map.objects[0]));
     assert!((width(&map.objects[1]) - 5.0).abs() < 1e-9, "{}", width(&map.objects[1]));
     assert!((width(&map.objects[2]) - 10.0).abs() < 1e-9, "{}", width(&map.objects[2]));
@@ -87,7 +87,7 @@ fn a_generated_map_renders() {
 
     for name in ["001_area_401_Open_land", "004_point_109_Small_knoll", "005_text_105_Contour_value"] {
         let map = into.join(format!("{name}.omap"));
-        let rendering = mti::render::render_map(&map, 3.0, 50.0).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let rendering = maur_o::render::render_map(&map, 3.0, 50.0).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(rendering.pixmap.width() > 100, "{name} came out {} wide", rendering.pixmap.width());
         // Something was drawn: the frame alone would leave it all white.
         let white = rendering.pixmap.data().chunks(4).filter(|p| p[0..3] == [255, 255, 255]).count();
@@ -118,6 +118,6 @@ fn a_map_which_is_not_one_is_reported() {
     let source = dir.path().join("not a map.omap");
     std::fs::write(&source, "this is not XML").unwrap();
 
-    let result = mti::all_symbols::create_maps(&source, &dir.path().join("out"), |_, _| {});
+    let result = maur_o::all_symbols::create_maps(&source, &dir.path().join("out"), |_, _| {});
     assert!(result.is_err());
 }

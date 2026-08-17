@@ -34,14 +34,19 @@ impl std::fmt::Display for Error {
     }
 }
 
+/// A drawn map, and what it turned out to be.
 pub struct Rendering {
+    /// The image itself, opaque RGBA, white wherever the map drew nothing.
     pub pixmap: Pixmap,
-    /// The extent covered by the image, in meters on the ground, rounded the
-    /// way `map_to_image` reports it.
+    /// The extent covered by the image, in meters on the ground, the white
+    /// frame included, and rounded the way `map_to_image` reports it.
     pub ground_width: i64,
+    /// The same, vertically.
     pub ground_height: i64,
+    /// The map scale the file asked for: 15000 for a 1:15000 map.
     pub scale_denominator: i32,
-    /// Non-fatal complaints from reading the map file.
+    /// Non-fatal complaints from reading the map file. A map that produced
+    /// some was still drawn, but perhaps not in full.
     pub warnings: Vec<String>,
 }
 

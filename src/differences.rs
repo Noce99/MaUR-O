@@ -1,11 +1,9 @@
 //! Shows where the benchmark renderings differ from their reference images.
 //!
-//! A port of the C++ project's `../benchmarks/differences.py`, structure for
-//! structure, so that the `benchmark` tool writes the same report without
-//! needing Python, numpy and Pillow installed. It compares an `expected/`
-//! folder against a `predictions/` folder image by image; identical pairs
-//! are reported and skipped, and for every differing pair a subfolder is
-//! written, holding
+//! It compares an `expected/` folder of reference images against a
+//! `predictions/` folder of this project's own renderings, image by image.
+//! Identical pairs are counted and skipped, and for every differing pair a
+//! subfolder is written, holding
 //!
 //! ```text
 //! side_by_side.png    the whole of both images, expected left, predicted right
@@ -16,27 +14,34 @@
 //! ```
 //!
 //! `side_by_side.png` is missing where the map is too large for it to be
-//! worth a second decode just to shrink — see [`MAX_OVERVIEW_BYTES`] — and
-//! the pair is listed in [`Report::no_overview`] instead; the crops, which
-//! is what a difference is actually diagnosed from, are written all the same.
+//! worth decoding a second time just to shrink, and the pair is listed in
+//! [`Report::no_overview`] instead. The crops, which is what a difference is
+//! actually diagnosed from, are written all the same.
 //!
 //! The crop file names carry the top left corner of the region in the image,
 //! so a region can be found again in the full size images.
 //!
-//! Two things here are equivalent to the Python original rather than
-//! identical to it, and both are labelling rather than measurement: the text
-//! in the grey bars is rasterized by `tiny-skia` instead of FreeType, and
-//! the overview in `side_by_side.png` is scaled down by the `image` crate's
-//! Lanczos filter instead of Pillow's.
+//! The central problem this module exists to solve is that a raw pixel diff
+//! of two renderings is nearly useless. Almost every pixel it flags is an
+//! edge both renderers drew and merely disagreed about the coverage of by a
+//! shade — unavoidable between two different rasterizers, present in the
+//! thousands on any real map, and enough to bury the handful of pixels that
+//! mean something. A suite whose every map is "2% different" cannot be read,
+//! and cannot show a regression.
 //!
-//! One thing is a deliberate departure from it. Almost every pixel these
-//! benchmarks report is an edge that both renderers drew and disagreed about
-//! the coverage of, which buries the handful that mean something; so every
-//! differing pixel is classified, by [`is_antialiasing`], into one two
-//! rasterizers can legitimately disagree about and one they cannot. Only the
-//! second kind chooses which regions get cropped out, and a pair with none
-//! of them gets no folder at all. Run with `keep_antialiasing` for the
-//! Python's own behaviour of reporting every differing pixel.
+//! So every differing pixel is classified by [`is_antialiasing`] into a
+//! difference two rasterizers can legitimately have about a shared edge, and
+//! one they cannot. Both are counted and both are drawn — orange and red in
+//! `diff.png` — but only the second kind decides which regions are worth
+//! cropping out, and a pair with none of them gets no folder at all. What is
+//! left in `differences/` after a run is therefore the list of things worth
+//! looking at, which is the whole point. Set `keep_antialiasing` to turn the
+//! classification off and have every differing pixel counted as real.
+//!
+//! Where a choice had no principled answer, this follows the convention the
+//! usual Python imaging stack uses — Pillow's rounding, its text anchoring,
+//! numpy's tie-break on an argmax — so that a number here means what the same
+//! number computed with those tools would mean.
 
 use std::path::{Path, PathBuf};
 
@@ -73,6 +78,7 @@ const GAP: u32 = 8;
 /// applied to a redundant decode rather than the mandatory first one.
 const MAX_OVERVIEW_BYTES: u64 = 512 * 1024 * 1024;
 
+/// How a comparison run is to be carried out and reported.
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Per pixel difference, summed over red, green and blue, which does not
@@ -121,7 +127,9 @@ pub const DEFAULT_TOLERANCE: i32 = 3;
 /// What a run of [`compare`] found.
 #[derive(Debug, Default)]
 pub struct Report {
+    /// How many pairs were compared.
     pub total: usize,
+    /// How many came out pixel for pixel identical.
     pub identical: usize,
     /// Pairs with at least one real difference. Only these get a folder.
     pub differing: usize,
@@ -129,8 +137,8 @@ pub struct Report {
     pub antialiasing_only: usize,
     /// Reference images with no rendering next to them, by name.
     pub missing: Vec<String>,
-    /// Differing pairs too large for [`write_side_by_side`]'s overview, by
-    /// name: their differences/ folder holds the crops and no side_by_side.png.
+    /// Differing pairs too large to be worth an overview, by name: their
+    /// `differences/` folder holds the crops and no `side_by_side.png`.
     pub no_overview: Vec<String>,
     /// One row per pair actually compared, in the order the suite runs.
     /// [`write_results`] sorts a copy for the table; this stays as it ran.
@@ -140,6 +148,7 @@ pub struct Report {
 /// How one pair of images compared, as the results table reports it.
 #[derive(Debug, Clone)]
 pub struct Row {
+    /// The map's name, without a folder or a suffix.
     pub name: String,
     /// The fraction of the union of the two images which differs at all.
     pub differing: f64,
@@ -155,6 +164,7 @@ pub struct Row {
 
 /// Everything measuring a pair of images yields.
 pub struct Comparison {
+    /// Which pixels differ, and what each difference was put down to.
     pub mask: Mask,
     /// The largest per-pixel error, summed over red, green and blue.
     pub largest: i32,
@@ -188,7 +198,9 @@ pub const REAL: u8 = 2;
 /// every pixel counts as differing, and as a real difference rather than an
 /// antialiasing one — a rendering of the wrong size is not an edge effect.
 pub struct Mask {
+    /// The width of the union of the two images, in pixels.
     pub width: u32,
+    /// Its height.
     pub height: u32,
     /// One byte per pixel, row by row: [`AGREE`], [`ANTIALIASING`] or [`REAL`].
     bits: Vec<u8>,
@@ -234,9 +246,10 @@ impl Mask {
     }
 }
 
-/// Python's `round`, which breaks a tie towards the even number rather than
-/// away from zero. The image sizes below are computed with it, and a size
-/// which is one pixel off is a report which does not line up.
+/// Banker's rounding: a tie goes to the even number rather than away from
+/// zero, the way Python's `round` and numpy both do it. The image sizes below
+/// are computed with it, and a size one pixel off is a report whose panels do
+/// not line up.
 fn python_round(value: f64) -> f64 {
     let rounded = value.round();
     if (value - value.trunc()).abs() == 0.5 && rounded % 2.0 != 0.0 {
@@ -315,9 +328,11 @@ pub fn is_antialiasing(
 /// Which pixels differ, by how much at the worst pixel, and by how much on
 /// average.
 ///
-/// The difference of a pixel is summed over red, green and blue, the way the
-/// C++ project's `tests/image_compare.cpp` measures it, so that a tolerance
-/// means the same thing here as it does there.
+/// The difference of a pixel is the sum of the absolute per-channel
+/// differences over red, green and blue, so it runs from 0 to 765 and a
+/// tolerance is read on that scale. Summing rather than taking the largest
+/// channel is what makes a colour that is slightly off in all three count as
+/// more wrong than one that is slightly off in a single channel.
 pub fn difference_mask(
     expected: &RgbImage,
     predicted: &RgbImage,
@@ -925,9 +940,10 @@ pub fn write_results(report: &Report, title: &str, options: &Options, path: &Pat
 
 /// The best available font, never failing.
 ///
-/// The same candidates the Python tries, in the same order, so that a machine
-/// with DejaVu installed — which is every machine the benchmarks are run on —
-/// gets the same face.
+/// The candidates are tried in a fixed order, DejaVu first, so that two
+/// machines with the same fonts installed label their reports identically —
+/// the labels are part of an image people compare across runs, and a report
+/// which suddenly switches typeface reads as though something changed.
 fn label_font() -> Option<&'static (Vec<u8>, u32)> {
     use std::sync::OnceLock;
     static FONT: OnceLock<Option<(Vec<u8>, u32)>> = OnceLock::new();

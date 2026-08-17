@@ -1,12 +1,19 @@
-//! Renders an OpenOrienteering Mapper map to a raster image, without a
-//! graphical user interface. Ported from `main.cpp`.
+//! Renders an OpenOrienteering Mapper map to a raster image — no Mapper, no
+//! Qt, no graphical environment needed.
 //!
 //! ```text
 //! map_to_image [-r px-per-meter] [-f meters] <map-file> [image-file]
 //! ```
 //!
-//! Lengths are given in meters on the ground. They are converted to paper
-//! units using the map scale (1:15000 etc.) stored in the map file.
+//! This is the tool to reach for to just look at a map. The suffix of the
+//! output file picks the format (`.png`, `.bmp`, `.tif`, `.jpg`); with no
+//! output file given, the map's own name with `.png` is used.
+//!
+//! Both options are given in meters on the ground, not on the paper, since
+//! that is the way a map is talked about — how many pixels per meter of
+//! forest, how wide a margin around it. They are converted to paper units
+//! with the map scale (1:15000 and so on) stored in the map file, so the same
+//! resolution gives comparable detail across maps drawn at different scales.
 //!
 //! Exit codes: 0 success, 1 usage error, 2 the map could not be read, 3 the
 //! image geometry is invalid, 4 the image could not be written.
@@ -16,7 +23,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use mti::render::{render_map, save_pixmap, DEFAULT_FRAME, DEFAULT_RESOLUTION};
+use maur_o::render::{render_map, save_pixmap, DEFAULT_FRAME, DEFAULT_RESOLUTION};
 
 #[derive(Parser)]
 #[command(
@@ -75,8 +82,8 @@ fn run() -> Result<(), (ExitCode, String)> {
     let image_path = args.image_file.clone().unwrap_or_else(|| default_output_path(&args.map_file));
 
     let rendering = render_map(&args.map_file, args.resolution, args.frame).map_err(|e| match e {
-        mti::render::Error::Read(message) => (ExitCode::from(2), format!("Error: {message}")),
-        mti::render::Error::Geometry(message) => (ExitCode::from(3), format!("Error: {message}")),
+        maur_o::render::Error::Read(message) => (ExitCode::from(2), format!("Error: {message}")),
+        maur_o::render::Error::Geometry(message) => (ExitCode::from(3), format!("Error: {message}")),
     })?;
     for warning in &rendering.warnings {
         eprintln!("Warning: {}", warning);

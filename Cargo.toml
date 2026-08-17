@@ -4,9 +4,15 @@ version = "1.0.0"
 edition = "2021"
 description = "Renders OpenOrienteering Mapper maps to raster images"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/Noce99/MaUR-O/tree/master"
+readme = "README.md"
+keywords = ["orienteering", "OpenOrienteeringMapper", "rasterization"]
+categories = ["command-line-utilities", "graphics", "parser-implementations", "rendering", "science::geo"]
 
 [lib]
-name = "mti"
+# The package is "maur-o"; a library target name cannot contain a hyphen, so
+# it takes the same name with the underscore Cargo would substitute anyway.
+name = "maur_o"
 path = "src/lib.rs"
 
 [[bin]]

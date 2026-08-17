@@ -1,6 +1,14 @@
-//! Path handling: splitting into parts, flattening bezier curves, lengths
-//! and tangents along a polyline, and parallel offsets. Ported from
-//! `geometry.h`/`geometry.cpp`.
+//! Path handling: splitting a coordinate list into parts, flattening bezier
+//! curves, lengths and tangents along a polyline, and parallel offsets.
+//!
+//! This is where a map's coordinates stop being numbers in a file and become
+//! shapes. Almost nothing here is a free choice: a symbol's border has to sit
+//! the same distance off the line Mapper puts it at, a dash has to start where
+//! Mapper starts it, and a curve has to be flattened into the same number of
+//! segments — otherwise two renderings of one map differ everywhere rather
+//! than somewhere, and a benchmark run has nothing to say. So the constants,
+//! the tolerances and the tie-breaks are Mapper's, and the results are checked
+//! against it pixel for pixel.
 
 use crate::map::*;
 use crate::qbezier::QBezier;
@@ -27,36 +35,60 @@ fn fuzzy_compare_f32(p1: f32, p2: f32) -> bool {
 /// "null" (all-zero) sentinel used as an empty-accumulator state.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
+    /// Left edge, in mm on the paper.
     pub x: f64,
+    /// Top edge, in mm on the paper.
     pub y: f64,
+    /// Width, in mm.
     pub w: f64,
+    /// Height, in mm.
     pub h: f64,
 }
 
 impl Rect {
+    /// A rectangle at `x`, `y`, `w` wide and `h` tall.
     pub fn new(x: f64, y: f64, w: f64, h: f64) -> Rect {
         Rect { x, y, w, h }
     }
+    /// A rectangle from its four edges, rather than from a corner and a size.
     pub fn from_ltrb(l: f64, t: f64, r: f64, b: f64) -> Rect {
         Rect { x: l, y: t, w: r - l, h: b - t }
     }
+    /// The left edge.
     pub fn left(&self) -> f64 { self.x }
+    /// The top edge.
     pub fn top(&self) -> f64 { self.y }
+    /// The right edge.
     pub fn right(&self) -> f64 { self.x + self.w }
+    /// The bottom edge.
     pub fn bottom(&self) -> f64 { self.y + self.h }
+    /// The width.
     pub fn width(&self) -> f64 { self.w }
+    /// The height.
     pub fn height(&self) -> f64 { self.h }
+    /// Whether this is the null rectangle — the empty-accumulator state,
+    /// which [`united`](Self::united) treats as "nothing yet" rather than as
+    /// a zero-sized rectangle at the origin.
     pub fn is_null(&self) -> bool { self.w == 0.0 && self.h == 0.0 }
 
+    /// Moves the left edge to `v`, keeping the right one where it is.
     pub fn set_left(&mut self, v: f64) { self.w = self.right() - v; self.x = v; }
+    /// Moves the top edge to `v`, keeping the bottom one where it is.
     pub fn set_top(&mut self, v: f64) { self.h = self.bottom() - v; self.y = v; }
+    /// Moves the right edge to `v`.
     pub fn set_right(&mut self, v: f64) { self.w = v - self.x; }
+    /// Moves the bottom edge to `v`.
     pub fn set_bottom(&mut self, v: f64) { self.h = v - self.y; }
 
+    /// The rectangle with each edge moved by the given amount. Positive
+    /// values move each edge right or down, so growing a rectangle on all
+    /// sides takes negative `dl` and `dt`.
     pub fn adjusted(&self, dl: f64, dt: f64, dr: f64, db: f64) -> Rect {
         Rect::from_ltrb(self.left() + dl, self.top() + dt, self.right() + dr, self.bottom() + db)
     }
 
+    /// The smallest rectangle holding both. A null rectangle contributes
+    /// nothing, which is what makes this usable as a fold over an extent.
     pub fn united(&self, other: &Rect) -> Rect {
         if self.is_null() { return *other; }
         if other.is_null() { return *self; }
@@ -97,25 +129,37 @@ fn rect_include(rect: &mut Rect, point: Point) {
 /// independent of the rendering backend.
 #[derive(Clone, Copy, Debug)]
 pub enum PathCommand {
+    /// Starts a new subpath at this point.
     MoveTo(Point),
+    /// A straight segment to this point.
     LineTo(Point),
+    /// A cubic bezier: two control points, then the end point.
     CubicTo(Point, Point, Point),
+    /// Closes the current subpath back to where it started.
     Close,
 }
 
+/// A path: a flat stream of drawing commands, one or more subpaths long.
 #[derive(Clone, Debug, Default)]
 pub struct Path {
+    /// The commands, in order.
     pub commands: Vec<PathCommand>,
 }
 
 impl Path {
+    /// An empty path.
     pub fn new() -> Path { Path::default() }
+    /// Whether the path holds no commands at all.
     pub fn is_empty(&self) -> bool { self.commands.is_empty() }
+    /// Starts a new subpath at `p`.
     pub fn move_to(&mut self, p: Point) { self.commands.push(PathCommand::MoveTo(p)); }
+    /// Adds a straight segment to `p`.
     pub fn line_to(&mut self, p: Point) { self.commands.push(PathCommand::LineTo(p)); }
+    /// Adds a cubic bezier through the two control points to `end`.
     pub fn cubic_to(&mut self, c1: Point, c2: Point, end: Point) {
         self.commands.push(PathCommand::CubicTo(c1, c2, end));
     }
+    /// Closes the current subpath.
     pub fn close_subpath(&mut self) { self.commands.push(PathCommand::Close); }
 
     /// Appends another path's subpaths as new subpaths, like
@@ -270,6 +314,9 @@ fn flatten_cubic_tol(out: &mut Vec<Point>, out_params: &mut Vec<f32>, c0: Point,
 /// One connected part of a path: a polyline, plus the length of each vertex
 /// measured along the polyline from its start.
 pub struct PathPart {
+    /// The polyline itself: the path's vertices, with the points a curve was
+    /// flattened into between them. All the parallel arrays below are indexed
+    /// by position in this one.
     pub points: Vec<Point>,
     /// Cumulative length at each point, in mm. Accumulated in single
     /// precision, as Mapper measures paths in floats, then widened; the
@@ -286,8 +333,13 @@ pub struct PathPart {
     pub params: Vec<f32>,
     /// The coordinate flags at each vertex, 0 at curve points.
     pub point_flags: Vec<i32>,
+    /// Index into the object's coordinate list of this part's first
+    /// coordinate.
     pub first_coord: usize,
+    /// Index of its last coordinate.
     pub last_coord: usize,
+    /// Whether the part comes back round to where it started, in which case
+    /// it has no ends to cap and its dash pattern has to meet itself.
     pub closed: bool,
 }
 
@@ -672,10 +724,26 @@ const TANGENT_EPSILON_SQUARED: f64 = 0.000625; // about 0.025 mm
 /// The pen miter limit used by Mapper, in units of half the pen width.
 const STROKE_MITER_LIMIT: f64 = 1.0;
 
+/// How a stroked line ends, for the purpose of measuring its extent.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PenCap { Flat, Square, Round }
+pub enum PenCap {
+    /// Stops at the last point.
+    Flat,
+    /// Extends half the pen width past it.
+    Square,
+    /// A half disc past it.
+    Round,
+}
+/// How a stroked line turns a corner, for the purpose of measuring its extent.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PenJoin { Miter, Bevel, Round }
+pub enum PenJoin {
+    /// The edges are extended to meet, with the tip clipped past the limit.
+    Miter,
+    /// The corner is cut off straight across.
+    Bevel,
+    /// The corner is rounded.
+    Round,
+}
 
 /// The incoming direction at a coordinate, skipping degenerate segments.
 pub fn coord_incoming_tangent(coords: &CoordList, first: usize, last: usize, closed: bool, i: usize) -> Option<Point> {
@@ -808,10 +876,12 @@ fn extent_include_join(extent: &mut Rect, coord: Point, incoming: Point, outgoin
     boundary(extent, coord_lhs, next_lhs);
 }
 
-/// The extent of one stroked part. Shared by the coordinate-list and
-/// polyline overloads by wrapping a plain polyline in zero-flag `Coord`s
-/// (`NoFlags` in the original never sets any flag anyway, so a `Coord` with
-/// `flags: 0` behaves identically for every check used here).
+/// The extent of one stroked part.
+///
+/// Serves both the coordinate-list and the plain-polyline entry points: a
+/// polyline is wrapped in `Coord`s with `flags: 0`, which every check below
+/// treats exactly as it treats a coordinate carrying no flags, so the two
+/// callers share one implementation rather than a copy each.
 fn stroked_part_extent(coords: &CoordList, first: usize, last: usize, closed: bool, half_width: f64, cap: PenCap, join: PenJoin) -> Rect {
     let join_at = |extent: &mut Rect, i: usize| {
         let to_coord = coord_incoming_tangent(coords, first, last, closed, i);
@@ -989,7 +1059,9 @@ fn split_at(coords: &CoordList, part: &PathPart, length: f64) -> Split {
     }
 }
 
+/// A place on a path: where it is, and which way the path is heading there.
 pub struct PathLocation {
+    /// The position, in mm on the paper.
     pub pos: Point,
     /// Not normalized; null if the path has no direction.
     pub tangent: Point,
@@ -1481,9 +1553,10 @@ pub fn shift_coordinates(coords: &CoordList, first: usize, last: usize, closed: 
         let tangent_in = if ok_in { vector_in.unwrap().normalized() } else { Point::ZERO };
         let tangent_out = if ok_out { vector_out.unwrap().normalized() } else { Point::ZERO };
 
-        // Always overwritten in one of the branches below (mirrors the
-        // uninitialized-then-assigned C++ original); silence the lint
-        // rather than restructure already cross-checked logic.
+        // Always overwritten in one of the branches below. The branches are
+        // laid out the way Mapper's are, so that they stay readable side by
+        // side with it; silence the lint rather than restructure logic which
+        // has been cross-checked against it.
         #[allow(unused_assignments)]
         let mut segment_start = Point::ZERO;
         if !ok_in && !ok_out {
@@ -1705,8 +1778,8 @@ impl Path {
 
     /// Same as [`to_subpath_polygons`](Self::to_subpath_polygons), but with
     /// the bezier flattening tolerance passed in. `contains_even_odd` needs
-    /// a much tighter one than [`BEZIER_ERROR`] -- see
-    /// [`flatten_cubic_tol`]'s doc comment.
+    /// a much tighter one than [`BEZIER_ERROR`] -- see `flatten_cubic_tol`'s
+    /// doc comment.
     pub fn to_subpath_polygons_tol(&self, error: f64) -> Vec<Vec<Point>> {
         let mut result = Vec::new();
         let mut current: Vec<Point> = Vec::new();

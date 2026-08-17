@@ -9,8 +9,10 @@
 //! are new, are actually written here.
 //!
 //! The document around them is the one Mapper writes: same element order,
-//! same `barrier`, same defaults. A file this writes is opened by Mapper and
-//! by the C++ `map_to_image` as one of their own.
+//! same `barrier`, same defaults. That is what makes a generated map usable
+//! as a benchmark map at all — it is opened by Mapper, and drawn by the
+//! ground truth renderer, as one of their own files, so the reference image
+//! it produces is a fair thing to be measured against.
 
 use std::io::Write;
 use std::path::Path;

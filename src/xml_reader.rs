@@ -1,7 +1,16 @@
 //! Reads a map in the native XML format of OpenOrienteering Mapper.
 //!
-//! Ported from `xml_reader.cpp`. Both the ".omap" and the ".xmap" file name
-//! suffixes denote this format; they differ in formatting only.
+//! Both the `.omap` and the `.xmap` suffix denote this same format; they
+//! differ in how the file is laid out, not in what it says, and either is
+//! read here without being told which it is.
+//!
+//! Reading is deliberately forgiving. A map in the wild has been through
+//! several versions of Mapper and the occasional hand edit, and a single
+//! attribute nobody recognises is no reason to refuse to draw the map: an
+//! element that cannot be made sense of is skipped, a complaint about it is
+//! collected, and the caller gets both the map and the list of complaints.
+//! Only a file that cannot be parsed at all, or that is not a map, is an
+//! error.
 
 use std::path::Path;
 
@@ -166,7 +175,8 @@ fn attr_bool(e: &BytesStart, name: &str, fallback: bool) -> bool {
     }
 }
 
-/// Parses one "x y[ flags];" coordinate record, advancing the cursor past it.
+/// Parses one `x y[ flags];` coordinate record, advancing the cursor past it.
+/// The flags are optional, which is what the brackets mean.
 fn parse_coord(cursor: &mut &str) -> Option<Coord> {
     fn take_token<'a>(cursor: &mut &'a str) -> &'a str {
         let s = cursor.trim_start();
@@ -939,7 +949,9 @@ pub struct Fragment {
 /// and is the reliable way to pair the two up.
 #[derive(Debug, Default)]
 pub struct Fragments {
+    /// Every `<color>` element, in document order.
     pub colors: Vec<Fragment>,
+    /// Every `<symbol>` element, in document order.
     pub symbols: Vec<Fragment>,
 }
 

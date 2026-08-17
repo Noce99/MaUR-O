@@ -43,6 +43,7 @@ pub struct Renaming {
 }
 
 impl Renaming {
+    /// Whether the file has to be renamed at all.
     pub fn changed(&self) -> bool {
         self.original != self.corrected
     }
@@ -55,7 +56,10 @@ impl Renaming {
 /// off has one kind and as many details as it has maps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reason {
+    /// What kind of problem this is. Two files with the same `kind` broke the
+    /// same rule, which is what lets a summary count them together.
     pub kind: &'static str,
+    /// This file's own version of it, ready to print.
     pub detail: String,
 }
 

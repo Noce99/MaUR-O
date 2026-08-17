@@ -4,19 +4,25 @@
 //! create_benchmark [options] <renderer> <folder or map file>
 //! ```
 //!
-//! The renderer is the C++/Qt `map_to_image` this project was ported from —
-//! the reference images of a benchmark archive are what it draws, which is
-//! the whole point of the archive: `benchmark` then measures this project
-//! against them.
+//! The reference images in an archive are drawn by an external, ground truth
+//! renderer, not by this project — that is the whole point of the archive.
+//! `benchmark` later measures this project's own rendering against them, and
+//! a reference this project produced itself would measure nothing.
+//!
+//! Any command line tool that takes a map file, a resolution and a frame and
+//! writes an image will do. The one these benchmarks were built against is a
+//! fork of OpenOrienteering Mapper's own command line renderer,
+//! <https://github.com/Noce99/mapper_cmd_rederer>, which makes Mapper itself
+//! the yardstick.
 //!
 //! What the second argument is decides where the maps come from:
 //!
 //! * a **folder** is searched, subfolders included, for every `.omap` and
 //!   `.xmap` in it;
 //! * a **map file** is taken apart into one map per symbol by
-//!   [`mti::all_symbols`].
+//!   [`maur_o::all_symbols`].
 //!
-//! Either way the maps are renamed to the rules in [`mti::naming`] — a zero
+//! Either way the maps are renamed to the rules in [`maur_o::naming`] — a zero
 //! padded ordinal, `__`, and a name free of spaces — rendered one by one, and
 //! written into
 //!
@@ -45,10 +51,10 @@ use std::process::{Command, ExitCode};
 use chrono::{Datelike, Timelike};
 use clap::Parser;
 
-use mti::naming::{self, Plan};
-use mti::progress::{stage, Progress};
-use mti::render::{DEFAULT_FRAME, DEFAULT_RESOLUTION};
-use mti::report;
+use maur_o::naming::{self, Plan};
+use maur_o::progress::{stage, Progress};
+use maur_o::render::{DEFAULT_FRAME, DEFAULT_RESOLUTION};
+use maur_o::report;
 
 /// How many stages a run has, for the headings.
 const STAGES: usize = 3;
@@ -86,16 +92,17 @@ enum Origin {
              without being corrected first."
 )]
 struct Args {
-    /// The ground truth renderer: the C++ map_to_image executable.
+    /// The ground truth renderer: an external command line map renderer,
+    /// which draws the reference images this project is measured against.
     renderer: PathBuf,
 
     /// The maps: a folder, searched recursively, or a single map file, whose
     /// symbols each become a map of their own.
     source: PathBuf,
 
-    /// The archive to write. Defaults to benchmarks/benchmark_<source
-    /// name>_<resolution>_px_m.zip. Whichever folder it names is made if it
-    /// is not there.
+    /// The archive to write. Defaults to
+    /// benchmarks/benchmark_SOURCE_RESOLUTION_px_m.zip. Whichever folder it
+    /// names is made if it is not there.
     #[arg(short = 'o', long, value_name = "FILE")]
     output: Option<PathBuf>,
 
@@ -259,10 +266,10 @@ fn complaints(stderr: &[u8]) -> Vec<String> {
 }
 
 /// Makes one map per symbol of `source`, into `into`, with
-/// [`mti::all_symbols`].
+/// [`maur_o::all_symbols`].
 fn generate_symbol_maps(source: &Path, into: &Path) -> Result<Vec<PathBuf>, String> {
     let mut progress: Option<Progress> = None;
-    let summary = mti::all_symbols::create_maps(source, into, |_, total| {
+    let summary = maur_o::all_symbols::create_maps(source, into, |_, total| {
         progress.get_or_insert_with(|| Progress::new("Symbols", total)).tick();
     })?;
     if let Some(bar) = progress {
@@ -455,7 +462,7 @@ fn write_archive(
 /// them against images of another size, and every pixel is then wrong. The
 /// archive is passed around and run months later, so it says what it was made
 /// with rather than leaving it to be remembered — and says it in a shape
-/// [`mti::archive_info::parse`] can read the resolution and the frame back
+/// [`maur_o::archive_info::parse`] can read the resolution and the frame back
 /// out of: both are on their own line, first word the key, straight after the
 /// heading and before the first blank line, which is the only part of the
 /// file a program ever looks at.

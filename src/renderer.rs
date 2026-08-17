@@ -1,12 +1,24 @@
-//! Turns the objects of a map into painter paths, and draws them. Ported
-//! from `renderer.h`/`renderer.cpp`.
+//! Turns the objects of a map into painter paths, and draws them.
 //!
-//! A renderable is a path which is either filled or stroked with a single
-//! map color. This mirrors what Mapper does: the drawing order of a map is
-//! defined by the color priorities, not by the objects, so all renderables
-//! have to be collected before anything can be drawn.
+//! A renderable is one path, either filled or stroked, in a single map
+//! colour. Everything a map contains comes apart into these: a line symbol
+//! with a border and dash symbols yields a renderable for the line, one per
+//! border, and one per point symbol along it.
 //!
-//! All coordinates are in mm on the paper.
+//! Building them all up front is not an optimisation but a requirement, and
+//! it is the rule the whole module is arranged around. A map's drawing order
+//! is defined by its colour priorities, not by its objects — every stroke in
+//! the colour "black" is drawn after every stroke in the colour under it, no
+//! matter which object each belongs to, which is how a road drawn across a
+//! forest comes out looking like one map rather than a stack of them. Nothing
+//! can be put on the pixel buffer, then, until the last object has been taken
+//! apart, because the last object may well own a renderable that belongs
+//! underneath the first one's.
+//!
+//! So [`Renderer::new`] does the taking apart, and [`Renderer::paint`] does
+//! the drawing, in colour order. All coordinates here are in mm on the paper;
+//! the transform that turns those into pixels is applied at paint time and
+//! chosen by [`crate::render`].
 
 use tiny_skia::{FillRule, Mask, Paint, PixmapMut, Stroke, Transform};
 
@@ -21,7 +33,7 @@ const MITER_LIMIT: f64 = 1.0;
 /// back to a bevel past the miter limit: it keeps the miter direction but
 /// clips its tip at a fixed distance -- `2 * half_width * MITER_LIMIT` --
 /// beyond the vertex, along the tangent (see `extent_include_join` in
-/// geometry.rs, ported from the same Mapper source and validated against it
+/// geometry.rs, which measures the same join and is checked against Mapper
 /// pixel-for-pixel down to 1-degree corners). That is tiny_skia's
 /// `LineJoin::MiterClip`, not `LineJoin::Miter` (which clips by switching to
 /// a bevel, a visibly different shape for sharp angles -- confirmed to
@@ -185,9 +197,9 @@ impl<'m> Renderer<'m> {
         self.extent
     }
 
-    /// The bounding box of one object of `map`, as `Object::getExtent()`
-    /// gives it: the union of the object's renderables, the ones inside a
-    /// clip path left out (see [`Self::include`]).
+    /// The bounding box of one object of `map`: the union of the object's
+    /// renderables, leaving out the ones inside a clip path, which contribute
+    /// nothing beyond the shape clipping them (see `include`).
     ///
     /// The renderables are built and thrown away again, which is what makes
     /// this the extent of that object rather than of the map so far. A
@@ -894,8 +906,8 @@ impl<'m> Renderer<'m> {
             let part_coords: CoordList;
             if is_dashed {
                 // A dashed line is one path with gaps cut into it: the dash
-                // layout -- with its mid symbols -- is Mapper's, ported in
-                // dashed_path().
+                // layout -- with its mid symbols -- follows Mapper's rules,
+                // worked out in dashed_path().
                 if symbol.dash_length > 0.0 && (create_line || create_border) {
                     part_coords = self.dashed_path(coords, part, symbol, start_length, end_length);
                 } else {

@@ -1,7 +1,7 @@
-//! Text layout and rendering. Ported from `Renderer::addText()`
-//! (`renderer.cpp:1352-1467`).
+//! Laying out and drawing the text objects of a map: labels, control
+//! descriptions, whatever the mapper typed onto the paper.
 //!
-//! The text is laid out at a large font size (matching Mapper's own
+//! The text is laid out at a large font size (Mapper's own
 //! `internal_font_size`) and scaled down afterwards, so the result does not
 //! depend on hinting. Family names are resolved through the system's
 //! fontconfig library (the same one Qt calls into on Linux), then handed to
@@ -15,11 +15,14 @@
 //! advances closer to Qt's own than a naive per-glyph-advance layout would
 //! be. Glyph outlines come from `ttf-parser`.
 //!
-//! This is the highest-risk-for-divergence module in the port: exact text
-//! metrics are font-engine-specific, so word-for-word pixel matches with
-//! Mapper's Qt/FreeType text rendering are not expected here the way they
-//! are for pure geometry. What matters is that text lands in the right
-//! place, at the right size, with the right alignment.
+//! This is the module most likely to disagree with the ground truth, and the
+//! one place where that is expected rather than a bug. Exact glyph metrics
+//! belong to whichever font engine produced them, and matching Qt and
+//! FreeType outline for outline is not something a different stack can
+//! promise the way it can promise a straight line. What is asked of the text
+//! here is that it land in the right place, at the right size, with the right
+//! alignment — so a benchmark difference on a label is worth reading as
+//! "which of those is off?" before reading it as a rendering fault.
 
 use std::sync::OnceLock;
 
@@ -313,6 +316,17 @@ fn build_text_layout(data: &[u8], face_index: u32, symbol: &TextSymbol, text_obj
     Some(TextLayout { text_path, line_below_path })
 }
 
+/// Lays out `text_object` and hands the resulting glyph outlines to
+/// `renderer`: the text itself, its framing or shadow where the symbol asks
+/// for one, and the line below it where it has one.
+///
+/// Nothing is added at all for an object with no anchor, empty text, a
+/// non-positive font size, or a font family no face could be matched for.
+///
+/// The outlines go in at the internal font size, with the scale down to paper
+/// millimetres carried on the renderable's transform instead of baked into
+/// the path, so that curves are flattened at the size they are finally drawn
+/// at rather than at the size they were laid out at.
 pub fn add_text(renderer: &mut Renderer, symbol: &TextSymbol, object: &Object, text_object: &TextObject) {
     if object.coords.is_empty() || text_object.text.is_empty() || symbol.font_size <= 0.0 {
         return;

@@ -1,5 +1,7 @@
 # MaUR-O
 
+[![Crates.io](https://img.shields.io/crates/v/maur-o.svg)][crate]
+
 This is a **Ma**p **U**tils project written in **R**ust for **O**rienteering.
 
 ![Side by side comparison of a map rendered by MaUR-O against the ground-truth renderer](mds/assets/side_by_side_valserena.png)
@@ -199,3 +201,6 @@ No known bugs on the sample maps (`maps/city_sample.omap` and
 differences on the ISOM/ISSprOM per-symbol benchmarks, and a few genuine
 placement/shape bugs found on a private dataset of real maps — see
 [bug.md](mds/bug.md) for all of them, with pictures.
+
+<!-- Badge target. Replace with the crate link when you have it. -->
+[crate]: https://crates.io/crates/maur-o

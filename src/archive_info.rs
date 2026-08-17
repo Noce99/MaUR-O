@@ -14,7 +14,9 @@ use std::path::Path;
 /// and every pixel of a comparison against it is then wrong.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArchiveInfo {
+    /// Pixels per meter on the ground the reference images were drawn at.
     pub resolution: f64,
+    /// Width of the white frame around each one, in meters on the ground.
     pub frame: f64,
 }
 

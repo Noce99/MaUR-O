@@ -56,6 +56,11 @@ fn clock(seconds: f64) -> String {
     }
 }
 
+/// A progress bar over a known number of steps.
+///
+/// Call [`tick`](Self::tick) once per step and [`finish`](Self::finish) at the
+/// end. Drops to a single summary line where standard error is not a
+/// terminal.
 pub struct Progress {
     label: String,
     total: usize,
@@ -70,6 +75,7 @@ pub struct Progress {
 }
 
 impl Progress {
+    /// A bar named `label`, over `total` steps.
     pub fn new(label: &str, total: usize) -> Self {
         let mut progress = Progress {
             label: label.to_string(),
