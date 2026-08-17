@@ -91,8 +91,8 @@ fn a_dataset_is_one_map_per_ask_and_one_fill_per_cell() {
         .assert()
         .success()
         .stdout(predicates::str::contains("3 maps of 4 by 4 cells"))
-        // Four cells of the default 30 m.
-        .stdout(predicates::str::contains("120 by 120 meters"))
+        // Four cells of the default 150 m.
+        .stdout(predicates::str::contains("600 by 600 meters"))
         .stdout(predicates::str::contains("filled from 1 opaque area"))
         .stdout(predicates::str::contains(
             "48 fills, 0 lines, 0 transparent areas, 0 point symbols drawn",
@@ -181,6 +181,37 @@ fn every_cell_is_filled_with_an_opaque_area() {
         .args(ONLY_THE_GROUND)
         .assert()
         .success();
+
+    let objects = drawn(&folder.join("map_001.omap"));
+    assert_eq!(objects.len(), 9);
+    assert!(objects
+        .iter()
+        .all(|object| attribute(object, "symbol") == "0"));
+}
+
+/// Asking for the ground alone leaves the ground alone: the three steps over
+/// it are skipped however much of them was asked for.
+#[test]
+fn just_the_opaque_areas_skips_everything_drawn_over_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("dataset");
+    generate()
+        .arg(SYMBOL_SET)
+        .arg(&folder)
+        .args(["--maps=1", "--layout-size=3", "--just-opaque-areas"])
+        // A line on every side, an area over every cell and a point symbol in
+        // every cell — all of which the flag overrides.
+        .args([
+            "--empty-sides=0",
+            "--transparent-areas=1",
+            "--point-symbols=1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "9 fills, 0 lines, 0 transparent areas, 0 point symbols drawn \
+             (just the opaque areas: nothing was drawn over the ground)",
+        ));
 
     let objects = drawn(&folder.join("map_001.omap"));
     assert_eq!(objects.len(), 9);
@@ -303,11 +334,11 @@ fn a_generated_map_renders() {
         .args(ONLY_THE_GROUND)
         .assert()
         .success();
-    // The 90 m square of the default layout, plus the 5 m frame on each
+    // The 450 m square of the default layout, plus the 5 m frame on each
     // side. An area fill ends where its outline is, so with nothing but the
     // ground on it the extent is the square itself.
     render("map_001.omap").stdout(predicates::str::contains(
-        "100x100 meters, map scale 1:10000",
+        "460x460 meters, map scale 1:10000",
     ));
 
     // And with everything else on it, which reaches past the square: a line

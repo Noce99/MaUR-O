@@ -31,6 +31,11 @@
 //! map has nothing on it which the drawing order buries. The lettering of a
 //! symbol set is the one kind nothing draws with yet.
 //!
+//! [`Settings::just_opaque_areas`] stops after step three, which leaves a map
+//! of ground cover and nothing else: what a renderer does with an area fill
+//! and a wandering boundary, with no line, no see-through area and no point
+//! symbol drawn over it to say where a difference came from.
+//!
 //! A cell is filled from the opaque areas alone because those are the symbols
 //! which hide what is under them: whatever is drawn over a cell, the ground
 //! it is drawn on is exactly the one symbol the cell was filled with, and a
@@ -73,7 +78,7 @@ use crate::xml_writer::MapFile;
 pub const DEFAULT_LAYOUT_SIZE: usize = 3;
 
 /// The default width of one cell, in meters on the ground.
-pub const DEFAULT_CELL_SIZE: u32 = 30;
+pub const DEFAULT_CELL_SIZE: u32 = 150;
 
 /// The default number of maps in a dataset.
 pub const DEFAULT_MAPS: usize = 10;
@@ -119,6 +124,12 @@ pub struct Settings {
     /// as likely as one, three half as likely again, and so on — see
     /// [`Random::halving_count`].
     pub point_symbols: f64,
+    /// Whether to stop after the ground: the opaque areas which fill the
+    /// cells are drawn and the three steps over them — the lines, the
+    /// see-through areas and the point symbols — are skipped, whatever
+    /// [`Settings::empty_sides`], [`Settings::transparent_areas`] and
+    /// [`Settings::point_symbols`] say.
+    pub just_opaque_areas: bool,
 }
 
 impl Default for Settings {
@@ -132,6 +143,7 @@ impl Default for Settings {
             empty_sides: DEFAULT_EMPTY_SIDES,
             transparent_areas: DEFAULT_TRANSPARENT_AREAS,
             point_symbols: DEFAULT_POINT_SYMBOLS,
+            just_opaque_areas: false,
         }
     }
 }
@@ -267,7 +279,8 @@ struct Generator<'a> {
 impl Generator<'_> {
     /// Everything one map is drawn out of, in the four steps which put it
     /// there: the ground, the lines along the boundaries, the see-through
-    /// areas over the ground, and the point symbols scattered on it.
+    /// areas over the ground, and the point symbols scattered on it. Only the
+    /// first of them where [`Settings::just_opaque_areas`] is on.
     fn draw(&self, layout: &Layout, random: &mut Random, drawn: &mut Drawn) -> Vec<Object> {
         let outlines = layout.cell_outlines(self.mm_per_meter);
         let mut objects = Vec::with_capacity(outlines.len());
@@ -285,6 +298,12 @@ impl Generator<'_> {
                 at
             })
             .collect();
+
+        // The ground on its own, where that is all which was asked for: a
+        // patchwork of the set's opaque areas, with nothing drawn over it.
+        if self.settings.just_opaque_areas {
+            return objects;
+        }
 
         // A line along some of the cell sides. A side belongs to two cells
         // at once and is drawn once, so what runs along it is the boundary

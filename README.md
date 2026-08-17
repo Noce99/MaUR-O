@@ -236,11 +236,12 @@ generate_maps_dataset [OPTIONS] <symbol-set> [folder]
 | `<symbol-set>` | The map whose symbols and colours the generated maps are drawn with. Nothing drawn on it is used. |
 | `[folder]` | Where the maps are written (default `dataset`). Created if needed. |
 | `-l, --layout-size <CELLS>` | How many cells a map is across; it holds this squared (default `3`). |
-| `-c, --background-cell-size <METERS>` | How wide one cell is, in meters on the ground (default `30`). |
+| `-c, --background-cell-size <METERS>` | How wide one cell is, in meters on the ground (default `150`). |
 | `-n, --maps <COUNT>` | How many maps to generate (default `10`). |
 | `-e, --empty-sides <SHARE>` | The share of cell sides left without a line along them, 0 for a line on every side, 1 for none (default `0.5`). |
 | `-t, --transparent-areas <CHANCE>` | The chance of a cell being covered by a see-through area (default `0.1`). |
 | `-p, --point-symbols <CHANCE>` | The chance of a cell holding a point symbol; two are half as likely as one, three half as likely again (default `0.5`). |
+| `-j, --just-opaque-areas` | Draw nothing but the ground: the cells are filled with opaque areas and the lines, see-through areas and point symbols are all skipped, whatever the three options above say. |
 | `--iof-rules` | Keep to the IOF rules for what may be drawn where — **not read yet**: an overlay is picked for showing up on its ground, not for being allowed there. |
 | `-s, --seed <N>` | What the randomness is seeded with (default `0`). |
 
@@ -261,6 +262,10 @@ A map is built in six steps:
    terrain and the next;
 5. **some cells are covered** by a see-through area;
 6. **point symbols are dropped** into the cells.
+
+`--just-opaque-areas` stops after step three, which leaves a map of ground
+cover and nothing else: what a renderer makes of an area fill and a wandering
+boundary, with nothing drawn over it to say where a difference came from.
 
 Only the opaque areas fill a cell, since those are the symbols which hide
 what is under them: whatever is drawn over a cell, the ground beneath it is
