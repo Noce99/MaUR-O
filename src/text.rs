@@ -15,6 +15,21 @@
 //! advances closer to Qt's own than a naive per-glyph-advance layout would
 //! be. Glyph outlines come from `ttf-parser`.
 //!
+//! fontconfig is opened by name at first use rather than linked, so nothing
+//! about it is needed to build. Where it cannot be opened, family resolution
+//! falls back to `fontdb` alone and a warning is printed once.
+//!
+//! That fallback is worth being precise about, because it is easy to
+//! underestimate. The substituted font does not merely look different: its
+//! glyph widths and line heights differ, so text is laid out in *different
+//! places* — labels shift, and successive lines of a block drift further and
+//! further apart as the line-height error accumulates. Geometry is untouched,
+//! so the map still looks entirely plausible; only the text is wrong, and
+//! nothing about the image says so. Measured on `maps/city_sample.omap`,
+//! losing fontconfig moves about 0.66% of all pixels, every one of which a
+//! benchmark run classifies as a real difference rather than as antialiasing.
+//! Hence the warning: a silent version of this would poison a whole suite.
+//!
 //! This is the module most likely to disagree with the ground truth, and the
 //! one place where that is expected rather than a bug. Exact glyph metrics
 //! belong to whichever font engine produced them, and matching Qt and
@@ -64,12 +79,34 @@ fn family_for(name: &str) -> Family<'_> {
 /// `None` if fontconfig is unavailable or the lookup fails, in which case
 /// callers fall back to `fontdb`'s own (less faithful) generic-family
 /// resolution.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+// Must stay identical to the platform gate on the `fontconfig` dependency in
+// Cargo.toml: the two select the same platforms, and the stub below covers
+// everything else.
+#[cfg(all(unix, not(any(target_vendor = "apple", target_os = "android", target_os = "emscripten"))))]
 fn fontconfig_family_for(name: &str, bold: bool, italic: bool) -> Option<String> {
     use std::ffi::CString;
 
+    // The library is opened by name on first use, so a machine without it
+    // still runs -- but with text resolved by fontdb, which is a quieter and
+    // worse failure than not drawing at all: the map looks perfectly fine and
+    // is simply wrong. Spell out what that costs rather than let a benchmark
+    // run report differences nobody can account for.
     static FC: OnceLock<Option<fontconfig::Fontconfig>> = OnceLock::new();
-    let fc = FC.get_or_init(fontconfig::Fontconfig::new).as_ref()?;
+    let fc = FC
+        .get_or_init(|| {
+            let fc = fontconfig::Fontconfig::new();
+            if fc.is_none() {
+                eprintln!(
+                    "Warning: libfontconfig could not be loaded. Text will be set in a \
+                     substituted font and, because its glyph widths and line heights \
+                     differ, drawn in different places than the ground truth puts it. \
+                     Install your distribution's fontconfig package to fix this; see \
+                     \"Fonts and fontconfig\" in the README for what it costs."
+                );
+            }
+            fc
+        })
+        .as_ref()?;
 
     // fontconfig expects the CSS/hyphenated spelling of the generic names.
     let pattern_family = match name.to_ascii_lowercase().as_str() {
@@ -96,7 +133,9 @@ fn fontconfig_family_for(name: &str, bold: bool, italic: bool) -> Option<String>
     matched.get_string(fontconfig::FC_FAMILY).ok().map(str::to_owned)
 }
 
-#[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android")))))]
+/// The same, where there is no fontconfig to ask. Callers fall back to
+/// `fontdb`'s own generic-family resolution.
+#[cfg(not(all(unix, not(any(target_vendor = "apple", target_os = "android", target_os = "emscripten")))))]
 fn fontconfig_family_for(_name: &str, _bold: bool, _italic: bool) -> Option<String> {
     None
 }

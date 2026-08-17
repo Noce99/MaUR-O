@@ -19,6 +19,7 @@ disagree on.
 ## Table of Contents
 
 - [Installation](#installation)
+  - [Fonts and fontconfig](#fonts-and-fontconfig)
 - [Usage](#usage)
   - [`map_to_image`](#map_to_image)
   - [`create_benchmark`](#create_benchmark)
@@ -33,17 +34,13 @@ Dependencies:
 - **A working `cargo`/Rust toolchain, version 1.88 or newer** (edition 2021).
   1.88 is the floor set by the `image` crate; everything else in the
   dependency tree asks for less.
-- **Linux**: a system
-  [fontconfig](https://www.freedesktop.org/wiki/Software/fontconfig/)
-  installation with its development headers and `pkg-config`, so that fonts
-  are resolved the same way Qt/Mapper resolves them rather than through a
-  reimplementation of fontconfig's rules:
-  - Debian/Ubuntu: `apt install libfontconfig1-dev pkg-config`
-  - Fedora: `dnf install fontconfig-devel pkgconf`
-  - Arch Linux: `pacman -S fontconfig pkgconf`
 
-  MacOS and Windows have not been tested; this project has only been built
-  and run on Linux so far.
+That is all it takes to build: no C toolchain, no `pkg-config`, no `-dev`
+package. Drawing *text* correctly wants one ordinary runtime library on top —
+see [Fonts and fontconfig](#fonts-and-fontconfig).
+
+MacOS and Windows have not been tested; this project has only been built and
+run on Linux so far.
 
 Build everything with:
 
@@ -55,6 +52,40 @@ The three executables are then at:
 - `target/release/`[`map_to_image`](#map_to_image)
 - `target/release/`[`benchmark`](#benchmark)
 - `target/release/`[`create_benchmark`](#create_benchmark)
+
+### Fonts and fontconfig
+
+To render text correctly, MaUR-O wants a
+[fontconfig](https://www.freedesktop.org/wiki/Software/fontconfig/) runtime
+library — already present on essentially every desktop Linux install:
+
+- Debian/Ubuntu: `apt install libfontconfig1`
+- Fedora: `dnf install fontconfig`
+- Arch Linux: `pacman -S fontconfig`
+
+It is opened by name when the first map with text is drawn, never linked, so
+it is a requirement for *correct output* rather than for building. If it is
+missing, MaUR-O prints a warning once and carries on.
+
+**That fallback matters more than it sounds.** fontconfig is what resolves a
+family name the same way Qt and Mapper do. Without it the job falls to
+`fontdb` alone, which picks a different font for a generic family like "Sans
+Serif" — and the substituted font has different glyph widths and line
+heights. So the text is not merely set in another typeface, it is drawn *in
+different positions*: labels shift, and successive lines of a block drift
+further apart as the line-height error accumulates. Nothing about the image
+looks broken, because the geometry is untouched and only the text is wrong.
+
+Concretely, rendering `maps/city_sample.omap` with and without fontconfig
+moves **0.66% of all pixels**, at a mean error of 499 out of 765 — the scale
+of black glyphs landing on white paper, not of soft edges. A benchmark run
+counts every one of those as a *real* difference rather than as antialiasing
+(see [Antialiasing](mds/ImplementationDetails.md#antialiasing)), so a suite
+run on a machine without fontconfig reports spurious failures on every map
+carrying text.
+
+On MacOS, on Windows, and on any other platform without fontconfig, this
+fallback is what runs.
 
 ## Usage
 

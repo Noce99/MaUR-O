@@ -2,12 +2,19 @@
 name = "maur-o"
 version = "1.0.0"
 edition = "2021"
+# The floor set by the `image` crate; everything else asks for less.
+rust-version = "1.88"
 description = "Renders OpenOrienteering Mapper maps to raster images"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/Noce99/MaUR-O/tree/master"
+repository = "https://github.com/Noce99/MaUR-O"
 readme = "README.md"
-keywords = ["orienteering", "OpenOrienteeringMapper", "rasterization"]
+keywords = ["orienteering", "omap", "openorienteering", "rasterization"]
 categories = ["command-line-utilities", "graphics", "parser-implementations", "rendering", "science::geo"]
+# Screenshots and sample maps: ~10MB of the package, and needed by neither the
+# build nor the tests (whose fixtures live in tests/data/). crates.io rewrites
+# the README's relative paths to <repository>/raw/HEAD/..., so the images on
+# the crate page are fetched from GitHub rather than from this archive.
+exclude = ["mds/", "maps/"]
 
 [lib]
 # The package is "maur-o"; a library target name cannot contain a hyphen, so
@@ -39,16 +46,19 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 png = "0.17"
 tempfile = "3"
 
-# Resolves font family names (including generic ones like "Sans Serif") the
-# same way Qt does on Linux: through the system's actual fontconfig library.
-# `fontdb`'s own bundled fontconfig-parser reimplements just enough of
-# fontconfig's config-file format to enumerate installed fonts, but not its
-# full alias/substitution algorithm (e.g. it does not walk /etc/fonts/conf.d/
-# includes), so it can resolve a generic family to a different font than the
-# real fontconfig does. Gated the same way fontdb gates its own fontconfig
-# feature.
-[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
-fontconfig = "0.11"
+# The real fontconfig rather than `fontdb`'s bundled parser: only it resolves a
+# generic family ("Sans Serif") the way Qt and Mapper do. See `crate::text`.
+#
+# The cfg is fontdb's platform set less the Apple family and Emscripten: `unix`,
+# not `macos`, but with no libfontconfig to find -- harmless for fontdb's pure
+# Rust parser, a build failure for this binding to the real library.
+#
+# `dlopen` opens it by name at first use, so nothing is needed to build and a
+# machine without it falls back to fontdb with a warning. Use the Cargo feature,
+# not RUST_FONTCONFIG_DLOPEN: the variable reaches the -sys crate alone, leaving
+# the wrapper to unwrap a library it never checked was loaded.
+[target.'cfg(all(unix, not(any(target_vendor = "apple", target_os = "android", target_os = "emscripten"))))'.dependencies]
+fontconfig = { version = "0.11", features = ["dlopen"] }
 
 [dev-dependencies]
 assert_cmd = "2"
