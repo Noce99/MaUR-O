@@ -108,6 +108,17 @@
 //! pixel that disagrees; and [`archive_info`], [`progress`] and [`report`] are
 //! the small pieces the `mauro benchmark create` and `mauro benchmark run` tools are assembled
 //! from.
+//!
+//! # Generating maps
+//!
+//! The maps which exist are never enough, and never put a symbol next to the
+//! symbol which breaks it. [`dataset`] generates new ones out of nothing but
+//! an existing symbol set, and is what the `generate_maps_dataset` tool is
+//! built on: [`symbol_kinds`] sorts a symbol set into what its symbols are
+//! for, [`layout`] divides a square of ground into cells with wandering
+//! boundaries, [`path_builder`] turns a shape in meters into the coordinates
+//! a file holds, and [`random`] is where every choice any of them makes comes
+//! from — seeded by hand, so that a generated map can be generated again.
 
 // Every public item carries a doc comment; this keeps it that way.
 #![warn(missing_docs)]
@@ -130,6 +141,8 @@ pub mod geometry;
 pub mod geotiff;
 pub mod gravity_model;
 pub mod image_template;
+pub mod dataset;
+pub mod layout;
 pub mod map;
 pub mod map_areas;
 pub mod naming;
@@ -142,8 +155,10 @@ pub mod osm_convert;
 pub mod osm_download;
 pub mod osm_orienteering;
 pub mod osm_style;
+pub mod path_builder;
 pub mod progress;
 pub mod qbezier;
+pub mod random;
 pub mod render;
 pub mod renderer;
 pub mod report;
@@ -158,6 +173,7 @@ pub mod step4_elevation;
 pub mod step5_elevation_raster;
 pub mod step5_gravity_raster;
 pub mod svg;
+pub mod symbol_kinds;
 pub mod text;
 pub mod validate;
 pub mod xml_reader;

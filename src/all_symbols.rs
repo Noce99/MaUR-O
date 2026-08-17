@@ -44,6 +44,7 @@ use std::path::Path;
 
 use crate::geometry::qround;
 use crate::map::*;
+use crate::path_builder::PathBuilder;
 use crate::renderer::Renderer;
 use crate::xml_reader::{self, Fragment, Fragments};
 use crate::xml_writer::MapFile;
@@ -79,83 +80,6 @@ fn rotation_step(i: usize) -> f64 {
 /// The rotation of the i-th step, in degrees, for labels.
 fn rotation_degrees(i: usize) -> i32 {
     (i * 360 / NUM_ROTATIONS) as i32
-}
-
-/// Builds the coordinate vector of a path object.
-///
-/// Input positions are given in meters on the ground, relative to the center
-/// of the shape. They are converted to native map coordinates using the map
-/// scale — and rounded to them, since a `MapCoord` is an integer number of
-/// 1/1000 mm and everything downstream, the extents included, sees the
-/// rounded shape rather than the exact one.
-struct PathBuilder {
-    mm_per_meter: f64,
-    coords: CoordList,
-    part_start: usize,
-}
-
-impl PathBuilder {
-    fn new(mm_per_meter: f64) -> PathBuilder {
-        PathBuilder {
-            mm_per_meter,
-            coords: Vec::new(),
-            part_start: 0,
-        }
-    }
-
-    fn to_coord(&self, point: Point) -> Coord {
-        // MapCoord(qreal, qreal) rounds millimeters to native units, by the
-        // rule qRound uses rather than by Rust's, see [`qround`].
-        let x = qround(point.x * self.mm_per_meter * 1000.0) / 1000.0;
-        let y = qround(point.y * self.mm_per_meter * 1000.0) / 1000.0;
-        Coord::new(x, y, 0)
-    }
-
-    /// Starts a new part. Any previous part becomes a hole of this object.
-    fn move_to(&mut self, point: Point) {
-        if let Some(last) = self.coords.last_mut() {
-            last.flags |= coord_flag::HOLE_POINT;
-        }
-        self.part_start = self.coords.len();
-        let coord = self.to_coord(point);
-        self.coords.push(coord);
-    }
-
-    /// Appends a straight segment.
-    fn line_to(&mut self, point: Point) {
-        let coord = self.to_coord(point);
-        self.coords.push(coord);
-    }
-
-    /// Appends a cubic bezier segment.
-    fn curve_to(&mut self, control_1: Point, control_2: Point, point: Point) {
-        if let Some(last) = self.coords.last_mut() {
-            last.flags |= coord_flag::CURVE_START;
-        }
-        for p in [control_1, control_2, point] {
-            let coord = self.to_coord(p);
-            self.coords.push(coord);
-        }
-    }
-
-    /// Closes the current part.
-    ///
-    /// The last coordinate of a closed part repeats the first one. If the
-    /// part already ends at its start position, that coordinate is reused.
-    fn close(&mut self) {
-        let start = self.coords[self.part_start];
-        let last = *self.coords.last().expect("a part has been started");
-        // Compared as the file holds them, which is what
-        // MapCoord::isPositionEqualTo compares.
-        if last.x == start.x && last.y == start.y {
-            self.coords.last_mut().unwrap().flags |= coord_flag::CLOSE_POINT;
-        } else {
-            let mut closing = start;
-            closing.flags &= !coord_flag::CURVE_START;
-            closing.flags |= coord_flag::CLOSE_POINT;
-            self.coords.push(closing);
-        }
-    }
 }
 
 // ### Shapes ###
@@ -335,19 +259,6 @@ fn is_rotatable(symbol: &Symbol) -> bool {
     }
 }
 
-/// The parts of a combined symbol, resolved to symbols.
-fn parts<'m>(map: &'m Map, combined: &'m CombinedSymbol) -> Vec<&'m Symbol> {
-    combined
-        .parts
-        .iter()
-        .filter_map(|part| match part {
-            PartRef::Shared(index) => map.symbols.get(*index),
-            PartRef::Private(index) => combined.owned_parts.get(*index),
-            PartRef::None => None,
-        })
-        .collect()
-}
-
 /// Every symbol personality this symbol draws with, as a bit set of
 /// [`crate::map::symbol_type`] values. A combined symbol contains what its
 /// parts contain.
@@ -355,7 +266,7 @@ fn contained_types(map: &Map, symbol: &Symbol, depth: usize) -> i32 {
     let mut types = symbol_type(symbol);
     if let Symbol::Combined(combined) = symbol {
         if depth < MAX_PART_DEPTH {
-            for part in parts(map, combined) {
+            for part in map.parts(combined) {
                 types |= contained_types(map, part, depth + 1);
             }
         }
@@ -367,7 +278,8 @@ fn contained_types(map: &Map, symbol: &Symbol, depth: usize) -> i32 {
 fn has_rotatable_fill_pattern(map: &Map, symbol: &Symbol, depth: usize) -> bool {
     match symbol {
         Symbol::Area(area) => area.patterns.iter().any(|pattern| pattern.rotatable),
-        Symbol::Combined(combined) if depth < MAX_PART_DEPTH => parts(map, combined)
+        Symbol::Combined(combined) if depth < MAX_PART_DEPTH => map
+            .parts(combined)
             .iter()
             .any(|part| has_rotatable_fill_pattern(map, part, depth + 1)),
         _ => false,
@@ -380,7 +292,7 @@ fn minimum_length(map: &Map, symbol: &Symbol, depth: usize) -> f64 {
     match symbol {
         Symbol::Line(line) => line.minimum_length,
         Symbol::Combined(combined) if depth < MAX_PART_DEPTH => {
-            parts(map, combined).iter().fold(0.0, |largest: f64, part| {
+            map.parts(combined).iter().fold(0.0, |largest: f64, part| {
                 largest.max(minimum_length(map, part, depth + 1))
             })
         }
@@ -395,7 +307,7 @@ fn minimum_area(map: &Map, symbol: &Symbol, depth: usize) -> i32 {
     match symbol {
         Symbol::Area(area) => area.minimum_area,
         Symbol::Combined(combined) if depth < MAX_PART_DEPTH => {
-            parts(map, combined).iter().fold(0, |largest, part| {
+            map.parts(combined).iter().fold(0, |largest, part| {
                 largest.max(minimum_area(map, part, depth + 1))
             })
         }

@@ -26,6 +26,10 @@ path = "src/lib.rs"
 name = "mauro"
 path = "src/bin/mauro/main.rs"
 
+[[bin]]
+name = "generate_maps_dataset"
+path = "src/bin/generate_maps_dataset.rs"
+
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }
