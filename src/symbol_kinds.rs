@@ -204,6 +204,19 @@ fn area_kind(map: &Map, symbol: &Symbol, depth: usize) -> SymbolKind {
     }
 }
 
+/// Whether the symbol fills an area with a pattern which turns with the
+/// object it is drawn on.
+///
+/// A pattern says for itself whether it turns; one which does not keeps the
+/// angle the symbol set gave it however the object is rotated, which is why
+/// a generator has to ask before it bothers turning anything.
+pub fn has_rotatable_pattern(map: &Map, symbol: &Symbol) -> bool {
+    contains(map, symbol, 0, &|part| match part {
+        Symbol::Area(area) => area.patterns.iter().any(|pattern| pattern.rotatable),
+        _ => false,
+    })
+}
+
 /// Whether the symbol, or any symbol it is built out of, satisfies `wanted`.
 fn contains(map: &Map, symbol: &Symbol, depth: usize, wanted: &dyn Fn(&Symbol) -> bool) -> bool {
     if wanted(symbol) {
@@ -243,7 +256,9 @@ fn code_of(symbol: &Symbol) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map::{AreaSymbol, Color, CombinedSymbol, LineSymbol, PointSymbol, TextSymbol};
+    use crate::map::{
+        AreaSymbol, Color, CombinedSymbol, FillPattern, LineSymbol, PointSymbol, TextSymbol,
+    };
 
     /// A map with two colours: an opaque one and a half transparent one.
     fn map_with(symbols: Vec<Symbol>) -> Map {
@@ -269,6 +284,17 @@ mod tests {
     fn area(color: i32) -> Symbol {
         Symbol::Area(AreaSymbol {
             color,
+            ..AreaSymbol::new()
+        })
+    }
+
+    fn area_with_pattern(rotatable: bool) -> Symbol {
+        Symbol::Area(AreaSymbol {
+            color: 0,
+            patterns: vec![FillPattern {
+                rotatable,
+                ..FillPattern::default()
+            }],
             ..AreaSymbol::new()
         })
     }
@@ -347,6 +373,27 @@ mod tests {
         let catalogue = Catalogue::of(&map);
         assert_eq!(catalogue.len(), 1);
         assert_eq!(catalogue.opaque_areas.len(), 1);
+    }
+
+    #[test]
+    fn a_pattern_turns_only_where_it_says_it_does() {
+        let map = map_with(vec![
+            area(0),
+            area_with_pattern(false),
+            area_with_pattern(true),
+            // A combined symbol turns where any part of it does.
+            combined(vec![0, 1]),
+            combined(vec![0, 2]),
+        ]);
+        let turns = |index: usize| has_rotatable_pattern(&map, &map.symbols[index]);
+        assert!(!turns(0));
+        assert!(!turns(1));
+        assert!(turns(2));
+        assert!(!turns(3));
+        assert!(turns(4));
+        // A line has no fill to turn.
+        let lines = map_with(vec![Symbol::Line(LineSymbol::default())]);
+        assert!(!has_rotatable_pattern(&lines, &lines.symbols[0]));
     }
 
     #[test]

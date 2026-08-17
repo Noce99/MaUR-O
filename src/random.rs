@@ -97,6 +97,12 @@ impl Random {
     pub fn chance(&mut self, probability: f64) -> bool {
         self.unit() < probability
     }
+
+    /// One of `from`, each as likely as any other, or `None` where there is
+    /// nothing to pick.
+    pub fn pick<'a, T>(&mut self, from: &'a [T]) -> Option<&'a T> {
+        from.get(self.below(from.len()))
+    }
 }
 
 #[cfg(test)]
@@ -140,6 +146,23 @@ mod tests {
         assert_eq!(random.below(0), 0);
         assert_eq!(random.below(1), 0);
         assert_eq!(random.in_range(4, 4), 4);
+    }
+
+    #[test]
+    fn every_item_is_picked_about_as_often_as_any_other() {
+        let mut random = Random::from_seed(4);
+        let items = ["a", "b", "c", "d"];
+        let mut taken = [0; 4];
+        for _ in 0..10_000 {
+            let picked = random.pick(&items).unwrap();
+            taken[items.iter().position(|i| i == picked).unwrap()] += 1;
+        }
+        assert!(
+            taken.iter().all(|&n| (2300..2700).contains(&n)),
+            "{taken:?}"
+        );
+        // Nothing to pick from is nothing picked, rather than a panic.
+        assert_eq!(random.pick::<u8>(&[]), None);
     }
 
     #[test]

@@ -14,9 +14,29 @@
 //!    [`crate::symbol_kinds`];
 //! 2. the ground is divided into cells with wandering sides — see
 //!    [`crate::layout`];
-//! 3. the cells are filled in and drawn over. *Not written yet*: for now a
-//!    generated map is its layout, drawn with a single line symbol, which is
-//!    what makes a layout something that can be looked at.
+//! 3. every cell is filled with one piece of terrain: an opaque area symbol
+//!    drawn uniformly at random, turned to an angle of its own where it
+//!    fills with a pattern which turns, so a map comes out as a patchwork of
+//!    the ground cover the set holds. What goes *over* the fills — the
+//!    lines, point symbols and lettering a real map carries — is not written
+//!    yet.
+//!
+//! A cell is filled from the opaque areas alone because those are the symbols
+//! which hide what is under them: whatever the next step draws over a cell,
+//! the ground it is drawn on is exactly the one symbol the cell was filled
+//! with, and a rendering which disagrees is disagreeing about that symbol
+//! rather than about a stack of see-through ones. Two neighbouring cells may
+//! be filled with the same symbol, since the draws are independent; where
+//! that happens the boundary between them stops being visible, which is a
+//! shape a real map has too.
+//!
+//! A fill is turned only where the symbol's pattern says it turns with its
+//! object — the rest keep the angle the symbol set drew them at, as they do
+//! on a real map. The angle is a whole turn's worth: a pattern of parallel
+//! lines repeats every half turn and the renderer folds the angle into that
+//! itself, but a pattern of point symbols carries those symbols round with
+//! it the whole way, so half a turn would leave half of what a rotatable
+//! pattern can look like untried.
 //!
 //! Everything random comes from [`crate::random`] and from the seed in
 //! [`Settings`], so the same settings give the same folder of maps, map for
@@ -28,12 +48,13 @@
 //! its place in it, so it goes out whole in any case; and a generated map is
 //! meant to be opened, edited and drawn on with the rest of the set.
 
+use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
 
 use crate::layout::Layout;
 use crate::map::{Object, ObjectKind, PathObject};
 use crate::random::Random;
-use crate::symbol_kinds::{Catalogue, Entry};
+use crate::symbol_kinds::{has_rotatable_pattern, Catalogue, Entry};
 use crate::xml_reader;
 use crate::xml_writer::MapFile;
 
@@ -45,10 +66,6 @@ pub const DEFAULT_CELL_SIZE: u32 = 30;
 
 /// The default number of maps in a dataset.
 pub const DEFAULT_MAPS: usize = 10;
-
-/// The line symbol the cell outlines are drawn with while there is nothing in
-/// them yet.
-pub const DEFAULT_BORDER_SYMBOL: &str = "Paved area, bounding line";
 
 /// What a dataset is to be made of.
 pub struct Settings {
@@ -62,18 +79,15 @@ pub struct Settings {
     /// Whether the maps must keep to the IOF rules for what may be drawn
     /// where.
     ///
-    /// Nothing reads it yet: it is step three's, which picks the symbols the
-    /// cells are filled with, and a layout is the same layout either way. It
-    /// is carried here so that a dataset generated now records the setting it
+    /// Nothing reads it yet: the rules are about what may be drawn *over* a
+    /// piece of ground, and nothing is drawn over the fills so far. It is
+    /// carried here so that a dataset generated now records the setting it
     /// was asked for.
     pub iof_rules: bool,
     /// What the randomness is seeded with. The same seed gives the same
     /// dataset; the n-th map of a dataset is seeded with `seed + n`, so a map
     /// keeps its shape however many maps are asked for.
     pub seed: u64,
-    /// The name of the symbol the cell outlines are drawn with, see
-    /// [`DEFAULT_BORDER_SYMBOL`].
-    pub border_symbol: String,
 }
 
 impl Default for Settings {
@@ -84,7 +98,6 @@ impl Default for Settings {
             maps: DEFAULT_MAPS,
             iof_rules: false,
             seed: 0,
-            border_symbol: DEFAULT_BORDER_SYMBOL.to_string(),
         }
     }
 }
@@ -95,8 +108,9 @@ pub struct Summary {
     pub written: Vec<PathBuf>,
     /// The symbol set the maps were built from, sorted into kinds.
     pub catalogue: Catalogue,
-    /// The symbol the cell outlines were drawn with.
-    pub border: Entry,
+    /// How many of the opaque areas fill with a pattern which turns with the
+    /// object, and so came out at an angle of their own.
+    pub turning_fills: usize,
     /// The scale of the source map, which every generated map inherits.
     pub scale_denominator: i32,
     /// Complaints from reading the source map.
@@ -126,22 +140,26 @@ pub fn create_dataset(
     let fragments = xml_reader::read_fragments(source)?;
 
     let catalogue = Catalogue::of(&map);
-    if catalogue.is_empty() {
+    if catalogue.opaque_areas.is_empty() {
         return Err(format!(
-            "{} does not hold a single symbol which draws anything",
+            "{} holds no opaque area symbol, so there is nothing to fill a cell with",
             source.display()
         ));
     }
-    let border = catalogue
-        .named(&settings.border_symbol)
-        .ok_or_else(|| {
-            format!(
-                "{} has no symbol named \"{}\"",
-                source.display(),
-                settings.border_symbol
+
+    // Which of the fills carry a pattern that turns with the object, asked
+    // once here rather than once per cell of every map.
+    let fills: Vec<(&Entry, bool)> = catalogue
+        .opaque_areas
+        .iter()
+        .map(|entry| {
+            (
+                entry,
+                has_rotatable_pattern(&map, &map.symbols[entry.index]),
             )
-        })?
-        .clone();
+        })
+        .collect();
+    let turning_fills = fills.iter().filter(|(_, turns)| *turns).count();
 
     std::fs::create_dir_all(into).map_err(|e| format!("cannot make {}: {e}", into.display()))?;
 
@@ -156,14 +174,34 @@ pub fn create_dataset(
         let mut random = Random::from_seed(settings.seed.wrapping_add(index as u64));
         let layout = Layout::random(settings.layout_size, settings.cell_size as f64, &mut random);
 
+        // One piece of terrain per cell. The draws are independent, so two
+        // cells side by side are sometimes the same ground cover; the shape
+        // of the layout is still there, in the boundaries which do show.
         let objects: Vec<Object> = layout
             .cell_outlines(mm_per_meter)
             .into_iter()
             .map(|coords| {
+                let (fill, turns) = *random
+                    .pick(&fills)
+                    .expect("the set was checked for an opaque area");
                 let mut object = Object::new(ObjectKind::Path(PathObject::default()));
                 object.coords = coords;
-                object.symbol_index = Some(border.index);
-                object.symbol_id = border.id;
+                object.symbol_index = Some(fill.index);
+                object.symbol_id = fill.id;
+                if turns {
+                    // A whole turn, not half of one: a pattern of lines
+                    // repeats every half turn and the renderer folds the
+                    // angle into that itself, but the point symbols of a dot
+                    // pattern turn with the object the whole way round.
+                    let turn = random.between(0.0, TAU);
+                    // A path object has one rotation, which is the rotation
+                    // of its fill pattern, and a file carries it twice: once
+                    // as the object's attribute and once on its `<pattern>`.
+                    object.rotation = turn;
+                    if let ObjectKind::Path(path) = &mut object.kind {
+                        path.pattern_rotation = turn;
+                    }
+                }
                 object
             })
             .collect();
@@ -174,7 +212,10 @@ pub fn create_dataset(
             colors: &fragments.colors,
             symbols: &fragments.symbols,
             objects: &objects,
-            rotatable: false,
+            // The fills are the only objects there are, and one carries a
+            // rotation only where its pattern turns with it, so a rotation
+            // written here is a rotation something reads.
+            rotatable: true,
         }
         .write(&path)?;
         written.push(path);
@@ -184,7 +225,7 @@ pub fn create_dataset(
     Ok(Summary {
         written,
         catalogue,
-        border,
+        turning_fills,
         scale_denominator: map.scale_denominator,
         warnings,
     })

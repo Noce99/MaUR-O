@@ -46,6 +46,7 @@ use crate::geometry::qround;
 use crate::map::*;
 use crate::path_builder::PathBuilder;
 use crate::renderer::Renderer;
+use crate::symbol_kinds::has_rotatable_pattern;
 use crate::xml_reader::{self, Fragment, Fragments};
 use crate::xml_writer::MapFile;
 
@@ -272,18 +273,6 @@ fn contained_types(map: &Map, symbol: &Symbol, depth: usize) -> i32 {
         }
     }
     types
-}
-
-/// Whether the symbol fills an area with a pattern which can be turned.
-fn has_rotatable_fill_pattern(map: &Map, symbol: &Symbol, depth: usize) -> bool {
-    match symbol {
-        Symbol::Area(area) => area.patterns.iter().any(|pattern| pattern.rotatable),
-        Symbol::Combined(combined) if depth < MAX_PART_DEPTH => map
-            .parts(combined)
-            .iter()
-            .any(|part| has_rotatable_fill_pattern(map, part, depth + 1)),
-        _ => false,
-    }
 }
 
 /// The symbol's minimum length, in mm on the paper. A combined symbol's is
@@ -907,7 +896,7 @@ fn write_symbol(
         id,
         is_rotatable: is_rotatable(symbol),
         contained_types: contained_types(map, symbol, 0),
-        has_rotatable_fill_pattern: has_rotatable_fill_pattern(map, symbol, 0),
+        has_rotatable_fill_pattern: has_rotatable_pattern(map, symbol),
         minimum_length: minimum_length(map, symbol, 0),
         minimum_area: minimum_area(map, symbol, 0),
     };

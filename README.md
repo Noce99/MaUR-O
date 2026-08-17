@@ -238,24 +238,33 @@ generate_maps_dataset [OPTIONS] <symbol-set> [folder]
 | `-l, --layout-size <CELLS>` | How many cells a map is across; it holds this squared (default `3`). |
 | `-c, --background-cell-size <METERS>` | How wide one cell is, in meters on the ground (default `30`). |
 | `-n, --maps <COUNT>` | How many maps to generate (default `10`). |
-| `--iof-rules` | Keep to the IOF rules for what may be drawn where. Read by the step which fills the cells in — **not written yet**. |
+| `--iof-rules` | Keep to the IOF rules for what may be drawn where. Read by the step which draws over the cells — **not written yet**. |
 | `-s, --seed <N>` | What the randomness is seeded with (default `0`). |
-| `--border-symbol <NAME>` | The symbol the cell outlines are drawn with (default `Paved area, bounding line`). |
 
 A map is built in three steps: the symbol set is sorted into what its symbols
 are *for* (opaque areas, see-through areas, lines, point symbols, text); the
-ground is divided into cells; the cells are filled in and drawn over. **The
-third step is not written yet** — for now a generated map is its layout,
-every cell outlined in one line symbol, so that the shapes can be looked at.
+ground is divided into cells; every cell is filled with one piece of ground
+cover, an opaque area symbol drawn uniformly at random out of the set. Only
+the opaque areas fill a cell, since those are the symbols which hide what is
+under them: whatever is drawn over a cell later, the ground beneath it is
+exactly the one symbol the cell was filled with. Two neighbouring cells are
+sometimes the same symbol — the draws are independent — and the boundary
+between them then stops being visible, which is a shape a real map has too.
+
+A fill whose pattern turns with its object — the dots of rough open land,
+the stripes of undergrowth — is given an angle of its own, drawn uniformly
+out of a whole turn. The symbols whose patterns are fixed keep the angle the
+symbol set drew them at, as they do on a real map. **What a map carries over
+its ground — lines, point symbols, lettering — is not written yet.**
 
 ```bash
 cargo build --release
 ./target/release/generate_maps_dataset maps/ISOM_10k.omap dataset
-./target/release/map_to_image -r 12 -f 5 dataset/map_001.omap
+./target/release/map_to_image -r 12 -f 5 dataset/map_002.omap
 ```
 
-![A generated layout: a square of ground divided into nine cells whose boundaries wander instead of following the grid](mds/assets/random_layout.png)
-*One generated map at the defaults: 3 by 3 cells of 30 m. The cell corners are pinned to the grid, at `(i · 30 m, j · 30 m)`; everything between two corners is a random chain of straight segments and bezier curves. Two neighbouring cells are built from the same side, run one way and then the other, so the boundary between them is a single line.*
+![A generated map: nine pieces of ground cover — open land, undergrowth, rough open with scattered trees, a building — with wandering boundaries instead of a grid](mds/assets/random_map.png)
+*What those two commands print: the second map of the default dataset, 3 by 3 cells of 30 m, each filled with one opaque area of the ISOM set. The cell corners are pinned to the grid, at `(i · 30 m, j · 30 m)`; everything between two corners is a random chain of straight segments and bezier curves. Two of the fills carry a pattern which turns with its object, and came out at an angle of their own: the white stripes running diagonally across the bottom left cell, and the tilted grid of dots next to it. The two top right cells drew the same symbol, which is what an independent draw does now and then — their shared boundary is there, but there is nothing left to see of it but a hairline.*
 
 It prints the symbol set broken down by kind, what it wrote, and the seed it
 used. The whole dataset follows from that seed: the same options give the
