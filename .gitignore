@@ -24,6 +24,9 @@ dataset/
 
 a_lot_of_work
 
+# Where the `train` tool puts one folder per run.
+trainings/
+
 # Machine-local cargo settings (e.g. the CUDA toolkit version this machine's
 # cudarc build needs) -- not something to push, since it is a fact about this
 # machine rather than about the project.

@@ -14,8 +14,9 @@
 //! cargo run --release --bin generate_maps_dataset -- \
 //!     --just-opaque-areas -n 300 maps/ISOM_10k.omap dataset
 //!
-//! # And a network read off them.
-//! cargo run --release -p maur-o-net --bin train -- dataset runs/first
+//! # And a network read off them. Each run writes its own timestamped folder
+//! # under `trainings/`.
+//! cargo run --release -p maur-o-net --bin train -- dataset trainings
 //! ```
 //!
 //! Three pieces, and they are meant to be read in this order:

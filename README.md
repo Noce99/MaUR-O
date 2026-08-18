@@ -416,7 +416,7 @@ cargo run --release --bin generate_maps_dataset -- \
     --just-opaque-areas -n 300 maps/ISOM_10k.omap dataset
 
 # And a network read off them.
-cargo run --release -p maur-o-net --bin train -- dataset runs/first
+cargo run --release -p maur-o-net --bin train -- dataset trainings
 ```
 
 It is a workspace member rather than part of the `maur-o` crate: burn's
@@ -475,6 +475,41 @@ is to be argmaxed, so what crosses instead is five scalars.
 | Train | Loss           | 3.811    | 8        | 3.965    | 1        |
 | Train | Pixel accuracy | 2.355    | 7        | 3.543    | 2        |
 ```
+
+### What a run leaves behind
+
+The last argument is a **training folder**, not a run: it is a history, and
+each run makes its own folder under it, stamped with the model's Rust type and
+the moment it started, so that a listing is in the order the runs happened.
+
+```text
+trainings/
+└── UNet_2026_08_18__09_13_39/
+    ├── training.json          the configuration the run was started with
+    ├── architecture.txt       the network that configuration built
+    ├── experiment.log         what the run logged as it went
+    ├── checkpoint/
+    │   ├── 08/                the weights, the optimizer and the scheduler,
+    │   ├── 09/                as each checkpointed epoch left them
+    │   └── …
+    ├── train/01/…             the metrics of every epoch, per split
+    ├── valid/01/…
+    └── best.mpk               the weights of the epoch which validated best
+```
+
+Epoch numbers are zero-padded to the width of the last epoch the run was set
+up for — `001` through `100` for a hundred of them — because `epoch-10` sorts
+before `epoch-2` everywhere a name is sorted as text.
+
+A checkpoint is everything it would take to carry the run on from that epoch —
+the weights, the optimizer's state and the scheduler's — and on a full-size
+model that is not small, so **the last five epochs are checkpointed and the
+rest are not**. The epoch which validated best is kept as well, however far
+back it was, which is what lets `best.mpk` be a *copy* of that epoch's
+`model.mpk` rather than whatever `fit` handed back: the last epoch is only the
+best one when the run was still improving when it stopped. The metric logs
+under `train/` and `valid/` are untouched by any of this — every epoch keeps
+its numbers.
 
 ## Implementation Details
 
