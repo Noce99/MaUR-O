@@ -216,7 +216,7 @@ impl Mask {
     }
 
     /// How many pixels differ at all, however the difference is explained.
-    fn count(&self) -> u64 {
+    pub fn count(&self) -> u64 {
         self.bits.iter().filter(|&&b| b != AGREE).count() as u64
     }
 
@@ -508,6 +508,25 @@ fn crop_of_mask(mask: &Mask, x: u32, y: u32, size: u32) -> RgbImage {
     result
 }
 
+/// The whole difference mask as an image: black where the two agree, red
+/// where they really differ, dim orange where antialiasing explains it.
+///
+/// The same colours a crop of one is painted in, over the whole of it —
+/// which is what a panel beside the two images it compares wants.
+pub fn mask_image(mask: &Mask) -> RgbImage {
+    let mut result = RgbImage::from_pixel(mask.width.max(1), mask.height.max(1), Rgb([0, 0, 0]));
+    for row in 0..mask.height {
+        for column in 0..mask.width {
+            match mask.class(column, row) {
+                REAL => result.put_pixel(column, row, DIFFERENCE_COLOUR),
+                ANTIALIASING => result.put_pixel(column, row, ANTIALIASING_COLOUR),
+                _ => {}
+            }
+        }
+    }
+    result
+}
+
 /// Enlarges an image by a whole number factor, without smoothing.
 ///
 /// Nearest neighbour: these differences are a pixel wide, and smoothing them
@@ -522,17 +541,25 @@ fn magnify(image: &RgbImage, factor: u32) -> RgbImage {
     result
 }
 
-/// Puts labelled images next to each other on a single canvas.
+/// Puts labelled images next to each other on a single canvas, one label
+/// above each.
 ///
 /// The panels keep their size and are aligned at the top, so that images of
-/// different size stay comparable.
-fn compose(panels: &[RgbImage], labels: &[String]) -> RgbImage {
+/// different size stay comparable. A label with no panel is dropped, and a
+/// panel with no label goes under an empty stretch of bar.
+///
+/// Public because a sheet of panels is a thing more than the benchmark wants:
+/// `maur_o_net::image_valid` puts a picture, the map a network read out of it
+/// and where the two disagree side by side, epoch by epoch.
+pub fn compose(panels: &[RgbImage], labels: &[String]) -> RgbImage {
     let widest = panels.iter().map(|p| p.width()).max().unwrap_or(1);
     let font_size = (widest / 40).clamp(12, 40);
     let bar = font_size + 8;
 
-    let width: u32 =
-        panels.iter().map(|p| p.width()).sum::<u32>() + GAP * (panels.len() as u32 - 1);
+    // Saturating, because a sheet of no panels is an empty sheet rather than
+    // a width of four billion.
+    let width: u32 = panels.iter().map(|p| p.width()).sum::<u32>()
+        + GAP * (panels.len() as u32).saturating_sub(1);
     let height = panels.iter().map(|p| p.height()).max().unwrap_or(0) + bar;
     let mut result = canvas(width, height);
 
@@ -1187,6 +1214,41 @@ mod tests {
 
     fn image(width: u32, height: u32, colour: [u8; 3]) -> RgbImage {
         RgbImage::from_pixel(width, height, Rgb(colour))
+    }
+
+    /// A sheet of panels is as wide as they are plus the gaps, and taller
+    /// than the tallest by the caption bar.
+    #[test]
+    fn a_composed_sheet_is_its_panels_side_by_side() {
+        let sheet = compose(
+            &[image(40, 30, [0, 0, 0]), image(20, 50, [255, 255, 255])],
+            &["left".to_string(), "right".to_string()],
+        );
+        assert_eq!(sheet.width(), 40 + 20 + GAP);
+        assert!(sheet.height() > 50, "the bar is above the panels");
+    }
+
+    /// A sheet of nothing is an empty sheet rather than a width of four
+    /// billion, which is what the gap between no panels used to come to.
+    #[test]
+    fn a_composed_sheet_of_no_panels_is_empty() {
+        let sheet = compose(&[], &[]);
+        assert_eq!(sheet.width(), 1);
+    }
+
+    /// The whole mask, in the colours a crop of one is painted in.
+    #[test]
+    fn a_mask_becomes_an_image_of_its_own_size() {
+        let mut a = image(4, 3, [255, 255, 255]);
+        let b = image(4, 3, [255, 255, 255]);
+        // One pixel wrong in a way no edge explains: neither image has one.
+        a.put_pixel(1, 1, Rgb([0, 0, 0]));
+
+        let comparison = difference_mask(&a, &b, DEFAULT_TOLERANCE, false);
+        let drawn = mask_image(&comparison.mask);
+        assert_eq!((drawn.width(), drawn.height()), (4, 3));
+        assert_eq!(*drawn.get_pixel(1, 1), DIFFERENCE_COLOUR);
+        assert_eq!(*drawn.get_pixel(0, 0), Rgb([0, 0, 0]));
     }
 
     #[test]

@@ -307,6 +307,17 @@ impl MapDataset {
         self.maps.len()
     }
 
+    /// The pictures of those maps, in the order the folder sorts — which is
+    /// the order they were generated in.
+    ///
+    /// The crops are what a network is trained on; these are the whole
+    /// images the crops were cut from, for anything which wants to put one
+    /// through the network as it stands. `crate::image_valid` reads the first
+    /// few of a validation split back into maps, epoch by epoch.
+    pub fn pictures(&self) -> impl Iterator<Item = &Path> {
+        self.maps.iter().map(|(image, _)| image.as_path())
+    }
+
     /// How many pixels square this dataset's crops are.
     pub fn crop(&self) -> usize {
         self.crop

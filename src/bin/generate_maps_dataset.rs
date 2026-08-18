@@ -30,6 +30,7 @@
 //! generate_maps_dataset --just-opaque-areas maps/ISOM_10k.omap dataset
 //!
 //! dataset/classes.json       what channel each opaque area owns
+//! dataset/ISOM_10k.omap      the symbol set the maps were drawn with
 //! dataset/maps/map_001.omap  the map, to open in Mapper
 //! dataset/images/map_001.png what it looks like: a model's input
 //! dataset/gt/map_001.bin     what it is, pixel by pixel: the answer
@@ -286,6 +287,16 @@ fn run() -> Result<(), (ExitCode, String)> {
     println!(
         "  {MAPS_FOLDER}/ {} maps written",
         count(|g| g.map.is_file())
+    );
+    // The set travels with the answers: a class of a label is a place in its
+    // list of opaque areas, and nothing else says which place.
+    println!(
+        "  {} the symbol set the maps were drawn with, copied in",
+        summary
+            .symbol_set
+            .file_name()
+            .unwrap_or(summary.symbol_set.as_os_str())
+            .to_string_lossy(),
     );
     let images = count(|g| g.image.is_some());
     if images == 0 {
