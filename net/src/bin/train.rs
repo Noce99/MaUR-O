@@ -2,7 +2,7 @@
 //! it was drawn with.
 //!
 //! ```text
-//! train [OPTIONS] <dataset> [run]
+//! train [OPTIONS] <dataset> [trainings]
 //! ```
 //!
 //! The dataset is a folder `generate_maps_dataset --just-opaque-areas` wrote:
@@ -17,11 +17,16 @@
 //! ```bash
 //! cargo run --release --bin generate_maps_dataset -- \
 //!     --just-opaque-areas -n 300 maps/ISOM_10k.omap dataset
-//! cargo run --release -p maur-o-net --bin train -- dataset runs/first
+//! cargo run --release -p maur-o-net --bin train -- dataset trainings
 //! ```
 //!
-//! The run folder holds the checkpoints, the metrics of every epoch, the
-//! configuration the run was started with, and `model` — the trained weights
+//! The training folder is a history rather than a run: each run writes
+//! `<Model>_YYYY_MM_DD__hh_mm_ss` under it, and that folder holds
+//! `training.json` and `architecture.txt` for what was trained,
+//! `checkpoint/001/`, `002/`, … for what a checkpointed epoch left behind —
+//! the last five and the best one, rather than all of them — `train/001/` and
+//! `valid/001/` for the metrics of every epoch, `experiment.log` for what the
+//! run logged, and `best.mpk` — the weights of the epoch which validated best
 //! — at the end of it.
 //!
 //! The backend is chosen when this is built, not when it is run: `ndarray` by
@@ -40,8 +45,8 @@ use maur_o_net::data::{CROP, DEFAULT_CROPS_PER_MAP};
 use maur_o_net::training::{train, TrainingConfig, DEFAULT_ANGLE_WEIGHT};
 use maur_o_net::unet::{DEFAULT_BASE_CHANNELS, DEPTH};
 
-/// Where a run is written when no folder is named.
-const DEFAULT_RUN: &str = "run";
+/// Where the runs are written when no folder is named.
+const DEFAULT_TRAININGS: &str = "trainings";
 
 #[derive(Parser)]
 #[command(
@@ -61,10 +66,11 @@ struct Args {
     /// The dataset folder: images/, gt/ and classes.json under it.
     dataset: PathBuf,
 
-    /// Where the checkpoints, the metrics and the trained weights go. Made if
+    /// The training folder, which holds one timestamped folder per run: the
+    /// checkpoints, the metrics and the weights of each go under that. Made if
     /// it is not there.
-    #[arg(default_value = DEFAULT_RUN)]
-    run: PathBuf,
+    #[arg(default_value = DEFAULT_TRAININGS)]
+    trainings: PathBuf,
 
     /// How many passes over the dataset.
     #[arg(short = 'e', long, default_value_t = 10, value_name = "COUNT")]
@@ -223,8 +229,15 @@ fn run() -> Result<(), (ExitCode, String)> {
         args.base_channels,
     );
 
-    train::<Backend>(&args.dataset, &args.run, config, device(), args.dashboard)
-        .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))
+    train::<Backend>(
+        &args.dataset,
+        &args.trainings,
+        config,
+        device(),
+        args.dashboard,
+    )
+    .map(|_| ())
+    .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))
 }
 
 fn main() -> ExitCode {

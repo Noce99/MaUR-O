@@ -50,21 +50,27 @@
 //!   network pointing anywhere, and a batch with no rotatable pattern in it
 //!   counts as one pixel of ninety rather than as a division by nothing.
 
+use std::path::{Path, PathBuf};
+
 use burn::config::Config;
-use burn::module::Module;
+use burn::module::{extract_type_name, Module};
 use burn::nn::loss::{CrossEntropyLossConfig, MseLoss, Reduction};
 use burn::optim::AdamConfig;
 use burn::prelude::Backend;
 use burn::record::CompactRecorder;
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::Tensor;
+use burn::train::checkpoint::{
+    ComposedCheckpointingStrategy, KeepLastNCheckpoints, MetricCheckpointingStrategy,
+};
 use burn::train::metric::state::{FormatOptions, NumericMetricState};
+use burn::train::metric::store::{Aggregate, Direction, Split};
 use burn::train::metric::{
     Adaptor, ItemLazy, LossInput, LossMetric, Metric, MetricEntry, MetricMetadata, Numeric,
 };
 use burn::train::renderer::tui::TuiMetricsRenderer;
 use burn::train::renderer::{MetricState, MetricsRenderer, TrainingProgress};
-use burn::train::{LearnerBuilder, TrainOutput, TrainStep, ValidStep};
+use burn::train::{LearnerBuilder, LearnerSummary, TrainOutput, TrainStep, ValidStep};
 
 use crate::data::{MapBatch, MapBatcher, MapDataset, CROP, DEFAULT_CROPS_PER_MAP};
 use crate::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEPTH};
@@ -473,20 +479,200 @@ impl MetricsRenderer for PlainRenderer {
     }
 }
 
-/// Trains a U-Net on the dataset in `dataset`, writing the run — the
-/// checkpoints, the metrics and the configuration — into `into`.
+/// How the moment a run was started is written into its folder's name. Fixed
+/// width and biggest unit first, so that a listing of the training folder is
+/// in the order the runs happened.
+const RUN_STAMP: &str = "%Y_%m_%d__%H_%M_%S";
+
+/// What burn calls a per-epoch metric folder, before [`number_epochs`] gives
+/// it its number.
+const BURN_EPOCH_PREFIX: &str = "epoch-";
+
+/// Which metric decides the epoch `best.mpk` is taken from: the validation
+/// loss, which is the one figure the whole of a run is descending.
+const BEST_METRIC: &str = "Loss";
+
+/// How many epochs keep their checkpoint folder.
 ///
-/// `into` is created if it is not there. `dashboard` switches the plain,
-/// scrolling metrics log for a live terminal dashboard; it says nothing about
-/// the run itself, which is why it is a parameter here rather than a field of
-/// [`TrainingConfig`], the part of a run's setup that gets written to disk.
+/// A checkpoint is the weights, the optimizer's state and the scheduler's —
+/// what it would take to carry the run on from that epoch — and on a
+/// full-size model that is not small. Keeping every epoch's would multiply
+/// the cost of a run by its length for the sake of epochs nobody goes back
+/// to, so what is kept is the last few, which is what resuming needs.
+///
+/// The epoch which validated best is kept too, however far back it was: see
+/// [`MetricCheckpointingStrategy`] where the two are composed. The metric
+/// logs under `train/` and `valid/` are untouched by this — every epoch keeps
+/// its numbers, which are a few bytes each.
+pub const KEPT_CHECKPOINTS: usize = 5;
+
+/// The weights of the epoch which validated best, at the top of the run
+/// folder.
+///
+/// A file rather than a folder because [`CompactRecorder`] writes a whole
+/// model as one; a recorder which needed more than one would want a folder of
+/// this name instead, which is why the name carries no extension of its own
+/// until it is saved.
+const BEST_WEIGHTS: &str = "best";
+
+/// Makes the folder this run writes into: `<Model>_YYYY_MM_DD__hh_mm_ss`
+/// under `into`, and `into` itself if it is not there.
+///
+/// The name is the model's Rust type and the moment the run started, so that
+/// a training folder is a history rather than one run overwriting the last.
+fn run_directory(into: &Path, model: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(into).map_err(|e| format!("cannot make {}: {e}", into.display()))?;
+
+    let base = format!("{model}_{}", chrono::Local::now().format(RUN_STAMP));
+    // Two runs started inside the same second would otherwise write into one
+    // another's folder, and the second of them would read as the first
+    // resumed.
+    let mut attempt = 1;
+    loop {
+        let run = into.join(if attempt == 1 {
+            base.clone()
+        } else {
+            format!("{base}__{attempt}")
+        });
+        match std::fs::create_dir(&run) {
+            Ok(()) => return Ok(run),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
+            Err(e) => return Err(format!("cannot make {}: {e}", run.display())),
+        }
+    }
+}
+
+/// Renames burn's `epoch-3` to `003`, `width` digits wide.
+///
+/// Zero padded to the widest epoch number the run can reach, so that the
+/// epochs of a run list in the order they happened rather than in the order
+/// their names sort — `epoch-10` comes before `epoch-2` everywhere a name is
+/// sorted as text, which is a file browser, a shell glob and `ls` alike.
+fn number_epochs(directory: &Path, width: usize) -> Result<(), String> {
+    let read = |e| format!("cannot read {}: {e}", directory.display());
+    for entry in std::fs::read_dir(directory).map_err(read)? {
+        let entry = entry.map_err(read)?;
+        let name = entry.file_name();
+        let Some(epoch) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(BURN_EPOCH_PREFIX))
+            .and_then(|epoch| epoch.parse::<usize>().ok())
+        else {
+            continue;
+        };
+
+        let to = directory.join(format!("{epoch:0width$}"));
+        std::fs::rename(entry.path(), &to).map_err(|e| {
+            format!(
+                "cannot rename {} to {}: {e}",
+                entry.path().display(),
+                to.display(),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Moves burn's `checkpoint/model-3.mpk` into `checkpoint/003/model.mpk`, the
+/// epoch numbers padded as [`number_epochs`] pads them.
+///
+/// What an epoch left behind is the weights, the optimizer's state and the
+/// scheduler's, and those three are one thing: what it would take to carry
+/// the run on from there. Written flat they are three files among every other
+/// epoch's, and reading one epoch's state off a folder of thirty is arithmetic
+/// on file names.
+fn group_checkpoints(directory: &Path, width: usize) -> Result<(), String> {
+    let read = |e| format!("cannot read {}: {e}", directory.display());
+    for entry in std::fs::read_dir(directory).map_err(read)? {
+        let entry = entry.map_err(read)?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        // `model-3.mpk` is the model of epoch three; the recorder chose the
+        // extension, so it is carried over rather than assumed.
+        let Some((name, epoch)) = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.rsplit_once('-'))
+        else {
+            continue;
+        };
+        let Ok(epoch) = epoch.parse::<usize>() else {
+            continue;
+        };
+
+        let into = directory.join(format!("{epoch:0width$}"));
+        std::fs::create_dir_all(&into)
+            .map_err(|e| format!("cannot make {}: {e}", into.display()))?;
+
+        let mut file = std::ffi::OsString::from(name);
+        if let Some(extension) = path.extension() {
+            file.push(".");
+            file.push(extension);
+        }
+        let to = into.join(file);
+        std::fs::rename(&path, &to)
+            .map_err(|e| format!("cannot move {} to {}: {e}", path.display(), to.display(),))?;
+    }
+    Ok(())
+}
+
+/// Which epoch validated best, out of the metric logs the run just wrote.
+///
+/// Read back through burn's own summary rather than kept as the run went: an
+/// epoch is scored by the mean over its batches, and that mean is what the
+/// logs hold and what the table printed at the end of a run reports. So this
+/// picks the epoch that table names, and not some other reading of the same
+/// numbers.
+///
+/// Must be called before the epoch folders are renumbered — burn reads its own
+/// `epoch-N` names back.
+fn best_epoch(run: &Path) -> Option<usize> {
+    let summary = LearnerSummary::new(run, &[BEST_METRIC]).ok()?;
+    let loss = summary
+        .metrics
+        .valid
+        .iter()
+        .find(|metric| metric.name == BEST_METRIC)?;
+    loss.entries
+        .iter()
+        // A loss which is not a number is a run which came apart, and it is
+        // not the best of anything.
+        .filter(|entry| !entry.value.is_nan())
+        .min_by(|a, b| a.value.total_cmp(&b.value))
+        .map(|entry| entry.step)
+}
+
+/// Trains a U-Net on the dataset in `dataset`, writing the run into a folder
+/// of its own under `into`, and returning that folder.
+///
+/// `into` is the training folder — a history of runs rather than one run —
+/// and is created if it is not there. Each run gets
+/// `<Model>_YYYY_MM_DD__hh_mm_ss` under it, holding:
+///
+/// * `training.json`, the configuration it was started with, and
+///   `architecture.txt`, the network that configuration built;
+/// * `checkpoint/001/`, `002/`, …, a folder per checkpointed epoch, holding
+///   the weights, the optimizer and the scheduler as that epoch left them.
+///   Not every epoch: see [`KEPT_CHECKPOINTS`];
+/// * `train/001/` and `valid/001/`, the metrics of **every** epoch on each
+///   split;
+/// * `experiment.log`, what the run logged as it went;
+/// * `best.mpk`, the weights of the epoch which validated best.
+///
+/// `dashboard` switches the plain, scrolling metrics log for a live
+/// terminal dashboard; it says nothing about the run itself, which is why
+/// it is a parameter here rather than a field of [`TrainingConfig`], the
+/// part of a run's setup that gets written to disk.
 pub fn train<B: AutodiffBackend>(
-    dataset: &std::path::Path,
-    into: &std::path::Path,
+    dataset: &Path,
+    into: &Path,
     config: TrainingConfig,
     device: B::Device,
     dashboard: bool,
-) -> Result<(), String> {
+) -> Result<PathBuf, String> {
     if config.crop % (1 << DEPTH) != 0 {
         return Err(format!(
             "a crop of {} pixels does not divide by {}, which is what a U-Net of {DEPTH} levels \
@@ -496,9 +682,9 @@ pub fn train<B: AutodiffBackend>(
         ));
     }
 
-    std::fs::create_dir_all(into).map_err(|e| format!("cannot make {}: {e}", into.display()))?;
+    let run = run_directory(into, extract_type_name::<UNet<B>>())?;
     config
-        .save(into.join("training.json"))
+        .save(run.join("training.json"))
         .map_err(|e| format!("cannot write the configuration: {e}"))?;
 
     let all = MapDataset::load(dataset, config.seed)?
@@ -529,6 +715,16 @@ pub fn train<B: AutodiffBackend>(
         config.crops_per_map,
         config.crop,
     );
+    println!("{}: the run", run.display());
+
+    // Built here rather than inside the builder so that what the run trained
+    // can be written down before it starts training it.
+    let model = UNetConfig::new(config.classes)
+        .with_base_channels(config.base_channels)
+        .init::<B>(&device);
+    let architecture = run.join("architecture.txt");
+    std::fs::write(&architecture, format!("{model}\n"))
+        .map_err(|e| format!("cannot write {}: {e}", architecture.display()))?;
 
     // The training half runs on the autodiff backend, since that is where a
     // gradient comes from; the validation half runs on the plain one under
@@ -544,7 +740,7 @@ pub fn train<B: AutodiffBackend>(
             .num_workers(config.workers)
             .build(valid);
 
-    let mut builder = LearnerBuilder::new(into)
+    let mut builder = LearnerBuilder::new(&run)
         .metric_train_numeric(LossMetric::<MetricBackend>::new())
         .metric_valid_numeric(LossMetric::<MetricBackend>::new())
         .metric_train_numeric(PixelAccuracyMetric::<MetricBackend>::new())
@@ -552,6 +748,23 @@ pub fn train<B: AutodiffBackend>(
         .metric_train_numeric(AngleMetric::<MetricBackend>::new())
         .metric_valid_numeric(AngleMetric::<MetricBackend>::new())
         .with_file_checkpointer(CompactRecorder::new())
+        // burn's own default, with a longer tail: the last few epochs, so
+        // that a run can be carried on from where it stopped, and the epoch
+        // which validated best however far back it was, so that `best.mpk`
+        // has something to be copied from. Composed rather than chosen
+        // between — a composition deletes an epoch only when every strategy
+        // in it has finished with that epoch.
+        .with_checkpointing_strategy(
+            ComposedCheckpointingStrategy::builder()
+                .add(KeepLastNCheckpoints::new(KEPT_CHECKPOINTS))
+                .add(MetricCheckpointingStrategy::new(
+                    &LossMetric::<MetricBackend>::new(),
+                    Aggregate::Mean,
+                    Direction::Lowest,
+                    Split::Valid,
+                ))
+                .build(),
+        )
         .devices(vec![device.clone()])
         .num_epochs(config.epochs)
         .summary();
@@ -568,20 +781,160 @@ pub fn train<B: AutodiffBackend>(
         // --dashboard being what turns it on.
         builder.renderer(PlainRenderer)
     };
-    let learner = builder.build(
-        UNetConfig::new(config.classes)
-            .with_base_channels(config.base_channels)
-            .init::<B>(&device),
-        AdamConfig::new().init(),
-        config.learning_rate,
-    );
+    let learner = builder.build(model, AdamConfig::new().init(), config.learning_rate);
 
     let trained = learner.fit(train_loader, valid_loader);
 
-    let weights = into.join("model");
-    trained
-        .save_file(&weights, &CompactRecorder::new())
-        .map_err(|e| format!("cannot write the weights: {e}"))?;
-    println!("{}: the trained weights", weights.display());
-    Ok(())
+    // While the folders are still the `epoch-N` burn reads back, and before
+    // they are renumbered under it.
+    let best = best_epoch(&run);
+
+    // Wide enough for the last epoch the run was set up for, rather than for
+    // the last it reached: the width is a property of the run, and an
+    // interrupted one should number its epochs the way a finished one would.
+    let width = config.epochs.to_string().len();
+    group_checkpoints(&run.join("checkpoint"), width)?;
+    for split in ["train", "valid"] {
+        number_epochs(&run.join(split), width)?;
+    }
+
+    let weights = run.join(BEST_WEIGHTS).with_extension("mpk");
+    let kept = best
+        .map(|epoch| {
+            let from = run
+                .join("checkpoint")
+                .join(format!("{epoch:0width$}"))
+                .join("model.mpk");
+            (epoch, from)
+        })
+        .filter(|(_, from)| from.is_file());
+
+    match kept {
+        // Copied out of the epoch's own folder rather than saved from memory:
+        // what `fit` returns is the last epoch, and the last epoch is only the
+        // best one when the run was still improving when it stopped.
+        Some((epoch, from)) => {
+            std::fs::copy(&from, &weights).map_err(|e| {
+                format!(
+                    "cannot copy {} to {}: {e}",
+                    from.display(),
+                    weights.display()
+                )
+            })?;
+            println!(
+                "{}: the weights of epoch {epoch}, which validated best",
+                weights.display(),
+            );
+        }
+        // No validation loss to read — a run of no epochs, or logs which could
+        // not be read back — or its epoch has no checkpoint left. The model in
+        // hand is the last epoch, and it is then the only answer there is.
+        None => {
+            trained
+                .save_file(run.join(BEST_WEIGHTS), &CompactRecorder::new())
+                .map_err(|e| format!("cannot write the weights: {e}"))?;
+            println!(
+                "{}: the weights of the last epoch, there being no best epoch's checkpoint to \
+                 take them from",
+                weights.display(),
+            );
+        }
+    }
+
+    Ok(run)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder holding empty files at the given names.
+    fn folder(names: &[&str]) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().expect("a temporary folder");
+        for name in names {
+            std::fs::write(directory.path().join(name), []).expect("a file");
+        }
+        directory
+    }
+
+    /// What a folder holds, sorted, folders' contents written as `dir/file`.
+    fn listing(directory: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(directory).expect("a folder") {
+            let entry = entry.expect("an entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.path().is_dir() {
+                let inside = listing(&entry.path());
+                if inside.is_empty() {
+                    found.push(name);
+                } else {
+                    found.extend(inside.into_iter().map(|inner| format!("{name}/{inner}")));
+                }
+            } else {
+                found.push(name);
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn an_epoch_is_numbered_to_the_width_of_the_last_one() {
+        let directory = tempfile::tempdir().expect("a temporary folder");
+        for epoch in [1, 2, 10, 100] {
+            std::fs::create_dir(directory.path().join(format!("epoch-{epoch}"))).expect("an epoch");
+        }
+        std::fs::write(directory.path().join("epoch-1/Loss.log"), b"1.0").expect("a metric");
+
+        number_epochs(directory.path(), 3).expect("the epochs renumbered");
+        assert_eq!(
+            listing(directory.path()),
+            ["001/Loss.log", "002", "010", "100"],
+        );
+    }
+
+    /// A run folder can hold things which are not epochs, and renaming those
+    /// would be renaming a file the tool does not own.
+    #[test]
+    fn what_is_not_an_epoch_is_left_where_it_is() {
+        let directory = folder(&["epoch-none", "notes.txt"]);
+        std::fs::create_dir(directory.path().join("epoch-2")).expect("an epoch");
+
+        number_epochs(directory.path(), 2).expect("the epochs renumbered");
+        assert_eq!(listing(directory.path()), ["02", "epoch-none", "notes.txt"]);
+    }
+
+    #[test]
+    fn an_epochs_checkpoint_files_are_gathered_into_its_own_folder() {
+        let directory = folder(&[
+            "model-1.mpk",
+            "optim-1.mpk",
+            "scheduler-1.mpk",
+            "model-12.mpk",
+        ]);
+
+        group_checkpoints(directory.path(), 2).expect("the checkpoints grouped");
+        assert_eq!(
+            listing(directory.path()),
+            [
+                "01/model.mpk",
+                "01/optim.mpk",
+                "01/scheduler.mpk",
+                "12/model.mpk",
+            ],
+        );
+    }
+
+    /// The epoch is what follows the *last* dash, and the extension is the
+    /// recorder's rather than this module's to choose.
+    #[test]
+    fn a_checkpoint_keeps_its_name_and_its_extension() {
+        let directory = folder(&["model-ema-3.bin", "model-3", "loose.txt"]);
+
+        group_checkpoints(directory.path(), 3).expect("the checkpoints grouped");
+        assert_eq!(
+            listing(directory.path()),
+            ["003/model", "003/model-ema.bin", "loose.txt"],
+        );
+    }
 }
