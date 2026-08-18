@@ -70,6 +70,15 @@
 //! folder of them a training set: [`ground_truth`] writes down what each
 //! pixel of a generated map's image is, as the tensor a model is scored
 //! against, out of the very decisions the map was drawn from.
+//!
+//! # Reading an answer back
+//!
+//! [`vectorize`] closes the loop. An answer about a map — the labels a
+//! dataset holds, or what a model said when it was shown the picture — is a
+//! grid of symbols, and this turns that grid back into the map it describes:
+//! the regions its cells form, as bezier paths with the corners rounded off
+//! the staircase, drawn with an existing symbol set and written out by
+//! [`xml_writer`]. It is what the `grid_to_map` tool is built on.
 
 // Every public item carries a doc comment; this keeps it that way.
 #![warn(missing_docs)]
@@ -92,5 +101,6 @@ pub mod renderer;
 pub mod report;
 pub mod symbol_kinds;
 pub mod text;
+pub mod vectorize;
 pub mod xml_reader;
 pub mod xml_writer;

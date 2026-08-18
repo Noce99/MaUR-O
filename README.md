@@ -28,7 +28,10 @@ set, for when the maps that exist are not enough.
   - [`benchmark`](#benchmark)
   - [`generate_maps_dataset`](#generate_maps_dataset)
     - [A training set](#a-training-set)
+  - [`grid_to_map`](#grid_to_map)
 - [Reading a map back: `maur-o-net`](#reading-a-map-back-maur-o-net)
+  - [Image validation](#image-validation)
+  - [`image_to_map`](#image_to_map)
 - [Implementation Details](#implementation-details)
 - [Known Limitations](#known-limitations)
 
@@ -330,10 +333,16 @@ beside the map, in three folders under one set of names:
 ```
 dataset/
   classes.json         what channel each opaque area owns, and the settings
+  ISOM_10k.omap        the symbol set the maps were drawn with, copied in
   maps/map_001.omap    the map, to open in Mapper or render again
   images/map_001.png   what it looks like: a model's input
   gt/map_001.bin       what it is, pixel by pixel: the answer
 ```
+
+The symbol set comes along because a class is a place in the list of that
+set's opaque areas and nothing else says which place: without it, a folder of
+answers is a folder of numbers. `train` copies it and `classes.json` into the
+run folder for the same reason.
 
 ```bash
 ./target/release/generate_maps_dataset --just-opaque-areas -n 100 \
@@ -401,6 +410,64 @@ let truth = GroundTruth::read(Path::new("dataset/gt/map_001.bin"))?;
 let shape = [truth.height as usize, truth.width as usize, truth.channels()];
 let target = Tensor::<B, 3>::from_floats(truth.one_hot().as_slice(), device).reshape(shape);
 ```
+
+### `grid_to_map`
+
+The way back. A label file — or what a model said when it was shown the
+picture — is a grid of symbols, one per pixel. This turns that grid into a map
+file again:
+
+```bash
+grid_to_map maps/ISOM_10k.omap dataset/gt/map_001.bin back.omap --image back.png
+```
+
+The cells are gathered into regions — 4-connected runs which agree about the
+symbol and about the angle — and each region becomes one path object drawn
+with a symbol of the given set. A region which surrounds another is written as
+one object of several parts, the outer loop and a part per hole, which the
+even-odd fill punches through.
+
+A boundary between two regions runs along the sides of cells, so left as it is
+it would be a staircase. It is not left as it is. Every side of it gets one
+bezier node, at its middle, and every corner between two of them gets a
+doubled control point — which turns each right angle into a quarter of a
+curve, half a cell wide — and then every node the boundary runs straight
+through is dropped again, so a run of `k` collinear sides keeps two nodes
+rather than `k`.
+
+That is what `--tolerance 0`, the default, does. It is exact and, on a grid
+the size of a rendered map, far too much of a good thing: at three pixels per
+meter a boundary which wandered smoothly across the ground comes back as a
+staircase which turns every pixel or two, and none of that is worth keeping.
+
+```text
+back.omap:    11 objects, 40051 coordinates    # --tolerance 0
+back_t2.omap: 11 objects,  1351 coordinates    # --tolerance 2
+```
+
+A tolerance is in cells, and simplifies the staircase before the nodes are
+placed: no part of the boundary is moved further than that. Two cells is two
+thirds of a meter on the ground at the dataset's resolution, and thirty times
+fewer coordinates.
+
+How much ground a cell covers is not in a labels file, so the four options the
+dataset was generated with have to be given again — `--layout-size`,
+`--background-cell-size`, `--frame` and `--resolution`, spelt as
+`generate_maps_dataset` spells them. The tool checks the grid is the size
+those options imply, and says so when it is not.
+
+`--image` draws the map it just wrote over the very ground the dataset's own
+images cover, so the two are the same size and can be compared pixel for
+pixel. Round-tripping `dataset/gt/map_001.bin` that way comes back **99.5 %
+identical** to `dataset/images/map_001.png`, with every difference in a band a
+pixel or two wide along the region boundaries — which is the corner rounding,
+and is the point.
+
+One thing a label file cannot say is where one object ended and the next
+began: two neighbouring cells drawn with the same symbol and turned the same
+way were two objects on the original map and are one region here. Where that
+symbol has a bounding line, the line between them is in the picture and not in
+the map which comes back out of it.
 
 ## Reading a map back: `maur-o-net`
 
@@ -487,6 +554,8 @@ trainings/
 └── UNet_2026_08_18__09_13_39/
     ├── training.json          the configuration the run was started with
     ├── architecture.txt       the network that configuration built
+    ├── classes.json           what a class means, copied from the dataset
+    ├── ISOM_10k.omap          the symbol set, copied from the dataset
     ├── experiment.log         what the run logged as it went
     ├── checkpoint/
     │   ├── 08/                the weights, the optimizer and the scheduler,
@@ -494,6 +563,7 @@ trainings/
     │   └── …
     ├── train/01/…             the metrics of every epoch, per split
     ├── valid/01/…
+    ├── image_valid/08/…       the maps that epoch read back, drawn
     └── best.mpk               the weights of the epoch which validated best
 ```
 
@@ -510,6 +580,94 @@ back it was, which is what lets `best.mpk` be a *copy* of that epoch's
 best one when the run was still improving when it stopped. The metric logs
 under `train/` and `valid/` are untouched by any of this — every epoch keeps
 its numbers.
+
+### Image validation
+
+`train/` and `valid/` say how a run is doing in numbers. Numbers do not show
+you a map. `image_valid/` is the third split, and what it holds is pictures:
+each epoch takes the first few images of the **validation** split, puts them
+back through the network, turns what comes out into an `.omap` and draws it,
+and writes the original, that drawing and the difference between them side by
+side.
+
+![Three epochs of one map read back: the original, the map the network read out of it, and where the two disagree](mds/assets/image_valid_progression.png)
+
+That is a run learning to read a map — 41% of the picture agreeing at epoch 2,
+81% at epoch 8, 83% at epoch 12 — and it is the one thing a column of losses
+cannot tell you. `--image-valid <COUNT>` sets how many pictures (10 by
+default, `0` for none), and each epoch's folder keeps the `.omap` files as
+well, so a map that looks wrong can be opened in Mapper and looked at.
+
+The sheets are kept for exactly the epochs `checkpoint/` keeps — the last five
+and the best — because they are pruned to match it after every epoch rather
+than by a policy of their own. What a sheet shows is exactly what
+[`image_to_map`](#image_to_map) would give from that epoch's weights: both go
+through the same `read_back`, so the caption's agreement figure and the tool's
+are the same number.
+
+This costs a full prediction per picture per epoch, which on a large dataset
+is not free — `--image-valid 0` is there for a run that would rather not pay
+it. It also occupies burn's single early-stopping slot, which is how it gets a
+once-an-epoch hook at all: burn hands no callback the model, so the phase
+takes the epoch number and reloads the checkpoint that epoch just wrote.
+
+`classes.json` and the symbol set are **copies**, made when the run starts.
+What comes out of a trained network is a class index per pixel, and an index
+means nothing on its own: which symbol it is, and how much ground a pixel
+covers, are in those two files and nowhere in the weights. A dataset is a
+temporary thing — regenerated with other settings, moved, deleted — and a run
+outlives it, so the run keeps its own. That is what makes a run folder enough
+on its own for [`image_to_map`](#image_to_map).
+
+### `image_to_map`
+
+The whole chain in one call, and the other end of
+[`map_to_image`](#map_to_image): a picture goes in, a map file comes out.
+
+```bash
+cargo run --release -p maur-o-net --bin image_to_map -- \
+    trainings/UNet_2026_08_18__09_13_39 dataset/images/map_001.png back.omap
+```
+
+The network says which of the symbol set's opaque areas each pixel is; the
+regions those pixels form become the path objects of an `.omap`, by exactly
+the vectorizer [`grid_to_map`](#grid_to_map) uses. The run folder is all it is
+told, because a run folder holds all of it — the weights, what a class means,
+and the symbols themselves.
+
+A picture is not put through in one piece. A U-Net of four levels halves what
+it is given four times over, so its input has to divide by sixteen, and a
+dataset image is 1650 pixels square, which does not — quite apart from being
+two and a half million pixels against the 256-pixel crops the network trained
+on. So it is cut into tiles the size the run trained at, overlapping by a
+quarter of that, and **each pixel keeps the answer of whichever tile saw it
+furthest from that tile's own edge**: the tile with the most of the
+surroundings to go on. That is what keeps a seam from appearing along the
+joins.
+
+Then the map it wrote is drawn again and compared with the picture it was read
+off:
+
+```text
+back.omap: 14 objects, 38210 coordinates, over 550 by 550 meters at 1:10000
+drawn again against map_001.png:
+  97.412% of pixels agree, 1.904% differ as two renderers differ about an
+  edge, 0.684% really differ
+```
+
+That scores the network and the vectorizer together, and it needs no labels,
+so it works on any picture of a map rather than only on one a dataset drew.
+The comparison is the same [`differences`](#benchmark) the benchmark harness
+scores a renderer with, which is why it can separate a real disagreement from
+the sort two rasterizers have about an edge they both drew — a distinction
+that earns its keep here, since rounding the staircase off a boundary moves it
+by half a pixel and half a pixel of boundary is exactly an edge effect.
+
+`--tolerance` and `--same-angle` are the vectorizer's, and `--same-angle`
+defaults looser here than it does in `grid_to_map`: a label file holds one
+exact angle per object, while a network gives a continuous field with noise on
+it, and a tight threshold would read that noise as a difference of angle and
+shatter every turning area into fragments.
 
 ## Implementation Details
 

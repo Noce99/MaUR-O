@@ -156,6 +156,20 @@ pub fn render_map_over(
     })
 }
 
+/// A rendered pixmap as an image, for anything which wants to look at the
+/// pixels rather than write them out.
+///
+/// tiny-skia's buffer is premultiplied RGBA8 and every pixel a map is drawn
+/// onto is fully opaque — the background is opaque white — so dropping the
+/// alpha is the whole of the conversion.
+pub fn to_rgb_image(pixmap: &Pixmap) -> image::RgbImage {
+    let mut image = image::RgbImage::new(pixmap.width(), pixmap.height());
+    for (pixel, rgba) in image.pixels_mut().zip(pixmap.data().chunks_exact(4)) {
+        *pixel = image::Rgb([rgba[0], rgba[1], rgba[2]]);
+    }
+    image
+}
+
 /// Writes a rendered pixmap. The file name suffix selects the format.
 pub fn save_pixmap(pixmap: &Pixmap, path: &Path) -> Result<(), String> {
     // tiny-skia's pixel buffer is premultiplied RGBA8, but every pixel in

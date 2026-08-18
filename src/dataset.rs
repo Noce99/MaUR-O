@@ -73,10 +73,16 @@
 //! ```text
 //! dataset/
 //!   classes.json      what the channels of a label are, and the settings
+//!   ISOM_10k.omap     the symbol set the maps were drawn with, copied in
 //!   maps/map_001.omap the map itself, to open in Mapper or render again
 //!   images/map_001.png what it looks like, which is the input
 //!   gt/map_001.bin    what it is, pixel by pixel, which is the answer
 //! ```
+//!
+//! The symbol set comes along because a class of a label is a place in the
+//! list of that set's opaque areas and nothing else says which place: without
+//! it a folder of answers is a folder of numbers. `classes.json` names the
+//! file, and [`Classes::read`] is what reads that back.
 //!
 //! The three share a name, so the answer to an image is the file of the same
 //! stem in `gt/`. The images of one dataset are all the same size: they are
@@ -283,6 +289,9 @@ pub struct Summary {
     pub scale_denominator: i32,
     /// How many pixels across every image of the dataset came out.
     pub image_size: u32,
+    /// Where the symbol set was copied to, which is the dataset's own folder
+    /// and the source's own file name.
+    pub symbol_set: PathBuf,
     /// Complaints from reading the source map, and from drawing the maps
     /// which came out of it.
     pub warnings: Vec<String>,
@@ -291,6 +300,11 @@ pub struct Summary {
 /// A folder of random maps built on the symbol set of `source`, written into
 /// `into` — the maps, the images they render to and the labels for those
 /// images, in the three subfolders this module describes.
+///
+/// The symbol set itself is copied in beside them, under its own file name.
+/// A class of a label is a place in the list of that set's opaque areas and
+/// nothing else says which place, so a dataset without the set is a folder of
+/// answers to a question nobody kept: see [`copy_symbol_set`].
 ///
 /// `into` and its subfolders are created if they are not there, and a file of
 /// a previous run under the same name is overwritten.
@@ -378,8 +392,13 @@ pub fn create_dataset(
         std::fs::create_dir_all(folder)
             .map_err(|e| format!("cannot make {}: {e}", folder.display()))?;
     }
+
+    // The set the maps are drawn with, beside the maps. Whatever else this
+    // folder is for, a label in it means nothing without the list of symbols
+    // its classes are places in.
+    let symbol_set = copy_symbol_set(source, into)?;
     if answerable {
-        write_classes(&into.join(CLASSES_FILE), &catalogue, settings)?;
+        write_classes(&into.join(CLASSES_FILE), &catalogue, settings, &symbol_set)?;
     }
 
     let generator = Generator {
@@ -468,8 +487,43 @@ pub fn create_dataset(
         drawn,
         scale_denominator: map.scale_denominator,
         image_size: settings.image_size(),
+        symbol_set: into.join(&symbol_set),
         warnings,
     })
+}
+
+/// Copies the symbol set a dataset was generated from into the dataset,
+/// under its own file name, and says what that name is.
+///
+/// A class of a label is a place in the list of the set's opaque areas, and
+/// nothing in a labels file says which set that was. Anything reading the
+/// answers back — turning them into a map again, saying which symbol a
+/// channel is — needs the set, so it travels with them rather than being
+/// remembered by whoever ran the generator.
+///
+/// A source which is already the file it would be copied to is left alone,
+/// which is what a second run into the same folder does.
+pub fn copy_symbol_set(source: &Path, into: &Path) -> Result<String, String> {
+    let name = source
+        .file_name()
+        .ok_or_else(|| format!("{} is not a file to copy", source.display()))?;
+    let copy = into.join(name);
+    // Not `source == copy`: the same file reached by two different paths is
+    // still the same file, and copying one onto itself truncates it.
+    let same = std::fs::canonicalize(source)
+        .ok()
+        .zip(std::fs::canonicalize(&copy).ok())
+        .is_some_and(|(source, copy)| source == copy);
+    if !same {
+        std::fs::copy(source, &copy).map_err(|e| {
+            format!(
+                "cannot copy {} to {}: {e}",
+                source.display(),
+                copy.display()
+            )
+        })?;
+    }
+    Ok(name.to_string_lossy().into_owned())
 }
 
 /// The symbol set as the generator uses it, and how much of it to use.
@@ -636,10 +690,19 @@ pub fn map_name(index: usize, total: usize) -> String {
 /// A label is a stack of numbers and nothing in it says which number is the
 /// bare rock. This is where that is written down, once for the dataset, since
 /// it is the symbol set which decides it rather than any one map.
-fn write_classes(path: &Path, catalogue: &Catalogue, settings: &Settings) -> Result<(), String> {
+///
+/// `symbol_set` is the name that set was copied in under, so that anything
+/// reading this file can find the symbols themselves beside it.
+fn write_classes(
+    path: &Path,
+    catalogue: &Catalogue,
+    settings: &Settings,
+    symbol_set: &str,
+) -> Result<(), String> {
     let classes = catalogue.opaque_areas.len();
     let mut json = String::from("{\n");
     json.push_str("  \"format\": \"MAUROGT2\",\n");
+    json.push_str(&format!("  \"symbol_set\": {},\n", quoted(symbol_set)));
     json.push_str(&format!("  \"classes\": {classes},\n"));
     json.push_str(&format!("  \"channels\": {},\n", classes + 2));
     // The angle is the last two channels, its sine and then its cosine: an
@@ -673,6 +736,83 @@ fn write_classes(path: &Path, catalogue: &Catalogue, settings: &Settings) -> Res
     std::fs::write(path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// What a dataset's `classes.json` says, for the tools which have to read
+/// back what [`create_dataset`] wrote there.
+///
+/// A run of `train` copies this file into its own folder, and everything
+/// downstream of a trained model — which symbol a channel is, how much ground
+/// a pixel covers — comes out of it. The symbol names are left in the file
+/// rather than read here: what wants them wants the symbol set beside it in
+/// any case, and [`crate::symbol_kinds::Catalogue`] takes them out of that in
+/// the very order this file records.
+#[derive(Debug)]
+pub struct Classes {
+    /// How many one-hot channels a label has: the opaque areas of the set.
+    pub classes: usize,
+    /// How many pixels across the images of the dataset were drawn.
+    pub image_size: u32,
+    /// How many pixels of image one meter of ground came to.
+    pub resolution: f64,
+    /// How much white ground was left around each map, in meters.
+    pub frame: f64,
+    /// How wide one cell of the layout was, in meters.
+    pub cell_size: u32,
+    /// How many cells across the layout was.
+    pub layout_size: usize,
+    /// The symbol set the maps were drawn with, as a file name beside this
+    /// one. `None` for a dataset generated before it was copied there, which
+    /// is a dataset nothing can turn back into a map.
+    pub symbol_set: Option<String>,
+}
+
+impl Classes {
+    /// Reads a dataset's `classes.json`.
+    ///
+    /// By scanning for the keys rather than by parsing JSON: the file is one
+    /// this crate writes, flat, and every value wanted here is a number or a
+    /// string — which is a great deal less than a JSON dependency, in a crate
+    /// whose job is to draw a map.
+    pub fn read(path: &Path) -> Result<Classes, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let missing = |key: &str| format!("{} names no {key}", path.display());
+        let number = |key: &str| -> Result<f64, String> {
+            value_of(&text, key)
+                .and_then(|value| {
+                    let digits: String = value
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == 'e')
+                        .collect();
+                    digits.parse().ok()
+                })
+                .ok_or_else(|| missing(key))
+        };
+        Ok(Classes {
+            classes: number("classes")? as usize,
+            image_size: number("image_size")? as u32,
+            resolution: number("resolution")?,
+            frame: number("frame")?,
+            cell_size: number("cell_size")? as u32,
+            layout_size: number("layout_size")? as usize,
+            // The one field a file written before it existed does not have,
+            // so its absence is an answer rather than an error.
+            symbol_set: value_of(&text, "symbol_set")
+                .and_then(|value| value.strip_prefix('"'))
+                .and_then(|value| value.split('"').next())
+                .map(str::to_string),
+        })
+    }
+}
+
+/// Whatever follows `"key":` in `text`, with the space after the colon
+/// trimmed. The keys of this file are written once each and none of them is
+/// a substring of another.
+fn value_of<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let key = format!("\"{key}\":");
+    text.find(&key)
+        .map(|at| text[at + key.len()..].trim_start())
+}
+
 /// The pixels-per-meter a dataset's images were drawn at, out of the
 /// `classes.json` written beside them.
 ///
@@ -680,21 +820,23 @@ fn write_classes(path: &Path, catalogue: &Catalogue, settings: &Settings) -> Res
 /// a rendering choice, not a property of the map — so a label rebuilt from a
 /// map file with [`crate::ground_truth::GroundTruth::from_map`], after its
 /// `.bin` was left out of the folder, has nowhere else to read it from.
+///
+/// Reads the one field rather than the whole of [`Classes`]: a folder which
+/// answers this question need not carry every other note for it to be a fair
+/// answer.
 pub fn resolution_of(dataset: &Path) -> Result<f64, String> {
     let path = dataset.join(CLASSES_FILE);
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
 
-    let key = "\"resolution\":";
-    let at = text
-        .find(key)
-        .ok_or_else(|| format!("{} names no resolution", path.display()))?;
-    text[at + key.len()..]
-        .trim_start()
-        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .next()
-        .filter(|digits| !digits.is_empty())
-        .and_then(|digits| digits.parse().ok())
+    value_of(&text, "resolution")
+        .and_then(|value| {
+            value
+                .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .next()
+                .filter(|digits| !digits.is_empty())
+                .and_then(|digits| digits.parse().ok())
+        })
         .ok_or_else(|| format!("{} names no resolution", path.display()))
 }
 
@@ -747,6 +889,97 @@ mod tests {
         assert_eq!(settings.image_size(), 1650);
     }
 
+    /// What `write_classes` wrote is what `Classes::read` reads.
+    #[test]
+    fn a_classes_file_reads_back_as_what_was_written() {
+        use crate::symbol_kinds::Entry;
+
+        let catalogue = Catalogue {
+            opaque_areas: vec![
+                Entry {
+                    index: 0,
+                    id: 7,
+                    code: "401".to_string(),
+                    name: "Open land".to_string(),
+                    turns: false,
+                },
+                Entry {
+                    index: 1,
+                    id: 9,
+                    code: "403".to_string(),
+                    name: r#"Say "stop""#.to_string(),
+                    turns: true,
+                },
+            ],
+            ..Catalogue::default()
+        };
+        let settings = Settings {
+            layout_size: 2,
+            cell_size: 60,
+            resolution: 2.0,
+            frame: 20.0,
+            ..Settings::default()
+        };
+        let file = tempfile::NamedTempFile::new().expect("a temporary file");
+        write_classes(file.path(), &catalogue, &settings, "ISOM_10k.omap")
+            .expect("cannot write the classes");
+
+        let read = Classes::read(file.path()).expect("cannot read them back");
+        assert_eq!(read.classes, 2);
+        assert_eq!(read.image_size, settings.image_size());
+        assert_eq!(read.resolution, 2.0);
+        assert_eq!(read.frame, 20.0);
+        assert_eq!(read.cell_size, 60);
+        assert_eq!(read.layout_size, 2);
+        assert_eq!(read.symbol_set.as_deref(), Some("ISOM_10k.omap"));
+    }
+
+    /// A dataset generated before the set was copied in says nothing about
+    /// one, which is an answer rather than a file which cannot be read.
+    #[test]
+    fn a_classes_file_without_a_symbol_set_says_so() {
+        let file = tempfile::NamedTempFile::new().expect("a temporary file");
+        std::fs::write(
+            file.path(),
+            "{\n  \"classes\": 3,\n  \"image_size\": 100,\n  \"resolution\": 3,\n  \
+             \"frame\": 50,\n  \"cell_size\": 150,\n  \"layout_size\": 3\n}\n",
+        )
+        .expect("a file to read");
+        let read = Classes::read(file.path()).expect("cannot read it");
+        assert_eq!(read.classes, 3);
+        assert_eq!(read.symbol_set, None);
+    }
+
+    /// The symbol set is copied in under its own name, and copying a file
+    /// which is already there leaves it alone rather than truncating it.
+    #[test]
+    fn the_symbol_set_is_copied_in_under_its_own_name() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let source = dir.path().join("ISOM_10k.omap");
+        std::fs::write(&source, b"<map/>").expect("a file to copy");
+
+        let into = dir.path().join("dataset");
+        std::fs::create_dir(&into).expect("the dataset folder");
+        assert_eq!(
+            copy_symbol_set(&source, &into).expect("cannot copy it"),
+            "ISOM_10k.omap"
+        );
+        assert_eq!(
+            std::fs::read(into.join("ISOM_10k.omap")).expect("the copy"),
+            b"<map/>"
+        );
+
+        // Generating a dataset into the folder the set is already in.
+        assert_eq!(
+            copy_symbol_set(&into.join("ISOM_10k.omap"), &into).expect("cannot copy it"),
+            "ISOM_10k.omap"
+        );
+        assert_eq!(
+            std::fs::read(into.join("ISOM_10k.omap")).expect("the copy"),
+            b"<map/>"
+        );
+    }
+
     #[test]
     fn a_symbol_name_goes_into_json_as_one() {
         assert_eq!(quoted(r#"Say "stop""#), r#""Say \"stop\"""#);
@@ -764,8 +997,13 @@ mod tests {
                 resolution,
                 ..Settings::default()
             };
-            write_classes(&dir.path().join(CLASSES_FILE), &catalogue, &settings)
-                .expect("classes.json writes");
+            write_classes(
+                &dir.path().join(CLASSES_FILE),
+                &catalogue,
+                &settings,
+                "symbols.ocd",
+            )
+            .expect("classes.json writes");
             assert_eq!(resolution_of(dir.path()), Ok(resolution));
         }
     }

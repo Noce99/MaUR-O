@@ -2455,11 +2455,13 @@ dependencies = [
 name = "maur-o-net"
 version = "0.1.0"
 dependencies = [
+ "assert_cmd",
  "burn",
  "chrono",
  "clap",
  "image",
  "maur-o",
+ "predicates",
  "tempfile",
 ]
 

@@ -72,7 +72,13 @@ use burn::train::renderer::tui::TuiMetricsRenderer;
 use burn::train::renderer::{MetricState, MetricsRenderer, TrainingProgress};
 use burn::train::{LearnerBuilder, LearnerSummary, TrainOutput, TrainStep, ValidStep};
 
+use maur_o::dataset::{Classes, CLASSES_FILE};
+use maur_o::symbol_kinds::Catalogue;
+use maur_o::xml_reader::read_xml_map;
+
 use crate::data::{MapBatch, MapBatcher, MapDataset, CROP, DEFAULT_CROPS_PER_MAP};
+use crate::image_valid::{ImageValidation, DEFAULT_IMAGE_VALID, IMAGE_VALID};
+use crate::predict::ReadBackSettings;
 use crate::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEPTH};
 
 /// How much the angle term counts for beside the classes. See
@@ -452,6 +458,10 @@ pub struct TrainingConfig {
     /// built rather than about the data.
     #[config(default = "DEFAULT_ANGLE_WEIGHT")]
     pub angle_weight: f64,
+    /// How many of the validation split's pictures to read back into maps
+    /// each epoch, for the sheets under `image_valid/`. Nought draws none.
+    #[config(default = "DEFAULT_IMAGE_VALID")]
+    pub image_valid: usize,
     /// What the crop positions and the shuffling come out of. The same seed
     /// gives the same run.
     #[config(default = 0)]
@@ -514,6 +524,86 @@ pub const KEPT_CHECKPOINTS: usize = 5;
 /// this name instead, which is why the name carries no extension of its own
 /// until it is saved.
 const BEST_WEIGHTS: &str = "best";
+
+/// The phase a run shows its work with, built out of what its folder now
+/// holds: the symbol set the dataset was drawn with, and the `classes.json`
+/// which says how much ground a pixel of a picture covers.
+///
+/// Reading those back rather than being handed them keeps the sheets and the
+/// `image_to_map` tool looking at the same two files, so a sheet is a preview
+/// of that tool rather than a second opinion.
+fn image_validation<B: AutodiffBackend>(
+    run: &Path,
+    pictures: Vec<PathBuf>,
+    config: &TrainingConfig,
+    device: &B::Device,
+) -> Result<ImageValidation<B::InnerBackend>, String> {
+    // Nothing to draw, so nothing to read: a run asked for no sheets should
+    // not fail over a symbol set it will never open.
+    if pictures.is_empty() {
+        return Ok(ImageValidation::new(
+            run,
+            Vec::new(),
+            Path::new(""),
+            Vec::new(),
+            ReadBackSettings::of(config.crop, 1.0, 1),
+            device.clone(),
+        ));
+    }
+
+    let notes_file = run.join(CLASSES_FILE);
+    let notes = Classes::read(&notes_file)?;
+    let symbol_set = run.join(notes.symbol_set.ok_or_else(|| {
+        format!(
+            "{} names no symbol set, so there is no telling which symbol a class is",
+            notes_file.display(),
+        )
+    })?);
+    let (mut map, _) = read_xml_map(&symbol_set)
+        .map_err(|e| format!("cannot read the symbol set {}: {e}", symbol_set.display()))?;
+    map.resolve_references();
+    let catalogue = Catalogue::of(&map);
+
+    Ok(ImageValidation::new(
+        run,
+        pictures,
+        &symbol_set,
+        catalogue.opaque_areas,
+        ReadBackSettings::of(config.crop, notes.resolution, map.scale_denominator),
+        device.clone(),
+    ))
+}
+
+/// Copies what the dataset says about its own answers into the run folder:
+/// `classes.json`, and the symbol set it names.
+///
+/// What comes out of a trained network is a class index per pixel, and an
+/// index means nothing on its own — which symbol it is, and how much ground
+/// a pixel covers, are in those two files and nowhere in the weights. A run
+/// folder which carries them is enough on its own to turn a picture into a
+/// map; one which does not is a model whose answers cannot be read, however
+/// well it learned them.
+///
+/// Copied rather than referred to, because a dataset is a temporary thing —
+/// regenerated with other settings, moved, deleted — and a run outlives it.
+pub fn copy_dataset_notes(dataset: &Path, run: &Path) -> Result<(), String> {
+    let classes_file = dataset.join(CLASSES_FILE);
+    let classes = Classes::read(&classes_file)?;
+    let copy = |from: &Path, name: &str| {
+        std::fs::copy(from, run.join(name))
+            .map(|_| ())
+            .map_err(|e| format!("cannot copy {} into {}: {e}", from.display(), run.display()))
+    };
+    copy(&classes_file, CLASSES_FILE)?;
+
+    let symbol_set = classes.symbol_set.ok_or_else(|| {
+        format!(
+            "{} names no symbol set. A dataset carries the set its maps were drawn with, since a              class of a label is a place in that set's opaque areas and nothing else says which              place; this one was generated before that was so. Generating it again is what puts              the set there.",
+            classes_file.display(),
+        )
+    })?;
+    copy(&dataset.join(&symbol_set), &symbol_set)
+}
 
 /// Makes the folder this run writes into: `<Model>_YYYY_MM_DD__hh_mm_ss`
 /// under `into`, and `into` itself if it is not there.
@@ -660,7 +750,9 @@ fn best_epoch(run: &Path) -> Option<usize> {
 /// * `train/001/` and `valid/001/`, the metrics of **every** epoch on each
 ///   split;
 /// * `experiment.log`, what the run logged as it went;
-/// * `best.mpk`, the weights of the epoch which validated best.
+/// * `best.mpk`, the weights of the epoch which validated best;
+/// * `classes.json` and the symbol set, copied out of the dataset — see
+///   [`copy_dataset_notes`].
 ///
 /// `dashboard` switches the plain, scrolling metrics log for a live
 /// terminal dashboard; it says nothing about the run itself, which is why
@@ -686,6 +778,7 @@ pub fn train<B: AutodiffBackend>(
     config
         .save(run.join("training.json"))
         .map_err(|e| format!("cannot write the configuration: {e}"))?;
+    copy_dataset_notes(dataset, &run)?;
 
     let all = MapDataset::load(dataset, config.seed)?
         .with_crop(config.crop)?
@@ -706,6 +799,14 @@ pub fn train<B: AutodiffBackend>(
 
     let maps = all.maps();
     let (train, valid) = all.split(config.train_share);
+    // Taken before the split is handed to a loader, which consumes it. The
+    // validation half, because a sheet of a map the network trained on shows
+    // how well it remembers rather than how well it reads.
+    let pictures: Vec<PathBuf> = valid
+        .pictures()
+        .take(config.image_valid)
+        .map(Path::to_path_buf)
+        .collect();
     println!(
         "{}: {maps} maps, {} to train on and {} to validate against, {} crops of {} pixels from \
          each of them each pass",
@@ -740,6 +841,18 @@ pub fn train<B: AutodiffBackend>(
             .num_workers(config.workers)
             .build(valid);
 
+    // What the run shows its work on. Built twice — once for the hook, once
+    // for the catch-up after `fit` — because the learner takes ownership of
+    // the first.
+    let phase = image_validation::<B>(&run, pictures.clone(), &config, &device)?;
+    if phase.wanted() {
+        println!(
+            "{}/: {} pictures read back into maps each epoch, drawn beside the originals",
+            run.join(IMAGE_VALID).display(),
+            pictures.len(),
+        );
+    }
+
     let mut builder = LearnerBuilder::new(&run)
         .metric_train_numeric(LossMetric::<MetricBackend>::new())
         .metric_valid_numeric(LossMetric::<MetricBackend>::new())
@@ -767,6 +880,10 @@ pub fn train<B: AutodiffBackend>(
         )
         .devices(vec![device.clone()])
         .num_epochs(config.epochs)
+        // Not a stopping strategy: the one hook burn calls once an epoch. It
+        // always answers that the run should carry on — see
+        // `crate::image_valid`.
+        .early_stopping(phase)
         .summary();
     builder = if dashboard {
         // The same interrupter the learner would otherwise make for itself,
@@ -789,13 +906,25 @@ pub fn train<B: AutodiffBackend>(
     // they are renumbered under it.
     let best = best_epoch(&run);
 
+    // The hook draws an epoch behind, so the last one is always outstanding
+    // here; and a run which was interrupted may be missing more. Every
+    // checkpoint which survived gets its sheets now that the checkpointer's
+    // thread has been joined and its writes are all on disk.
+    let phase = image_validation::<B>(&run, pictures, &config, &device)?;
+    if let Err(message) = phase.catch_up() {
+        eprintln!("Warning: cannot draw the last epochs: {message}");
+    }
+
     // Wide enough for the last epoch the run was set up for, rather than for
     // the last it reached: the width is a property of the run, and an
     // interrupted one should number its epochs the way a finished one would.
     let width = config.epochs.to_string().len();
     group_checkpoints(&run.join("checkpoint"), width)?;
-    for split in ["train", "valid"] {
-        number_epochs(&run.join(split), width)?;
+    for split in ["train", "valid", IMAGE_VALID] {
+        let folder = run.join(split);
+        if folder.is_dir() {
+            number_epochs(&folder, width)?;
+        }
     }
 
     let weights = run.join(BEST_WEIGHTS).with_extension("mpk");

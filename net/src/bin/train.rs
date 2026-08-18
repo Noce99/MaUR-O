@@ -41,7 +41,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+use maur_o::dataset::{Classes, CLASSES_FILE};
+
 use maur_o_net::data::{CROP, DEFAULT_CROPS_PER_MAP};
+use maur_o_net::image_valid::DEFAULT_IMAGE_VALID;
 use maur_o_net::training::{train, TrainingConfig, DEFAULT_ANGLE_WEIGHT};
 use maur_o_net::unet::{DEFAULT_BASE_CHANNELS, DEPTH};
 
@@ -112,6 +115,13 @@ struct Args {
     #[arg(short = 'w', long, default_value_t = 4, value_name = "COUNT")]
     workers: usize,
 
+    /// How many of the validation split's pictures to read back into maps
+    /// each epoch: they are drawn beside the originals under image_valid/, so
+    /// that a run shows its work rather than only scoring it. Nought draws
+    /// none, which is what a run in a hurry wants.
+    #[arg(long, default_value_t = DEFAULT_IMAGE_VALID, value_name = "COUNT")]
+    image_valid: usize,
+
     /// What the crop positions and the shuffling come out of. The same seed
     /// gives the same run.
     #[arg(short = 's', long, default_value_t = 0)]
@@ -130,30 +140,42 @@ struct Args {
 /// Read rather than asked for: it is the symbol set which decides how many
 /// classes there are, a network built for the wrong number would be a network
 /// trained against labels it cannot express, and the file is right there.
-fn classes_of(dataset: &std::path::Path) -> Result<usize, String> {
-    let path = dataset.join(maur_o::dataset::CLASSES_FILE);
-    let text = std::fs::read_to_string(&path).map_err(|e| {
+/// What the dataset says about its own answers: how many classes a label
+/// has, and that the symbol set naming them is there beside it.
+///
+/// Both are checked before a run starts rather than as it copies them, so a
+/// folder which cannot be trained on is refused in the same breath as one
+/// which cannot be read.
+fn notes_of(dataset: &std::path::Path) -> Result<Classes, String> {
+    let path = dataset.join(CLASSES_FILE);
+    let classes = Classes::read(&path).map_err(|e| {
         format!(
-            "cannot read {}: {e}\nA dataset to train on is what generate_maps_dataset writes \
-             with --just-opaque-areas; without that flag there are no labels and no {}.",
-            path.display(),
-            maur_o::dataset::CLASSES_FILE,
+            "{e}\nA dataset to train on is what generate_maps_dataset writes with \
+             --just-opaque-areas; without that flag there are no labels and no {CLASSES_FILE}.",
         )
     })?;
 
-    // One number out of a small file the generator wrote, rather than a JSON
-    // parser and the dependency under it.
-    let key = "\"classes\":";
-    let at = text
-        .find(key)
-        .ok_or_else(|| format!("{} names no class count", path.display()))?;
-    text[at + key.len()..]
-        .trim_start()
-        .split(|c: char| !c.is_ascii_digit())
-        .next()
-        .filter(|digits| !digits.is_empty())
-        .and_then(|digits| digits.parse().ok())
-        .ok_or_else(|| format!("{} names no class count", path.display()))
+    // The set the classes are places in travels with the dataset and is
+    // copied into the run folder, so that what the run learns can be read
+    // back afterwards. A dataset without it can still be trained on, and the
+    // model would be one nothing could turn into a map.
+    let Some(symbol_set) = &classes.symbol_set else {
+        return Err(format!(
+            "{} names no symbol set. A dataset carries the set its maps were drawn with, since a \
+             class of a label is a place in that set's opaque areas; this one was generated \
+             before that was so, and a run off it could not be read back into a map. Generating \
+             it again is what puts the set there.",
+            path.display(),
+        ));
+    };
+    let file = dataset.join(symbol_set);
+    if !file.is_file() {
+        return Err(format!(
+            "{} names {symbol_set} as its symbol set and there is no such file beside it",
+            path.display(),
+        ));
+    }
+    Ok(classes)
 }
 
 fn run() -> Result<(), (ExitCode, String)> {
@@ -208,8 +230,8 @@ fn run() -> Result<(), (ExitCode, String)> {
         ));
     }
 
-    let classes =
-        classes_of(&args.dataset).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+    let notes = notes_of(&args.dataset).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+    let classes = notes.classes;
 
     let config = TrainingConfig::new(classes)
         .with_epochs(args.epochs)
@@ -221,12 +243,18 @@ fn run() -> Result<(), (ExitCode, String)> {
         .with_crops_per_map(args.crops_per_map)
         .with_train_share(args.train_share)
         .with_angle_weight(args.angle_weight)
+        .with_image_valid(args.image_valid)
         .with_seed(args.seed);
 
     println!(
         "{BACKEND}: a U-Net of {DEPTH} levels from {} channels, {classes} symbols and the frame \
          to tell apart, and the sine and the cosine of the pattern angle",
         args.base_channels,
+    );
+    println!(
+        "  drawn with {}, which is copied into the run folder with {CLASSES_FILE} so that what \
+         the run learns can be read back into a map",
+        notes.symbol_set.as_deref().unwrap_or("its symbol set"),
     );
 
     train::<Backend>(
