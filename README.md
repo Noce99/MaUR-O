@@ -55,7 +55,7 @@ together.
   - [`generate_maps_dataset`](#generate_maps_dataset)
     - [A training set](#a-training-set)
   - [`grid_to_map`](#grid_to_map)
-- [Reading a map back: `maur-o-net`](#reading-a-map-back-maur-o-net)
+- [Reading a map back: the `net` module](#reading-a-map-back-the-net-module)
   - [Image validation](#image-validation)
   - [`image_to_map`](#image_to_map)
 - [Using it as a library](#using-it-as-a-library)
@@ -67,9 +67,9 @@ together.
 
 Dependencies:
 
-- **A working `cargo`/Rust toolchain, version 1.88 or newer** (edition 2021).
-  1.88 is the floor set by the `image` crate; everything else in the
-  dependency tree asks for less.
+- **A working `cargo`/Rust toolchain, version 1.89 or newer** (edition 2021).
+  1.89 is the floor set by `bytemuck`, which burn pulls in; the renderer's own
+  dependencies stop at 1.88, which is what the `image` crate asks for.
 
 That is all it takes to build: no C toolchain, no `pkg-config`, no `-dev`
 package. Drawing *text* correctly wants one ordinary runtime library on top —
@@ -99,6 +99,9 @@ tool:
 | [`mauro osm`](#mauro-osm) | Converts OpenStreetMap data into a Mapper map, drawn to ISSprOM, ISOM or openstreetmap.org's look. |
 | [`mauro ortho`](#mauro-ortho) | Adds the aerial orthophoto of a map's ground to it as a template. |
 | [`generate_maps_dataset`](#generate_maps_dataset) | Generates random maps out of an existing symbol set. |
+| [`grid_to_map`](#grid_to_map) | Turns a grid of per-pixel classes back into a map. |
+| [`image_to_map`](#image_to_map) | Reads a map back from its image with the trained net. |
+| `train` | Trains the net: see [Reading a map back](#reading-a-map-back-the-net-module). |
 
 `mauro --help` lists them, and every one of them takes `--help` and
 `--version` (`mauro render --help`). `mauro` on its own, in a terminal,
@@ -917,9 +920,9 @@ way were two objects on the original map and are one region here. Where that
 symbol has a bounding line, the line between them is in the picture and not in
 the map which comes back out of it.
 
-## Reading a map back: `maur-o-net`
+## Reading a map back: the `net` module
 
-The renderer turns a map file into a picture. The `net/` crate goes the other
+The renderer turns a map file into a picture. The `net` module goes the other
 way — given the picture, which of the symbol set's opaque areas is each pixel,
 and at what angle was its fill pattern turned. It is a **U-Net**, written with
 [burn](https://burn.dev), trained on exactly what
@@ -931,13 +934,14 @@ cargo run --release --bin generate_maps_dataset -- \
     --just-opaque-areas -n 300 maps/ISOM_10k.omap dataset
 
 # And a network read off them.
-cargo run --release -p maur-o-net --bin train -- dataset trainings
+cargo run --release --bin train -- dataset trainings
 ```
 
-It is a workspace member rather than part of the `maur-o` crate: burn's
-dependency tree is an order of magnitude larger than the renderer's, and none
-of it belongs in a crate whose job is to draw a map. `cargo build` at the root
-still builds the renderer alone.
+It lives in the same crate as the renderer, under
+[`maur_o::net`](src/net/), and is built by a plain `cargo build` along with
+everything else — which does mean burn's dependency tree, an order of
+magnitude larger than the renderer's, is compiled whether a map is being read
+back or only drawn.
 
 **The backend is a build-time choice**, since burn takes it as a type
 parameter: `ndarray` by default — pure Rust, runs anywhere, and far too slow
@@ -1073,7 +1077,7 @@ The whole chain in one call, and the other end of
 [`map_to_image`](#map_to_image): a picture goes in, a map file comes out.
 
 ```bash
-cargo run --release -p maur-o-net --bin image_to_map -- \
+cargo run --release --bin image_to_map -- \
     trainings/UNet_2026_08_18__09_13_39 dataset/images/map_001.png back.omap
 ```
 

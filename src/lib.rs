@@ -137,6 +137,16 @@
 //! the regions its cells form, as bezier paths with the corners rounded off
 //! the staircase, drawn with an existing symbol set and written out by
 //! [`xml_writer`]. It is what the `grid_to_map` tool is built on.
+//!
+//! # Answering for itself
+//!
+//! [`net`] is where the answer comes from when nobody wrote one down: a
+//! U-Net shown a rendered map and asked which of the symbol set's opaque
+//! areas each pixel is, trained on the folders [`dataset`] wrote and scored
+//! against the tensors [`ground_truth`] holds. It is what the `train` and
+//! `image_to_map` tools are built on, and the backend it is built against —
+//! pure Rust by default, `--features wgpu` or `--features cuda` otherwise —
+//! is a Cargo feature, since burn takes its backend as a type parameter.
 
 // Every public item carries a doc comment; this keeps it that way.
 #![warn(missing_docs)]
@@ -174,6 +184,7 @@ pub mod osm_convert;
 pub mod osm_download;
 pub mod osm_orienteering;
 pub mod osm_style;
+pub mod net;
 pub mod path_builder;
 pub mod progress;
 pub mod qbezier;

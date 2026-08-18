@@ -1,6 +1,6 @@
 //! Running a trained network over a whole picture.
 //!
-//! [`crate::training`] leaves a folder behind; this is what reads one back
+//! [`crate::net::training`] leaves a folder behind; this is what reads one back
 //! and puts a map through it. Two things stand between the weights and an
 //! answer about a picture, and this module is both of them.
 //!
@@ -46,16 +46,14 @@
 //!
 //! # What comes out
 //!
-//! A [`SymbolGrid`], which is what [`maur_o::vectorize`] turns into a map.
+//! A [`SymbolGrid`], which is what [`crate::vectorize`] turns into a map.
 //! The class of a pixel is the argmax over the `classes + 1` logits of
-//! [`UNet::forward`], with a win for the frame becoming
-//! [`BACKGROUND`](maur_o::ground_truth::BACKGROUND); the angle is
-//! `atan2(sin, cos)` of the last two channels, and
-//! [`NO_ROTATION`](maur_o::ground_truth::NO_ROTATION) where the pair is
-//! shorter than half a unit — the same threshold [`crate::training`] masks
-//! its rotation score with, and for the same reason: a label is either the
-//! zero vector or a point on the unit circle, so anything in between is the
-//! network saying it does not know.
+//! [`UNet::forward`], with a win for the frame becoming [`BACKGROUND`]; the
+//! angle is `atan2(sin, cos)` of the last two channels, and [`NO_ROTATION`]
+//! where the pair is shorter than half a unit — the same threshold
+//! [`crate::net::training`] masks its rotation score with, and for the same
+//! reason: a label is either the zero vector or a point on the unit circle,
+//! so anything in between is the network saying it does not know.
 //!
 //! What it does **not** do is decide that a symbol with no pattern to turn
 //! has no angle. That needs the symbol set, which is a thing about the map
@@ -66,8 +64,8 @@
 //! [`read_back`] is all of it in one call: a picture in, the map the network
 //! read out of it written to a file, that map drawn again, and the drawing
 //! measured against the picture it came from. The `image_to_map` tool is that
-//! function with a command line around it, and [`crate::image_valid`] is that
-//! function once per epoch of a run — which is the point of it being one
+//! function with a command line around it, and [`crate::net::image_valid`] is
+//! that function once per epoch of a run — which is the point of it being one
 //! function. A sheet a run leaves behind has to show what the tool would
 //! give, or it is a picture of something else.
 
@@ -80,15 +78,15 @@ use burn::record::CompactRecorder;
 use burn::tensor::{Tensor, TensorData};
 use image::RgbImage;
 
-use maur_o::differences::{difference_mask, Comparison, DEFAULT_TOLERANCE};
-use maur_o::geometry::Rect;
-use maur_o::ground_truth::{BACKGROUND, NO_ROTATION};
-use maur_o::render::{render_map_over, to_rgb_image, Extent};
-use maur_o::symbol_kinds::Entry;
-use maur_o::vectorize::{write_map, Placement, Simplify, SymbolGrid};
+use crate::differences::{difference_mask, Comparison, DEFAULT_TOLERANCE};
+use crate::geometry::Rect;
+use crate::ground_truth::{BACKGROUND, NO_ROTATION};
+use crate::render::{render_map_over, to_rgb_image, Extent};
+use crate::symbol_kinds::Entry;
+use crate::vectorize::{write_map, Placement, Simplify, SymbolGrid};
 
-use crate::training::TrainingConfig;
-use crate::unet::{UNet, UNetConfig, DEPTH};
+use crate::net::training::TrainingConfig;
+use crate::net::unet::{UNet, UNetConfig, DEPTH};
 
 /// The weights of the epoch which validated best, which is what a run folder
 /// holds under this name.
@@ -411,7 +409,7 @@ impl ReadBackSettings {
 /// How far apart two neighbouring pixels' angles may be and still be one
 /// object's, when the angles came from a network.
 ///
-/// Looser than [`maur_o::vectorize::SAME_ANGLE`], which is meant for the
+/// Looser than [`crate::vectorize::SAME_ANGLE`], which is meant for the
 /// exact angles a label file holds. What a network gives is a continuous
 /// field with noise on it, and a threshold of a hundredth of a turn would
 /// read that noise as a difference of angle and shatter every turning area
@@ -458,7 +456,7 @@ fn round_up(value: usize, step: usize) -> usize {
 /// One tile of the picture as the network takes it: `[1, 3, tile, tile]`,
 /// planar, scaled to `[-1, 1]`.
 ///
-/// The conversion is the one `crate::data` uses to build a training batch,
+/// The conversion is the one `crate::net::data` uses to build a training batch,
 /// and has to stay the one it uses: a network shown its input on another
 /// scale is being shown another picture. Past the edge of the image the tile
 /// is white, which is the frame a map is drawn inside.
@@ -680,7 +678,7 @@ mod tests {
         let done = read_back(
             &model,
             &image,
-            Path::new("../tests/data/turning_patterns.xmap"),
+            Path::new("tests/data/turning_patterns.xmap"),
             &symbols(3),
             &map,
             &ReadBackSettings::of(16, 2.0, 10000),

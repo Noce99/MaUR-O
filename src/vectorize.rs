@@ -406,6 +406,8 @@ pub fn write_map(
     let objects = to_objects(grid, &catalogue.opaque_areas, placement, simplify)?;
     let coords = objects.iter().map(|object| object.coords.len()).sum();
     MapFile {
+        notes: "",
+        georeferencing: None,
         scale_denominator: placement.scale_denominator,
         colors: &fragments.colors,
         symbols: &fragments.symbols,

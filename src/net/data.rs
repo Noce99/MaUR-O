@@ -1,7 +1,7 @@
 //! The folder `generate_maps_dataset` wrote, as something burn can train on.
 //!
 //! A dataset on disk is three folders and a `classes.json` — see
-//! [`maur_o::dataset`]. What a learner wants is a stream of batched tensors,
+//! [`crate::dataset`]. What a learner wants is a stream of batched tensors,
 //! and the two are further apart than they look, for one reason: a map is
 //! drawn at 1650 by 1650 pixels and a U-Net at that size is a tensor of two
 //! and a half million pixels per image per level. So an item here is not a
@@ -60,7 +60,7 @@
 //!
 //! A generated map's objects *are* its answer: every one of them is a cell
 //! filled with one opaque area of the symbol set, at the angle its pattern
-//! was turned to, so the labels [`maur_o::ground_truth::GroundTruth::rasterize`]
+//! was turned to, so the labels [`crate::ground_truth::GroundTruth::rasterize`]
 //! writes to `gt/` can be rasterized straight back out of `maps/<name>.omap`
 //! instead, whenever that `.bin` was left out of the folder — dropped to save
 //! the disk it takes, or a dataset moved without it. [`MapDataset::load`]
@@ -74,7 +74,7 @@
 //! handful of cells to rasterize — cheap next to decoding the image beside
 //! it — and one thing a `.bin` never needed: the resolution the image was
 //! drawn at, which a map file says nothing about and which
-//! [`maur_o::dataset::resolution_of`] reads from `classes.json` instead.
+//! [`crate::dataset::resolution_of`] reads from `classes.json` instead.
 
 use std::path::{Path, PathBuf};
 
@@ -83,11 +83,11 @@ use burn::data::dataset::Dataset;
 use burn::prelude::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 
-use maur_o::dataset::{resolution_of, GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER};
-use maur_o::ground_truth::{GroundTruth, BACKGROUND};
-use maur_o::random::Random;
-use maur_o::symbol_kinds::Catalogue;
-use maur_o::xml_reader::read_xml_map;
+use crate::dataset::{resolution_of, GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER};
+use crate::ground_truth::{GroundTruth, BACKGROUND};
+use crate::random::Random;
+use crate::symbol_kinds::Catalogue;
+use crate::xml_reader::read_xml_map;
 
 /// How many pixels square a crop is.
 ///
@@ -127,7 +127,7 @@ enum Labels {
     File(PathBuf),
     /// Not on disk: rasterized afresh from `maps/<name>.omap` every time they
     /// are asked for, the same as the image beside them is decoded afresh.
-    /// See [`crate::data`]'s module documentation.
+    /// See [`crate::net::data`]'s module documentation.
     FromMap(PathBuf),
 }
 
@@ -312,8 +312,8 @@ impl MapDataset {
     ///
     /// The crops are what a network is trained on; these are the whole
     /// images the crops were cut from, for anything which wants to put one
-    /// through the network as it stands. `crate::image_valid` reads the first
-    /// few of a validation split back into maps, epoch by epoch.
+    /// through the network as it stands. `crate::net::image_valid` reads
+    /// the first few of a validation split back into maps, epoch by epoch.
     pub fn pictures(&self) -> impl Iterator<Item = &Path> {
         self.maps.iter().map(|(image, _)| image.as_path())
     }
@@ -546,17 +546,17 @@ mod tests {
     fn a_missing_label_is_computed_from_the_map_beside_it() {
         let dir = tempfile::tempdir().expect("a temporary folder");
         let folder = dir.path().join("dataset");
-        let settings = maur_o::dataset::Settings {
+        let settings = crate::dataset::Settings {
             layout_size: 2,
             cell_size: 20,
             maps: 2,
             just_opaque_areas: true,
             resolution: 2.0,
             frame: 5.0,
-            ..maur_o::dataset::Settings::default()
+            ..crate::dataset::Settings::default()
         };
-        maur_o::dataset::create_dataset(
-            Path::new("../tests/data/turning_patterns.xmap"),
+        crate::dataset::create_dataset(
+            Path::new("tests/data/turning_patterns.xmap"),
             &folder,
             &settings,
             |_, _| {},
