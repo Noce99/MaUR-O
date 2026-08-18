@@ -6,7 +6,7 @@
 //! Weights only exist once something has trained, and training is minutes on
 //! the pure Rust backend where a test suite has milliseconds; the geometry
 //! behind the tool is tested in `maur_o::vectorize`, and the tiling and the
-//! reloading in `maur_o_net::predict`, both without a trained network.
+//! reloading in `maur_o::net::predict`, both without a trained network.
 
 use std::path::{Path, PathBuf};
 

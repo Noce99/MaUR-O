@@ -12,12 +12,12 @@
 //! labels were left out of `gt/` is not left out of the run: they are
 //! computed straight from `maps/<name>.omap` instead, at the cost of parsing
 //! and rasterizing that map every time they are asked for rather than reading
-//! a `.bin` — see [`maur_o_net::data`].
+//! a `.bin` — see [`maur_o::net::data`].
 //!
 //! ```bash
 //! cargo run --release --bin generate_maps_dataset -- \
 //!     --just-opaque-areas -n 300 maps/ISOM_10k.omap dataset
-//! cargo run --release -p maur-o-net --bin train -- dataset trainings
+//! cargo run --release --bin train -- dataset trainings
 //! ```
 //!
 //! The training folder is a history rather than a run: each run writes
@@ -43,10 +43,10 @@ use clap::Parser;
 
 use maur_o::dataset::{Classes, CLASSES_FILE};
 
-use maur_o_net::data::{CROP, DEFAULT_CROPS_PER_MAP};
-use maur_o_net::image_valid::DEFAULT_IMAGE_VALID;
-use maur_o_net::training::{train, TrainingConfig, DEFAULT_ANGLE_WEIGHT};
-use maur_o_net::unet::{DEFAULT_BASE_CHANNELS, DEPTH};
+use maur_o::net::data::{CROP, DEFAULT_CROPS_PER_MAP};
+use maur_o::net::image_valid::DEFAULT_IMAGE_VALID;
+use maur_o::net::training::{train, TrainingConfig, DEFAULT_ANGLE_WEIGHT};
+use maur_o::net::unet::{DEFAULT_BASE_CHANNELS, DEPTH};
 
 /// Where the runs are written when no folder is named.
 const DEFAULT_TRAININGS: &str = "trainings";

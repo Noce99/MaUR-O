@@ -12,8 +12,8 @@
 //!
 //! # What comes out
 //!
-//! [`crate::data`] hands the label over as `on + 2` channels — a one-hot over
-//! the `on` opaque areas, all zeros for the white frame, then the sine and
+//! [`crate::net::data`] hands the label over as `on + 2` channels — a one-hot
+//! over the `on` opaque areas, all zeros for the white frame, then the sine and
 //! the cosine of the angle. The head does **not** emit those `on + 2`
 //! numbers directly. It emits `on + 3`:
 //!
@@ -34,13 +34,13 @@
 //! wants. [`UNet::predict`] is the answer in the dataset's own shape: the
 //! softmax over the `on + 1`, with the frame channel dropped, and the two
 //! angle channels after it — `on + 2`, matching a `gt/*.bin` expanded by
-//! [`maur_o::ground_truth::GroundTruth::one_hot`] channel for channel.
+//! [`crate::ground_truth::GroundTruth::one_hot`] channel for channel.
 //!
 //! Everything here is `NCHW`, which is the layout burn's convolutions work
 //! in: `[batch, channel, row, column]`. The label on disk is `H, W, C`, the
-//! same numbers read in a different order, and [`crate::data`] is where the
-//! order changes — once, while a batch is built, rather than on every tensor
-//! that passes through here.
+//! same numbers read in a different order, and [`crate::net::data`] is where
+//! the order changes — once, while a batch is built, rather than on every
+//! tensor that passes through here.
 
 use burn::config::Config;
 use burn::module::Module;

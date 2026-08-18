@@ -72,14 +72,14 @@ use burn::train::renderer::tui::TuiMetricsRenderer;
 use burn::train::renderer::{MetricState, MetricsRenderer, TrainingProgress};
 use burn::train::{LearnerBuilder, LearnerSummary, TrainOutput, TrainStep, ValidStep};
 
-use maur_o::dataset::{Classes, CLASSES_FILE};
-use maur_o::symbol_kinds::Catalogue;
-use maur_o::xml_reader::read_xml_map;
+use crate::dataset::{Classes, CLASSES_FILE};
+use crate::symbol_kinds::Catalogue;
+use crate::xml_reader::read_xml_map;
 
-use crate::data::{MapBatch, MapBatcher, MapDataset, CROP, DEFAULT_CROPS_PER_MAP};
-use crate::image_valid::{ImageValidation, DEFAULT_IMAGE_VALID, IMAGE_VALID};
-use crate::predict::ReadBackSettings;
-use crate::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEPTH};
+use crate::net::data::{MapBatch, MapBatcher, MapDataset, CROP, DEFAULT_CROPS_PER_MAP};
+use crate::net::image_valid::{ImageValidation, DEFAULT_IMAGE_VALID, IMAGE_VALID};
+use crate::net::predict::ReadBackSettings;
+use crate::net::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEPTH};
 
 /// How much the angle term counts for beside the classes. See
 /// [`TrainingConfig::angle_weight`].
@@ -440,7 +440,7 @@ pub struct TrainingConfig {
     #[config(default = 1.0e-4)]
     pub learning_rate: f64,
     /// The feature maps at full resolution — see
-    /// [`crate::unet::UNetConfig::base_channels`].
+    /// [`crate::net::unet::UNetConfig::base_channels`].
     #[config(default = "DEFAULT_BASE_CHANNELS")]
     pub base_channels: usize,
     /// How many pixels square a crop is. Must divide by `2^DEPTH`.
@@ -765,7 +765,7 @@ pub fn train<B: AutodiffBackend>(
     device: B::Device,
     dashboard: bool,
 ) -> Result<PathBuf, String> {
-    if config.crop % (1 << DEPTH) != 0 {
+    if !config.crop.is_multiple_of(1 << DEPTH) {
         return Err(format!(
             "a crop of {} pixels does not divide by {}, which is what a U-Net of {DEPTH} levels \
              halves and doubles",
@@ -882,7 +882,7 @@ pub fn train<B: AutodiffBackend>(
         .num_epochs(config.epochs)
         // Not a stopping strategy: the one hook burn calls once an epoch. It
         // always answers that the run should carry on — see
-        // `crate::image_valid`.
+        // `crate::net::image_valid`.
         .early_stopping(phase)
         .summary();
     builder = if dashboard {

@@ -1,9 +1,9 @@
 //! A U-Net trained to read a rendered orienteering map back into the symbols
 //! it was drawn with.
 //!
-//! The renderer this sits beside turns a map file into a picture. This goes
-//! the other way: given the picture, which of the symbol set's opaque areas
-//! is each pixel, and at what angle was its fill pattern turned. It is the
+//! The rest of this crate turns a map file into a picture. This goes the
+//! other way: given the picture, which of the symbol set's opaque areas is
+//! each pixel, and at what angle was its fill pattern turned. It is the
 //! same question a person answers by looking at a legend, and the training
 //! data for it is not a survey anybody had to label — `generate_maps_dataset`
 //! draws a map out of a list of decisions and writes the list down beside the
@@ -16,7 +16,7 @@
 //!
 //! # And a network read off them. Each run writes its own timestamped folder
 //! # under `trainings/`.
-//! cargo run --release -p maur-o-net --bin train -- dataset trainings
+//! cargo run --release --bin train -- dataset trainings
 //! ```
 //!
 //! Three pieces, and they are meant to be read in this order:
@@ -40,9 +40,6 @@
 //! renderer does and is far too slow for a real run; `--features wgpu` for
 //! any GPU with a Vulkan, Metal or DX12 driver; `--features cuda` for an
 //! NVIDIA one. The `train` binary is built against whichever is on.
-
-// Every public item carries a doc comment, as in the renderer beside it.
-#![warn(missing_docs)]
 
 pub mod data;
 pub mod image_valid;

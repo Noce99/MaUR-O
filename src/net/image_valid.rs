@@ -49,10 +49,10 @@ use burn::train::metric::store::EventStoreClient;
 use burn::train::EarlyStoppingStrategy;
 use image::RgbImage;
 
-use maur_o::differences::{compose, mask_image, open_image};
-use maur_o::symbol_kinds::Entry;
+use crate::differences::{compose, mask_image, open_image};
+use crate::symbol_kinds::Entry;
 
-use crate::predict::{load, read_back, ReadBackSettings};
+use crate::net::predict::{load, read_back, ReadBackSettings};
 
 /// The folder a run's sheets go in, beside `train/` and `valid/`.
 pub const IMAGE_VALID: &str = "image_valid";

@@ -50,7 +50,7 @@ use maur_o::xml_reader::read_xml_map;
 
 use maur_o::vectorize::Simplify;
 
-use maur_o_net::predict::{load, read_back, ReadBackSettings, OVERLAP, PREDICTED_SAME_ANGLE};
+use maur_o::net::predict::{load, read_back, ReadBackSettings, OVERLAP, PREDICTED_SAME_ANGLE};
 
 #[derive(Parser)]
 #[command(

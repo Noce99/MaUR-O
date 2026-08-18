@@ -549,7 +549,7 @@ fn magnify(image: &RgbImage, factor: u32) -> RgbImage {
 /// panel with no label goes under an empty stretch of bar.
 ///
 /// Public because a sheet of panels is a thing more than the benchmark wants:
-/// `maur_o_net::image_valid` puts a picture, the map a network read out of it
+/// [`net::image_valid`](crate::net::image_valid) puts a picture, the map a network read out of it
 /// and where the two disagree side by side, epoch by epoch.
 pub fn compose(panels: &[RgbImage], labels: &[String]) -> RgbImage {
     let widest = panels.iter().map(|p| p.width()).max().unwrap_or(1);
