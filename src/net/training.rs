@@ -15,12 +15,24 @@
 //! alike and a network left to itself would spend all its capacity on
 //! whichever happened to start larger.
 //!
-//! The angle term is taken over **every** pixel, not only the turned ones.
-//! Where there is no angle — the frame, and a symbol with no pattern to turn
-//! — the label is the zero vector, and the network learning to shrink to
-//! nothing there is the network learning that there is nothing to say, which
-//! is worth as much as the angles themselves. On the sample sets that is most
-//! of the picture: only a fifth or so of pixels carry an angle at all.
+//! The angle term is taken over the pixels which **have** an angle, and over
+//! no others. Where there is none — the frame, and a symbol with no pattern
+//! to turn — the label is the zero vector, and asking the network to hit it
+//! there was asking it to spend most of its capacity saying nothing: only a
+//! fifth or so of pixels carry an angle at all, so four fifths of the term
+//! was a pull towards the origin which the angles themselves had to fight.
+//! Masked, the term is the mean squared error per angled pixel, and a batch
+//! with no angle in it contributes nought rather than a pull.
+//!
+//! # What the classes are weighted by
+//!
+//! A dataset is mostly frame and mostly whichever ground cover is commonest,
+//! and a cross-entropy which counts every pixel the same is a cross-entropy
+//! whose easiest move is to answer with the commonest class everywhere. That
+//! is not a hypothetical: a run left unweighted settles there and reads back
+//! as an empty map. So the loss weights each class by the inverse of how much
+//! of the sampled ground truth it holds — see [`class_weights`] — which makes
+//! a rare symbol worth as much to get right as a common one.
 //!
 //! # What is reported, and why it is five numbers
 //!
@@ -53,8 +65,10 @@
 use std::path::{Path, PathBuf};
 
 use burn::config::Config;
+use burn::data::dataset::Dataset;
+use burn::grad_clipping::GradientClippingConfig;
+use burn::lr_scheduler::LrScheduler;
 use burn::module::{extract_type_name, Module};
-use burn::nn::loss::{CrossEntropyLossConfig, MseLoss, Reduction};
 use burn::optim::AdamConfig;
 use burn::prelude::Backend;
 use burn::record::CompactRecorder;
@@ -71,6 +85,7 @@ use burn::train::metric::{
 use burn::train::renderer::tui::TuiMetricsRenderer;
 use burn::train::renderer::{MetricState, MetricsRenderer, TrainingProgress};
 use burn::train::{LearnerBuilder, LearnerSummary, TrainOutput, TrainStep, ValidStep};
+use burn::LearningRate;
 
 use crate::dataset::{Classes, CLASSES_FILE};
 use crate::symbol_kinds::Catalogue;
@@ -83,12 +98,171 @@ use crate::net::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEPTH};
 
 /// How much the angle term counts for beside the classes. See
 /// [`TrainingConfig::angle_weight`].
-pub const DEFAULT_ANGLE_WEIGHT: f64 = 1.0;
+///
+/// A fifth rather than the whole: the angle term is a squared error and the
+/// class term a cross-entropy, and on the runs this was set from the first
+/// starts larger and moves faster. Reading the symbol is what the network is
+/// for, and the angle is what it says about a symbol it has already found.
+pub const DEFAULT_ANGLE_WEIGHT: f64 = 0.2;
 
 /// The backend the metrics run on, which is the host: a metric reads numbers
 /// rather than trains on them, so everything in [`MapOutput`] is brought back
 /// here before it is looked at.
 type MetricBackend = burn::backend::NdArray;
+
+/// The rate the warmup climbs to, and so the largest rate a run takes a step
+/// at -- see [`WarmupCosine`].
+///
+/// Three ten-thousandths. A tenth of that trains too slowly to leave the
+/// commonest class in ten epochs; ten times it trains, and then falls over
+/// somewhere in the second epoch. This is between them, and it is a peak
+/// reached after a warmup rather than a rate started at, which is most of
+/// what makes it safe to be the larger of the two.
+pub const DEFAULT_LEARNING_RATE: f64 = 3.0e-4;
+
+/// The ceiling on the norm of one step's gradient.
+///
+/// One, which is the usual figure and is here as a ceiling rather than as a
+/// scale: an ordinary step is well under it and is left exactly as it was,
+/// and only the rare step which would have moved the weights out from under
+/// the batch normalization is cut down to it.
+const GRADIENT_NORM: f32 = 1.0;
+
+/// How many maps the class balance is counted over before a run starts.
+///
+/// The count is over whole ground truths rather than over crops, so a map is
+/// a hundred thousand pixels of evidence and thirty-two of them are three
+/// million: enough to put a share to two figures, which is all a weight needs
+/// it to. The cost is thirty-two label reads, or thirty-two rasterizations
+/// where the labels are not on disk, against an epoch of tens of thousands of
+/// steps.
+const BALANCE_SAMPLE: usize = 32;
+
+/// The floor a class's share is held at before it is inverted.
+///
+/// A symbol which no sampled map held would otherwise be weighted by one over
+/// nothing, and a class the sample caught twice by something nearly as large:
+/// either would hand the whole loss to a class the network has barely seen.
+/// A thousandth of the pixels is the smallest share this trusts.
+const RAREST_SHARE: f64 = 1e-3;
+
+/// What each class should count for in the cross-entropy, the frame last,
+/// scaled so that the average class counts for one.
+///
+/// The inverse of what share of the ground truth each holds. A dataset is
+/// nine cells of ground in a white border and the border alone is a quarter
+/// of it, so an unweighted loss is a loss whose cheapest answer is the
+/// commonest class everywhere — and that is an answer which scores well on
+/// pixels and reads back as an empty map. Weighting by the inverse share is
+/// what makes a rare symbol worth finding.
+///
+/// The shares are counted off [`MapDataset::class_balance`], which samples
+/// the maps rather than reading all of them.
+pub fn class_weights(train: &MapDataset) -> Result<Vec<f32>, String> {
+    let shares = train.class_balance(BALANCE_SAMPLE)?;
+
+    let inverted: Vec<f64> = shares
+        .iter()
+        .map(|&share| 1.0 / share.max(RAREST_SHARE))
+        .collect();
+
+    // Scaled to average one, so that turning the weighting on does not also
+    // turn the effective learning rate up: what changes is how the loss is
+    // divided between the classes, not how large it is.
+    let mean = inverted.iter().sum::<f64>() / inverted.len() as f64;
+    Ok(inverted
+        .into_iter()
+        .map(|weight| (weight / mean) as f32)
+        .collect())
+}
+
+/// How many steps the learning rate is warmed up over, and how far down it is
+/// annealed by the end of the run.
+///
+/// A U-Net full of batch normalization starts with running statistics which
+/// are not yet the statistics of anything, and a first step at the full rate
+/// moves the weights out from under them: the training half goes on looking
+/// fine, since it normalizes by the batch it is holding, and the validation
+/// half — which normalizes by the running figures — comes apart. Warming up
+/// is what lets the statistics catch up while the weights are still moving
+/// slowly.
+const WARMUP_STEPS: usize = 500;
+
+/// What the rate is annealed down to by the last step, as a share of the rate
+/// it warmed up to. Not nought: a rate of nought is a step of nothing, and
+/// the last epoch may as well still be learning.
+const FINAL_SHARE: f64 = 0.05;
+
+/// A learning rate which is warmed up and then annealed: linearly from
+/// nothing to `peak` over [`WARMUP_STEPS`] steps, then down a cosine to
+/// [`FINAL_SHARE`] of `peak` by the last step of the run.
+///
+/// Both halves are here for the same reason. Adam at a rate which suits the
+/// middle of a run is too large for its first steps, when the batch
+/// normalization has no statistics yet and the gradients are largest, and too
+/// large for its last, when what is left to do is small. A constant rate is
+/// what makes a run which improves for an epoch and then falls over.
+#[derive(Clone, Copy, Debug)]
+pub struct WarmupCosine {
+    /// The rate the warmup climbs to and the annealing comes down from.
+    peak: LearningRate,
+    /// How many steps the climb takes.
+    warmup: usize,
+    /// How many steps the whole run is, warmup included.
+    total: usize,
+    /// How many steps have been taken. One-based once `step` has been called,
+    /// which is why it starts at nought.
+    taken: usize,
+}
+
+impl WarmupCosine {
+    /// The schedule for a run of `total` steps peaking at `peak`.
+    ///
+    /// The warmup is [`WARMUP_STEPS`] steps, or half the run where the run is
+    /// shorter than twice that — a short run should not be all warmup.
+    pub fn new(peak: LearningRate, total: usize) -> WarmupCosine {
+        let total = total.max(1);
+        WarmupCosine {
+            peak,
+            warmup: WARMUP_STEPS.min(total / 2).max(1),
+            total,
+            taken: 0,
+        }
+    }
+}
+
+impl LrScheduler for WarmupCosine {
+    /// How many steps have been taken, which is the whole of the state.
+    type Record<B: Backend> = usize;
+
+    fn step(&mut self) -> LearningRate {
+        self.taken += 1;
+
+        if self.taken <= self.warmup {
+            // Never nought on the first step: a step of nothing is a step
+            // which teaches nothing, and burn asks for the rate before the
+            // step rather than after it.
+            return self.peak * self.taken as f64 / self.warmup as f64;
+        }
+
+        // How far through the annealing this step is, in [0, 1].
+        let after = (self.taken - self.warmup) as f64;
+        let length = (self.total.saturating_sub(self.warmup)).max(1) as f64;
+        let through = (after / length).min(1.0);
+
+        let cosine = 0.5 * (1.0 + (std::f64::consts::PI * through).cos());
+        self.peak * (FINAL_SHARE + (1.0 - FINAL_SHARE) * cosine)
+    }
+
+    fn to_record<B: Backend>(&self) -> Self::Record<B> {
+        self.taken
+    }
+
+    fn load_record<B: Backend>(mut self, record: Self::Record<B>) -> Self {
+        self.taken = record;
+        self
+    }
+}
 
 /// What one step of training or validation came to — five scalars, counted on
 /// the device.
@@ -325,7 +499,7 @@ impl<B: Backend> Numeric for AngleMetric<B> {
 impl<B: Backend> UNet<B> {
     /// One forward pass scored against the labels: the loss to descend, and
     /// the counts the metrics divide.
-    pub fn forward_step(&self, batch: MapBatch<B>, angle_weight: f64) -> MapOutput<B> {
+    pub fn forward_step(&self, batch: MapBatch<B>) -> MapOutput<B> {
         let device = batch.image.device();
         let raw = self.forward(batch.image);
         let [size, channels, height, width] = raw.dims();
@@ -340,13 +514,34 @@ impl<B: Backend> UNet<B> {
         let predicted = flat.slice([0..pixels, classes + 1..classes + 3]);
 
         let targets = batch.class.reshape([pixels]);
-        let class_loss = CrossEntropyLossConfig::new()
-            .init(&device)
-            .forward(logits.clone(), targets.clone());
+        let class_loss = self.class_loss().forward(logits.clone(), targets.clone());
 
         // The label's own pair, laid out to match: [pixels, 2].
         let wanted = batch.angle.permute([0, 2, 3, 1]).reshape([pixels, 2]);
-        let angle_loss = MseLoss::new().forward(predicted.clone(), wanted.clone(), Reduction::Mean);
+
+        // Which pixels have a direction at all. The zero vector is the label
+        // for "no angle", so its length is what tells the two apart; half a
+        // unit, since a label is either that or a point on the unit circle,
+        // with nothing in between to be caught by the wrong side of this.
+        let wanted_length = wanted.clone().powi_scalar(2).sum_dim(1).sqrt();
+        let has_angle = wanted_length
+            .clone()
+            .greater_elem(0.5)
+            .float()
+            .reshape([pixels]);
+        let angled = has_angle.clone().sum();
+
+        // The squared error of the pixels which had a direction, over how
+        // many of those there were: a mean per angled pixel rather than per
+        // pixel. A batch with no angle in it comes to nought over one, which
+        // is nought -- the term simply says nothing that step.
+        let squared = predicted
+            .clone()
+            .sub(wanted.clone())
+            .powi_scalar(2)
+            .sum_dim(1)
+            .reshape([pixels]);
+        let angle_loss = squared.mul(has_angle.clone()).sum() / angled.clone().clamp_min(1.0);
 
         // How many pixels the argmax got right, counted here rather than on
         // the host: the logits are the largest thing in this function and
@@ -354,10 +549,10 @@ impl<B: Backend> UNet<B> {
         let chosen = logits.argmax(1).reshape([pixels]);
         let correct = chosen.equal(targets).float().sum();
 
-        let (agreement, angled) = agreement(predicted, wanted);
+        let agreement = agreement(predicted, wanted, has_angle);
 
         MapOutput {
-            loss: class_loss + angle_loss.mul_scalar(angle_weight),
+            loss: class_loss + angle_loss.mul_scalar(self.angle_weight()),
             correct,
             pixels: Tensor::from_data([pixels as f32], &device),
             agreement,
@@ -367,17 +562,20 @@ impl<B: Backend> UNet<B> {
 }
 
 /// How much the predicted directions agree with the labelled ones, summed
-/// over the pixels which had one, and how many of those there were.
+/// over the pixels which had one.
 ///
 /// The length of either vector says nothing about its direction, so both are
 /// normalized away: what is summed is the cosine of the angle between them,
 /// one where they point the same way and minus one where they are opposed. A
 /// pixel whose label is the zero vector — the frame, a symbol with no pattern
-/// to turn — has no direction to agree with and contributes to neither sum.
+/// to turn — has no direction to agree with, and `has_angle` is the nought it
+/// is multiplied by: the caller worked out which those were to mask the loss
+/// with, and the same mask serves here rather than being found twice.
 fn agreement<B: Backend>(
     predicted: Tensor<B, 2>,
     wanted: Tensor<B, 2>,
-) -> (Tensor<B, 1>, Tensor<B, 1>) {
+    has_angle: Tensor<B, 1>,
+) -> Tensor<B, 1> {
     // A prediction shorter than this has no direction worth measuring, and
     // dividing by its length would be dividing by nothing. Clamping the
     // divisor leaves such a pixel with an agreement near zero, which is the
@@ -387,12 +585,6 @@ fn agreement<B: Backend>(
     let length = |v: Tensor<B, 2>| v.powi_scalar(2).sum_dim(1).sqrt();
     let (predicted_length, wanted_length) = (length(predicted.clone()), length(wanted.clone()));
 
-    // The zero vector is the label for "no angle", so its length is what
-    // tells the pixels with an angle from the pixels without one. Half a
-    // unit: a label is either the zero vector or a point on the unit circle,
-    // with nothing in between to be caught by the wrong side of this.
-    let has_angle = wanted_length.clone().greater_elem(0.5).float();
-
     let cosine = predicted.mul(wanted).sum_dim(1).div(
         predicted_length
             .clamp_min(TINY)
@@ -400,23 +592,19 @@ fn agreement<B: Backend>(
     );
 
     let [pixels, _] = cosine.dims();
-    let has_angle = has_angle.reshape([pixels]);
-    (
-        cosine.reshape([pixels]).mul(has_angle.clone()).sum(),
-        has_angle.sum(),
-    )
+    cosine.reshape([pixels]).mul(has_angle).sum()
 }
 
 impl<B: AutodiffBackend> TrainStep<MapBatch<B>, MapOutput<B>> for UNet<B> {
     fn step(&self, batch: MapBatch<B>) -> TrainOutput<MapOutput<B>> {
-        let output = self.forward_step(batch, DEFAULT_ANGLE_WEIGHT);
+        let output = self.forward_step(batch);
         TrainOutput::new(self, output.loss.backward(), output)
     }
 }
 
 impl<B: Backend> ValidStep<MapBatch<B>, MapOutput<B>> for UNet<B> {
     fn step(&self, batch: MapBatch<B>) -> MapOutput<B> {
-        self.forward_step(batch, DEFAULT_ANGLE_WEIGHT)
+        self.forward_step(batch)
     }
 }
 
@@ -436,8 +624,9 @@ pub struct TrainingConfig {
     /// How many threads decode maps ahead of the arithmetic.
     #[config(default = 4)]
     pub workers: usize,
-    /// The step size Adam starts from.
-    #[config(default = 1.0e-4)]
+    /// The rate the warmup climbs to and the annealing comes down from --
+    /// see [`WarmupCosine`]. Not the rate of any particular step.
+    #[config(default = "DEFAULT_LEARNING_RATE")]
     pub learning_rate: f64,
     /// The feature maps at full resolution — see
     /// [`crate::net::unet::UNetConfig::base_channels`].
@@ -818,14 +1007,37 @@ pub fn train<B: AutodiffBackend>(
     );
     println!("{}: the run", run.display());
 
+    // Counted before the model is built, since the loss inside it carries
+    // the weights. A sample of the training half only: the validation half is
+    // scored on the same weights, but counting it in would be reading the
+    // labels the run is meant to be held out from.
+    let weights = class_weights(&train)?;
+    println!(
+        "the classes are weighted {}, the frame last",
+        weights
+            .iter()
+            .map(|weight| format!("{weight:.2}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+
     // Built here rather than inside the builder so that what the run trained
     // can be written down before it starts training it.
     let model = UNetConfig::new(config.classes)
         .with_base_channels(config.base_channels)
+        .with_angle_weight(config.angle_weight)
+        .with_class_weights(Some(weights))
         .init::<B>(&device);
     let architecture = run.join("architecture.txt");
     std::fs::write(&architecture, format!("{model}\n"))
         .map_err(|e| format!("cannot write {}: {e}", architecture.display()))?;
+
+    // How many steps one pass over the training half takes, which is what
+    // the learning rate is annealed against. Taken before the loader is
+    // built, since building it consumes the dataset. The last batch of an
+    // epoch is a short one wherever the split does not divide, and burn runs
+    // it rather than dropping it, so this rounds up.
+    let train_batches = train.len().div_ceil(config.batch_size).max(1);
 
     // The training half runs on the autodiff backend, since that is where a
     // gradient comes from; the validation half runs on the plain one under
@@ -898,7 +1110,23 @@ pub fn train<B: AutodiffBackend>(
         // --dashboard being what turns it on.
         builder.renderer(PlainRenderer)
     };
-    let learner = builder.build(model, AdamConfig::new().init(), config.learning_rate);
+    // How many steps the run is, which is what the annealing is spread over:
+    // one step per batch, every batch of every epoch.
+    let steps = config.epochs * train_batches;
+    let learner = builder.build(
+        model,
+        // Clipped rather than bare. Adam scales a step by the gradient's own
+        // recent size and so survives a large one, but not the step after a
+        // gradient hundreds of times the usual: that one moves the weights
+        // far enough that the batch normalization's running statistics are
+        // left describing a network which no longer exists, and a validation
+        // pass through the stale ones comes back as a loss in the billions.
+        // The norm is the ceiling on how far one batch can move the run.
+        AdamConfig::new()
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(GRADIENT_NORM)))
+            .init(),
+        WarmupCosine::new(config.learning_rate, steps),
+    );
 
     let trained = learner.fit(train_loader, valid_loader);
 
@@ -1065,5 +1293,218 @@ mod tests {
             listing(directory.path()),
             ["003/model", "003/model-ema.bin", "loose.txt"],
         );
+    }
+
+    /// The whole point of the warmup: the first step is a small fraction of
+    /// the peak rather than the peak itself, and the climb is even.
+    #[test]
+    fn the_rate_climbs_to_the_peak_and_then_comes_down() {
+        let peak = 3.0e-4;
+        let total = 10_000;
+        let mut schedule = WarmupCosine::new(peak, total);
+
+        let first = schedule.step();
+        assert!(first > 0.0, "a first step of nothing teaches nothing");
+        assert!(
+            first < peak / 100.0,
+            "the first step is {first}, not a warmup"
+        );
+
+        // Up to the peak, and no further: the last step of the warmup is the
+        // largest rate the run ever takes.
+        let mut largest: f64 = first;
+        for _ in 1..WARMUP_STEPS {
+            largest = largest.max(schedule.step());
+        }
+        assert!(
+            (largest - peak).abs() < 1e-12,
+            "climbed to {largest}, not {peak}"
+        );
+
+        // And down from there, never back above it.
+        let mut last = largest;
+        for _ in WARMUP_STEPS..total {
+            let rate = schedule.step();
+            assert!(
+                rate <= last + 1e-12,
+                "the rate went back up: {last} then {rate}"
+            );
+            last = rate;
+        }
+        let wanted = peak * FINAL_SHARE;
+        assert!(
+            (last - wanted).abs() < peak * 1e-3,
+            "ended at {last}, not near {wanted}",
+        );
+    }
+
+    /// A run of fewer steps than the warmup is a run which would otherwise
+    /// never reach its rate at all.
+    #[test]
+    fn a_short_run_is_not_all_warmup() {
+        let peak = 1.0e-3;
+        let mut schedule = WarmupCosine::new(peak, 10);
+        let rates: Vec<f64> = (0..10).map(|_| schedule.step()).collect();
+        let largest = rates.iter().cloned().fold(f64::MIN, f64::max);
+        assert!(
+            (largest - peak).abs() < 1e-12,
+            "a ten step run peaked at {largest}, not {peak}",
+        );
+    }
+
+    /// A checkpoint carries the schedule as well as the weights, so a run
+    /// carried on from one carries on at the rate it left off at rather than
+    /// warming up all over again.
+    #[test]
+    fn the_schedule_comes_back_where_it_was_left() {
+        let mut schedule = WarmupCosine::new(3.0e-4, 1_000);
+        for _ in 0..250 {
+            schedule.step();
+        }
+        let record = schedule.to_record::<MetricBackend>();
+        let wanted = schedule.step();
+
+        let loaded = WarmupCosine::new(3.0e-4, 1_000).load_record::<MetricBackend>(record);
+        let mut loaded = loaded;
+        assert_eq!(loaded.step(), wanted);
+    }
+
+    /// The weighting is inverse to the share, so the rare class is worth more
+    /// than the common one -- which is the whole of what it is for.
+    #[test]
+    fn a_rare_class_is_weighted_above_a_common_one() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let folder = dir.path().join("dataset");
+        let settings = crate::dataset::Settings {
+            layout_size: 2,
+            cell_size: 20,
+            maps: 3,
+            just_opaque_areas: true,
+            resolution: 2.0,
+            frame: 5.0,
+            ..crate::dataset::Settings::default()
+        };
+        crate::dataset::create_dataset(
+            Path::new("tests/data/turning_patterns.xmap"),
+            &folder,
+            &settings,
+            |_, _| {},
+        )
+        .expect("the dataset generates");
+
+        let dataset = MapDataset::load(&folder, 0).expect("the dataset loads");
+        let shares = dataset.class_balance(BALANCE_SAMPLE).expect("a balance");
+        let weights = class_weights(&dataset).expect("the weights are counted");
+
+        assert_eq!(weights.len(), shares.len());
+        assert!(weights.iter().all(|&weight| weight > 0.0), "{weights:?}");
+
+        // Whichever two classes those turned out to be: the larger share is
+        // the smaller weight.
+        let commonest = shares
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .expect("a class")
+            .0;
+        let rarest = shares
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .expect("a class")
+            .0;
+        assert!(
+            weights[rarest] >= weights[commonest],
+            "the rarest class weighs {} and the commonest {}",
+            weights[rarest],
+            weights[commonest],
+        );
+
+        // Scaled to average one, so that turning the weighting on does not
+        // turn the size of the loss up with it.
+        let mean = weights.iter().map(|&w| w as f64).sum::<f64>() / weights.len() as f64;
+        assert!((mean - 1.0).abs() < 1e-5, "the weights average {mean}");
+    }
+
+    /// A crop with no rotatable symbol in it has nothing to say about
+    /// angles, and the angle term says nothing about it: the loss is the
+    /// class term alone. Unmasked, the same crop would have been thousands of
+    /// pixels of "point nowhere" -- which is what a network trained on it
+    /// learned to do everywhere.
+    #[test]
+    fn a_crop_with_no_angle_in_it_is_scored_on_its_classes_alone() {
+        use burn::backend::ndarray::{NdArray, NdArrayDevice};
+        type TestBackend = NdArray<f32>;
+
+        let device = NdArrayDevice::default();
+        let classes = 3;
+        // Weighted heavily towards the angle, so that a term which was still
+        // being taken over the unangled pixels could not hide in the rounding.
+        let net = UNetConfig::new(classes)
+            .with_base_channels(4)
+            .with_angle_weight(100.0)
+            .init::<TestBackend>(&device);
+
+        let image = Tensor::<TestBackend, 4>::zeros([1, 3, 16, 16], &device);
+        let class = Tensor::<TestBackend, 3, burn::tensor::Int>::zeros([1, 16, 16], &device);
+
+        // Every label the zero vector: no pixel of this crop has an angle.
+        let none = MapBatch {
+            image: image.clone(),
+            class: class.clone(),
+            angle: Tensor::zeros([1, 2, 16, 16], &device),
+        };
+        let without = net.forward_step(none);
+        let angled: f32 = without.angled.clone().into_scalar();
+        assert_eq!(angled, 0.0, "no pixel of that crop had an angle");
+
+        // The same crop scored on its classes and nothing else.
+        let plain = net.class_loss().forward(
+            net.forward(image.clone())
+                .permute([0, 2, 3, 1])
+                .reshape([16 * 16, classes + 3])
+                .slice([0..16 * 16, 0..classes + 1]),
+            class.clone().reshape([16 * 16]),
+        );
+        let (whole, expected): (f32, f32) = (without.loss.into_scalar(), plain.into_scalar());
+        assert!(
+            (whole - expected).abs() < 1e-6,
+            "the loss was {whole} and the class term alone {expected}",
+        );
+
+        // And a crop which does have angles is scored on more than that.
+        let some = MapBatch {
+            image,
+            class,
+            angle: Tensor::ones([1, 2, 16, 16], &device),
+        };
+        let with = net.forward_step(some);
+        let angled: f32 = with.angled.into_scalar();
+        assert_eq!(angled, 16.0 * 16.0, "every pixel of that crop had one");
+        let whole: f32 = with.loss.into_scalar();
+        assert!(
+            whole > expected + 1e-6,
+            "an angled crop scored {whole}, no more than the {expected} of an unangled one",
+        );
+    }
+
+    /// A class the sample never saw would be one over nothing. It is held to
+    /// the floor instead, which is a large weight rather than an infinite
+    /// one.
+    #[test]
+    fn a_class_which_was_never_seen_does_not_take_the_whole_loss() {
+        // Not through the dataset: what is being checked is the arithmetic on
+        // a balance with a nought in it, and a generated dataset draws every
+        // symbol it was given.
+        let shares = [0.5, 0.5, 0.0];
+        let inverted: Vec<f64> = shares
+            .iter()
+            .map(|&share: &f64| 1.0 / share.max(RAREST_SHARE))
+            .collect();
+        assert!(
+            inverted.iter().all(|weight| weight.is_finite()),
+            "{inverted:?}"
+        );
+        assert_eq!(inverted[2], 1.0 / RAREST_SHARE);
     }
 }

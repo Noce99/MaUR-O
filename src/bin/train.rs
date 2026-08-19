@@ -45,7 +45,7 @@ use maur_o::dataset::{Classes, CLASSES_FILE};
 
 use maur_o::net::data::{CROP, DEFAULT_CROPS_PER_MAP};
 use maur_o::net::image_valid::DEFAULT_IMAGE_VALID;
-use maur_o::net::training::{train, TrainingConfig, DEFAULT_ANGLE_WEIGHT};
+use maur_o::net::training::{train, TrainingConfig, DEFAULT_ANGLE_WEIGHT, DEFAULT_LEARNING_RATE};
 use maur_o::net::unet::{DEFAULT_BASE_CHANNELS, DEPTH};
 
 /// Where the runs are written when no folder is named.
@@ -97,11 +97,16 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_BASE_CHANNELS, value_name = "COUNT")]
     base_channels: usize,
 
-    /// The step size Adam starts from.
-    #[arg(short = 'l', long, default_value_t = 1.0e-4, value_name = "RATE")]
+    /// The rate the warmup climbs to, which the run then anneals down from.
+    /// Not the rate of any particular step: the first steps are slower while
+    /// the batch normalization finds its statistics, and the last are slower
+    /// again -- see `maur_o::net::training::WarmupCosine`.
+    #[arg(short = 'l', long, default_value_t = DEFAULT_LEARNING_RATE, value_name = "RATE")]
     learning_rate: f64,
 
-    /// What the angle term counts for beside the class term.
+    /// What the angle term counts for beside the class term. The term is
+    /// taken over the pixels which have an angle and no others, so this is
+    /// what an angled pixel's direction is worth beside its symbol.
     #[arg(long, default_value_t = DEFAULT_ANGLE_WEIGHT, value_name = "WEIGHT")]
     angle_weight: f64,
 

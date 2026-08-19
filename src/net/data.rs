@@ -329,6 +329,65 @@ impl MapDataset {
         self.classes
     }
 
+    /// What share of the labelled pixels each class holds, the frame last:
+    /// `classes + 1` figures which sum to one.
+    ///
+    /// Read off the ground truth alone — the pictures beside it are never
+    /// decoded — and off `sample` maps rather than all of them, taken at an
+    /// even stride through the folder so that a dataset generated in some
+    /// order is not counted from one end of it. A map whose labels are
+    /// rasterized afresh rather than read from `gt/` costs what rasterizing
+    /// it costs, which is what the stride is here to bound.
+    ///
+    /// A class no sampled map held comes back as nought, and what to do
+    /// about that belongs to whoever asked: this counts, it does not smooth.
+    pub fn class_balance(&self, sample: usize) -> Result<Vec<f64>, String> {
+        let mut counted = vec![0u64; self.classes + 1];
+        if self.maps.is_empty() {
+            return Ok(counted.iter().map(|_| 0.0).collect());
+        }
+
+        // At least one map, and never a stride which walks off the end.
+        let wanted = sample.clamp(1, self.maps.len());
+        let stride = self.maps.len() / wanted;
+
+        for index in (0..self.maps.len()).step_by(stride.max(1)).take(wanted) {
+            let (_, labels) = &self.maps[index];
+            let truth = self.labels(labels)?;
+            for &class in &truth.class_of {
+                let at = match class {
+                    BACKGROUND => self.classes,
+                    symbol => symbol as usize,
+                };
+                counted[at] += 1;
+            }
+        }
+
+        let total: u64 = counted.iter().sum();
+        if total == 0 {
+            return Err("the sampled labels hold no pixels at all".to_string());
+        }
+        Ok(counted
+            .into_iter()
+            .map(|count| count as f64 / total as f64)
+            .collect())
+    }
+
+    /// One map's labels, however they are kept — read from `gt/`, or
+    /// rasterized from the map itself.
+    fn labels(&self, labels: &Labels) -> Result<GroundTruth, String> {
+        match labels {
+            Labels::File(path) => GroundTruth::read(path),
+            Labels::FromMap(path) => {
+                let (width, height) = self.size;
+                let resolution = self
+                    .resolution
+                    .expect("set in load whenever a map's labels are computed from it");
+                GroundTruth::from_map(path, width as u32, height as u32, resolution)
+            }
+        }
+    }
+
     /// Splits the maps in two, the first `share` of them for training and the
     /// rest for validation.
     ///
@@ -386,18 +445,9 @@ impl Dataset<MapCrop> for MapDataset {
     fn get(&self, index: usize) -> Option<MapCrop> {
         let (image_path, labels) = self.maps.get(index / self.crops_per_map)?;
 
-        let truth = match labels {
-            Labels::File(label_path) => GroundTruth::read(label_path)
-                .unwrap_or_else(|e| panic!("cannot read the labels mid-run: {e}")),
-            Labels::FromMap(map_path) => {
-                let (width, height) = self.size;
-                let resolution = self
-                    .resolution
-                    .expect("set in load whenever a map's labels are computed from it");
-                GroundTruth::from_map(map_path, width as u32, height as u32, resolution)
-                    .unwrap_or_else(|e| panic!("cannot compute the labels mid-run: {e}"))
-            }
-        };
+        let truth = self
+            .labels(labels)
+            .unwrap_or_else(|e| panic!("cannot read the labels mid-run: {e}"));
         let image = image::open(image_path)
             .unwrap_or_else(|e| panic!("cannot read {} mid-run: {e}", image_path.display()))
             .to_rgb8();
@@ -598,6 +648,83 @@ mod tests {
                     "crop {index} angle {at}: {got} from the map, {wanted} from disk",
                 );
             }
+        }
+    }
+
+    /// The balance is a share per class and the frame's is one of them, so it
+    /// sums to one however the ground fell -- and the frame of a dataset
+    /// drawn with a wide border is a large share of it rather than a
+    /// rounding.
+    #[test]
+    fn the_class_balance_is_a_share_of_the_pixels_each() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let folder = dir.path().join("dataset");
+        let settings = crate::dataset::Settings {
+            layout_size: 2,
+            cell_size: 20,
+            maps: 4,
+            just_opaque_areas: true,
+            resolution: 2.0,
+            frame: 5.0,
+            ..crate::dataset::Settings::default()
+        };
+        crate::dataset::create_dataset(
+            Path::new("tests/data/turning_patterns.xmap"),
+            &folder,
+            &settings,
+            |_, _| {},
+        )
+        .expect("the dataset generates");
+
+        let dataset = MapDataset::load(&folder, 0).expect("the dataset loads");
+        let shares = dataset.class_balance(4).expect("the labels are counted");
+
+        assert_eq!(shares.len(), dataset.classes() + 1);
+        let total: f64 = shares.iter().sum();
+        assert!((total - 1.0).abs() < 1e-9, "the shares sum to {total}");
+        assert!(
+            shares.iter().all(|&share| (0.0..=1.0).contains(&share)),
+            "{shares:?}",
+        );
+        // The frame is the last of them, and a five meter border round a
+        // forty meter map is not nothing.
+        assert!(shares[dataset.classes()] > 0.0, "{shares:?}");
+    }
+
+    /// Counting a sample means counting some of the maps, not the first of
+    /// them: a dataset generated in some order would otherwise be read from
+    /// one end. A sample of one still counts one whole map.
+    #[test]
+    fn a_sample_of_the_maps_is_still_a_balance() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let folder = dir.path().join("dataset");
+        let settings = crate::dataset::Settings {
+            layout_size: 2,
+            cell_size: 20,
+            maps: 3,
+            just_opaque_areas: true,
+            resolution: 2.0,
+            frame: 5.0,
+            ..crate::dataset::Settings::default()
+        };
+        crate::dataset::create_dataset(
+            Path::new("tests/data/turning_patterns.xmap"),
+            &folder,
+            &settings,
+            |_, _| {},
+        )
+        .expect("the dataset generates");
+
+        let dataset = MapDataset::load(&folder, 0).expect("the dataset loads");
+        for sample in [1, 2, 3, 99] {
+            let shares = dataset
+                .class_balance(sample)
+                .expect("the labels are counted");
+            let total: f64 = shares.iter().sum();
+            assert!(
+                (total - 1.0).abs() < 1e-9,
+                "a sample of {sample} summed to {total}",
+            );
         }
     }
 }
