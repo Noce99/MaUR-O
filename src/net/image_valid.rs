@@ -7,9 +7,15 @@
 //! as maps, drawn, and set beside the originals.
 //!
 //! ```text
-//! image_valid/007/map_013.omap   the map the network read out of the picture
 //! image_valid/007/map_013.png    the picture, that map drawn, and the difference
 //! ```
+//!
+//! Only the sheets. The map itself is written — [`read_back`] scores the map
+//! somebody else could open rather than the objects which went into it, so
+//! there has to be a file to draw from — but it is written to a scratch
+//! folder which goes when the epoch is done. A run's worth of read-back maps
+//! is a great deal of disk for something nobody opens, and an early epoch's
+//! is the worst of them; `image_to_map` writes one to keep.
 //!
 //! Opened in order, the middle panel of those sheets is a run learning to
 //! read a map, which is the one thing a column of losses cannot tell you.
@@ -67,10 +73,9 @@ const EPOCH_PREFIX: &str = "epoch-";
 /// network says before it has learned anything is noise, and noise vectorizes
 /// into as many objects as the grid has cells to spare: the first epoch of a
 /// run of this dataset gives half a million objects per picture and some two
-/// hundred megabytes of map, against a few dozen kilobytes once the network is
-/// reading real regions. Ten pictures of that, over the handful of epochs
-/// `checkpoint/` keeps, is a run whose sheets weigh more than the dataset it
-/// trained on and an epoch which spends longer drawing than training.
+/// hundred megabytes of map to write and draw again, against a few dozen
+/// kilobytes once the network is reading real regions. Ten pictures of that
+/// is an epoch which spends longer drawing than training.
 ///
 /// Three is enough to see whether a run is learning to read a map, which is
 /// what the sheets are for; `--image-valid` is there for a run which wants
@@ -149,6 +154,12 @@ impl<B: Backend> ImageValidation<B> {
             .map_err(|e| format!("cannot make {}: {e}", folder.display()))?;
         let (model, _) = load::<B>(&self.run, Some(&file), &self.device)?;
 
+        // Where the maps go while they are being drawn from, and no further:
+        // what is kept of an epoch is its sheets. Dropped at the end of the
+        // epoch, which takes the maps with it.
+        let scratch = tempfile::tempdir()
+            .map_err(|e| format!("cannot make a folder for the read-back maps: {e}"))?;
+
         for picture in &self.pictures {
             let stem = picture
                 .file_stem()
@@ -160,7 +171,7 @@ impl<B: Backend> ImageValidation<B> {
                 &image,
                 &self.symbol_set,
                 &self.symbols,
-                &folder.join(format!("{stem}.omap")),
+                &scratch.path().join(format!("{stem}.omap")),
                 &self.settings,
                 &self.device,
             )?;
