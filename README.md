@@ -569,7 +569,7 @@ trainings/
     │   └── …
     ├── train/01/…             the metrics of every epoch, per split
     ├── valid/01/…
-    ├── image_valid/08/…       the maps that epoch read back, drawn
+    ├── image_valid/08/…       the pictures that epoch read back, drawn
     └── best.mpk               the weights of the epoch which validated best
 ```
 
@@ -601,14 +601,17 @@ side.
 That is a run learning to read a map — 41% of the picture agreeing at epoch 2,
 81% at epoch 8, 83% at epoch 12 — and it is the one thing a column of losses
 cannot tell you. `--image-valid <COUNT>` sets how many pictures (3 by
-default, `0` for none), and each epoch's folder keeps the `.omap` files as
-well, so a map that looks wrong can be opened in Mapper and looked at.
+default, `0` for none). Only the sheets are kept: the maps themselves are
+written to a scratch folder and thrown away with it, since a run's worth of
+read-back maps is a great deal of disk for something nobody opens. To keep
+one, run `image_to_map` over the picture with the epoch's weights.
 
 Three rather than more because of what the early epochs cost. A network which
 has learned nothing yet says noise, and noise vectorizes into as many objects
 as the grid has cells to spare: the first epoch of a run on this dataset gives
-half a million objects and some two hundred megabytes of `.omap` per picture,
-against a few dozen kilobytes once it is reading real regions. The tolerance
+half a million objects and some two hundred megabytes of `.omap` per picture
+to write and draw again, against a few dozen kilobytes once it is reading real
+regions. The tolerance
 does not help there — a single-cell object has no staircase to simplify — so
 the number of pictures is the thing to turn down.
 
