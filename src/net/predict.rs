@@ -389,9 +389,10 @@ pub struct ReadBackSettings {
 impl ReadBackSettings {
     /// The settings a run of `crop` pixels wants, over a picture drawn at
     /// `resolution` with a map of `scale_denominator`: tiles the size the run
-    /// trained at, overlapping by [`OVERLAP`] of that, every node the
-    /// staircase asks for, and [`PREDICTED_SAME_ANGLE`] between two cells of
-    /// one object.
+    /// trained at, overlapping by [`OVERLAP`] of that, and the two loosened
+    /// numbers a grid off a network wants of the vectorizer —
+    /// [`PREDICTED_TOLERANCE`] of boundary and [`PREDICTED_SAME_ANGLE`]
+    /// between two cells of one object.
     pub fn of(crop: usize, resolution: f64, scale_denominator: i32) -> ReadBackSettings {
         ReadBackSettings {
             tile: crop,
@@ -399,12 +400,36 @@ impl ReadBackSettings {
             resolution,
             scale_denominator,
             simplify: Simplify {
-                tolerance: 0.0,
+                tolerance: PREDICTED_TOLERANCE,
                 same_angle: PREDICTED_SAME_ANGLE,
             },
         }
     }
 }
+
+/// How far a boundary may be moved to be rid of a node, in cells, when the
+/// boundary came from a network.
+///
+/// One cell, which is one pixel of the picture — a third of a meter of ground
+/// at the three pixels per meter a dataset is drawn at. The counterpart of
+/// [`PREDICTED_SAME_ANGLE`] for the other of [`Simplify`]'s two numbers, and
+/// looser than [`crate::vectorize::Simplify::default`] for the same reason:
+/// nought is right for a grid of exact labels, and a grid read off a picture
+/// is not one.
+///
+/// What it buys is measured on the labels themselves, where a boundary is
+/// known to be the one a map was drawn with: over a dataset map it takes the
+/// 32,261 coordinates of the untouched staircase down to 5,028, and moves
+/// three hundredths of a percent of the drawn pixels — half a pixel of edge,
+/// which is what a tolerance of one pixel is allowed to be. A node every pixel
+/// or two along a boundary which wandered smoothly across the ground is a node
+/// the map it came from never had.
+///
+/// It is not what makes an early epoch's map small: there the objects are
+/// single cells in their hundreds of thousands, and a cell has no staircase to
+/// simplify. Fewer pictures is the answer to that one — see
+/// [`crate::net::image_valid::DEFAULT_IMAGE_VALID`].
+pub const PREDICTED_TOLERANCE: f64 = 1.0;
 
 /// How far apart two neighbouring pixels' angles may be and still be one
 /// object's, when the angles came from a network.
@@ -742,6 +767,35 @@ mod tests {
             load::<TestBackend>(dir.path(), None, &device).expect("cannot read them back");
         let after = predict_image(&read, &image, 16, 4, &device);
         assert_eq!(before.class, after.class);
+    }
+
+    /// Reading a grid off a network loosens both of the vectorizer's numbers,
+    /// which is the whole difference between these settings and the ones a
+    /// file of exact labels is vectorized with.
+    ///
+    /// Stated as a comparison rather than as the two values, since what
+    /// matters is that neither is the default: a boundary a network drew is
+    /// not the staircase it comes out as, and its angles are a noisy field
+    /// rather than one angle per object.
+    #[test]
+    fn a_grid_off_a_network_is_vectorized_more_loosely_than_a_file_of_labels() {
+        let exact = Simplify::default();
+        let predicted = ReadBackSettings::of(256, 3.0, 10000).simplify;
+        assert!(
+            predicted.tolerance > exact.tolerance,
+            "{} is not looser than {}",
+            predicted.tolerance,
+            exact.tolerance,
+        );
+        assert!(
+            predicted.same_angle > exact.same_angle,
+            "{} is not looser than {}",
+            predicted.same_angle,
+            exact.same_angle,
+        );
+        // And a tolerance is in cells, so one which reached across a crop
+        // would take a region's boundary off altogether.
+        assert!(predicted.tolerance < 16.0);
     }
 
     /// A run folder with no weights in it says so, rather than handing back a

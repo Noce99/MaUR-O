@@ -57,7 +57,9 @@
 //! the line drawn in its place. It is off by default because it is a decision
 //! about how much of the answer to keep, and that is not this module's to
 //! make. It and the angle two neighbouring cells may differ by are the two
-//! fields of [`Simplify`].
+//! fields of [`Simplify`], and a caller which reads a grid off a network hands
+//! both of them something looser: see
+//! [`crate::net::predict::PREDICTED_TOLERANCE`].
 //!
 //! [Douglas–Peucker]: https://en.wikipedia.org/wiki/Ramer%E2%80%93Douglas%E2%80%93Peucker_algorithm
 //!
@@ -327,7 +329,7 @@ pub fn to_objects(
     let mut objects = Vec::with_capacity(regions.regions.len());
     for region in &regions.regions {
         let entry = &symbols[region.class];
-        let mut loops = trace_loops(grid, &regions.region_of, region.id);
+        let mut loops = trace_loops(grid, &regions.region_of, region.id, &region.cells);
         if loops.is_empty() {
             continue;
         }
@@ -444,6 +446,12 @@ struct Region {
     /// The angle its fill pattern is turned to, in radians — the circular
     /// mean of its cells' — and `None` where none of them had one.
     turn: Option<f64>,
+    /// The cells it is made of, in row-major order: the region's own boundary
+    /// is traced from these rather than by looking over the whole grid for
+    /// them, which is what keeps [`to_objects`] linear in the grid however
+    /// many regions the grid falls into. A network part way through learning
+    /// gives hundreds of thousands of them.
+    cells: Vec<usize>,
 }
 
 /// The regions of a grid, and which of them each cell belongs to.
@@ -479,6 +487,7 @@ fn regions_of(grid: &SymbolGrid, symbols: usize, same_angle: f32) -> Result<Regi
         }
 
         let id = regions.len() as u32;
+        let mut cells = Vec::new();
         // The angle of a region is the circular mean of its cells', taken as
         // points on the unit circle: an angle has a seam where a whole turn
         // brings it back, and averaging across that seam is how a region
@@ -488,6 +497,7 @@ fn regions_of(grid: &SymbolGrid, symbols: usize, same_angle: f32) -> Result<Regi
         stack.push(start);
         region_of[start] = id;
         while let Some(at) = stack.pop() {
+            cells.push(at);
             let turn = grid.rotation[at];
             if turn != NO_ROTATION {
                 let (s, c) = (turn as f64 * TAU).sin_cos();
@@ -523,10 +533,16 @@ fn regions_of(grid: &SymbolGrid, symbols: usize, same_angle: f32) -> Result<Regi
         // A resultant of no length is a region whose cells point every way at
         // once, which is no angle rather than an angle of nothing.
         let turn = (angled > 0 && sin.hypot(cos) > 1e-9).then(|| sin.atan2(cos).rem_euclid(TAU));
+        // The flood fill reaches the cells in whatever order the stack came
+        // to them; row-major is the order `trace_loops` wants them in, since
+        // which unit edge a loop starts at is the first one a scan of the grid
+        // would have come to.
+        cells.sort_unstable();
         regions.push(Region {
             id,
             class: class as usize,
             turn,
+            cells,
         });
     }
 
@@ -564,7 +580,13 @@ type Vertex = (i32, i32);
 /// rather than a parting: the traversal takes the sharpest left turn there,
 /// which carries the boundary through the pinch and leaves what the pinch
 /// closed off as a hole of its own.
-fn trace_loops(grid: &SymbolGrid, region_of: &[u32], id: u32) -> Vec<Vec<Vertex>> {
+///
+/// `cells` is the region's own cells, in row-major order — [`Region::cells`].
+/// Looking for them over the whole grid instead would cost the grid once per
+/// region, and a grid which falls into as many regions as it has cells is
+/// then quadratic in its own size: an hour and more on the 1650-pixel picture
+/// a part-trained network gives, which is what that reads as from outside.
+fn trace_loops(grid: &SymbolGrid, region_of: &[u32], id: u32, cells: &[usize]) -> Vec<Vec<Vertex>> {
     let (width, height) = (grid.width as i32, grid.height as i32);
     let inside = |column: i32, row: i32| {
         column >= 0
@@ -584,24 +606,19 @@ fn trace_loops(grid: &SymbolGrid, region_of: &[u32], id: u32) -> Vec<Vec<Vertex>
         leaving.entry(from).or_default().push(edges.len());
         edges.push((from, to));
     };
-    for row in 0..height {
-        for column in 0..width {
-            if !inside(column, row) {
-                continue;
-            }
-            let (c, r) = (column, row);
-            if !inside(c, r - 1) {
-                edge((c, r), (c + 1, r), &mut edges, &mut leaving);
-            }
-            if !inside(c + 1, r) {
-                edge((c + 1, r), (c + 1, r + 1), &mut edges, &mut leaving);
-            }
-            if !inside(c, r + 1) {
-                edge((c + 1, r + 1), (c, r + 1), &mut edges, &mut leaving);
-            }
-            if !inside(c - 1, r) {
-                edge((c, r + 1), (c, r), &mut edges, &mut leaving);
-            }
+    for &at in cells {
+        let (c, r) = ((at % grid.width) as i32, (at / grid.width) as i32);
+        if !inside(c, r - 1) {
+            edge((c, r), (c + 1, r), &mut edges, &mut leaving);
+        }
+        if !inside(c + 1, r) {
+            edge((c + 1, r), (c + 1, r + 1), &mut edges, &mut leaving);
+        }
+        if !inside(c, r + 1) {
+            edge((c + 1, r + 1), (c, r + 1), &mut edges, &mut leaving);
+        }
+        if !inside(c - 1, r) {
+            edge((c, r + 1), (c, r), &mut edges, &mut leaving);
         }
     }
 
@@ -1078,6 +1095,45 @@ mod tests {
     fn cells_which_touch_at_a_corner_alone_are_two_regions() {
         let objects = objects_of(&["0.", ".0"], 0.0);
         assert_eq!(objects.len(), 2);
+    }
+
+    /// A grid of nothing but single-cell regions costs the grid once, not once
+    /// per region.
+    ///
+    /// The cost is what this is about, and the object count is only how it is
+    /// checked: a chequerboard is the worst a grid can be — as many regions as
+    /// it has cells to spare — and tracing each region's boundary by looking
+    /// for its cells over the whole grid made that quadratic. This grid is a
+    /// hundred thousand cells, which is a hair of work per region and some
+    /// 10^9 the other way; a picture of a map is twenty-five times larger
+    /// again, and that is a run which never comes out of its first epoch of
+    /// image validation.
+    #[test]
+    fn a_grid_of_many_regions_is_vectorized_in_one_pass_over_it() {
+        let side = 320;
+        let mut grid = SymbolGrid::new(side, side);
+        let mut regions = 0;
+        for row in 0..side {
+            for column in 0..side {
+                if (row + column) % 2 == 0 {
+                    grid.class[row * side + column] = 0;
+                    regions += 1;
+                } else {
+                    grid.class[row * side + column] = BACKGROUND;
+                }
+            }
+        }
+
+        let objects = to_objects(
+            &grid,
+            &symbols(4),
+            &placement(side, side),
+            &Simplify::default(),
+        )
+        .expect("a grid of known classes");
+        // Every cell of the chequerboard on its own, since touching at a
+        // corner alone is not being joined.
+        assert_eq!(objects.len(), regions);
     }
 
     /// A pinch inside one region is a pinch rather than a parting: the cells

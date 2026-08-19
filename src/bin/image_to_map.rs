@@ -50,7 +50,9 @@ use maur_o::xml_reader::read_xml_map;
 
 use maur_o::vectorize::Simplify;
 
-use maur_o::net::predict::{load, read_back, ReadBackSettings, OVERLAP, PREDICTED_SAME_ANGLE};
+use maur_o::net::predict::{
+    load, read_back, ReadBackSettings, OVERLAP, PREDICTED_SAME_ANGLE, PREDICTED_TOLERANCE,
+};
 
 #[derive(Parser)]
 #[command(
@@ -86,7 +88,7 @@ struct Args {
     /// How far the boundary may be moved to be rid of a node, in cells --
     /// one cell being one pixel of the picture. Nought keeps every node the
     /// staircase asks for, which on a picture this size is a great many.
-    #[arg(short = 't', long, default_value_t = 0.0, value_name = "PIXELS")]
+    #[arg(short = 't', long, default_value_t = PREDICTED_TOLERANCE, value_name = "PIXELS")]
     tolerance: f64,
 
     /// How far apart two neighbouring pixels' angles may be and still be one

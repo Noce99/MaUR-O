@@ -45,11 +45,14 @@
 use burn::config::Config;
 use burn::module::Module;
 use burn::nn::conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig};
+use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
 use burn::nn::{BatchNorm, BatchNormConfig, PaddingConfig2d, Relu};
 use burn::prelude::Backend;
 use burn::tensor::activation::softmax;
 use burn::tensor::Tensor;
+
+use crate::net::training::DEFAULT_ANGLE_WEIGHT;
 
 /// How many times the picture is halved on the way down and doubled on the
 /// way back up.
@@ -81,6 +84,19 @@ pub struct UNetConfig {
     /// The feature maps at full resolution, doubling at every step down.
     #[config(default = "DEFAULT_BASE_CHANNELS")]
     pub base_channels: usize,
+    /// What the angle term counts for beside the class term — see
+    /// [`crate::net::training::TrainingConfig::angle_weight`]. Carried by the
+    /// model rather than passed to the loss because burn's `TrainStep` hands
+    /// a step nothing but the batch and the model, so the model is the only
+    /// place a run's own figure can reach it from.
+    #[config(default = "DEFAULT_ANGLE_WEIGHT")]
+    pub angle_weight: f64,
+    /// What each class counts for in the cross-entropy, the frame last:
+    /// `classes + 1` figures, or `None` for a loss which counts every pixel
+    /// the same. See [`crate::net::training::class_weights`] for where a
+    /// run's come from and why it wants them.
+    #[config(default = "None")]
+    pub class_weights: Option<Vec<f32>>,
 }
 
 impl UNetConfig {
@@ -116,6 +132,13 @@ impl UNetConfig {
             // the rest of the network was for.
             head: Conv2dConfig::new([self.base_channels, self.classes + 3], [1, 1]).init(device),
             classes: self.classes,
+            // Built once here rather than per step: the weights are a tensor,
+            // and a tensor built inside a training step is a tensor built
+            // tens of thousands of times an epoch.
+            class_loss: CrossEntropyLossConfig::new()
+                .with_weights(self.class_weights.clone())
+                .init(device),
+            angle_weight: self.angle_weight,
         }
     }
 }
@@ -137,6 +160,11 @@ pub struct UNet<B: Backend> {
     head: Conv2d<B>,
     /// How many opaque areas the symbol set holds — see [`UNetConfig`].
     classes: usize,
+    /// The cross-entropy the class logits are scored with, its per-class
+    /// weights already in it — see [`UNetConfig::class_weights`].
+    class_loss: CrossEntropyLoss<B>,
+    /// What the angle term counts for — see [`UNetConfig::angle_weight`].
+    angle_weight: f64,
 }
 
 impl<B: Backend> UNet<B> {
@@ -207,6 +235,17 @@ impl<B: Backend> UNet<B> {
     /// one-hot channels its answer has.
     pub fn classes(&self) -> usize {
         self.classes
+    }
+
+    /// The cross-entropy the class logits are scored with, per-class weights
+    /// and all.
+    pub fn class_loss(&self) -> &CrossEntropyLoss<B> {
+        &self.class_loss
+    }
+
+    /// What the angle term counts for beside the class term.
+    pub fn angle_weight(&self) -> f64 {
+        self.angle_weight
     }
 
     /// How many channels its answer has in the dataset's shape: one per

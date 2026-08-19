@@ -600,9 +600,17 @@ side.
 
 That is a run learning to read a map — 41% of the picture agreeing at epoch 2,
 81% at epoch 8, 83% at epoch 12 — and it is the one thing a column of losses
-cannot tell you. `--image-valid <COUNT>` sets how many pictures (10 by
+cannot tell you. `--image-valid <COUNT>` sets how many pictures (3 by
 default, `0` for none), and each epoch's folder keeps the `.omap` files as
 well, so a map that looks wrong can be opened in Mapper and looked at.
+
+Three rather than more because of what the early epochs cost. A network which
+has learned nothing yet says noise, and noise vectorizes into as many objects
+as the grid has cells to spare: the first epoch of a run on this dataset gives
+half a million objects and some two hundred megabytes of `.omap` per picture,
+against a few dozen kilobytes once it is reading real regions. The tolerance
+does not help there — a single-cell object has no staircase to simplify — so
+the number of pictures is the thing to turn down.
 
 The sheets are kept for exactly the epochs `checkpoint/` keeps — the last five
 and the best — because they are pruned to match it after every epoch rather
@@ -669,11 +677,16 @@ the sort two rasterizers have about an edge they both drew — a distinction
 that earns its keep here, since rounding the staircase off a boundary moves it
 by half a pixel and half a pixel of boundary is exactly an edge effect.
 
-`--tolerance` and `--same-angle` are the vectorizer's, and `--same-angle`
-defaults looser here than it does in `grid_to_map`: a label file holds one
-exact angle per object, while a network gives a continuous field with noise on
-it, and a tight threshold would read that noise as a difference of angle and
-shatter every turning area into fragments.
+`--tolerance` and `--same-angle` are the vectorizer's, and **both default
+looser here than they do in `grid_to_map`**, because a grid read off a network
+is not a grid of exact labels. A label file holds one exact angle per object,
+while a network gives a continuous field with noise on it, and a tight
+threshold would read that noise as a difference of angle and shatter every
+turning area into fragments. And a boundary a network drew was never the
+staircase it comes out as: `--tolerance` is one cell here — one pixel of the
+picture, a third of a meter of ground — where `grid_to_map` keeps every node.
+On a dataset map that is 5,028 coordinates in place of 32,261, for three
+hundredths of a percent of the drawn pixels, which is half a pixel of edge.
 
 ## Implementation Details
 
