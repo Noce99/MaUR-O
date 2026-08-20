@@ -12,10 +12,25 @@
 //! numbers are in the `training.json` the run wrote before it started, which
 //! is why [`load`] reads that first and the weights second.
 //!
-//! The recorder has to be the one which saved: `CompactRecorder`, which is
-//! burn's named-messagepack file recorder at half precision. `best.mpk` is
-//! the epoch which validated best; a `checkpoint/007/model.mpk` is the same
-//! format and loads the same way, which is what `weights` is for.
+//! The recorder has to be the one which saved. That is `DefaultRecorder` —
+//! burn's named-messagepack file recorder at **full** precision — and it is
+//! full precision for one reason: a batch normalization's running variance
+//! does not fit in an `f16`. This network's reach 1e5 by the fourth level and
+//! `f16` tops out at 65504, so a run written by burn's `CompactRecorder`
+//! stored those channels as infinities, and a channel loaded with an infinite
+//! variance normalizes to nothing and emits its own bias everywhere. It costs
+//! a run nothing while it is going — training normalizes by the batch it is
+//! holding, and the model in memory is `f32` — and it costs every use of the
+//! file afterwards everything.
+//!
+//! A run written before that was so still opens — a record carries the type
+//! it was written in and burn widens it on the way back — but widening an
+//! infinity gives an infinity, so what comes back is the broken model rather
+//! than the one which trained. There is nothing to recover from such a file;
+//! the run has to be trained again.
+//!
+//! `best.mpk` is the epoch which validated best; a `checkpoint/007/model.mpk`
+//! is the same format and loads the same way, which is what `weights` is for.
 //!
 //! # The picture
 //!
@@ -57,7 +72,8 @@
 //!
 //! What it does **not** do is decide that a symbol with no pattern to turn
 //! has no angle. That needs the symbol set, which is a thing about the map
-//! rather than about the network — see [`blank_still_angles`].
+//! rather than about the network — see [`resolve_angles`], which is also
+//! where the angle is unfolded by the symbol's own symmetry.
 //!
 //! # The whole way round
 //!
@@ -74,7 +90,7 @@ use std::path::Path;
 use burn::config::Config;
 use burn::module::Module;
 use burn::prelude::Backend;
-use burn::record::CompactRecorder;
+use burn::record::DefaultRecorder;
 use burn::tensor::{Tensor, TensorData};
 use image::RgbImage;
 
@@ -134,7 +150,7 @@ pub fn load<B: Backend>(
     let model = UNetConfig::new(config.classes)
         .with_base_channels(config.base_channels)
         .init::<B>(device)
-        .load_file(weights, &CompactRecorder::new(), device)
+        .load_file(weights, &DefaultRecorder::new(), device)
         .map_err(|e| {
             format!(
                 "cannot read the weights from {}: {e}\nA run which was stopped before it \
@@ -142,6 +158,23 @@ pub fn load<B: Backend>(
                 weights.display(),
             )
         })?;
+
+    // A run from before the recorder was full precision. The file opens --
+    // burn widens what it was written in -- but widening an infinity gives
+    // an infinity, and a batch normalization channel loaded with one emits
+    // its own bias and nothing else. Said out loud, because the answer looks
+    // like a network which learned the wrong thing rather than like a file
+    // which lost what it learned.
+    let dead = model.constant_channels();
+    if dead > 0 {
+        eprintln!(
+            "Warning: {} holds {dead} batch normalization channels whose variance is not finite. \
+             It was written at half precision, by a run from before that was fixed: every \
+             variance over 65504 was stored as an infinity, and a channel loaded with one is a \
+             constant. What this model says is worth no more than the file. Train again.",
+            weights.display(),
+        );
+    }
     Ok((model, config))
 }
 
@@ -331,7 +364,7 @@ pub fn read_back<B: Backend>(
     // A symbol with no pattern to turn gets no angle, whatever the two
     // channels said: left in, that noise is read as a difference of angle and
     // splits the region into fragments.
-    blank_still_angles(&mut grid, symbols);
+    resolve_angles(&mut grid, symbols);
 
     let (width, height) = (picture.width() as f64, picture.height() as f64);
     let (ground_width, ground_height) = (width / settings.resolution, height / settings.resolution);
@@ -441,21 +474,35 @@ pub const PREDICTED_TOLERANCE: f64 = 1.0;
 /// into fragments.
 pub const PREDICTED_SAME_ANGLE: f32 = 0.05;
 
-/// Takes the angle off every cell whose symbol has no pattern to turn.
+/// Turns the angles a network gave into angles a map can be written with:
+/// unfolded by each symbol's own symmetry, and taken off entirely where the
+/// symbol has no pattern to turn.
 ///
-/// The network gives two numbers for every pixel whatever the symbol is, and
-/// on a symbol with nothing to turn they are noise. Left in, that noise is
-/// read as a difference of angle and splits the region into fragments — see
-/// `vectorize::Simplify::same_angle` — so it goes here, where the symbol set
-/// is known and the network is not.
-pub fn blank_still_angles(grid: &mut SymbolGrid, symbols: &[Entry]) {
+/// Two things the network cannot do for itself, both of them facts about the
+/// symbol set rather than about the picture.
+///
+/// **Unfolding.** What the network was trained to give is the angle
+/// multiplied by however many turns of that symbol look alike — see
+/// [`crate::ground_truth::GroundTruth::sin_cos_folded`], and
+/// [`crate::symbol_kinds::pattern_symmetry`] for why. So a quarter-symmetric
+/// symbol predicted at a whole turn is really at a quarter of one, and
+/// dividing is what puts it back. Which of the four quarter turns it was is
+/// not in the picture and never was; any of them draws it, and this takes the
+/// first.
+///
+/// **Blanking.** The network gives two numbers for every pixel whatever the
+/// symbol is, and on a symbol with nothing to turn they are noise. Left in,
+/// that noise is read as a difference of angle and splits the region into
+/// fragments — see `vectorize::Simplify::same_angle`.
+pub fn resolve_angles(grid: &mut SymbolGrid, symbols: &[Entry]) {
     for (class, rotation) in grid.class.iter().zip(&mut grid.rotation) {
-        let turns = symbols
-            .get(*class as usize)
-            .is_some_and(|symbol| symbol.turns);
-        if !turns {
+        let symbol = symbols.get(*class as usize);
+        if !symbol.is_some_and(|symbol| symbol.turns) || *rotation == NO_ROTATION {
             *rotation = NO_ROTATION;
+            continue;
         }
+        let order = symbol.map_or(1, |symbol| symbol.symmetry.max(1));
+        *rotation = (*rotation / order as f32).rem_euclid(1.0);
     }
 }
 
@@ -681,14 +728,58 @@ mod tests {
                 code: String::new(),
                 name: String::new(),
                 turns,
+                symmetry: 1,
             })
             .collect();
 
         let mut grid = SymbolGrid::new(3, 1);
         grid.class = vec![0, 1, BACKGROUND];
         grid.rotation = vec![0.25, 0.25, 0.25];
-        blank_still_angles(&mut grid, &symbols);
+        resolve_angles(&mut grid, &symbols);
         assert_eq!(grid.rotation, [NO_ROTATION, 0.25, NO_ROTATION]);
+    }
+
+    /// What a network gives is the angle folded by the symbol's own symmetry
+    /// — see [`crate::ground_truth::GroundTruth::sin_cos_folded`] — so this
+    /// is where it is divided back down into an angle a map can be written
+    /// with.
+    #[test]
+    fn an_angle_comes_back_out_divided_by_the_symbols_symmetry() {
+        let mut symbols = symbols(2);
+        symbols[1].turns = true;
+        symbols[1].symmetry = 4;
+
+        let mut grid = SymbolGrid::new(4, 1);
+        grid.class = vec![1, 1, 1, 1];
+        // A whole turn of the folded angle is a quarter turn of the symbol,
+        // which is exactly the turn that draws the same picture again.
+        grid.rotation = vec![0.0, 0.4, 0.8, 0.99];
+        resolve_angles(&mut grid, &symbols);
+        for (at, wanted) in [0.0, 0.1, 0.2, 0.2475].into_iter().enumerate() {
+            assert!(
+                (grid.rotation[at] - wanted).abs() < 1e-6,
+                "{at}: {} is not {wanted}",
+                grid.rotation[at],
+            );
+        }
+        // Everything it can give lands inside the one turn the picture can
+        // tell apart, and none of it past it.
+        assert!(grid.rotation.iter().all(|&turn| (0.0..0.25).contains(&turn)));
+    }
+
+    /// A symbol which folds nothing keeps the angle it was given, which is
+    /// what every symbol did before there was any folding at all.
+    #[test]
+    fn a_symmetry_of_one_leaves_the_angle_where_it_was() {
+        let mut symbols = symbols(2);
+        symbols[1].turns = true;
+        symbols[1].symmetry = 1;
+
+        let mut grid = SymbolGrid::new(2, 1);
+        grid.class = vec![1, 1];
+        grid.rotation = vec![0.3, 0.75];
+        resolve_angles(&mut grid, &symbols);
+        assert_eq!(grid.rotation, [0.3, 0.75]);
     }
 
     /// The whole way round: a picture in, a map on disk, a drawing of it and
@@ -738,6 +829,7 @@ mod tests {
                 code: String::new(),
                 name: String::new(),
                 turns: at + 1 == count,
+                symmetry: 1,
             })
             .collect()
     }
@@ -760,7 +852,7 @@ mod tests {
             .save(dir.path().join("training.json"))
             .expect("cannot write the configuration");
         model
-            .save_file(dir.path().join(BEST_WEIGHTS), &CompactRecorder::new())
+            .save_file(dir.path().join(BEST_WEIGHTS), &DefaultRecorder::new())
             .expect("cannot write the weights");
 
         let (read, _) =

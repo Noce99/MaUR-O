@@ -22,7 +22,15 @@
 //! * the class of each pixel, `[CROP, CROP]`, as an index into the symbol
 //!   list of `classes.json` — with the white frame given a class of its own,
 //!   the last one, rather than the `0xFFFF` a file writes;
-//! * the sine and the cosine of each pixel's angle, `[2, CROP, CROP]`.
+//! * the sine and the cosine of each pixel's angle, `[2, CROP, CROP]` —
+//!   **folded** by however many turns of that pixel's symbol look exactly
+//!   alike, which is what makes a pattern drawn at four indistinguishable
+//!   angles one target instead of four (see
+//!   [`crate::ground_truth::GroundTruth::sin_cos_folded`], and
+//!   `crate::net::predict::resolve_angles` for the way back);
+//! * and which map it was cut out of, and where — read by nothing which
+//!   trains, and there for anything which looks at a crop rather than
+//!   learning from it.
 //!
 //! The label on disk is `H, W, C` and everything here is `C, H, W`, which is
 //! what burn's convolutions read. The order changes here, once, while the
@@ -83,7 +91,7 @@ use burn::data::dataset::Dataset;
 use burn::prelude::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 
-use crate::dataset::{resolution_of, GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER};
+use crate::dataset::{resolution_of, Classes, CLASSES_FILE, GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER};
 use crate::ground_truth::{GroundTruth, BACKGROUND};
 use crate::random::Random;
 use crate::symbol_kinds::Catalogue;
@@ -117,6 +125,23 @@ pub struct MapCrop {
     pub angle: Vec<f32>,
     /// How many pixels square this crop is.
     pub size: usize,
+    /// The name of the map it was cut out of, without its suffix.
+    ///
+    /// Nothing in training reads this: it is here for anything looking at a
+    /// crop rather than learning from one — `show_batches` names the map a
+    /// crop came from, and a crop which looks wrong is worth being able to
+    /// find in `images/`.
+    pub map: String,
+    /// Which pixel of that map the crop's left edge is at. Negative where the
+    /// crop hangs off the edge — see [`MapDataset::with_overhang`].
+    ///
+    /// With [`MapCrop::top`], what puts the crop back where it came from:
+    /// the fill patterns of a map are drawn against the map's own ground, so
+    /// a crop rendered anywhere else comes out with its dots in the wrong
+    /// places even when every class is right.
+    pub left: isize,
+    /// Which pixel of that map the crop's top edge is at.
+    pub top: isize,
 }
 
 /// Where one map's labels come from.
@@ -151,6 +176,30 @@ pub struct MapDataset {
     crops_per_map: usize,
     /// How many pixels square a crop is.
     crop: usize,
+    /// How far a crop may hang off the edge of the map, in pixels.
+    ///
+    /// Nought keeps every crop wholly inside, which is the obvious thing to
+    /// do and quietly wrong: a crop's corner is drawn uniformly, so the pixel
+    /// it lands on is that corner plus an offset — the sum of two uniform
+    /// draws, which piles up in the middle of a map and thins towards its
+    /// edges. The white frame is a third of a picture and a seventh of what
+    /// 256-pixel crops show of it, so the network is trained on a mixture the
+    /// map does not hold and `image_to_map` does not show it.
+    ///
+    /// Letting a crop hang off and filling what is past the edge with white
+    /// is what evens that out, and it is honest rather than a trick: past the
+    /// edge of a map really is white paper, which is what the frame is, and
+    /// `net::predict::tile_tensor` already pads its tiles with white for the
+    /// same reason. Half the crop makes the crop's *centre* uniform over the
+    /// map, and so every pixel of the map equally likely — see
+    /// [`MapDataset::with_overhang`].
+    overhang: usize,
+    /// How many turns of each class look exactly alike, in the order the
+    /// classes are numbered — [`crate::symbol_kinds::pattern_symmetry`] of
+    /// each opaque area of the symbol set. What the angle of a pixel is
+    /// folded by before it is handed over, and all ones for a dataset whose
+    /// `classes.json` names no symbol set to read them from.
+    symmetry: Vec<u32>,
     /// What the crop positions come out of. A dataset is asked for the same
     /// item more than once — every epoch, for one — and an item which
     /// changed between two asks would make a validation score mean nothing,
@@ -272,13 +321,16 @@ impl MapDataset {
             }
         }
 
+        let classes = classes.expect("there is at least one map");
         Ok(MapDataset {
             maps,
             size: size.expect("there is at least one map"),
-            classes: classes.expect("there is at least one map"),
+            classes,
             resolution,
             crops_per_map: DEFAULT_CROPS_PER_MAP,
             crop: CROP,
+            overhang: 0,
+            symmetry: symmetry_of(folder, classes),
             seed,
         })
     }
@@ -299,7 +351,23 @@ impl MapDataset {
             ));
         }
         self.crop = crop.max(16);
+        // A crop of another size wants its overhang checked again against it.
+        self.overhang = self.overhang.min(self.crop.saturating_sub(1));
         Ok(self)
+    }
+
+    /// How far a crop may hang off the edge of the map, padded with the
+    /// white a map is printed on — see the field, which is where the reason
+    /// is.
+    ///
+    /// Clamped below the crop, since a crop entirely off the map is a crop of
+    /// nothing at all. Half the crop is the figure with a meaning: it makes
+    /// the crop's centre uniform over the map, so every pixel of the map is
+    /// equally likely to be trained on, which is the mixture a whole picture
+    /// through `image_to_map` shows.
+    pub fn with_overhang(mut self, overhang: usize) -> MapDataset {
+        self.overhang = overhang.min(self.crop.saturating_sub(1));
+        self
     }
 
     /// How many maps the folder held.
@@ -329,17 +397,31 @@ impl MapDataset {
         self.classes
     }
 
-    /// What share of the labelled pixels each class holds, the frame last:
-    /// `classes + 1` figures which sum to one.
+    /// What share of the pixels **a crop shows** each class holds, the frame
+    /// last: `classes + 1` figures which sum to one.
     ///
-    /// Read off the ground truth alone — the pictures beside it are never
-    /// decoded — and off `sample` maps rather than all of them, taken at an
-    /// even stride through the folder so that a dataset generated in some
-    /// order is not counted from one end of it. A map whose labels are
-    /// rasterized afresh rather than read from `gt/` costs what rasterizing
-    /// it costs, which is what the stride is here to bound.
+    /// Over the crops rather than over the whole maps, and that is the whole
+    /// point of it. A network trained on crops is never shown a map, and the
+    /// two do not hold the same mixture: a crop is placed at a corner drawn
+    /// uniformly, so the pixel it lands on is that corner plus an offset —
+    /// the sum of two uniform draws, which piles up in the middle of a map
+    /// and thins out towards its edges. Anything living at the edge is seen
+    /// less often than it covers. On a generated dataset the white frame is a
+    /// third of every picture and a seventh of what 256-pixel crops show, and
+    /// counted the other way it comes out as the commonest class in the
+    /// dataset when it is really the rarest thing the network is shown.
     ///
-    /// A class no sampled map held comes back as nought, and what to do
+    /// The crops counted are the very crops [`MapDataset::get`] would serve —
+    /// same seed, same corners — so this is a census of the training set and
+    /// not a model of it.
+    ///
+    /// Off `sample` maps rather than all of them, taken at an even stride
+    /// through the folder so that a dataset generated in some order is not
+    /// counted from one end of it. A map whose labels are rasterized afresh
+    /// rather than read from `gt/` costs what rasterizing it costs, which is
+    /// what the stride is here to bound.
+    ///
+    /// A class no sampled crop held comes back as nought, and what to do
     /// about that belongs to whoever asked: this counts, it does not smooth.
     pub fn class_balance(&self, sample: usize) -> Result<Vec<f64>, String> {
         let mut counted = vec![0u64; self.classes + 1];
@@ -350,16 +432,33 @@ impl MapDataset {
         // At least one map, and never a stride which walks off the end.
         let wanted = sample.clamp(1, self.maps.len());
         let stride = self.maps.len() / wanted;
+        let (width, height) = self.size;
+        let size = self.crop.min(width).min(height);
 
-        for index in (0..self.maps.len()).step_by(stride.max(1)).take(wanted) {
-            let (_, labels) = &self.maps[index];
+        for map in (0..self.maps.len()).step_by(stride.max(1)).take(wanted) {
+            let (_, labels) = &self.maps[map];
             let truth = self.labels(labels)?;
-            for &class in &truth.class_of {
-                let at = match class {
-                    BACKGROUND => self.classes,
-                    symbol => symbol as usize,
-                };
-                counted[at] += 1;
+
+            // The crops this map would be asked for, at the corners `get`
+            // works out for those same item indices.
+            for crop in 0..self.crops_per_map {
+                let index = map * self.crops_per_map + crop;
+                let mut random = Random::from_seed(self.seed.wrapping_add(index as u64));
+                let (left, top) = self.corner(&mut random, width, height);
+
+                for row in 0..size {
+                    for column in 0..size {
+                        // Off the map is white paper, which is the frame --
+                        // and the frame is the last class.
+                        let at = match inside(left + column as isize, top + row as isize, width, height)
+                            .map(|from| truth.class_of[from])
+                        {
+                            None | Some(BACKGROUND) => self.classes,
+                            Some(symbol) => symbol as usize,
+                        };
+                        counted[at] += 1;
+                    }
+                }
             }
         }
 
@@ -371,6 +470,25 @@ impl MapDataset {
             .into_iter()
             .map(|count| count as f64 / total as f64)
             .collect())
+    }
+
+    /// The corner a crop is taken from, which may be off the map by up to
+    /// [`MapDataset::overhang`] in either direction.
+    ///
+    /// One place rather than two, because [`MapDataset::class_balance`] has
+    /// to count the very crops [`MapDataset::get`] serves — a census of the
+    /// training set is no use if it is drawn from somewhere else.
+    fn corner(&self, random: &mut Random, width: usize, height: usize) -> (isize, isize) {
+        // A crop no larger than the map it comes out of: `with_crop` refuses
+        // one that does not fit, but a dataset asked for a balance before
+        // that has the default still on it.
+        let size = self.crop.min(width).min(height);
+        let overhang = self.overhang.min(size.saturating_sub(1));
+        let span = |length: usize| length + 2 * overhang - size + 1;
+        (
+            random.below(span(width)) as isize - overhang as isize,
+            random.below(span(height)) as isize - overhang as isize,
+        )
     }
 
     /// One map's labels, however they are kept — read from `gt/`, or
@@ -407,6 +525,8 @@ impl MapDataset {
             resolution: self.resolution,
             crops_per_map: self.crops_per_map,
             crop: self.crop,
+            overhang: self.overhang,
+            symmetry: self.symmetry.clone(),
             seed,
         };
         // Different seeds, so the two halves do not crop at the same corners.
@@ -415,6 +535,65 @@ impl MapDataset {
             part(valid, self.seed.wrapping_add(0x5eed)),
         )
     }
+}
+
+/// Where in the map `truth.class_of` a pixel of the crop comes from, and
+/// `None` for one which is off the map altogether.
+fn inside(x: isize, y: isize, width: usize, height: usize) -> Option<usize> {
+    let (inside_x, inside_y) = (
+        (0..width as isize).contains(&x),
+        (0..height as isize).contains(&y),
+    );
+    (inside_x && inside_y).then(|| y as usize * width + x as usize)
+}
+
+/// How many turns of each of a dataset's classes look exactly alike, in the
+/// order the classes are numbered.
+///
+/// Read off the symbol set `classes.json` names, which is the only place it
+/// is written down: a label file holds an angle per pixel and says nothing
+/// about which of them a picture could tell apart. See
+/// [`crate::symbol_kinds::pattern_symmetry`] for what is being counted.
+///
+/// All ones — which folds nothing, and leaves the angle exactly as the labels
+/// hold it — for a dataset generated before the symbol set was copied in
+/// beside them, or one whose symbol set will not parse. That is the old
+/// behaviour rather than an error: a run can still be had from it, and the
+/// warning says what it will cost.
+fn symmetry_of(folder: &Path, classes: usize) -> Vec<u32> {
+    let plain = vec![1u32; classes];
+    let complain = |what: String| {
+        eprintln!(
+            "Warning: {what}, so the pattern angles are left unfolded. A symbol whose pattern              looks the same at several angles cannot be learned that way -- see              maur_o::symbol_kinds::pattern_symmetry."
+        );
+    };
+
+    let notes = folder.join(CLASSES_FILE);
+    let Ok(read) = Classes::read(&notes) else {
+        complain(format!("{} cannot be read", notes.display()));
+        return plain;
+    };
+    let Some(named) = read.symbol_set else {
+        complain(format!("{} names no symbol set", notes.display()));
+        return plain;
+    };
+    let set = folder.join(named);
+    let Ok((mut map, _)) = read_xml_map(&set) else {
+        complain(format!("{} cannot be read", set.display()));
+        return plain;
+    };
+    map.resolve_references();
+
+    let areas = Catalogue::of(&map).opaque_areas;
+    if areas.len() != classes {
+        complain(format!(
+            "{} holds {} opaque areas and the labels were written for {classes}",
+            set.display(),
+            areas.len(),
+        ));
+        return plain;
+    }
+    areas.iter().map(|area| area.symmetry).collect()
 }
 
 /// How big a PNG is, out of its header rather than by decoding it.
@@ -461,8 +640,7 @@ impl Dataset<MapCrop> for MapDataset {
 
         // The same index gives the same corner however often it is asked for.
         let mut random = Random::from_seed(self.seed.wrapping_add(index as u64));
-        let left = random.below(width - self.crop + 1);
-        let top = random.below(height - self.crop + 1);
+        let (left, top) = self.corner(&mut random, width, height);
 
         let pixels = self.crop * self.crop;
         let mut rgb = vec![0.0; 3 * pixels];
@@ -476,9 +654,22 @@ impl Dataset<MapCrop> for MapDataset {
         for row in 0..self.crop {
             for column in 0..self.crop {
                 let at = row * self.crop + column;
-                let from = (top + row) * width + left + column;
+                let (x, y) = (left + column as isize, top + row as isize);
 
-                let pixel = image.get_pixel((left + column) as u32, (top + row) as u32);
+                // Past the edge of the map is the white paper a map is
+                // printed on, which is the same thing the frame around it is
+                // -- see `MapDataset::overhang`. Only reachable at all where
+                // an overhang was asked for.
+                let Some(from) = inside(x, y, width, height) else {
+                    for channel in 0..3 {
+                        // 255 on the scale below, which is white.
+                        rgb[channel * pixels + at] = 1.0;
+                    }
+                    class[at] = frame;
+                    continue;
+                };
+
+                let pixel = image.get_pixel(x as u32, y as u32);
                 for (channel, &value) in pixel.0.iter().enumerate() {
                     // Nought to 255 becomes -1 to 1, which is where a network
                     // with a symmetric activation would rather be given its
@@ -490,7 +681,18 @@ impl Dataset<MapCrop> for MapDataset {
                     BACKGROUND => frame,
                     symbol => symbol as i32,
                 };
-                let (sin, cos) = truth.sin_cos(from);
+                // Folded by however many turns of this class look alike,
+                // which is what makes the angle a thing there is one answer
+                // to -- see `GroundTruth::sin_cos_folded`.
+                // The frame's class is `BACKGROUND`, which is past the end
+                // of the list and comes back as one -- and it has no angle to
+                // fold either way.
+                let order = self
+                    .symmetry
+                    .get(truth.class_of[from] as usize)
+                    .copied()
+                    .unwrap_or(1);
+                let (sin, cos) = truth.sin_cos_folded(from, order);
                 angle[at] = sin;
                 angle[pixels + at] = cos;
             }
@@ -501,6 +703,12 @@ impl Dataset<MapCrop> for MapDataset {
             class,
             angle,
             size: self.crop,
+            map: image_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            left,
+            top,
         })
     }
 }
@@ -559,6 +767,9 @@ mod tests {
             class: vec![class; size * size],
             angle: vec![value; 2 * size * size],
             size,
+            map: "map".to_string(),
+            left: 0,
+            top: 0,
         }
     }
 
@@ -577,6 +788,108 @@ mod tests {
         let values = image.as_slice::<f32>().expect("floats");
         assert_eq!(values[0], 1.0);
         assert_eq!(values[3 * 4 * 4], -1.0);
+    }
+
+    /// A crop allowed to hang off the edge sees the map's rim as often as the
+    /// map holds it, and one held wholly inside does not.
+    ///
+    /// This is the whole case for [`MapDataset::with_overhang`], as a number:
+    /// count how often the outermost band of a map turns up in the crops, and
+    /// compare it against how much of the map that band actually is.
+    #[test]
+    fn an_overhang_lets_a_crop_see_the_edge_of_the_map() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let folder = dir.path().join("dataset");
+        let settings = crate::dataset::Settings {
+            layout_size: 3,
+            cell_size: 60,
+            maps: 4,
+            just_opaque_areas: true,
+            resolution: 2.0,
+            frame: 30.0,
+            ..crate::dataset::Settings::default()
+        };
+        crate::dataset::create_dataset(
+            Path::new("tests/data/turning_patterns.xmap"),
+            &folder,
+            &settings,
+            |_, _| {},
+        )
+        .expect("the dataset generates");
+
+        // The frame is the outermost band, and the only class which lives at
+        // the edge of a map: how much of the crops it holds is the measure.
+        let balance = |overhang: usize| -> f64 {
+            let dataset = MapDataset::load(&folder, 0)
+                .expect("the dataset loads")
+                .with_crop(64)
+                .expect("a crop which fits")
+                .with_crops_per_map(24)
+                .with_overhang(overhang);
+            let shares = dataset.class_balance(8).expect("a balance");
+            shares[dataset.classes()]
+        };
+
+        let held_in = balance(0);
+        let hanging_over = balance(32);
+        assert!(
+            hanging_over > held_in * 1.2,
+            "a crop held inside sees the frame {:.1} per cent of the time and one allowed to \
+             hang off sees it {:.1}, which is not the point of the option",
+            100.0 * held_in,
+            100.0 * hanging_over,
+        );
+    }
+
+    /// An overhang is clamped below the crop however it is asked for: a crop
+    /// entirely off the map is a crop of nothing at all, and a crop resized
+    /// afterwards has its overhang checked again against the new size.
+    #[test]
+    fn an_overhang_never_takes_the_crop_off_the_map() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let folder = dir.path().join("dataset");
+        let settings = crate::dataset::Settings {
+            layout_size: 2,
+            cell_size: 40,
+            maps: 2,
+            just_opaque_areas: true,
+            resolution: 2.0,
+            frame: 10.0,
+            ..crate::dataset::Settings::default()
+        };
+        crate::dataset::create_dataset(
+            Path::new("tests/data/turning_patterns.xmap"),
+            &folder,
+            &settings,
+            |_, _| {},
+        )
+        .expect("the dataset generates");
+
+        let dataset = MapDataset::load(&folder, 0)
+            .expect("the dataset loads")
+            .with_crop(64)
+            .expect("a crop which fits")
+            .with_overhang(usize::MAX)
+            .with_crop(32)
+            .expect("a smaller crop");
+
+        // Whatever was asked for, no crop is taken from entirely off the map:
+        // the corner stays within a crop's width of it on either side, so
+        // some of the picture is always in there. It may be almost all white
+        // -- that is what an overhang of a crop less one means -- but it is
+        // never a crop of nowhere.
+        for index in 0..dataset.len().min(8) {
+            let crop = dataset.get(index).expect("a crop");
+            assert_eq!(crop.image.len(), 3 * crop.size * crop.size);
+            assert_eq!(crop.class.len(), crop.size * crop.size);
+            let reach = crop.size as isize;
+            assert!(
+                crop.left > -reach && crop.top > -reach,
+                "crop {index} starts at {},{} which is a whole crop off the map",
+                crop.left,
+                crop.top,
+            );
+        }
     }
 
     /// A folder with nothing to train on says so, rather than handing back a

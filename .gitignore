@@ -31,3 +31,6 @@ trainings/
 # cudarc build needs) -- not something to push, since it is a fact about this
 # machine rather than about the project.
 .cargo/
+
+
+batches

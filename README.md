@@ -32,6 +32,9 @@ set, for when the maps that exist are not enough.
 - [Reading a map back: the `net` module](#reading-a-map-back-the-net-module)
   - [Image validation](#image-validation)
   - [`image_to_map`](#image_to_map)
+  - [The angle, and why it is folded](#the-angle-and-why-it-is-folded)
+  - [Weight decay](#weight-decay)
+  - [`show_batches`](#show_batches)
 - [Implementation Details](#implementation-details)
 - [Known Limitations](#known-limitations)
 
@@ -64,7 +67,8 @@ The six executables are then at:
 - `target/release/`[`grid_to_map`](#grid_to_map)
 - `target/release/`[`image_to_map`](#image_to_map)
 
-and `target/release/train`, the one tool with no map to read: see
+and `target/release/train` and `target/release/`[`show_batches`](#show_batches),
+the two tools with no map to read: see
 [Reading a map back](#reading-a-map-back-the-net-module).
 
 ### Fonts and fontconfig
@@ -527,11 +531,25 @@ split is **by map, not by crop**: two crops of one map overlap as often as
 not, and validating on a crop of a map the network trained on scores memory
 rather than reading.
 
+A crop is allowed to **hang off the edge** of its map, by half its width
+unless `--overhang <PIXELS>` says otherwise, with what lies past the edge
+filled in as the white paper the map is printed on. This is not a trick to get
+more crops: it is what makes the crops honest. If a crop must sit wholly
+inside, its corner is drawn uniformly and so its *centre* is the sum of two
+uniform draws — piled up in the middle of the map, thin at the rim. The white
+frame is a third of a picture and a seventh of what 256-pixel crops show of
+it, so a run trained on a mixture the picture does not hold, and answered
+accordingly when a whole picture was put through it. With the overhang the
+crop's centre is uniform and every pixel of the map equally likely. Past the
+edge of a map really is white paper, which is what the frame is, and
+`net::predict` already pads its tiles the same way. `--overhang 0` restores
+the old, inside-only sampling.
+
 The loss is cross-entropy on the classes plus weighted squared error on the
-`(sin, cos)` pair. The angle term runs over *every* pixel, not just the turned
-ones — where there is no angle the label is the zero vector, and learning to
-shrink to nothing there is learning that there is nothing to say, which on
-these datasets is four fifths of the picture.
+`(sin, cos)` pair, the angle term taken over the pixels which *have* an angle
+and no others: a pixel of a symbol that does not turn has no direction to be
+wrong about, and averaging its zero in with the rest only tells the network
+how much of the picture is unturned.
 
 Three numbers per epoch: loss, pixel accuracy (the frame counted as a symbol —
 a network answering "frame" everywhere already scores about a quarter, so read
@@ -690,6 +708,132 @@ staircase it comes out as: `--tolerance` is one cell here — one pixel of the
 picture, a third of a meter of ground — where `grid_to_map` keeps every node.
 On a dataset map that is 5,028 coordinates in place of 32,261, for three
 hundredths of a percent of the drawn pixels, which is half a pixel of edge.
+
+### The angle, and why it is folded
+
+A symbol whose fill turns is labelled with the angle it was turned to, and the
+network is asked for the sine and the cosine of it. Asked for them plainly,
+that question has no answer for most patterns worth asking about.
+
+Orchard (413) fills with a **square** grid of round dots. Turn it a quarter
+turn and it is the same grid: four different angles draw one picture. A
+network shown that picture and asked which of the four it was can do no better
+than the average of them — and the average of four points evenly spaced round
+a circle is the middle of the circle, which is exactly the `(0, 0)` that means
+"no angle at all". So the least wrong answer is to say nothing, and the score
+for saying nothing is the score for pointing anywhere: **90°, every epoch, for
+as long as you care to train it.**
+
+The fix is to ask a question which has an answer. Each symbol's rotational
+symmetry `n` is read off its patterns — see `maur_o::symbol_kinds::pattern_symmetry`
+— and the target becomes the sine and cosine of `n` times the angle. The `n`
+turns which drew one picture now share one target. What comes back is the
+angle *within* one of those turns; dividing by `n` gives one of them, and every
+one of them draws the picture, so the map written from it is the same map.
+
+| pattern | `n` |
+| --- | --- |
+| parallel lines | 2 |
+| square grid of round dots | 4 |
+| oblong or staggered grid | 2 |
+| a grid of anything not round | 1 |
+| several turning patterns | their gcd |
+
+The count errs downwards on purpose: claiming less symmetry than there is
+costs a little of what could have been learned, while claiming more folds
+together angles which really do look different, and there is no recovering
+from that. A symbol this cannot make a case about gets `n = 1`, which folds
+nothing.
+
+`show_batches` prints what it found, so you can check it against the symbol
+set:
+
+```text
+dataset/simple_ISOM_10k.omap: the angles fold -- 413 every 1/4 turn
+```
+
+One consequence to know when reading a run: the `Angle error` metric is in
+degrees of the *folded* angle, so 90° on a 4-fold symbol is a little over 22°
+on the map. Both ends of the scale still mean what they did — 0° is right, 90°
+is chance.
+
+### Weight decay
+
+The optimizer is AdamW, and `--weight-decay` defaults to `0.1` rather than to
+nothing. It is there for a reason particular to a network built out of batch
+normalizations: a normalization leaves the loss **invariant** to the scale of
+the convolution feeding it, so nothing in the loss has an opinion about how
+large those weights are, and Adam — whose step is about the same size whatever
+the gradient was — walks that scale upwards for as long as a run lasts. A
+fourteen epoch run of this network ended with weights around a hundred times
+the size they were initialized at.
+
+That costs a run twice. The running statistics a normalization keeps are
+always describing the network of a few hundred steps ago when the scale is
+still moving, so the validation half is scored on a network which no longer
+quite exists; and the part of the gradient which does any work — the part
+across the scale, the part along it doing nothing — shrinks as `1/||W||`, so
+the last epochs of a long run train at a fraction of the rate they were set
+to. A sweep of four six-epoch runs, at ten times the rate so that a long run's
+drift falls into a few hundred steps:
+
+| `--weight-decay` | best valid accuracy | last epoch | `gamma` rms |
+| --- | --- | --- | --- |
+| 0 | 51.5% | 32.6% | 0.994 |
+| 0.01 | 59.8% | 59.8% | 0.983 |
+| **0.1** | **65.0%** | **65.0%** | 0.884 |
+| 1.0 | 35.2% | 32.2% | 0.304 |
+
+Nought is the one which came apart — best at its third epoch and a third worse
+by its sixth. Not much more than a tenth either, because burn's AdamW decays
+every parameter it is handed, a normalization's own `gamma` among them, and
+`gamma` is scale free in the same way: at 1.0 it is pulled to a third of what
+it should be and the run learns half as much. `--weight-decay 0` turns it off
+and makes the optimizer plain Adam.
+
+This is *not* what keeps a checkpoint readable — that is the recorder, which
+writes at full precision because a normalization's running **variance** does
+not fit in an `f16`. The two are separate.
+
+### `show_batches`
+
+What the network is *shown*, drawn instead of descended. A loss going down
+says the network agrees with the labels; it does not say the labels are right,
+and nothing in a run ever puts a batch in front of you.
+
+```bash
+cargo run --release --bin show_batches -- dataset batches -n 2 -b 8
+```
+
+It builds the crops the way [`train`](#reading-a-map-back-the-net-module)
+does — the same split, crop size, `--crops-per-map` and seed, through the same
+batcher — and writes one sheet per batch, a row per crop: the picture, and the
+labels of that crop. Both panels are read **back out of the tensors** rather
+than out of the files behind them, so a channel swapped or a scale mistaken
+shows up as a picture rather than as a run which will not learn. The labels
+are drawn the whole way round — vectorized into a map and rendered again, as
+[`image_to_map`](#image_to_map) draws what a network says — over the very
+ground the crop was cut from, so the fill patterns land where the picture's
+do; the caption names the map and the corner, so a crop worth a second look
+can be found in `images/`.
+
+`--run <folder>` puts each crop through that run's network as well, adds a
+panel for what it said, and prints two tables over every crop drawn. The first
+is the confusion matrix — what each class really was against what the network
+called it — which is the one table that says whether a network scoring well on
+pixels is reading the map or has found the commonest answer, and whether it
+ever calls a pixel the frame at all. The second splits each class into the
+colour it is drawn in nearly everywhere and the pattern drawn over it, because
+those are not the same question: on a dot, the pixel says what it is by its
+own colour; between the dots, only the pattern *around* the pixel does, which
+the first convolution cannot see and only a level far enough down to hold two
+dots at once can.
+
+`--margin <pixels>` leaves that many pixels of every crop's own edge out of
+both tables. A convolution pads with nought and a U-Net of four levels does it
+eighteen times over, so a band around every crop is answered for partly out of
+padding rather than out of picture; leaving it out is what separates that from
+a class the network cannot tell apart anywhere.
 
 ## Implementation Details
 

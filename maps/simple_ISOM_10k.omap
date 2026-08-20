@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<map xmlns="http://openorienteering.org/apps/mapper/xml/v2" version="9">
+<notes></notes>
+<georeferencing scale="10000"><projected_crs id="Local"/></georeferencing>
+<colors count="35">
+<color priority="0" name="Purple for course overprint" c="0.35" m="0.85" y="0" k="0" opacity="1"><spotcolors knockout="true"><namedcolor>PURPLE</namedcolor></spotcolors><cmyk method="custom"/><rgb method="cmyk" r="0.65" g="0.15" b="1"/></color>
+<color priority="1" name="White for course overprint" c="0" m="0" y="0" k="0" opacity="1"><spotcolors knockout="true"><component factor="0" spotcolor="2"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="1" g="1" b="1"/></color>
+<color priority="2" name="Black 100%" c="0" m="0" y="0" k="1" opacity="1"><spotcolors><namedcolor>BLACK</namedcolor></spotcolors><cmyk method="custom"/><rgb method="cmyk" r="0" g="0" b="0"/></color>
+<color priority="3" name="Green 100%" c="0.76" m="0" y="0.91" k="0" opacity="1"><spotcolors><namedcolor>GREEN</namedcolor></spotcolors><cmyk method="custom"/><rgb method="cmyk" r="0.24" g="1" b="0.09"/></color>
+<color priority="4" name="White for railway" c="0" m="0" y="0" k="0" opacity="1"><spotcolors knockout="true"><component factor="0" spotcolor="2"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="1" g="1" b="1"/></color>
+<color priority="5" name="Blue 100%" c="1" m="0" y="0" k="0" opacity="1"><spotcolors><namedcolor>BLUE</namedcolor></spotcolors><cmyk method="custom"/><rgb method="cmyk" r="0" g="1" b="1"/></color>
+<color priority="6" name="Brown 100%" c="0" m="0.56" y="1" k="0.18" opacity="1"><spotcolors><namedcolor>BROWN</namedcolor></spotcolors><cmyk method="custom"/><rgb method="cmyk" r="0.82" g="0.361" b="0"/></color>
+<color priority="7" name="Purple for track symbols" c="0.35" m="0.85" y="0" k="0" opacity="1"><spotcolors><component factor="1" spotcolor="0"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.65" g="0.15" b="1"/></color>
+<color priority="8" name="Black below purple for track symbols" c="0" m="0" y="0" k="1" opacity="1"><spotcolors><component factor="1" spotcolor="2"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0" g="0" b="0"/></color>
+<color priority="9" name="Black 65%" c="0" m="0" y="0" k="0.65" opacity="1"><spotcolors knockout="true"><component factor="0.65" spotcolor="2"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.35" g="0.35" b="0.35"/></color>
+<color priority="10" name="Black 20%" c="0" m="0" y="0" k="0.2" opacity="1"><spotcolors knockout="true"><component factor="0.2" spotcolor="2"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.8" g="0.8" b="0.8"/></color>
+<color priority="11" name="Upper brown 50%" c="0" m="0.28" y="0.5" k="0.09" opacity="1"><spotcolors knockout="true"><component factor="0.5" spotcolor="6"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.91" g="0.68" b="0.5"/></color>
+<color priority="12" name="Black below upper brown 50%" c="0" m="0" y="0" k="1" opacity="1"><spotcolors><component factor="1" spotcolor="2"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0" g="0" b="0"/></color>
+<color priority="13" name="Lower brown 50%" c="0" m="0.28" y="0.5" k="0.09" opacity="1"><spotcolors knockout="true"><component factor="0.5" spotcolor="6"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.91" g="0.68" b="0.5"/></color>
+<color priority="14" name="Black below lower brown 50%" c="0" m="0" y="0" k="1" opacity="1"><spotcolors><component factor="1" spotcolor="2"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0" g="0" b="0"/></color>
+<color priority="15" name="Blue 100% for area features" c="1" m="0" y="0" k="0" opacity="1"><spotcolors knockout="true"><component factor="1" spotcolor="5"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0" g="1" b="1"/></color>
+<color priority="16" name="Blue 70%" c="0.7" m="0" y="0" k="0" opacity="1"><spotcolors knockout="true"><component factor="0.7" spotcolor="5"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.3" g="1" b="1"/></color>
+<color priority="17" name="Blue 50%" c="0.5" m="0" y="0" k="0" opacity="1"><spotcolors knockout="true"><component factor="0.5" spotcolor="5"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.5" g="1" b="1"/></color>
+<color priority="18" name="OpenOrienteering Orange" c="0" m="0.474" y="0.895" k="0.09" opacity="1"><spotcolors knockout="true"><component factor="0.5" spotcolor="6"/><component factor="1" spotcolor="32"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.91" g="0.497" b="0.105"/></color>
+<color priority="19" name="Yellow 100% for narrow ride" c="0" m="0.27" y="0.79" k="0" opacity="1"><spotcolors knockout="true"><component factor="1" spotcolor="32"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="1" g="0.73" b="0.21"/></color>
+<color priority="20" name="Green 60% for narrow ride" c="0.456" m="0" y="0.546" k="0" opacity="1"><spotcolors knockout="true"><component factor="0.6" spotcolor="3"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.544" g="1" b="0.454"/></color>
+<color priority="21" name="Green 30% for narrow ride" c="0.228" m="0" y="0.273" k="0" opacity="1"><spotcolors knockout="true"><component factor="0.3" spotcolor="3"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.772" g="1" b="0.727"/></color>
+<color priority="22" name="White over green" c="0" m="0" y="0" k="0" opacity="1"><spotcolors knockout="true"><component factor="0" spotcolor="3"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="1" g="1" b="1"/></color>
+<color priority="23" name="Yellow 100%/Green 50%" c="0.38" m="0.27" y="0.886" k="0" opacity="1"><spotcolors knockout="true"><component factor="0.5" spotcolor="3"/><component factor="1" spotcolor="32"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.62" g="0.73" b="0.114"/></color>
+<color priority="24" name="Black 25% (Grey)" c="0" m="0" y="0" k="0.25" opacity="1"><spotcolors knockout="true"><component factor="0.25" spotcolor="2"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.75" g="0.75" b="0.75"/></color>
+<color priority="25" name="Green 100%/Black 50%" c="0.76" m="0" y="0.91" k="0.5" opacity="1"><spotcolors knockout="true"><component factor="1" spotcolor="3"/><component factor="0.5" spotcolor="2"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.12" g="0.5" b="0.045"/></color>
+<color priority="26" name="Green 100% for area features" c="0.76" m="0" y="0.91" k="0" opacity="1"><spotcolors knockout="true"><component factor="1" spotcolor="3"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.24" g="1" b="0.09"/></color>
+<color priority="27" name="Green 60%" c="0.456" m="0" y="0.546" k="0" opacity="1"><spotcolors knockout="true"><component factor="0.6" spotcolor="3"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.544" g="1" b="0.454"/></color>
+<color priority="28" name="Green 30%" c="0.228" m="0" y="0.273" k="0" opacity="1"><spotcolors knockout="true"><component factor="0.3" spotcolor="3"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.772" g="1" b="0.727"/></color>
+<color priority="29" name="Green 100% for undergrowth" c="0.76" m="0" y="0.91" k="0" opacity="1"><spotcolors knockout="true"><component factor="1" spotcolor="3"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.24" g="1" b="0.09"/></color>
+<color priority="30" name="White over yellow" c="0" m="0" y="0" k="0" opacity="1"><spotcolors knockout="true"><component factor="0" spotcolor="32"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="1" g="1" b="1"/></color>
+<color priority="31" name="Black for open land" c="0" m="0" y="0" k="1" opacity="1"><spotcolors><component factor="1" spotcolor="2"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0" g="0" b="0"/></color>
+<color priority="32" name="Yellow" c="0" m="0.27" y="0.79" k="0" opacity="1"><spotcolors knockout="true"><namedcolor>YELLOW</namedcolor></spotcolors><cmyk method="custom"/><rgb method="cmyk" r="1" g="0.73" b="0.21"/></color>
+<color priority="33" name="Yellow 100% for area features" c="0" m="0.27" y="0.79" k="0" opacity="1"><spotcolors knockout="true"><component factor="1" spotcolor="32"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="1" g="0.73" b="0.21"/></color>
+<color priority="34" name="Yellow 50%" c="0" m="0.135" y="0.395" k="0" opacity="1"><spotcolors knockout="true"><component factor="0.5" spotcolor="32"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="1" g="0.865" b="0.605"/></color>
+</colors>
+<barrier version="6" required="0.6.0">
+<symbols count="5" id="ISOM 2017-2">
+<symbol type="4" id="0" code="213" name="Sandy ground"><description>An area of soft sandy ground where runnability is reduced to less than 80% of normal speed.
+The symbol is orientated to north.
+Minimum area: 1 mm x 1 mm (footprint 15 m x 15 m).</description><area_symbol inner_color="34" min_area="2250" patterns="1"><pattern type="2" angle="0.785398" line_spacing="675" line_offset="0" offset_along_line="0" point_distance="675"><symbol type="1" code="" name="Pattern fill 1"><point_symbol rotatable="true" inner_radius="120" inner_color="31" outer_width="0" outer_color="-1" elements="0"/></symbol></pattern></area_symbol></symbol>
+<symbol type="4" id="1" code="301.1" name="Uncrossable body of water (full colour)"><description>Dominant areas of water may be shown with 70% colour. Small areas of water and bodies of water that have narrow parts shall always be shown with full colour.
+Minimum width (inside): 0.3 mm.
+Minimum area (inside): 0.55 mm x 0.55 mm (footprint 8 m x 8 m).</description><area_symbol inner_color="15" min_area="2250" patterns="0"/>
+<icon src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABYAAAAWCAIAAABL1vtsAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAH0lEQVQ4jWNk+PSfgTLARKH+USNGjRg1YtSIUSPIAgCt1AIdbYPnGQAAAABJRU5ErkJggg=="/></symbol>
+<symbol type="4" id="2" code="413" name="Orchard"><description>Land planted with trees or bushes, normally in a regular pattern. The dot lines may be orientated to show the direction of planting.
+Must be combined with either symbol Open land (401) or Rough open land (403).
+May be combined with symbol Vegetation: slow running, good visibility (407) or Vegetation: walk, good visibility (409) to show reduced runnability.
+Minimum area: 2 mm x 2 mm (footprint 30 m x 30 m).</description><area_symbol inner_color="33" min_area="9000" rotatable="true" patterns="1"><pattern type="2" angle="0" rotatable="true" line_spacing="1200" line_offset="0" offset_along_line="0" point_distance="1200"><symbol type="1" code="" name="Pattern fill 1"><point_symbol rotatable="true" inner_radius="338" inner_color="29" outer_width="0" outer_color="-1" elements="0"/></symbol></pattern></area_symbol></symbol>
+<symbol type="4" id="3" code="520" name="Area that shall not be entered"><description>An out-of-bounds area is a feature such as a private house, a garden, a factory or another industrial area. Only contours and prominent features such as railways and large buildings shall be shown inside an out-of-bounds area. Vertical black stripes may be used for areas where it is important to show a complete representation of the terrain (e.g. when a part of the forest is out-of-bounds). The area shall be discontinued where a path or track goes through.
+Out-of-bound areas with a clear border shall be bounded by a black boundary line or another black line. If the border is unclear no black line shall occur.
+Course planning symbol 709 can be used for temporary out-of bounds areas.
+The vertical black stripes version of the symbol is orientated to north.
+An out-of-bounds area shall not be entered.
+Minimum area: 1 mm x 1 mm (footprint 15 m x 15 m).</description><area_symbol inner_color="23" min_area="2250" patterns="0"/></symbol>
+<symbol type="4" id="4" code="521" name="Building"><description>A building is shown with its ground plan so far as the scale permits.
+Buildings larger than 75 m x 75 m may be represented with a dark grey infill in urban areas.
+Passages through buildings must have a minimum width of 0.3 mm (footprint 4.5 m).
+Buildings within forbidden areas are generalised.
+Areas totally contained within a building shall not be mapped (they shall be represented as being part of the building). Minimum gap indicating a passage between buildings and between buildings and other impassable features should be 0.4 mm.
+Minimum area: 0.5 mm x 0.5 mm (footprint 7.5 m x 7.5 m).</description><area_symbol inner_color="8" min_area="675" patterns="0"/></symbol>
+</symbols>
+<parts count="1" current="0">
+<part name="default layer"><objects count="0">
+</objects></part>
+</parts>
+<templates count="0" first_front_template="0">
+<defaults use_meters_per_pixel="true" meters_per_pixel="0" dpi="0" scale="0"/>
+</templates>
+<view>
+<grid color="#646464" display="0" alignment="0" additional_rotation="0" unit="1" h_spacing="500" v_spacing="500" h_offset="0" v_offset="0" snapping_enabled="true"/>
+<map_view zoom="1" position_x="0" position_y="0"><map opacity="1" visible="true"/><templates count="0"/></map_view>
+</view>
+</barrier>
+<barrier version="6" required="0.6.0">
+<undo>
+<step type="2"><affected_objects part="0"><ref object="0"/><ref object="1"/></affected_objects><contained_objects count="2"><object type="1" symbol="1"><coords count="13">-4655 -52372 1;-5101 -53092;-6049 -53314;-6769 -52867 1;-7491 -52421;-7713 -51472;-7264 -50751 1;-6817 -50029;-5869 -49809;-5149 -50256 1;-4429 -50704;-4208 -51651;-4655 -52372 18;</coords><pattern rotation="0"><coord x="0" y="0"/></pattern></object><object type="1" symbol="3"><coords count="13">-11574 -52627 1;-12058 -51987;-11933 -51076;-11292 -50592 1;-10651 -50107;-9741 -50233;-9256 -50872 1;-8773 -51513;-8899 -52423;-9538 -52910 1;-10179 -53392;-11089 -53267;-11574 -52627 18;</coords><pattern rotation="0"><coord x="0" y="0"/></pattern></object></contained_objects></step>
+</undo>
+<redo>
+</redo>
+</barrier>
+</map>

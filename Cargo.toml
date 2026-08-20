@@ -54,6 +54,12 @@ path = "src/bin/train.rs"
 name = "image_to_map"
 path = "src/bin/image_to_map.rs"
 
+# Not a step of the pipeline: what the batches a run is trained on look like,
+# drawn rather than descended.
+[[bin]]
+name = "show_batches"
+path = "src/bin/show_batches.rs"
+
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }

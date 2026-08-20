@@ -40,7 +40,7 @@
 //! generator drops onto filled ground — the transparent areas and the point
 //! symbols — against every opaque area the set holds.
 
-use crate::map::{fill_pattern_type, is_color, Map, PointSymbol, Symbol};
+use crate::map::{fill_pattern_type, is_color, FillPattern, Map, PointSymbol, Symbol};
 
 /// How deep a combined symbol's parts are followed before giving up. A symbol
 /// which is its own part is not a thing Mapper writes, but a file is a file.
@@ -93,6 +93,12 @@ pub struct Entry {
     /// never turns, and a combined symbol is left alone — the file carries
     /// no `rotatable` of its own for one.
     pub turns: bool,
+    /// How many turns of this symbol look exactly alike — see
+    /// [`pattern_symmetry`], which is where it comes from and what it is for.
+    ///
+    /// One for a symbol whose every angle draws something different, and for
+    /// every symbol which does not turn at all.
+    pub symmetry: u32,
 }
 
 /// A symbol set sorted into the five kinds.
@@ -138,6 +144,14 @@ impl Catalogue {
                     }
                     SymbolKind::Point => matches!(symbol, Symbol::Point(p) if p.is_rotatable),
                     SymbolKind::Line | SymbolKind::Text => false,
+                },
+                symmetry: match kind {
+                    SymbolKind::OpaqueArea | SymbolKind::TransparentArea => {
+                        pattern_symmetry(map, symbol)
+                    }
+                    // A point symbol draws whatever it draws and this says
+                    // nothing about it; a line and a text do not turn at all.
+                    _ => 1,
                 },
             };
             match kind {
@@ -422,6 +436,147 @@ pub fn has_rotatable_pattern(map: &Map, symbol: &Symbol) -> bool {
     })
 }
 
+/// How many turns of a symbol's fill look exactly alike: the order `n` of its
+/// rotational symmetry, so that turning it by `1/n` of a whole turn draws the
+/// same picture.
+///
+/// This is a question nothing about drawing a map needs to ask, and one
+/// anything *reading* a map back has to. A regular grid of round dots turned
+/// by a quarter turn is the same grid: four different angles draw one
+/// picture, so a picture cannot say which of the four it was. Asked to
+/// predict the angle from the picture anyway, the best a network can do is
+/// answer the average of the four — which for four angles a quarter turn
+/// apart is nothing at all, and scores exactly as well as guessing. Folding
+/// the angle by `n` before it is ever asked for is what turns four
+/// unanswerable questions into one answerable one; see
+/// [`crate::ground_truth::GroundTruth::sin_cos_folded`].
+///
+/// Only the patterns which **turn** count. One which does not is drawn at the
+/// angle the symbol set gave it however the object is rotated, so it looks
+/// the same at every angle and says nothing about any of them.
+///
+/// What each kind of pattern comes to:
+///
+/// * Parallel lines are the same lines upside down, and nothing better:
+///   **two**.
+/// * A grid of points is **four** where the grid is square — the spacing
+///   between the lines equal to the spacing along them, and the lines not
+///   staggered — and **two** otherwise. A staggered grid is left at two
+///   rather than worked out: a hexagonal one is really six, and answering
+///   two where the truth is six costs a little of what could have been
+///   learned, where answering six where the truth is two would fold together
+///   angles which really do look different.
+/// * That grid is only as symmetric as the thing standing on it, so a point
+///   symbol which draws more than a dot and a ring — both of which look the
+///   same at every angle — takes the whole thing down to **one**. What it
+///   draws is anybody's guess, and guessing high is the one mistake here
+///   which cannot be recovered from.
+///
+/// Several turning patterns over one another are all turned by the same
+/// rotation about the same point, so what survives is what survives in all of
+/// them: the greatest common divisor.
+///
+/// One, therefore, for a symbol this cannot make a case about — which is the
+/// answer that folds nothing and leaves the angle exactly as it was.
+pub fn pattern_symmetry(map: &Map, symbol: &Symbol) -> u32 {
+    let mut order: Option<u32> = None;
+    turning_patterns(map, symbol, 0, &mut |pattern| {
+        let one = symmetry_of_pattern(pattern);
+        order = Some(match order {
+            Some(so_far) => greatest_common_divisor(so_far, one),
+            None => one,
+        });
+    });
+    order.unwrap_or(1).max(1)
+}
+
+/// Calls `found` for every pattern of the symbol, or of any symbol it is
+/// built out of, which turns with the object it is drawn on.
+fn turning_patterns(map: &Map, symbol: &Symbol, depth: usize, found: &mut dyn FnMut(&FillPattern)) {
+    match symbol {
+        Symbol::Area(area) => {
+            for pattern in area.patterns.iter().filter(|pattern| pattern.rotatable) {
+                found(pattern);
+            }
+        }
+        Symbol::Combined(combined) if depth < MAX_PART_DEPTH => {
+            for part in map.parts(combined) {
+                turning_patterns(map, part, depth + 1, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The order of one pattern's rotational symmetry — see [`pattern_symmetry`],
+/// which is where the reasoning is.
+fn symmetry_of_pattern(pattern: &FillPattern) -> u32 {
+    match pattern.pattern_type {
+        fill_pattern_type::LINE => 2,
+        fill_pattern_type::POINT => {
+            let lattice = point_lattice_symmetry(pattern);
+            match pattern.point.as_deref().map(point_symmetry) {
+                // A dot, a ring, or both: round, and so no constraint of its
+                // own on what the grid under it allows.
+                Some(None) => lattice,
+                Some(Some(glyph)) => greatest_common_divisor(lattice, glyph),
+                // A point pattern with no point symbol draws nothing.
+                None => 1,
+            }
+        }
+        _ => 1,
+    }
+}
+
+/// How symmetric the grid a point pattern stands its symbols on is.
+fn point_lattice_symmetry(pattern: &FillPattern) -> u32 {
+    // The spacings are lengths a file wrote down, so they are compared with a
+    // tolerance rather than for equality: a square grid written as two
+    // roundings of one number is still a square grid.
+    const CLOSE: f64 = 1e-6;
+
+    let (across, along) = (pattern.line_spacing, pattern.point_distance);
+    if across <= 0.0 || along <= 0.0 {
+        return 1;
+    }
+    // Successive lines shifted along themselves: the grid is no longer
+    // rectangular, and a half turn is all this claims for it.
+    if pattern.offset_along_line.abs() > CLOSE * along {
+        return 2;
+    }
+    if (across - along).abs() <= CLOSE * across.max(along) {
+        4
+    } else {
+        2
+    }
+}
+
+/// How symmetric a point symbol is about its own centre: `None` for one which
+/// looks the same at every angle, and `Some(n)` for one which does not.
+fn point_symmetry(point: &PointSymbol) -> Option<u32> {
+    // A filled dot and a ring around it are circles, and a circle is the same
+    // at every angle. Anything past that is drawn out of elements this does
+    // not read, so it is taken to look different at every angle -- see
+    // [`pattern_symmetry`] on why that is the safe way to be wrong.
+    if point.elements.is_empty() {
+        None
+    } else {
+        Some(1)
+    }
+}
+
+/// The largest number which divides both, and the order of the rotations two
+/// symmetric things have in common.
+fn greatest_common_divisor(a: u32, b: u32) -> u32 {
+    let (mut a, mut b) = (a.max(1), b.max(1));
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    a
+}
+
 /// Whether the symbol, or any symbol it is built out of, satisfies `wanted`.
 fn contains(map: &Map, symbol: &Symbol, depth: usize, wanted: &dyn Fn(&Symbol) -> bool) -> bool {
     if wanted(symbol) {
@@ -519,6 +674,125 @@ mod tests {
             color,
             ..AreaSymbol::new()
         })
+    }
+
+    /// An area filled with one turning grid of round dots, the lines `across`
+    /// apart and the dots `along` apart down each of them.
+    fn dotted(across: f64, along: f64, stagger: f64) -> Symbol {
+        Symbol::Area(AreaSymbol {
+            color: 2,
+            patterns: vec![FillPattern {
+                pattern_type: fill_pattern_type::POINT,
+                rotatable: true,
+                line_spacing: across,
+                point_distance: along,
+                offset_along_line: stagger,
+                point: Some(Box::new(PointSymbol {
+                    inner_radius: 0.2,
+                    inner_color: 0,
+                    ..PointSymbol::new()
+                })),
+                ..FillPattern::default()
+            }],
+            ..AreaSymbol::new()
+        })
+    }
+
+    /// A square grid of round dots is the same grid every quarter turn, which
+    /// is the whole reason any of this is counted.
+    #[test]
+    fn a_square_grid_of_round_dots_is_four_fold() {
+        let map = map_with(vec![dotted(1.2, 1.2, 0.0)]);
+        assert_eq!(pattern_symmetry(&map, &map.symbols[0]), 4);
+        // And the catalogue carries it, which is where everything else reads
+        // it from.
+        assert_eq!(Catalogue::of(&map).opaque_areas[0].symmetry, 4);
+    }
+
+    /// Lines further apart than the dots along them is a rectangular grid,
+    /// and a rectangle only comes back to itself at a half turn.
+    #[test]
+    fn an_oblong_grid_of_dots_is_only_two_fold() {
+        let map = map_with(vec![dotted(2.4, 1.2, 0.0)]);
+        assert_eq!(pattern_symmetry(&map, &map.symbols[0]), 2);
+    }
+
+    /// A grid whose lines are shifted along themselves is not rectangular at
+    /// all, and this claims no more than a half turn for it — see
+    /// [`pattern_symmetry`] on why it errs downwards.
+    #[test]
+    fn a_staggered_grid_is_left_at_two() {
+        let map = map_with(vec![dotted(1.2, 1.2, 0.6)]);
+        assert_eq!(pattern_symmetry(&map, &map.symbols[0]), 2);
+    }
+
+    /// The grid is only as symmetric as what stands on it: a point symbol
+    /// which draws more than a dot and a ring could be anything, and takes
+    /// the whole pattern down to a symmetry of one.
+    #[test]
+    fn a_grid_of_shapes_which_are_not_round_claims_nothing() {
+        let Symbol::Area(mut area) = dotted(1.2, 1.2, 0.0) else {
+            unreachable!("dotted builds an area")
+        };
+        let point = area.patterns[0].point.as_mut().expect("a point symbol");
+        point.elements = vec![crate::map::Element {
+            symbol: Symbol::Line(LineSymbol::default()),
+            object: crate::map::Object::new(crate::map::ObjectKind::Point),
+        }];
+        let map = map_with(vec![Symbol::Area(area)]);
+        assert_eq!(pattern_symmetry(&map, &map.symbols[0]), 1);
+    }
+
+    /// Parallel lines are the same lines upside down and nothing better.
+    #[test]
+    fn a_hatching_is_two_fold() {
+        let map = map_with(vec![Symbol::Area(AreaSymbol {
+            color: 2,
+            patterns: vec![FillPattern {
+                pattern_type: fill_pattern_type::LINE,
+                rotatable: true,
+                line_spacing: 1.0,
+                line_color: 0,
+                line_width: 0.1,
+                ..FillPattern::default()
+            }],
+            ..AreaSymbol::new()
+        })]);
+        assert_eq!(pattern_symmetry(&map, &map.symbols[0]), 2);
+    }
+
+    /// A pattern which does not turn with its object looks the same whatever
+    /// the object's angle, so it says nothing about the angle and is not
+    /// counted. A symbol with only such patterns folds nothing.
+    #[test]
+    fn a_pattern_which_does_not_turn_is_not_counted() {
+        let Symbol::Area(mut area) = dotted(1.2, 1.2, 0.0) else {
+            unreachable!("dotted builds an area")
+        };
+        area.patterns[0].rotatable = false;
+        let map = map_with(vec![Symbol::Area(area)]);
+        assert_eq!(pattern_symmetry(&map, &map.symbols[0]), 1);
+        assert!(!Catalogue::of(&map).opaque_areas[0].turns);
+    }
+
+    /// Two turning patterns over one another are turned together, so what
+    /// survives is what survives in both: a quarter-symmetric grid under a
+    /// hatching comes to a half turn.
+    #[test]
+    fn two_patterns_keep_only_what_they_share() {
+        let Symbol::Area(mut area) = dotted(1.2, 1.2, 0.0) else {
+            unreachable!("dotted builds an area")
+        };
+        area.patterns.push(FillPattern {
+            pattern_type: fill_pattern_type::LINE,
+            rotatable: true,
+            line_spacing: 1.0,
+            line_color: 0,
+            line_width: 0.1,
+            ..FillPattern::default()
+        });
+        let map = map_with(vec![Symbol::Area(area)]);
+        assert_eq!(pattern_symmetry(&map, &map.symbols[0]), 2);
     }
 
     fn area_with_pattern(rotatable: bool) -> Symbol {
