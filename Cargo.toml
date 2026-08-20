@@ -54,6 +54,10 @@ path = "src/bin/train.rs"
 name = "image_to_map"
 path = "src/bin/image_to_map.rs"
 
+[[bin]]
+name = "map_to_altitude"
+path = "src/bin/map_to_altitude.rs"
+
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }
@@ -64,6 +68,11 @@ rustybuzz = "0.20"
 zip = { version = "2", default-features = false, features = ["deflate", "time"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 png = "0.17"
+# Single band 32-bit float TIFF, which is what an altitude raster is and what
+# `image` cannot write: its TIFF encoder offers float only as RGB or RGBA, and
+# three copies of a DEM is not a DEM. This is the crate `image` itself uses for
+# TIFF, so it costs nothing beyond naming it.
+tiff = "0.11"
 tempfile = "3"
 
 # `train` is the learner and its metrics, `vision` nothing this uses -- the

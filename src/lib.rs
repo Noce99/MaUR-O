@@ -80,6 +80,17 @@
 //! the staircase, drawn with an existing symbol set and written out by
 //! [`xml_writer`]. It is what the `grid_to_map` tool is built on.
 //!
+//! # Reading the ground
+//!
+//! [`altitude`] asks a different question of the same file: not what is drawn
+//! on the map, but what the land under it is shaped like. A contour map is a
+//! height field with nearly all the height thrown away — a set of lines known
+//! to be level and known to be one interval apart, and nothing to say which
+//! way up any of it is — and this puts it back, as a raster carrying a height
+//! in meters for every pixel. Slope lines, contours closed inside the map,
+//! and the fact that a hillside goes on climbing are between them what
+//! settles the direction. It is what the `map_to_altitude` tool is built on.
+//!
 //! # Answering for itself
 //!
 //! [`net`] is where the answer comes from when nobody wrote one down: a
@@ -94,6 +105,7 @@
 #![warn(missing_docs)]
 
 pub mod all_symbols;
+pub mod altitude;
 pub mod archive_info;
 pub mod dataset;
 pub mod differences;

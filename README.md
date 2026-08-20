@@ -29,6 +29,7 @@ set, for when the maps that exist are not enough.
   - [`generate_maps_dataset`](#generate_maps_dataset)
     - [A training set](#a-training-set)
   - [`grid_to_map`](#grid_to_map)
+  - [`map_to_altitude`](#map_to_altitude)
 - [Reading a map back: the `net` module](#reading-a-map-back-the-net-module)
   - [Image validation](#image-validation)
   - [`image_to_map`](#image_to_map)
@@ -56,12 +57,13 @@ Build everything with:
 cargo build --release
 ```
 
-The six executables are then at:
+The seven executables are then at:
 - `target/release/`[`map_to_image`](#map_to_image)
 - `target/release/`[`benchmark`](#benchmark)
 - `target/release/`[`create_benchmark`](#create_benchmark)
 - `target/release/`[`generate_maps_dataset`](#generate_maps_dataset)
 - `target/release/`[`grid_to_map`](#grid_to_map)
+- `target/release/`[`map_to_altitude`](#map_to_altitude)
 - `target/release/`[`image_to_map`](#image_to_map)
 
 and `target/release/train`, the one tool with no map to read: see
@@ -473,6 +475,118 @@ began: two neighbouring cells drawn with the same symbol and turned the same
 way were two objects on the original map and are one region here. Where that
 symbol has a bounding line, the line between them is in the picture and not in
 the map which comes back out of it.
+
+### `map_to_altitude`
+
+The other question to ask a map: not what is drawn on it, but what the land
+under it is shaped like. This reads the contours and writes the ground they
+describe — a raster carrying a height in meters for every pixel, as a single
+band 32-bit float TIFF, which is what GDAL, QGIS and rasterio read as a
+terrain model without being told anything:
+
+```bash
+map_to_altitude -e 5 maps/forest_sample.omap forest.tif --preview relief.png
+```
+
+![The ground under a forest map, read back from its contours](mds/assets/forest_sample_altitude.png)
+*`maps/forest_sample.omap` read back by `map_to_altitude --preview`: the
+hypsometric ramp under a north-west hillshade, which is what makes a hill
+look like a hill rather than the hollow of the same shape.*
+
+`--resolution` is a meter to the pixel by default rather than the three
+`map_to_image` draws at: a contour interval does not carry finer detail than
+that. Heights are relative — a contour map fixes differences in height and
+never an absolute one, and no map file records the height of a single line —
+so the lowest ground is put at nought, or wherever `--base` says.
+
+The contour interval has to come from somewhere: `-e`/`--equidistance`, or the
+map's own notes where the mapper wrote it there ("equidistance 5 m", "contour
+interval 2.5m"). The interval quoted in an ISOM symbol's *description* is
+deliberately not read. It is boilerplate shipped with the symbol set, says
+"5 metres" on a map drawn at 2.5, and would put a wrong number on every height
+in the output without ever looking wrong.
+
+#### Which way is up
+
+Nothing in a contour line says whether the ground rises or falls as it is
+crossed. Four things say something, and they are used in this order:
+
+1. **Slope lines** (symbol 104) — the tick a mapper draws on the lower side of
+   a contour, exactly where the shape would otherwise be read the wrong way
+   round. Where there is one it settles the matter outright.
+2. **A contour has one uphill side.** It is a line of constant height, so the
+   ground to its left is above it everywhere or below it everywhere. One
+   settled crossing therefore settles every other crossing of the same
+   contour, however far along it they lie. This does most of the work.
+3. **Enclosure** — ground wrapped all the way round by one contour, touching
+   no edge of the map, is a summit. That is the default reading of a closed
+   contour, and the reason a depression needs a slope line to say otherwise.
+4. **Monotony** — ground which rises does not stop rising because a contour
+   was crossed.
+
+A map with none of them — an excerpt of a hillside where every contour runs
+off the edge — determines the *shape* of the ground fully but not its *sense*:
+the same lines describe a hill and the identical hollow. The tool says on
+stderr how much it had to guess at, and `--invert` turns the answer over.
+
+Between the contours the fill is proportional: halfway across a band is
+halfway up the interval, which reproduces an even slope exactly. A band
+bounded on one side only — inside the innermost ring of a hill, outside the
+outermost contour, on the floor of a hollow — is left flat at the contour that
+does bound it rather than given invented height. One consequence is worth
+knowing: a feature drawn with a *single* contour, which is most knolls and
+depressions, is correctly one interval up or down in the band structure but
+comes out level with its own rim in the raster, because the height of that
+rim is the only thing the map says about its middle.
+
+Only contours and index contours are read. Form lines (symbol 103) are
+counted and left out: a form line is not a contour but a note about what the
+ground does between two of them, it stops as soon as it has made its point,
+and it closes nothing.
+
+All of this is worked out on the raster rather than on the paths, which is
+what makes contours running off the edge of the map behave: they are drawn as
+one-pixel walls, what is left over is flood filled into bands, and two bands
+with a wall between them are one interval apart. A contour which divides
+nothing is reported and ignored rather than allowed to say something wrong.
+
+Loose ends are closed first, two ways. An end near the edge of the raster is
+carried out to it (`--seal`) — the map was cut through the contour there. Any
+other loose end is joined to **another loose end**, never to the middle of a
+contour: joining to the middle would make a junction where three bands meet
+that should not, and the levels either side then disagree about how far apart
+they are.
+
+Which end to join to is decided on how squarely the two face one another —
+each heading towards the other, and heading the opposite way, so that a line
+between them carries on both — and on how close they are. Facing does not
+gate the join; it *earns reach*. Two ends squarely opposed may reach the whole
+of `--bridge` for one another, two merely near each other half of it, and
+everything between scales. Both cases are real: a gap bitten out of one
+contour is the first, and two contours cut off by the same map boundary, whose
+ends sit side by side pointing the same way, are the second — closing those is
+putting the boundary back. Facing still decides the *order* they are matched
+in, so a true continuation is always taken before a neighbour that merely
+stopped nearby.
+
+`--walls` writes a picture of that stage, which is the thing to look at when
+contours are reported as dividing nothing or a hillside comes out flat:
+
+```bash
+map_to_altitude -e 5 -r 3 maps/forest_sample.omap forest.tif --walls walls.png
+```
+
+![The contours as rasterized, with the closed ends marked](mds/assets/forest_sample_walls.png)
+*Black is the contour where the map drew it, blue an end carried out to the
+edge of the raster, red a gap closed between two ends which faced one another,
+and a yellow arrow the way each remaining loose end was heading. The arrows are
+what the pairing is decided on, so they are what to look at when a gap was
+joined that should not have been or left open when it should not have been.
+They are laid only over blank paper, never over a wall, so a tightly closed gap
+shows as the red join rather than the arrows which earned it.*
+
+The counts on stderr say how many ends were sealed, how many gaps were bridged,
+and how many ends were left facing nothing.
 
 ## Reading a map back: the `net` module
 

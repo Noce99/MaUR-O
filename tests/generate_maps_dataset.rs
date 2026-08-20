@@ -633,7 +633,9 @@ fn no_gt_writes_the_maps_and_images_but_not_the_labels() {
         .args(["--maps=1", "--just-opaque-areas"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("gt/ nothing: --no-gt was asked for"));
+        .stdout(predicates::str::contains(
+            "gt/ nothing: --no-gt was asked for",
+        ));
 
     assert!(map_at(&folder, 1).is_file());
     assert!(folder.join(IMAGES_FOLDER).join("map_001.png").is_file());
