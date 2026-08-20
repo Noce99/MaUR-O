@@ -872,6 +872,7 @@ mod tests {
                 code: format!("{at}"),
                 name: format!("symbol {at}"),
                 turns: at == 0,
+                symmetry: 1,
             })
             .collect()
     }

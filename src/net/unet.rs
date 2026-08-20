@@ -260,6 +260,25 @@ impl<B: Backend> UNet<B> {
     pub fn frame_class(&self) -> usize {
         self.classes
     }
+
+    /// How many batch normalization channels have no finite variance to
+    /// normalize by, and so emit their own bias wherever the network is not
+    /// normalizing by the batch in front of it.
+    ///
+    /// Nought for a network which was trained and never written down, and
+    /// nought for one written down at full precision. What this counts is the
+    /// damage half precision does to a record: an `f16` tops out at 65504 and
+    /// the variances here reach 1e5, so every channel past that was stored as
+    /// an infinity — see [`crate::net::predict`], which is where a loaded
+    /// model is checked and where the story is.
+    pub fn constant_channels(&self) -> usize {
+        self.down
+            .iter()
+            .chain(std::iter::once(&self.bottom))
+            .chain(self.up.iter().map(|block| &block.conv))
+            .map(DoubleConv::constant_channels)
+            .sum()
+    }
 }
 
 /// Convolution, normalization, rectifier — twice, which is the block a U-Net
@@ -307,6 +326,22 @@ impl DoubleConvConfig {
 }
 
 impl<B: Backend> DoubleConv<B> {
+    /// How many of this block's two normalizations' channels have no finite
+    /// variance — see [`UNet::constant_channels`].
+    fn constant_channels(&self) -> usize {
+        [&self.first_norm, &self.second_norm]
+            .into_iter()
+            .map(|norm| {
+                norm.running_var
+                    .value()
+                    .into_data()
+                    .iter::<f32>()
+                    .filter(|variance| !variance.is_finite())
+                    .count()
+            })
+            .sum()
+    }
+
     /// `[batch, in, h, w]` to `[batch, out, h, w]`.
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
         let x = self

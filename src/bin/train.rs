@@ -45,7 +45,9 @@ use maur_o::dataset::{Classes, CLASSES_FILE};
 
 use maur_o::net::data::{CROP, DEFAULT_CROPS_PER_MAP};
 use maur_o::net::image_valid::DEFAULT_IMAGE_VALID;
-use maur_o::net::training::{train, TrainingConfig, DEFAULT_ANGLE_WEIGHT, DEFAULT_LEARNING_RATE};
+use maur_o::net::training::{
+    train, TrainingConfig, DEFAULT_ANGLE_WEIGHT, DEFAULT_LEARNING_RATE, DEFAULT_WEIGHT_DECAY,
+};
 use maur_o::net::unet::{DEFAULT_BASE_CHANNELS, DEPTH};
 
 /// Where the runs are written when no folder is named.
@@ -109,6 +111,27 @@ struct Args {
     /// what an angled pixel's direction is worth beside its symbol.
     #[arg(long, default_value_t = DEFAULT_ANGLE_WEIGHT, value_name = "WEIGHT")]
     angle_weight: f64,
+
+    /// How hard the weights are pulled back towards nothing at every step, as
+    /// a share of that step's own rate. A batch normalization leaves the loss
+    /// with no opinion about the scale of the layer feeding it, so nothing
+    /// else holds that scale down over a long run, and a run without this one
+    /// validates best somewhere in the middle and comes apart after it. Much
+    /// more than the default pulls the normalizations' own scale down with
+    /// it, which costs more than it saves. Nought turns it off, which makes
+    /// the optimizer plain Adam.
+    #[arg(long, default_value_t = DEFAULT_WEIGHT_DECAY, value_name = "SHARE")]
+    weight_decay: f64,
+
+    /// How far a crop may hang off the edge of a map, in pixels, with what
+    /// is past the edge filled in as the white paper a map is printed on.
+    /// Half the crop by default, which makes the crop's centre uniform and so
+    /// every pixel of the map equally likely to be trained on. Nought keeps
+    /// every crop wholly inside, which sounds right and quietly under-shows
+    /// whatever lives at a map's edge -- a corner drawn uniformly puts the
+    /// pixels it lands on in the middle far more often than at the rim.
+    #[arg(long, value_name = "PIXELS")]
+    overhang: Option<usize>,
 
     /// The share of the maps kept for training; the rest validate against it.
     /// Split by map rather than by crop, so a validation score is a score for
@@ -234,6 +257,13 @@ fn run() -> Result<(), (ExitCode, String)> {
             "Error: Invalid value for --learning-rate: it must be greater than zero.".to_string(),
         ));
     }
+    if args.weight_decay < 0.0 || args.weight_decay.is_nan() {
+        return Err((
+            ExitCode::from(1),
+            "Error: Invalid value for --weight-decay: it cannot be negative. Nought turns it off."
+                .to_string(),
+        ));
+    }
 
     let notes = notes_of(&args.dataset).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     let classes = notes.classes;
@@ -246,8 +276,10 @@ fn run() -> Result<(), (ExitCode, String)> {
         .with_base_channels(args.base_channels)
         .with_crop(args.crop)
         .with_crops_per_map(args.crops_per_map)
+        .with_overhang(args.overhang)
         .with_train_share(args.train_share)
         .with_angle_weight(args.angle_weight)
+        .with_weight_decay(args.weight_decay)
         .with_image_valid(args.image_valid)
         .with_seed(args.seed);
 

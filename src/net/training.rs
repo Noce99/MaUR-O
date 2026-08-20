@@ -69,9 +69,9 @@ use burn::data::dataset::Dataset;
 use burn::grad_clipping::GradientClippingConfig;
 use burn::lr_scheduler::LrScheduler;
 use burn::module::{extract_type_name, Module};
-use burn::optim::AdamConfig;
+use burn::optim::AdamWConfig;
 use burn::prelude::Backend;
-use burn::record::CompactRecorder;
+use burn::record::DefaultRecorder;
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::Tensor;
 use burn::train::checkpoint::{
@@ -103,6 +103,13 @@ use crate::net::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEPTH};
 /// class term a cross-entropy, and on the runs this was set from the first
 /// starts larger and moves faster. Reading the symbol is what the network is
 /// for, and the angle is what it says about a symbol it has already found.
+///
+/// Nought turns the term off, and is what a run wants where the symbol set's
+/// angles are not worth the gradient — but not, any longer, because they
+/// cannot be learned. The target is folded by each symbol's own rotational
+/// symmetry before it is asked for, which is what makes a pattern that looks
+/// the same at several angles a question with one answer rather than none;
+/// see [`crate::symbol_kinds::pattern_symmetry`].
 pub const DEFAULT_ANGLE_WEIGHT: f64 = 0.2;
 
 /// The backend the metrics run on, which is the host: a metric reads numbers
@@ -119,6 +126,59 @@ type MetricBackend = burn::backend::NdArray;
 /// reached after a warmup rather than a rate started at, which is most of
 /// what makes it safe to be the larger of the two.
 pub const DEFAULT_LEARNING_RATE: f64 = 3.0e-4;
+
+/// How hard the weights are pulled back towards nothing at every step, as a
+/// share of that step's own learning rate.
+///
+/// Not regularization in the usual sense of it. A batch normalization leaves
+/// the loss **invariant** to the scale of the convolution which feeds it —
+/// double those weights and the normalization divides the doubling straight
+/// back out — so nothing in the loss has an opinion about how large they are,
+/// and Adam, whose step is about the same size whatever the gradient was,
+/// walks that scale upwards for as long as a run lasts. A fourteen epoch run
+/// of this network ended with its convolution weights around a hundred times
+/// the size they were initialized at, every coordinate having drifted the one
+/// way for the whole run.
+///
+/// Decoupled, which is what makes it bite: [`AdamWConfig`] shrinks the weight
+/// by `rate * this` beside the gradient step rather than adding
+/// `this * weight` to the gradient, so the pull is proportional to how large
+/// the weight is rather than to how large Adam's running average of the
+/// gradient happens to be — which, being the divisor, would cancel most of it
+/// out. That is Loshchilov and Hutter's paper, and it is exactly the case
+/// here, where what is being held is a direction the loss says nothing about.
+///
+/// A tenth, which is what a sweep said. Four runs of six epochs over the same
+/// maps, at ten times the rate so that a long run's drift falls into a few
+/// hundred steps — the best pixel accuracy each of them validated at, and
+/// what became of the normalizations' own scale:
+///
+/// ```text
+/// decay    best valid    last epoch    gamma rms    gamma min
+///     0          51.5%         32.6%        0.994        0.496
+///  0.01          59.8%         59.8%        0.983        0.440
+///   0.1          65.0%         65.0%        0.884        0.104
+///   1.0          35.2%         32.2%        0.304        0.088
+/// ```
+///
+/// Nought is the one which came apart: best at its third epoch and a third
+/// worse by its sixth, which is a run whose scale ran away from its own
+/// running statistics. A tenth was still climbing when it stopped.
+///
+/// And not more than a tenth, because burn's AdamW decays **every** parameter
+/// it is handed, a batch normalization's own `gamma` among them — and `gamma`
+/// is scale free in the same way the convolution is, so nothing in the loss
+/// holds it up either. At one it is pulled to a third of what it should be
+/// and the run learns half as much. (`running_mean` and `running_var` are a
+/// `RunningState` rather than a `Param`, so they are never decayed.)
+///
+/// What this is **not** is what keeps a checkpoint readable. Even at a tenth
+/// the pre-normalization variances still reach 1e5 over a long run; what
+/// makes that harmless is writing them down in full precision, which is
+/// [`BEST_WEIGHTS`]. The two are separate repairs to the same run.
+///
+/// Nought turns it off, and turns [`AdamWConfig`] back into plain Adam.
+pub const DEFAULT_WEIGHT_DECAY: f64 = 0.1;
 
 /// The ceiling on the norm of one step's gradient.
 ///
@@ -146,18 +206,42 @@ const BALANCE_SAMPLE: usize = 32;
 /// A thousandth of the pixels is the smallest share this trusts.
 const RAREST_SHARE: f64 = 1e-3;
 
-/// What each class should count for in the cross-entropy, the frame last,
-/// scaled so that the average class counts for one.
+/// What each class should count for in the cross-entropy, the frame last:
+/// the inverse of the share of the ground truth it holds, scaled so that the
+/// average class counts for one, and never less than one.
 ///
-/// The inverse of what share of the ground truth each holds. A dataset is
-/// nine cells of ground in a white border and the border alone is a quarter
-/// of it, so an unweighted loss is a loss whose cheapest answer is the
-/// commonest class everywhere — and that is an answer which scores well on
-/// pixels and reads back as an empty map. Weighting by the inverse share is
-/// what makes a rare symbol worth finding.
+/// The inverting is what makes a rare symbol worth finding. A dataset is nine
+/// cells of ground in a white border, and without it the cheapest answer is
+/// the commonest class everywhere — an answer which scores well on pixels and
+/// reads back as an empty map.
 ///
-/// The shares are counted off [`MapDataset::class_balance`], which samples
-/// the maps rather than reading all of them.
+/// The floor is what stops that cure being worse than the disease: inverting
+/// a share does not only lift the rare classes, it pushes the common ones
+/// *down*, and a class pushed below one is a class the loss has made cheap to
+/// get wrong. Nothing should be penalized for being common.
+///
+/// # The shares have to be the shares a crop shows
+///
+/// [`MapDataset::class_balance`] counts over **crops**, and it has to: a
+/// network trained on crops is never shown a whole map, and the two do not
+/// hold the same mixture. A crop is placed at a corner drawn uniformly, so
+/// the pixel it lands on is that corner plus an offset — the sum of two
+/// uniform draws, which piles up in the middle of the map and thins out at
+/// its edges. On a dataset image the white frame is 33% of the picture and
+/// **14%** of what 256-pixel crops show.
+///
+/// Counted over whole maps instead, the frame comes out weighted 0.44 — the
+/// lowest of the six — for being commonest, while in the crops it is in fact
+/// the *rarest*. It was worth 6% of the weighted loss where it should have
+/// been worth 17%, and a run of this network duly declined to predict it at
+/// all: after fourteen epochs it called 1.2% of the frame the frame and
+/// filled the map's border with ground cover.
+///
+/// Fixing the count is necessary and may not be sufficient — a class the
+/// crops under-show is still a class the crops under-show, and what
+/// `image_to_map` puts through the network is a whole picture where the frame
+/// is a third of it, not a crop where it is a seventh. See
+/// [`MapDataset::class_balance`].
 pub fn class_weights(train: &MapDataset) -> Result<Vec<f32>, String> {
     let shares = train.class_balance(BALANCE_SAMPLE)?;
 
@@ -168,11 +252,13 @@ pub fn class_weights(train: &MapDataset) -> Result<Vec<f32>, String> {
 
     // Scaled to average one, so that turning the weighting on does not also
     // turn the effective learning rate up: what changes is how the loss is
-    // divided between the classes, not how large it is.
+    // divided between the classes, not how large it is. Then floored, which
+    // is the one thing allowed to put that average back above one -- see
+    // above for what it buys.
     let mean = inverted.iter().sum::<f64>() / inverted.len() as f64;
     Ok(inverted
         .into_iter()
-        .map(|weight| (weight / mean) as f32)
+        .map(|weight| (weight / mean).max(1.0) as f32)
         .collect())
 }
 
@@ -409,7 +495,15 @@ pub struct AngleInput<B: Backend> {
 /// the weights from summing to zero, and burn's summary divides by that sum.
 pub const NO_ANGLE_MEASURED: f64 = 90.0;
 
-/// How far out the pattern angles were, in degrees.
+/// How far out the pattern angles were, in degrees of the **folded** angle.
+///
+/// Folded, because that is the angle the network was asked for: a symbol
+/// whose pattern looks the same every quarter turn is scored on four times
+/// its angle, so ninety degrees here is a little over twenty-two on the map —
+/// see [`crate::ground_truth::GroundTruth::sin_cos_folded`]. What the two
+/// ends of the scale mean is unchanged by that, and they are what this is
+/// read for: nought is right, and ninety is what a network pointing anywhere
+/// scores, whatever the symmetry.
 ///
 /// The sums are kept here rather than in a [`NumericMetricState`] for the
 /// batch with no angle in it: that one has to be entered with a weight of its
@@ -638,6 +732,15 @@ pub struct TrainingConfig {
     /// How many crops one pass takes from each map.
     #[config(default = "DEFAULT_CROPS_PER_MAP")]
     pub crops_per_map: usize,
+    /// How far a crop may hang off the edge of a map, padded with the white
+    /// a map is printed on — see [`MapDataset::with_overhang`]. `None` is
+    /// half the crop, which makes every pixel of the map equally likely to be
+    /// trained on; nought keeps every crop wholly inside, which under-shows
+    /// whatever lives at a map's edge. [`train`] resolves it before it writes
+    /// the configuration out, so a run's `training.json` holds the number it
+    /// used rather than the absence of one.
+    #[config(default = "None")]
+    pub overhang: Option<usize>,
     /// The share of the maps kept for training, the rest for validation.
     #[config(default = 0.8)]
     pub train_share: f64,
@@ -651,6 +754,12 @@ pub struct TrainingConfig {
     /// each epoch, for the sheets under `image_valid/`. Nought draws none.
     #[config(default = "DEFAULT_IMAGE_VALID")]
     pub image_valid: usize,
+    /// How hard the weights are pulled back towards nothing at every step —
+    /// see [`DEFAULT_WEIGHT_DECAY`], which is mostly about what a batch
+    /// normalization does to the scale of the layer in front of it. Nought
+    /// turns it off.
+    #[config(default = "DEFAULT_WEIGHT_DECAY")]
+    pub weight_decay: f64,
     /// What the crop positions and the shuffling come out of. The same seed
     /// gives the same run.
     #[config(default = 0)]
@@ -708,10 +817,21 @@ pub const KEPT_CHECKPOINTS: usize = 5;
 /// The weights of the epoch which validated best, at the top of the run
 /// folder.
 ///
-/// A file rather than a folder because [`CompactRecorder`] writes a whole
+/// A file rather than a folder because [`DefaultRecorder`] writes a whole
 /// model as one; a recorder which needed more than one would want a folder of
 /// this name instead, which is why the name carries no extension of its own
 /// until it is saved.
+///
+/// [`DefaultRecorder`] and not burn's `CompactRecorder`, which is the same
+/// named-messagepack file at **half** precision. A weight fits in an `f16`
+/// and so does a batch normalization's running mean; its running **variance**
+/// does not. This network's reach 1e5 by the fourth level, `f16` tops out at
+/// 65504, and everything past that is written down as an infinity — which
+/// reads back as a channel whose output is its own bias and nothing else.
+/// Nothing goes wrong while the run is going, since training normalizes by
+/// the batch it is holding and the model in memory is `f32` throughout; what
+/// breaks is every use of the file afterwards. See the module documentation
+/// of [`crate::net::predict`].
 const BEST_WEIGHTS: &str = "best";
 
 /// The phase a run shows its work with, built out of what its folder now
@@ -963,6 +1083,11 @@ pub fn train<B: AutodiffBackend>(
         ));
     }
 
+    // Half the crop unless the run asked for another figure, settled here so
+    // that the configuration written below is the one the run went by.
+    let mut config = config;
+    config.overhang = Some(config.overhang.unwrap_or(config.crop / 2));
+
     let run = run_directory(into, extract_type_name::<UNet<B>>())?;
     config
         .save(run.join("training.json"))
@@ -971,7 +1096,8 @@ pub fn train<B: AutodiffBackend>(
 
     let all = MapDataset::load(dataset, config.seed)?
         .with_crop(config.crop)?
-        .with_crops_per_map(config.crops_per_map);
+        .with_crops_per_map(config.crops_per_map)
+        .with_overhang(config.overhang.unwrap_or(config.crop / 2));
 
     // The labels say how many symbols there are and so does `classes.json`;
     // a network built for the wrong number would train against targets it has
@@ -1072,7 +1198,7 @@ pub fn train<B: AutodiffBackend>(
         .metric_valid_numeric(PixelAccuracyMetric::<MetricBackend>::new())
         .metric_train_numeric(AngleMetric::<MetricBackend>::new())
         .metric_valid_numeric(AngleMetric::<MetricBackend>::new())
-        .with_file_checkpointer(CompactRecorder::new())
+        .with_file_checkpointer(DefaultRecorder::new())
         // burn's own default, with a longer tail: the last few epochs, so
         // that a run can be carried on from where it stopped, and the epoch
         // which validated best however far back it was, so that `best.mpk`
@@ -1122,7 +1248,12 @@ pub fn train<B: AutodiffBackend>(
         // left describing a network which no longer exists, and a validation
         // pass through the stale ones comes back as a loss in the billions.
         // The norm is the ceiling on how far one batch can move the run.
-        AdamConfig::new()
+        // AdamW rather than Adam: the decay has to be decoupled from the
+        // gradient to hold a scale the loss is indifferent to -- see
+        // [`DEFAULT_WEIGHT_DECAY`]. A decay of nought makes the two the same
+        // optimizer.
+        AdamWConfig::new()
+            .with_weight_decay(config.weight_decay as f32)
             .with_grad_clipping(Some(GradientClippingConfig::Norm(GRADIENT_NORM)))
             .init(),
         WarmupCosine::new(config.learning_rate, steps),
@@ -1188,7 +1319,7 @@ pub fn train<B: AutodiffBackend>(
         // hand is the last epoch, and it is then the only answer there is.
         None => {
             trained
-                .save_file(run.join(BEST_WEIGHTS), &CompactRecorder::new())
+                .save_file(run.join(BEST_WEIGHTS), &DefaultRecorder::new())
                 .map_err(|e| format!("cannot write the weights: {e}"))?;
             println!(
                 "{}: the weights of the last epoch, there being no best epoch's checkpoint to \
@@ -1420,10 +1551,56 @@ mod tests {
             weights[commonest],
         );
 
-        // Scaled to average one, so that turning the weighting on does not
-        // turn the size of the loss up with it.
+        // Scaled so that the average would be one, and then floored, so it
+        // comes out at one or a little above -- never below, which would be a
+        // loss quietly turned down.
         let mean = weights.iter().map(|&w| w as f64).sum::<f64>() / weights.len() as f64;
-        assert!((mean - 1.0).abs() < 1e-5, "the weights average {mean}");
+        assert!(mean >= 1.0 - 1e-5, "the weights average {mean}");
+    }
+
+    /// A class is weighted up for being rare and never down for being common.
+    ///
+    /// Inverting a share lifts the rare classes by pushing the common ones
+    /// below one, and the commonest class of a generated map is the white
+    /// frame at a third of every picture. Left below one it becomes the
+    /// cheapest thing in the dataset to get wrong — which is how a run comes
+    /// to fill the border with ground cover. See [`class_weights`].
+    #[test]
+    fn no_class_is_weighted_below_one_for_being_common() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let folder = dir.path().join("dataset");
+        let settings = crate::dataset::Settings {
+            layout_size: 2,
+            cell_size: 20,
+            maps: 3,
+            just_opaque_areas: true,
+            resolution: 2.0,
+            frame: 5.0,
+            ..crate::dataset::Settings::default()
+        };
+        crate::dataset::create_dataset(
+            Path::new("tests/data/turning_patterns.xmap"),
+            &folder,
+            &settings,
+            |_, _| {},
+        )
+        .expect("the dataset generates");
+
+        let dataset = MapDataset::load(&folder, 0).expect("the dataset loads");
+        let shares = dataset.class_balance(BALANCE_SAMPLE).expect("a balance");
+        let weights = class_weights(&dataset).expect("the weights are counted");
+
+        // The frame is the last class and the commonest thing on any of these
+        // maps, and it is not weighted down for it.
+        let frame = weights.len() - 1;
+        assert!(
+            shares[frame] > *shares[..frame].iter().max_by(|a, b| a.total_cmp(b)).expect("a class"),
+            "the frame should be the commonest class here: {shares:?}",
+        );
+        assert!(
+            weights.iter().all(|&weight| weight >= 1.0),
+            "{weights:?} holds a class weighted below one",
+        );
     }
 
     /// A crop with no rotatable symbol in it has nothing to say about

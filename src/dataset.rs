@@ -904,6 +904,7 @@ mod tests {
                     code: "401".to_string(),
                     name: "Open land".to_string(),
                     turns: false,
+                    symmetry: 1,
                 },
                 Entry {
                     index: 1,
@@ -911,6 +912,7 @@ mod tests {
                     code: "403".to_string(),
                     name: r#"Say "stop""#.to_string(),
                     turns: true,
+                    symmetry: 1,
                 },
             ],
             ..Catalogue::default()

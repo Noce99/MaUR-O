@@ -343,6 +343,42 @@ impl GroundTruth {
         (sin as f32, cos as f32)
     }
 
+    /// The angle of the pixel at `at`, folded by `order` before it is turned
+    /// into a point on the unit circle: `(sin(order * a), cos(order * a))`,
+    /// and `(0, 0)` where there is no angle.
+    ///
+    /// `order` is how many turns of the symbol look exactly alike — see
+    /// [`crate::symbol_kinds::pattern_symmetry`]. Multiplying the angle by it
+    /// is what makes those turns one target instead of `order` of them: the
+    /// angles `a`, `a + 1/n`, `a + 2/n` … all come to the same pair, because
+    /// `n` times a whole `1/n` of a turn is a whole turn and lands where it
+    /// started.
+    ///
+    /// That matters because the alternative is a question with no answer. A
+    /// grid of round dots drawn at four angles a quarter turn apart is one
+    /// picture; asked which of the four it was, the least wrong reply is the
+    /// average of them, which for four points evenly spaced round a circle is
+    /// the middle of the circle — the same `(0, 0)` that means "no angle at
+    /// all", and a score no better than pointing anywhere. Folded, there is
+    /// one answer and it can be learned.
+    ///
+    /// What comes back out of a prediction is therefore the angle **within**
+    /// one of those `order` turns, and dividing by `order` gives one of them:
+    /// which one is not in the picture, and every one of them draws it. See
+    /// `crate::net::predict::resolve_angles`.
+    ///
+    /// An `order` of one folds nothing and leaves this exactly
+    /// [`GroundTruth::sin_cos`].
+    pub fn sin_cos_folded(&self, at: usize, order: u32) -> (f32, f32) {
+        let turn = self.rotation[at];
+        if turn == NO_ROTATION {
+            return (0.0, 0.0);
+        }
+        let angle = turn as f64 * order.max(1) as f64 * TAU;
+        let (sin, cos) = angle.sin_cos();
+        (sin as f32, cos as f32)
+    }
+
     /// The labels as the tensor a model is scored against: `H` by `W` by
     /// `channels`, row by row and pixel by pixel, each pixel a one-hot vector
     /// of its class followed by the sine and the cosine of its angle.
@@ -521,6 +557,60 @@ mod tests {
         ];
         GroundTruth::rasterize(&grounds, 3, 4, 4, Transform::identity())
             .expect("the shapes are inside the image")
+    }
+
+    /// The whole point of folding: the `n` turns which draw one picture come
+    /// to one target, so there is a single answer to learn instead of `n` of
+    /// them whose average is nothing.
+    #[test]
+    fn the_turns_which_look_alike_fold_to_one_target() {
+        let truth = halves();
+        // The quarter turn the first half was drawn at, and the three other
+        // quarter turns which draw exactly the same grid of dots.
+        let quarters: Vec<(f32, f32)> = (0..4)
+            .map(|step| {
+                let mut turned = halves();
+                turned.rotation[0] = 0.25 * step as f32;
+                turned.sin_cos_folded(0, 4)
+            })
+            .collect();
+        for (sin, cos) in &quarters {
+            assert!(
+                (sin - quarters[0].0).abs() < 1e-5 && (cos - quarters[0].1).abs() < 1e-5,
+                "{quarters:?}",
+            );
+        }
+
+        // Unfolded, those same four are four different points on the circle,
+        // spread evenly enough that their average is the middle -- which is
+        // what the label for "no angle at all" is, and why the unfolded
+        // question has no answer worth giving.
+        let (mut sins, mut coses) = (0.0f32, 0.0f32);
+        for step in 0..4 {
+            let mut turned = halves();
+            turned.rotation[0] = 0.25 * step as f32;
+            let (sin, cos) = turned.sin_cos(0);
+            sins += sin;
+            coses += cos;
+        }
+        assert!(sins.abs() < 1e-5 && coses.abs() < 1e-5, "{sins}, {coses}");
+
+        // And an order of one is the plain encoding, folded by nothing.
+        assert_eq!(truth.sin_cos_folded(0, 1), truth.sin_cos(0));
+    }
+
+    /// A pixel with no angle keeps none however it is folded: the zero vector
+    /// is what the loss masks on, and multiplying an angle which is not there
+    /// must not invent one.
+    #[test]
+    fn a_pixel_with_no_angle_folds_to_no_angle() {
+        let truth = halves();
+        // The right half is drawn with a symbol which has nothing to turn.
+        let at = truth.width as usize - 1;
+        assert_eq!(truth.rotation[at], NO_ROTATION);
+        for order in 1..=6 {
+            assert_eq!(truth.sin_cos_folded(at, order), (0.0, 0.0));
+        }
     }
 
     #[test]
