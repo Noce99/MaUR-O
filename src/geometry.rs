@@ -90,6 +90,21 @@ impl Rect {
         self.w == 0.0 && self.h == 0.0
     }
 
+    /// Whether this rectangle and `other` share any area, touching edges
+    /// included. The null rectangle intersects nothing.
+    ///
+    /// Edges count as overlapping so that a shape sitting exactly on the
+    /// boundary of a viewport is drawn rather than culled: half of its
+    /// antialiased stroke falls inside.
+    pub fn intersects(&self, other: &Rect) -> bool {
+        !self.is_null()
+            && !other.is_null()
+            && self.left() <= other.right()
+            && other.left() <= self.right()
+            && self.top() <= other.bottom()
+            && other.top() <= self.bottom()
+    }
+
     /// Moves the left edge to `v`, keeping the right one where it is.
     pub fn set_left(&mut self, v: f64) {
         self.w = self.right() - v;

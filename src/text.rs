@@ -51,10 +51,33 @@ use crate::renderer::{Pen, Renderer};
 /// The font size used while laying out text, before scaling it down to mm.
 const INTERNAL_FONT_SIZE: f64 = 256.0;
 
+static DB: OnceLock<Database> = OnceLock::new();
+
+/// Sets the fonts to typeset with, for a caller that has to supply them
+/// itself: a WebAssembly build has no system fonts to scan, so the host loads
+/// the font files it wants and passes their bytes here.
+///
+/// Takes effect only if called before the first piece of text is laid out —
+/// the database is built once and then shared. Returns whether it was in time;
+/// a second call, or one after a map has already been drawn, does nothing and
+/// returns `false`.
+pub fn init_font_database(fonts: Vec<Vec<u8>>) -> bool {
+    let mut db = Database::new();
+    for bytes in fonts {
+        db.load_font_data(bytes);
+    }
+    DB.set(db).is_ok()
+}
+
 fn font_db() -> &'static Database {
-    static DB: OnceLock<Database> = OnceLock::new();
     DB.get_or_init(|| {
+        // Nothing mutates it where there are no system fonts to load.
+        #[allow(unused_mut)]
         let mut db = Database::new();
+        // Nothing to scan without a filesystem: a wasm host is expected to
+        // have called `init_font_database` first, and gets an empty database
+        // (text falls back to whatever `add_text` does with no match) if not.
+        #[cfg(not(target_arch = "wasm32"))]
         db.load_system_fonts();
         db
     })

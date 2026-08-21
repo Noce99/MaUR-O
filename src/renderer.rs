@@ -162,6 +162,16 @@ pub(crate) struct Pen {
 struct Renderable {
     path: Path,
     color: i32,
+    /// The bounding box in mm on the paper, as measured when this renderable
+    /// was built — the same rectangle `include` folds into the map extent,
+    /// kept per renderable so that `paint_rect` can reject one without
+    /// touching its geometry. Always in paper mm, even where `path` is not
+    /// (a transformed text path is pushed with its mapped extent).
+    bbox: Rect,
+    /// The `id` of the symbol whose object produced this renderable, so that
+    /// `paint_rect` can leave a symbol out. -1 for a renderable built outside
+    /// `add_object`, which no caller can name and none hides.
+    symbol_id: i32,
     clip: Option<usize>,
     /// Stroke width in mm, 0 for a filled path.
     pen_width: f64,
@@ -198,6 +208,9 @@ pub struct Renderer<'m> {
     extent: Rect,
     /// The clip path applying to new renderables; set while filling an area.
     current_clip: Option<usize>,
+    /// The symbol whose object is being added, stamped onto every renderable
+    /// it produces. -1 outside `add_object`.
+    current_symbol_id: i32,
 }
 
 impl<'m> Renderer<'m> {
@@ -209,6 +222,7 @@ impl<'m> Renderer<'m> {
             clips: Vec::new(),
             extent: Rect::default(),
             current_clip: None,
+            current_symbol_id: -1,
         };
         for object in &map.objects {
             renderer.add_object(object);
@@ -243,6 +257,7 @@ impl<'m> Renderer<'m> {
             clips: Vec::new(),
             extent: Rect::default(),
             current_clip: None,
+            current_symbol_id: -1,
         };
         if let Some(index) = object.symbol_index {
             let symbol = &map.symbols[index];
@@ -301,6 +316,8 @@ impl<'m> Renderer<'m> {
         self.renderables.push(Renderable {
             path,
             color,
+            bbox: b,
+            symbol_id: self.current_symbol_id,
             clip: self.current_clip,
             pen_width: 0.0,
             cap: PenCap::Flat,
@@ -350,8 +367,9 @@ impl<'m> Renderer<'m> {
         if self.map.color(color).is_none() || width <= 0.0 || path.is_empty() {
             return;
         }
-        if let Some(b) = bounds {
+        let bbox = if let Some(b) = bounds {
             self.include(b);
+            b
         } else {
             // Mapper measures a line of a negative color -- registration
             // black -- with a zero pen width.
@@ -366,10 +384,29 @@ impl<'m> Renderer<'m> {
                 };
             }
             self.include(extent);
-        }
+            extent
+        };
+        // What the stroke covers, which is not what it was measured by. The
+        // extent above follows Mapper: a caller may hand one in which was
+        // measured for the layout it wanted, and a line of a negative color
+        // -- registration black -- is measured with no pen width at all
+        // though it is still drawn with one. Culling by that would drop a
+        // line whose ink reaches into the region but whose measurement does
+        // not, so the box kept for culling grows by the pen the stroke is
+        // actually drawn with, and by the length a miter join can spike
+        // past the vertex.
+        let reach = (width / 2.0)
+            * if join == PenJoin::Miter {
+                TINY_SKIA_MITER_LIMIT
+            } else {
+                1.0
+            };
+        let bbox = bbox.adjusted(-reach, -reach, reach, reach);
         self.renderables.push(Renderable {
             path,
             color,
+            bbox,
+            symbol_id: self.current_symbol_id,
             clip: self.current_clip,
             pen_width: width,
             cap,
@@ -384,7 +421,9 @@ impl<'m> Renderer<'m> {
         if let Some(idx) = object.symbol_index {
             let symbol = &self.map.symbols[idx];
             if symbol.is_visible() {
+                self.current_symbol_id = object.symbol_id;
                 self.add_symbol(symbol, object, &object.coords);
+                self.current_symbol_id = -1;
             }
         }
     }
@@ -1871,7 +1910,58 @@ impl<'m> Renderer<'m> {
     /// color with the highest priority value is drawn first, color 0 comes
     /// last. `page_transform` maps mm-on-paper coordinates to pixels.
     pub fn paint(&self, pixmap: &mut PixmapMut, page_transform: Transform) {
-        let mut order: Vec<usize> = (0..self.renderables.len()).collect();
+        self.paint_rect(pixmap, page_transform, None, &[]);
+    }
+
+    /// Draws part of the map: as [`paint`](Self::paint), but skipping whatever
+    /// cannot be seen or is not wanted.
+    ///
+    /// `clip_mm` is the region being drawn, in mm on the paper. Renderables
+    /// whose bounding box misses it are left out, which is what makes drawing
+    /// a viewport of a large map cost something close to what is in the
+    /// viewport: `tiny-skia` would clip them at the edge of the pixmap anyway,
+    /// but only after walking the geometry of every one. Pass `None` to draw
+    /// everything, as `paint` does.
+    ///
+    /// `hidden_symbol_ids` holds the `id`s of symbols to leave undrawn — a
+    /// per-call filter rather than a property of the map, so that toggling a
+    /// symbol's visibility is a repaint and not a rebuild.
+    ///
+    /// Note that `page_transform` still maps mm to pixels; it is not derived
+    /// from `clip_mm`. To draw `clip_mm` into a `width` x `height` pixmap:
+    ///
+    /// ```no_run
+    /// # use maur_o::{geometry::Rect, renderer::Renderer};
+    /// # use tiny_skia::Transform;
+    /// # fn f(renderer: &Renderer, pixmap: &mut tiny_skia::PixmapMut, rect: Rect, width: u32, height: u32) {
+    /// let page_transform = Transform::from_translate(-rect.left() as f32, -rect.top() as f32)
+    ///     .post_concat(Transform::from_scale(
+    ///         width as f32 / rect.width() as f32,
+    ///         height as f32 / rect.height() as f32,
+    ///     ));
+    /// renderer.paint_rect(pixmap, page_transform, Some(rect), &[]);
+    /// # }
+    /// ```
+    pub fn paint_rect(
+        &self,
+        pixmap: &mut PixmapMut,
+        page_transform: Transform,
+        clip_mm: Option<Rect>,
+        hidden_symbol_ids: &[i32],
+    ) {
+        let mut order: Vec<usize> = (0..self.renderables.len())
+            .filter(|&i| {
+                let renderable = &self.renderables[i];
+                let visible = match clip_mm {
+                    Some(rect) => renderable.bbox.intersects(&rect),
+                    None => true,
+                };
+                // Linear in the number of hidden symbols, which is a handful:
+                // the caller names the ones it is hiding, not the ones it is
+                // not.
+                visible && !hidden_symbol_ids.contains(&renderable.symbol_id)
+            })
+            .collect();
         order.sort_by(|&a, &b| self.renderables[b].color.cmp(&self.renderables[a].color));
 
         let mut active_clip: Option<usize> = None;

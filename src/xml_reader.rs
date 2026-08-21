@@ -960,7 +960,14 @@ impl<'a> XmlMapReader<'a> {
 /// or an error message if the file could not be read at all.
 pub fn read_xml_map(path: &Path) -> Result<(Map, Vec<String>), String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let mut reader = XmlMapReader::new(&content);
+    read_xml_map_str(&content)
+}
+
+/// The same, for a map already in memory: the document text rather than a path
+/// to read it from. This is what a caller without a filesystem — a WebAssembly
+/// build handed the file by its host — parses through.
+pub fn read_xml_map_str(content: &str) -> Result<(Map, Vec<String>), String> {
+    let mut reader = XmlMapReader::new(content);
     reader.read()?;
     Ok((reader.map, reader.warnings))
 }
