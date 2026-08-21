@@ -13,6 +13,13 @@
 //! and rasterization, font shaping — so a map can be drawn without Mapper
 //! itself, Qt, or a graphical environment installed.
 //!
+//! # Beyond drawing
+//!
+//! [`ocd`] reads OCAD's own file format, so a map in it can be used like any
+//! other. [`runnability`] answers a different question of the same model: not
+//! what the map looks like, but how fast it is to run through, as a grid a
+//! route can be searched over.
+//!
 //! Mapper is both the inspiration and the yardstick. Its rendering rules are
 //! what this crate reproduces: the drawing order a map's colours define, the
 //! way a line symbol's dashes and border are laid out, how an area's fill
@@ -74,6 +81,7 @@ pub mod qbezier;
 pub mod render;
 pub mod renderer;
 pub mod report;
+pub mod runnability;
 pub mod text;
 pub mod xml_reader;
 pub mod xml_writer;
