@@ -219,7 +219,12 @@ pub struct Color {
     /// [`rgb`](Self::rgb) where it defines the colour by RGB alone -- so the
     /// two always describe the same colour, whichever way round the file put
     /// it.
-    pub cmyk: (f32, f32, f32, f32),
+    ///
+    /// To full precision, where [`rgb`](Self::rgb) is single: this is what a
+    /// map is specified in, and checking one against a standard compares
+    /// these to the decimal the file was written to, where a rounding of its
+    /// own would decide the answer.
+    pub cmyk: (f64, f64, f64, f64),
     /// Opacity in `[0, 1]`. Below 1 the colour is blended with whatever has
     /// already been drawn under it.
     pub opacity: f64,

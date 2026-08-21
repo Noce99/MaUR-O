@@ -220,7 +220,8 @@ fn cmyk_to_rgb(c: f32, m: f32, y: f32, k: f32) -> (f32, f32, f32) {
 /// Black is taken as far as it will go -- the most `k` the channels allow --
 /// which is the conventional choice and the one that round-trips: feeding the
 /// result back through `cmyk_to_rgb` returns the color it came from.
-fn rgb_to_cmyk(r: f32, g: f32, b: f32) -> (f32, f32, f32, f32) {
+fn rgb_to_cmyk(r: f32, g: f32, b: f32) -> (f64, f64, f64, f64) {
+    let (r, g, b) = (f64::from(r), f64::from(g), f64::from(b));
     let k = 1.0 - r.max(g).max(b);
     // Pure black: every channel is already spoken for by `k`, and dividing by
     // the ink left over would be dividing by zero.
@@ -374,10 +375,10 @@ impl<'a> XmlMapReader<'a> {
                     ..Color::default()
                 };
 
-                let c = attr_double(start, "c", 0.0) as f32;
-                let m = attr_double(start, "m", 0.0) as f32;
-                let y = attr_double(start, "y", 0.0) as f32;
-                let k = attr_double(start, "k", 0.0) as f32;
+                let c = attr_double(start, "c", 0.0);
+                let m = attr_double(start, "m", 0.0);
+                let y = attr_double(start, "y", 0.0);
+                let k = attr_double(start, "k", 0.0);
                 let has_cmyk = has_attr(start, "c") || has_attr(start, "k");
 
                 let mut rgb: Option<(f32, f32, f32)> = None;
@@ -403,7 +404,7 @@ impl<'a> XmlMapReader<'a> {
                 }
 
                 if has_cmyk && !cmyk_from_rgb {
-                    color.rgb = cmyk_to_rgb(c, m, y, k);
+                    color.rgb = cmyk_to_rgb(c as f32, m as f32, y as f32, k as f32);
                     color.cmyk = (c, m, y, k);
                 } else if let Some(rgb) = rgb {
                     color.rgb = rgb;
@@ -1126,7 +1127,7 @@ mod tests {
             (0.25, 0.5, 0.75),
         ] {
             let (c, m, y, k) = rgb_to_cmyk(rgb.0, rgb.1, rgb.2);
-            let back = cmyk_to_rgb(c, m, y, k);
+            let back = cmyk_to_rgb(c as f32, m as f32, y as f32, k as f32);
             assert!(
                 (back.0 - rgb.0).abs() < 1e-6
                     && (back.1 - rgb.1).abs() < 1e-6
