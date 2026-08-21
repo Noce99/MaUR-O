@@ -18,7 +18,8 @@
 //! [`ocd`] reads OCAD's own file format, so a map in it can be used like any
 //! other. [`runnability`] answers a different question of the same model: not
 //! what the map looks like, but how fast it is to run through, as a grid a
-//! route can be searched over.
+//! route can be searched over — and [`route`] searches it, for the way
+//! between two controls that takes the least time.
 //!
 //! Mapper is both the inspiration and the yardstick. Its rendering rules are
 //! what this crate reproduces: the drawing order a map's colours define, the
@@ -81,6 +82,7 @@ pub mod qbezier;
 pub mod render;
 pub mod renderer;
 pub mod report;
+pub mod route;
 pub mod runnability;
 pub mod text;
 pub mod xml_reader;
