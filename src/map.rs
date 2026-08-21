@@ -200,14 +200,26 @@ pub type CoordList = Vec<Coord>;
 ///
 /// The index of a color in `Map::colors` is its priority: it determines the
 /// drawing order of the whole map. Color 0 is drawn on top of all others.
-/// Only the RGB representation is kept; the CMYK and spot color definitions
-/// of the file format matter for printing, not for a raster image.
+///
+/// Both representations of the color are kept. Drawing uses [`rgb`](Self::rgb);
+/// [`cmyk`](Self::cmyk) is what an orienteering map is actually specified in --
+/// a standard defines its colors as ink percentages, so checking a map against
+/// one compares CMYK rather than the screen color derived from it. The spot
+/// color definitions of the file format are still dropped: they matter to a
+/// printing house, and to nothing here.
 #[derive(Clone, Debug)]
 pub struct Color {
     /// What the map calls this colour, e.g. "Upper purple".
     pub name: String,
     /// Red, green, blue, each in `[0, 1]`.
     pub rgb: (f32, f32, f32),
+    /// Cyan, magenta, yellow and black ink, each in `[0, 1]`.
+    ///
+    /// The file's own values where it gives them, and derived from
+    /// [`rgb`](Self::rgb) where it defines the colour by RGB alone -- so the
+    /// two always describe the same colour, whichever way round the file put
+    /// it.
+    pub cmyk: (f32, f32, f32, f32),
     /// Opacity in `[0, 1]`. Below 1 the colour is blended with whatever has
     /// already been drawn under it.
     pub opacity: f64,
@@ -218,6 +230,7 @@ impl Default for Color {
         Color {
             name: String::new(),
             rgb: (0.0, 0.0, 0.0),
+            cmyk: (0.0, 0.0, 0.0, 1.0),
             opacity: 1.0,
         }
     }
@@ -1023,5 +1036,7 @@ impl Map {
 static REGISTRATION_BLACK: std::sync::LazyLock<Color> = std::sync::LazyLock::new(|| Color {
     name: "Registration black".to_string(),
     rgb: (0.0, 0.0, 0.0),
+    // Every plate at full ink: that is what makes it register.
+    cmyk: (1.0, 1.0, 1.0, 1.0),
     opacity: 1.0,
 });

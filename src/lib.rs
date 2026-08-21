@@ -1,10 +1,17 @@
 //! **Ma**p **U**tils in **R**ust for **O**rienteering.
 //!
-//! Renders [OpenOrienteering Mapper](https://www.openorienteering.org/apps/mapper/)
-//! `.omap`/`.xmap` files to raster images, and measures how closely it does
-//! so. Everything is pure Rust, with a dedicated crate for each concern — XML
-//! parsing, path stroking and rasterization, font shaping — so a map can be
-//! drawn without Mapper itself, Qt, or a graphical environment installed.
+//! Everything here is built on one data model: an orienteering map, as
+//! [OpenOrienteering Mapper](https://www.openorienteering.org/apps/mapper/)
+//! writes it in an `.omap`/`.xmap` file. [`xml_reader`] parses a file into
+//! [`map`] and [`xml_writer`] writes one back out; every other module is a
+//! consumer of that model, and a new thing to do with a map is a new module
+//! rather than a new parser.
+//!
+//! Rendering is the largest of those consumers: this crate draws a map to a
+//! raster image, and measures how closely it does so. Everything is pure
+//! Rust, with a dedicated crate for each concern — XML parsing, path stroking
+//! and rasterization, font shaping — so a map can be drawn without Mapper
+//! itself, Qt, or a graphical environment installed.
 //!
 //! Mapper is both the inspiration and the yardstick. Its rendering rules are
 //! what this crate reproduces: the drawing order a map's colours define, the

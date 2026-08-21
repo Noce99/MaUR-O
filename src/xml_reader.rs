@@ -215,6 +215,27 @@ fn cmyk_to_rgb(c: f32, m: f32, y: f32, k: f32) -> (f32, f32, f32) {
     (r, g, b)
 }
 
+/// The inverse of [`cmyk_to_rgb`], for a color a file defines by RGB alone.
+///
+/// Black is taken as far as it will go -- the most `k` the channels allow --
+/// which is the conventional choice and the one that round-trips: feeding the
+/// result back through `cmyk_to_rgb` returns the color it came from.
+fn rgb_to_cmyk(r: f32, g: f32, b: f32) -> (f32, f32, f32, f32) {
+    let k = 1.0 - r.max(g).max(b);
+    // Pure black: every channel is already spoken for by `k`, and dividing by
+    // the ink left over would be dividing by zero.
+    if k >= 1.0 {
+        return (0.0, 0.0, 0.0, 1.0);
+    }
+    let inv = 1.0 - k;
+    (
+        (1.0 - r / inv).clamp(0.0, 1.0),
+        (1.0 - g / inv).clamp(0.0, 1.0),
+        (1.0 - b / inv).clamp(0.0, 1.0),
+        k.clamp(0.0, 1.0),
+    )
+}
+
 fn point_mut(s: &mut Symbol) -> &mut PointSymbol {
     match s {
         Symbol::Point(p) => p,
@@ -383,8 +404,16 @@ impl<'a> XmlMapReader<'a> {
 
                 if has_cmyk && !cmyk_from_rgb {
                     color.rgb = cmyk_to_rgb(c, m, y, k);
+                    color.cmyk = (c, m, y, k);
                 } else if let Some(rgb) = rgb {
                     color.rgb = rgb;
+                    // A file which gives both, but derived the CMYK from the
+                    // RGB, is still telling us what its inks are.
+                    color.cmyk = if has_cmyk {
+                        (c, m, y, k)
+                    } else {
+                        rgb_to_cmyk(rgb.0, rgb.1, rgb.2)
+                    };
                 }
 
                 if priority < 0 {
@@ -1085,6 +1114,29 @@ pub fn read_fragments(path: &Path) -> Result<Fragments, String> {
 mod tests {
     use super::*;
 
+    /// A color a file defines by RGB alone still reports the inks that make
+    /// it, and they are the ones which draw it back.
+    #[test]
+    fn derives_cmyk_from_rgb_and_back() {
+        for rgb in [
+            (0.0, 0.0, 0.0),
+            (1.0, 1.0, 1.0),
+            (0.0, 0.8, 1.0),
+            (1.0, 0.79, 0.15),
+            (0.25, 0.5, 0.75),
+        ] {
+            let (c, m, y, k) = rgb_to_cmyk(rgb.0, rgb.1, rgb.2);
+            let back = cmyk_to_rgb(c, m, y, k);
+            assert!(
+                (back.0 - rgb.0).abs() < 1e-6
+                    && (back.1 - rgb.1).abs() < 1e-6
+                    && (back.2 - rgb.2).abs() < 1e-6,
+                "{rgb:?} -> {:?} -> {back:?}",
+                (c, m, y, k)
+            );
+        }
+    }
+
     #[test]
     fn reads_empty_map() {
         let (map, warnings) = read_xml_map(Path::new("tests/data/empty.xmap")).unwrap();
@@ -1107,6 +1159,12 @@ mod tests {
         assert!((r - 0.0).abs() < 1e-4, "r={r}");
         assert!((g - 0.8).abs() < 1e-4, "g={g}");
         assert!((b - 1.0).abs() < 1e-4, "b={b}");
+        // The inks themselves, kept as the file wrote them: this is what a
+        // map is checked against a standard by, and rounding it through RGB
+        // would lose the third decimal the format is written to.
+        assert_eq!(map.colors[1].cmyk, (1.0, 0.2, 0.0, 0.0));
+        assert_eq!(map.colors[0].cmyk, (0.0, 0.0, 0.0, 1.0));
+        assert_eq!(map.colors[2].cmyk, (0.0, 0.27, 0.79, 0.0));
 
         assert_eq!(map.symbols.len(), 5);
         assert_eq!(map.objects.len(), 5);
