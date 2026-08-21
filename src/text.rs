@@ -62,11 +62,39 @@ static DB: OnceLock<Database> = OnceLock::new();
 /// a second call, or one after a map has already been drawn, does nothing and
 /// returns `false`.
 pub fn init_font_database(fonts: Vec<Vec<u8>>) -> bool {
+    DB.set(supplied_database(fonts)).is_ok()
+}
+
+/// The database [`init_font_database`] installs, built but not yet shared —
+/// which is what makes it something a test can look at.
+fn supplied_database(fonts: Vec<Vec<u8>>) -> Database {
     let mut db = Database::new();
     for bytes in fonts {
         db.load_font_data(bytes);
     }
-    DB.set(db).is_ok()
+    // The first font given stands in for every generic family. A map names
+    // the font it was drawn with ("Arial"), which a host supplying its own
+    // handful of fonts will usually not have under that name; the query in
+    // `add_text` falls back to `Family::SansSerif`, and fontdb resolves that
+    // through names which assume a desktop ("Arial", "Times New Roman") and
+    // need not be here either. Without this the fallback finds nothing and
+    // the text is quietly dropped rather than set in the wrong font.
+    //
+    // On a platform with fontconfig this rarely shows: `fontconfig_family_for`
+    // has already substituted a family which is present. wasm is the platform
+    // without one, and the one this is for.
+    let default = db
+        .faces()
+        .next()
+        .and_then(|face| face.families.first().map(|(name, _)| name.clone()));
+    if let Some(family) = default {
+        db.set_serif_family(family.clone());
+        db.set_sans_serif_family(family.clone());
+        db.set_monospace_family(family.clone());
+        db.set_cursive_family(family.clone());
+        db.set_fantasy_family(family);
+    }
+    db
 }
 
 fn font_db() -> &'static Database {
@@ -564,6 +592,50 @@ pub fn add_text(
             symbol.line_below_color,
             None,
             None,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A font which is under no name a map is likely to ask for.
+    const FONT: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+
+    /// The query `add_text` builds where there is no fontconfig to substitute
+    /// a family first, which is every wasm build: the name the map asks for,
+    /// then the generic fallback.
+    fn wasm_query<'a>(families: &'a [Family<'a>]) -> Query<'a> {
+        Query {
+            families,
+            weight: Weight::NORMAL,
+            style: Style::Normal,
+            stretch: Stretch::Normal,
+        }
+    }
+
+    #[test]
+    fn a_supplied_font_answers_for_a_family_the_map_asks_for() {
+        let Ok(font) = std::fs::read(FONT) else {
+            eprintln!("skipped: {FONT} is not installed");
+            return;
+        };
+        let db = supplied_database(vec![font.clone()]);
+        let families = [Family::Name("Arial"), Family::SansSerif];
+        assert!(
+            db.query(&wasm_query(&families)).is_some(),
+            "a map asking for a font which is not here should still be set"
+        );
+
+        // The same database without the generic families pointed at what was
+        // loaded -- fontdb's own defaults name a desktop's fonts -- finds
+        // nothing, which is the failure this guards against.
+        let mut bare = Database::new();
+        bare.load_font_data(font);
+        assert!(
+            bare.query(&wasm_query(&families)).is_none(),
+            "the fallback should be what makes the query resolve"
         );
     }
 }
