@@ -9,8 +9,10 @@ use std::path::Path;
 
 use tiny_skia::{Pixmap, Transform};
 
+use crate::map::Map;
+use crate::ocd::{is_ocd_file, ocd_to_omap_xml};
 use crate::renderer::Renderer;
-use crate::xml_reader::read_xml_map;
+use crate::xml_reader::read_xml_map_str;
 
 /// The default resolution, in pixels per meter on the ground.
 pub const DEFAULT_RESOLUTION: f64 = 3.0;
@@ -50,10 +52,31 @@ pub struct Rendering {
     pub warnings: Vec<String>,
 }
 
+/// Reads a map file of either format the crate understands.
+///
+/// Mapper's own `.omap`/`.xmap` is read as it is; an OCAD `.ocd` file is
+/// converted first, by [`crate::ocd`], and its conversion warnings come back
+/// alongside the parser's. Which of the two a file is is decided by what is
+/// in it and not by what it is called, so a map keeps working under any name.
+pub fn read_map_file(map_file: &Path) -> Result<(Map, Vec<String>), String> {
+    let bytes = std::fs::read(map_file).map_err(|e| e.to_string())?;
+    if is_ocd_file(&bytes) {
+        let imported = ocd_to_omap_xml(&bytes)?;
+        let (map, mut warnings) = read_xml_map_str(&imported.xml)?;
+        // The import's own complaints first: they are about the file the
+        // caller named, where the parser's are about text it never sees.
+        let mut all = imported.warnings;
+        all.append(&mut warnings);
+        return Ok((map, all));
+    }
+    let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+    read_xml_map_str(&text)
+}
+
 /// Renders `map_file` at `resolution` pixels per meter on the ground, with a
 /// white frame of `frame` meters on each side.
 pub fn render_map(map_file: &Path, resolution: f64, frame: f64) -> Result<Rendering, Error> {
-    let (map, warnings) = read_xml_map(map_file)
+    let (map, warnings) = read_map_file(map_file)
         .map_err(|e| Error::Read(format!("Failed to load {}: {}", map_file.display(), e)))?;
 
     // Map coordinates are given in mm on the paper. The map scale relates

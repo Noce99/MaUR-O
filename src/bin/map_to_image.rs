@@ -29,13 +29,13 @@ use maur_o::render::{render_map, save_pixmap, DEFAULT_FRAME, DEFAULT_RESOLUTION}
 #[command(
     name = "map_to_image",
     version,
-    about = "Renders an OpenOrienteering Mapper map to a raster image, without a \
+    about = "Renders an OpenOrienteering Mapper or OCAD map to a raster image, without a \
              graphical user interface.\n\n\
              Lengths are given in meters on the ground. They are converted to paper \
              units using the map scale (1:15000 etc.) stored in the map file."
 )]
 struct Args {
-    /// The map to be rendered (.omap, .xmap).
+    /// The map to be rendered (.omap, .xmap, .ocd).
     map_file: PathBuf,
 
     /// The image to be written. The file name suffix selects the format

@@ -826,6 +826,31 @@ impl Symbol {
         }
     }
 
+    /// What the symbol set numbers this symbol, e.g. "308".
+    ///
+    /// Text rather than a number: a symbol code is hierarchical, and may
+    /// carry a letter.
+    pub fn code(&self) -> &str {
+        match self {
+            Symbol::Point(s) => &s.code,
+            Symbol::Line(s) => &s.code,
+            Symbol::Area(s) => &s.code,
+            Symbol::Text(s) => &s.code,
+            Symbol::Combined(s) => &s.code,
+        }
+    }
+
+    /// What the symbol set calls this symbol, e.g. "Marsh".
+    pub fn name(&self) -> &str {
+        match self {
+            Symbol::Point(s) => &s.name,
+            Symbol::Line(s) => &s.name,
+            Symbol::Area(s) => &s.name,
+            Symbol::Text(s) => &s.name,
+            Symbol::Combined(s) => &s.name,
+        }
+    }
+
     /// Whether the symbol is a drawing aid rather than part of the map.
     pub fn is_helper_symbol(&self) -> bool {
         match self {

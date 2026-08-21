@@ -11,6 +11,8 @@ This is a **Ma**p **U**tils project written in **R**ust for **O**rienteering.
 It renders [OpenOrienteering Mapper](https://www.openorienteering.org/apps/mapper/)
 `.omap`/`.xmap` files to raster images (PNG, BMP, TIFF, JPEG) from the command
 line, without needing Mapper itself, Qt, or a graphical environment installed.
+OCAD `.ocd` files — versions 6 through 12 and 2018 — are read too, converted
+to Mapper's format on the way in, so the same tools work on either.
 Alongside the renderer, it ships a small pair of benchmarking tools that build
 and run suites of maps to measure how closely the renderer's output matches a
 ground-truth reference — useful both for tracking rendering fidelity over time
@@ -100,7 +102,7 @@ map_to_image [-r px-per-meter] [-f meters] <map-file> [image-file]
 
 | Argument | Meaning |
 | --- | --- |
-| `<map-file>` | The `.omap`/`.xmap` file to render. |
+| `<map-file>` | The map to render: `.omap`/`.xmap`, or an OCAD `.ocd` file. Which it is is decided by what is in the file, not by its name. |
 | `[image-file]` | Where to write the image. The file suffix (`.png`, `.bmp`, `.tif`, `.jpg`) selects the format; defaults to the map file's name with a `.png` suffix. |
 | `-r, --resolution <N>` | Pixels per meter on the ground (default `3`). |
 | `-f, --frame <N>` | Width of the white frame added on every side, in meters on the ground (default `50`). |
@@ -220,7 +222,11 @@ the top, so this is where to look first. For what each column means, see
 
 MaUR-O reads the OpenOrienteering Mapper `.omap`/`.xmap` format and renders
 it in pure Rust, with a dedicated crate for each concern (XML parsing, path
-stroking and rasterization, font shaping...). How closely its output matches
+stroking and rasterization, font shaping...). An OCAD `.ocd` file is read by
+converting it to that format first, following OpenOrienteering Mapper's own
+importer and Purple Pen's; what such a file carries and the XML has no place
+for — text on a path, a rectangle symbol's cell grid, a symbol switched off —
+is reported rather than dropped silently. How closely its output matches
 a ground-truth renderer, how the source is organized, and how the
 benchmarking tools tell a real rendering bug from the noise two different
 rasterizers' antialiasing produces, are documented in
