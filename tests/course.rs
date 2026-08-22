@@ -231,3 +231,60 @@ fn a_leg_leaving_the_start_stops_at_the_triangles_edge() {
     assert!(trim <= size::START_TRIANGLE_RADIUS + 1e-9);
     assert!(trim >= size::START_TRIANGLE_RADIUS * 0.5 - 1e-9);
 }
+
+#[test]
+fn the_triangles_edge_is_measured_the_same_way_from_all_three_sides() {
+    use maur_o::course::start_boundary_factor;
+    let third = 2.0 * std::f64::consts::PI / 3.0;
+
+    // Straight at a corner: the whole way out.
+    assert!((start_boundary_factor(0.0, 0.0) - 1.0).abs() < 1e-12);
+    // Straight at the middle of the opposite side: half way.
+    assert!((start_boundary_factor(std::f64::consts::PI, 0.0) - 0.5).abs() < 1e-12);
+    // And a triangle looks the same from three directions.
+    for angle in [0.3f64, 1.1, -0.7, 2.5] {
+        let here = start_boundary_factor(angle, 0.0);
+        for turn in [third, -third, 2.0 * third] {
+            let there = start_boundary_factor(angle + turn, 0.0);
+            assert!((here - there).abs() < 1e-12, "{here} vs {there} at {angle}");
+        }
+    }
+}
+
+#[test]
+fn a_label_is_placed_just_touching_the_circle_it_belongs_to() {
+    use maur_o::course::rectangle_center;
+    let (w, h) = (10.0, 4.0);
+    let r = 5.0;
+
+    // Due east: the label's left end touches, so its middle is half a width
+    // further out.
+    let east = rectangle_center(0.0, 0.0, r, 0.0, w, h);
+    assert!((east.x - (r + w / 2.0)).abs() < 1e-9, "{east:?}");
+    assert!(east.y.abs() < 1e-9, "{east:?}");
+
+    // Due south, in a page's coordinates: its top edge touches.
+    let south = rectangle_center(0.0, 0.0, r, std::f64::consts::FRAC_PI_2, w, h);
+    assert!(south.x.abs() < 1e-9, "{south:?}");
+    assert!((south.y - (r + h / 2.0)).abs() < 1e-9, "{south:?}");
+
+    // And it is placed relative to the circle it is given, not the origin.
+    let moved = rectangle_center(100.0, 50.0, r, 0.0, w, h);
+    assert!((moved.x - (100.0 + r + w / 2.0)).abs() < 1e-9);
+    assert!((moved.y - 50.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_start_with_nothing_after_it_still_gets_a_triangle() {
+    let controls = course(&[(0.0, 0.0, Kind::Start, "")]);
+    let out = layout(&controls, &Options::default());
+
+    assert_eq!(out.start_triangles.len(), 1);
+    // With nowhere to point, it points up the page.
+    let apex = out.start_triangles[0].points[0];
+    assert!(apex.x.abs() < 1e-9, "{apex:?}");
+    assert!(
+        (apex.y + size::START_TRIANGLE_RADIUS).abs() < 1e-9,
+        "{apex:?}"
+    );
+}
