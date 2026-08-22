@@ -23,9 +23,9 @@
 //! question a mapper asks: where does this map depart from the standard it
 //! is drawn to? And [`dem`] shades a model of the ground, so that terrain
 //! can be seen at all. [`course`] lays a course out over a map: where the
-//! circles, the lines between them and the numbers beside them go. [] lays a course out over a map: where the
-//! circles, the lines between them and the numbers beside them go. And [] shades a model of the ground, so that terrain can
-//! be seen at all.
+//! circles, the lines between them and the numbers beside them go. And
+//! [`svg`] writes the same drawing the renderer makes out as vector paths
+//! rather than pixels.
 //!
 //! Mapper is both the inspiration and the yardstick. Its rendering rules are
 //! what this crate reproduces: the drawing order a map's colours define, the
@@ -92,6 +92,7 @@ pub mod renderer;
 pub mod report;
 pub mod route;
 pub mod runnability;
+pub mod svg;
 pub mod text;
 pub mod validate;
 pub mod xml_reader;

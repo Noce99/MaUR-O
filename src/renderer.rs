@@ -40,7 +40,7 @@ const MITER_LIMIT: f64 = 1.0;
 /// collapse small, thick-stroked shapes like a five-pointed star into a
 /// round blob). `MiterClip`'s `miter_limit` uses the same
 /// ratio-to-full-pen-width convention as the clip distance above.
-const TINY_SKIA_MITER_LIMIT: f64 = 2.0 * MITER_LIMIT;
+pub(crate) const TINY_SKIA_MITER_LIMIT: f64 = 2.0 * MITER_LIMIT;
 
 fn pen_cap(style: i32) -> PenCap {
     match style {
@@ -159,24 +159,24 @@ pub(crate) struct Pen {
     pub join: PenJoin,
 }
 
-struct Renderable {
-    path: Path,
-    color: i32,
+pub(crate) struct Renderable {
+    pub(crate) path: Path,
+    pub(crate) color: i32,
     /// The bounding box in mm on the paper, as measured when this renderable
     /// was built — the same rectangle `include` folds into the map extent,
     /// kept per renderable so that `paint_rect` can reject one without
     /// touching its geometry. Always in paper mm, even where `path` is not
     /// (a transformed text path is pushed with its mapped extent).
-    bbox: Rect,
+    pub(crate) bbox: Rect,
     /// The `id` of the symbol whose object produced this renderable, so that
     /// `paint_rect` can leave a symbol out. -1 for a renderable built outside
     /// `add_object`, which no caller can name and none hides.
-    symbol_id: i32,
-    clip: Option<usize>,
+    pub(crate) symbol_id: i32,
+    pub(crate) clip: Option<usize>,
     /// Stroke width in mm, 0 for a filled path.
-    pen_width: f64,
-    cap: PenCap,
-    join: PenJoin,
+    pub(crate) pen_width: f64,
+    pub(crate) cap: PenCap,
+    pub(crate) join: PenJoin,
     /// Whether a `PenJoin::Miter` join is realized as tiny_skia's
     /// `LineJoin::MiterClip` (`true`, matching Mapper's own miter join --
     /// see `TINY_SKIA_MITER_LIMIT`) or its plain `LineJoin::Miter` (`false`).
@@ -188,23 +188,23 @@ struct Renderable {
     /// cleanly falls back to a bevel. An `ExactReversal` cusp keeps
     /// `MiterClip`, which -- unlike a plain miter -- renders it the way
     /// Mapper does.
-    miter_clip: bool,
+    pub(crate) miter_clip: bool,
     /// `QPainterPath` defaults to `Qt::OddEvenFill` (which is how a hole
     /// punched by a `HolePoint`-flagged inner loop works); text explicitly
     /// opts into `Qt::WindingFill` so that overlapping glyph contours don't
     /// punch accidental holes. Irrelevant for stroked renderables.
-    fill_rule: FillRule,
+    pub(crate) fill_rule: FillRule,
     /// Applied at paint time, for text: the glyph outlines stay in font
     /// units, so that they are flattened at the size at which they are
     /// drawn, as in Mapper.
-    transform: Option<Transform>,
+    pub(crate) transform: Option<Transform>,
 }
 
 /// Creates the renderables for all objects of the map, and draws them.
 pub struct Renderer<'m> {
-    map: &'m Map,
-    renderables: Vec<Renderable>,
-    clips: Vec<Path>,
+    pub(crate) map: &'m Map,
+    pub(crate) renderables: Vec<Renderable>,
+    pub(crate) clips: Vec<Path>,
     extent: Rect,
     /// The clip path applying to new renderables; set while filling an area.
     current_clip: Option<usize>,
@@ -1913,6 +1913,34 @@ impl<'m> Renderer<'m> {
         self.paint_rect(pixmap, page_transform, None, &[]);
     }
 
+    /// Which renderables to draw, in the order to draw them.
+    ///
+    /// A colour's place in the map's colour table is the order it is printed
+    /// in, and index 0 goes on top -- so the list runs from the last colour
+    /// to the first. `clip_mm` leaves out what falls outside a rectangle and
+    /// `hidden_symbol_ids` what is drawn with a symbol the caller is hiding.
+    pub(crate) fn draw_order(
+        &self,
+        clip_mm: Option<Rect>,
+        hidden_symbol_ids: &[i32],
+    ) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.renderables.len())
+            .filter(|&i| {
+                let renderable = &self.renderables[i];
+                let visible = match clip_mm {
+                    Some(rect) => renderable.bbox.intersects(&rect),
+                    None => true,
+                };
+                // Linear in the number of hidden symbols, which is a handful:
+                // the caller names the ones it is hiding, not the ones it is
+                // not.
+                visible && !hidden_symbol_ids.contains(&renderable.symbol_id)
+            })
+            .collect();
+        order.sort_by(|&a, &b| self.renderables[b].color.cmp(&self.renderables[a].color));
+        order
+    }
+
     /// Draws part of the map: as [`paint`](Self::paint), but skipping whatever
     /// cannot be seen or is not wanted.
     ///
@@ -1949,20 +1977,7 @@ impl<'m> Renderer<'m> {
         clip_mm: Option<Rect>,
         hidden_symbol_ids: &[i32],
     ) {
-        let mut order: Vec<usize> = (0..self.renderables.len())
-            .filter(|&i| {
-                let renderable = &self.renderables[i];
-                let visible = match clip_mm {
-                    Some(rect) => renderable.bbox.intersects(&rect),
-                    None => true,
-                };
-                // Linear in the number of hidden symbols, which is a handful:
-                // the caller names the ones it is hiding, not the ones it is
-                // not.
-                visible && !hidden_symbol_ids.contains(&renderable.symbol_id)
-            })
-            .collect();
-        order.sort_by(|&a, &b| self.renderables[b].color.cmp(&self.renderables[a].color));
+        let order = self.draw_order(clip_mm, hidden_symbol_ids);
 
         let mut active_clip: Option<usize> = None;
         let mut has_active_clip = false;
