@@ -300,6 +300,10 @@ pub struct PointSymbol {
     pub is_helper_symbol: bool,
     /// Whether an object's own rotation turns this symbol with it.
     pub is_rotatable: bool,
+    /// The picture of the symbol the file carries, for a panel to show
+    /// beside its name -- a `data:` URI, usually. Empty where the file has
+    /// none; the crate neither reads it nor draws it.
+    pub icon_src: String,
 
     /// Radius of the filled dot, in mm.
     pub inner_radius: f64,
@@ -433,6 +437,10 @@ pub struct LineSymbol {
     pub is_helper_symbol: bool,
     /// Whether an object's own rotation turns this symbol with it.
     pub is_rotatable: bool,
+    /// The picture of the symbol the file carries, for a panel to show
+    /// beside its name -- a `data:` URI, usually. Empty where the file has
+    /// none; the crate neither reads it nor draws it.
+    pub icon_src: String,
 
     /// Color index of the stroke, -1 for none. A line with no colour still
     /// draws its borders and its point symbols.
@@ -522,6 +530,7 @@ impl Default for LineSymbol {
         LineSymbol {
             name: String::new(),
             code: String::new(),
+            icon_src: String::new(),
             is_hidden: false,
             is_helper_symbol: false,
             is_rotatable: false,
@@ -634,6 +643,10 @@ pub struct AreaSymbol {
     pub is_helper_symbol: bool,
     /// Whether an object's own rotation turns this symbol with it.
     pub is_rotatable: bool,
+    /// The picture of the symbol the file carries, for a panel to show
+    /// beside its name -- a `data:` URI, usually. Empty where the file has
+    /// none; the crate neither reads it nor draws it.
+    pub icon_src: String,
 
     /// Color index of the plain fill, -1 for none. An area with no fill
     /// colour still draws its patterns.
@@ -674,6 +687,10 @@ pub struct TextSymbol {
     pub is_helper_symbol: bool,
     /// Whether an object's own rotation turns this symbol with it.
     pub is_rotatable: bool,
+    /// The picture of the symbol the file carries, for a panel to show
+    /// beside its name -- a `data:` URI, usually. Empty where the file has
+    /// none; the crate neither reads it nor draws it.
+    pub icon_src: String,
 
     /// The font family asked for, which is resolved against the fonts the
     /// machine actually has when the text is drawn.
@@ -728,6 +745,7 @@ impl Default for TextSymbol {
         TextSymbol {
             name: String::new(),
             code: String::new(),
+            icon_src: String::new(),
             is_hidden: false,
             is_helper_symbol: false,
             is_rotatable: false,
@@ -787,6 +805,10 @@ pub struct CombinedSymbol {
     pub is_helper_symbol: bool,
     /// Whether an object's own rotation turns this symbol with it.
     pub is_rotatable: bool,
+    /// The picture of the symbol the file carries, for a panel to show
+    /// beside its name -- a `data:` URI, usually. Empty where the file has
+    /// none; the crate neither reads it nor draws it.
+    pub icon_src: String,
 
     /// The private parts of this symbol.
     pub owned_parts: Vec<Symbol>,
@@ -853,6 +875,17 @@ impl Symbol {
             Symbol::Area(s) => &s.name,
             Symbol::Text(s) => &s.name,
             Symbol::Combined(s) => &s.name,
+        }
+    }
+
+    /// The picture of the symbol the file carries, or an empty string.
+    pub fn icon_src(&self) -> &str {
+        match self {
+            Symbol::Point(s) => &s.icon_src,
+            Symbol::Line(s) => &s.icon_src,
+            Symbol::Area(s) => &s.icon_src,
+            Symbol::Text(s) => &s.icon_src,
+            Symbol::Combined(s) => &s.icon_src,
         }
     }
 

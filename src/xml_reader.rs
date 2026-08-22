@@ -518,6 +518,13 @@ impl<'a> XmlMapReader<'a> {
                             "combined_symbol" => self.read_combined_symbol(&mut symbol)?,
                             _ => unreachable!(),
                         }
+                    } else if cname == "icon" {
+                        // Mapper's own picture of the symbol, for a panel to
+                        // show. Kept as written; nothing here reads it.
+                        if let Some(src) = attr_str(&child, "src") {
+                            set_icon_src(&mut symbol, src);
+                        }
+                        self.xml.skip_current()?;
                     } else {
                         self.xml.skip_current()?;
                     }
@@ -1109,6 +1116,17 @@ pub fn read_fragments(path: &Path) -> Result<Fragments, String> {
     }
 
     Ok(fragments)
+}
+
+/// Puts the file's own picture of a symbol on it, whichever kind it is.
+fn set_icon_src(symbol: &mut Symbol, src: String) {
+    match symbol {
+        Symbol::Point(s) => s.icon_src = src,
+        Symbol::Line(s) => s.icon_src = src,
+        Symbol::Area(s) => s.icon_src = src,
+        Symbol::Text(s) => s.icon_src = src,
+        Symbol::Combined(s) => s.icon_src = src,
+    }
 }
 
 #[cfg(test)]
