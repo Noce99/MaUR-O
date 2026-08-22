@@ -22,7 +22,9 @@
 //! between two controls that takes the least time. [`validate`] asks the
 //! question a mapper asks: where does this map depart from the standard it
 //! is drawn to? And [`dem`] shades a model of the ground, so that terrain
-//! can be seen at all. And [] shades a model of the ground, so that terrain can
+//! can be seen at all. [`course`] lays a course out over a map: where the
+//! circles, the lines between them and the numbers beside them go. [] lays a course out over a map: where the
+//! circles, the lines between them and the numbers beside them go. And [] shades a model of the ground, so that terrain can
 //! be seen at all.
 //!
 //! Mapper is both the inspiration and the yardstick. Its rendering rules are
@@ -75,6 +77,7 @@
 
 pub mod all_symbols;
 pub mod archive_info;
+pub mod course;
 pub mod dem;
 pub mod differences;
 pub mod geometry;
