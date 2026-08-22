@@ -25,7 +25,8 @@
 //! can be seen at all. [`course`] lays a course out over a map: where the
 //! circles, the lines between them and the numbers beside them go. And
 //! [`svg`] writes the same drawing the renderer makes out as vector paths
-//! rather than pixels.
+//! rather than pixels. [`stats`] counts what a map holds — its objects, the
+//! symbols it uses, how far its lines run and how much ground it covers.
 //!
 //! Mapper is both the inspiration and the yardstick. Its rendering rules are
 //! what this crate reproduces: the drawing order a map's colours define, the
@@ -92,6 +93,7 @@ pub mod renderer;
 pub mod report;
 pub mod route;
 pub mod runnability;
+pub mod stats;
 pub mod svg;
 pub mod text;
 pub mod validate;
