@@ -6,14 +6,20 @@
 //! ```
 //!
 //! This is the tool to reach for to just look at a map. The suffix of the
-//! output file picks the format (`.png`, `.bmp`, `.tif`, `.jpg`); with no
-//! output file given, the map's own name with `.png` is used.
+//! output file picks the format (`.png`, `.bmp`, `.tif`, `.jpg`, or `.svg`
+//! for vector output); with no output file given, the map's own name with
+//! `.png` is used.
 //!
 //! Both options are given in meters on the ground, not on the paper, since
 //! that is the way a map is talked about — how many pixels per meter of
 //! forest, how wide a margin around it. They are converted to paper units
 //! with the map scale (1:15000 and so on) stored in the map file, so the same
 //! resolution gives comparable detail across maps drawn at different scales.
+//!
+//! `.svg` writes the drawing itself rather than a picture of it, so it stays
+//! sharp at any size. `-r` does not apply to it — there are no pixels — and
+//! the frame is empty rather than white, an SVG being a drawing and not a
+//! page.
 //!
 //! Exit codes: 0 success, 1 usage error, 2 the map could not be read, 3 the
 //! image geometry is invalid, 4 the image could not be written.
@@ -23,7 +29,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use maur_o::render::{render_map, save_pixmap, DEFAULT_FRAME, DEFAULT_RESOLUTION};
+use maur_o::render::{render_map, render_map_svg, save_pixmap, DEFAULT_FRAME, DEFAULT_RESOLUTION};
 
 #[derive(Parser)]
 #[command(
@@ -39,8 +45,8 @@ struct Args {
     map_file: PathBuf,
 
     /// The image to be written. The file name suffix selects the format
-    /// (.png, .bmp, .tif, .jpg). Defaults to the map file name with a .png
-    /// suffix.
+    /// (.png, .bmp, .tif, .jpg, or .svg for vector output). Defaults to the
+    /// map file name with a .png suffix.
     image_file: Option<PathBuf>,
 
     /// Resolution of the image, in pixels per meter on the ground.
@@ -57,6 +63,37 @@ struct Args {
 /// with the suffix replaced by ".png".
 fn default_output_path(map_path: &Path) -> PathBuf {
     map_path.with_extension("png")
+}
+
+/// Writes the map as SVG, reporting it the way the raster path reports an
+/// image — the ground it covers rather than the pixels it took.
+fn write_svg(args: &Args, svg_path: &Path) -> Result<(), (ExitCode, String)> {
+    let rendering = render_map_svg(&args.map_file, args.frame).map_err(|e| match e {
+        maur_o::render::Error::Read(message) => (ExitCode::from(2), format!("Error: {message}")),
+        maur_o::render::Error::Geometry(message) => {
+            (ExitCode::from(3), format!("Error: {message}"))
+        }
+    })?;
+    for warning in &rendering.warnings {
+        eprintln!("Warning: {}", warning);
+    }
+    std::fs::write(svg_path, &rendering.svg).map_err(|e| {
+        (
+            ExitCode::from(4),
+            format!(
+                "Error: Failed to save {}. Does the directory exist? ({e})",
+                svg_path.display()
+            ),
+        )
+    })?;
+    println!(
+        "{}: vector, {}x{} meters, map scale 1:{}",
+        svg_path.display(),
+        rendering.ground_width,
+        rendering.ground_height,
+        rendering.scale_denominator,
+    );
+    Ok(())
 }
 
 fn run() -> Result<(), (ExitCode, String)> {
@@ -95,6 +132,13 @@ fn run() -> Result<(), (ExitCode, String)> {
         .image_file
         .clone()
         .unwrap_or_else(|| default_output_path(&args.map_file));
+
+    let is_svg = image_path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+    if is_svg {
+        return write_svg(&args, &image_path);
+    }
 
     let rendering =
         render_map(&args.map_file, args.resolution, args.frame).map_err(|e| match e {
