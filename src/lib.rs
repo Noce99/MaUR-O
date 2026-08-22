@@ -21,7 +21,9 @@
 //! route can be searched over — and [`route`] searches it, for the way
 //! between two controls that takes the least time. [`validate`] asks the
 //! question a mapper asks: where does this map depart from the standard it
-//! is drawn to?
+//! is drawn to? And [`dem`] shades a model of the ground, so that terrain
+//! can be seen at all. And [] shades a model of the ground, so that terrain can
+//! be seen at all.
 //!
 //! Mapper is both the inspiration and the yardstick. Its rendering rules are
 //! what this crate reproduces: the drawing order a map's colours define, the
@@ -73,6 +75,7 @@
 
 pub mod all_symbols;
 pub mod archive_info;
+pub mod dem;
 pub mod differences;
 pub mod geometry;
 pub mod map;
