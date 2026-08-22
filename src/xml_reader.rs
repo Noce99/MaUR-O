@@ -340,7 +340,8 @@ impl<'a> XmlMapReader<'a> {
                         if scale > 0 {
                             this.map.scale_denominator = scale;
                         }
-                        this.xml.skip_current()?;
+                        let georeferencing = this.read_georeferencing(start)?;
+                        this.map.georeferencing = Some(georeferencing);
                         Ok(true)
                     }
                     "colors" => {
@@ -348,6 +349,9 @@ impl<'a> XmlMapReader<'a> {
                         Ok(true)
                     }
                     "symbols" => {
+                        // What the file says it is drawn with: "ISOM 2017-2",
+                        // "ISSprOM 2019", "OCD" for a converted OCAD map.
+                        this.map.symbol_set = attr_str(start, "id").filter(|id| !id.is_empty());
                         this.read_symbols()?;
                         Ok(true)
                     }
@@ -359,6 +363,54 @@ impl<'a> XmlMapReader<'a> {
                 }
             };
         self.read_children(&mut handler)
+    }
+
+    /// Reads `<georeferencing>`: the scale and rotation from its own
+    /// attributes, the projection and its reference point from the projected
+    /// CRS inside it.
+    ///
+    /// A map with no projected CRS still gets a `Georeferencing` -- it has a
+    /// scale, which is what most of it is used for. Whether it is placed on
+    /// the earth is `epsg`, which stays 0 until a CRS says otherwise.
+    fn read_georeferencing(&mut self, start: &BytesStart) -> Result<Georeferencing, String> {
+        let mut georeferencing = Georeferencing {
+            scale: attr_int(start, "scale", 0),
+            grivation: attr_double(start, "grivation", 0.0),
+            grivation_specified: has_attr(start, "grivation"),
+            ..Default::default()
+        };
+
+        let mut handler =
+            |this: &mut Self, name: &str, _start: &BytesStart| -> Result<bool, String> {
+                match name {
+                    "projected_crs" => {
+                        this.read_children(&mut |this: &mut Self,
+                                                 name: &str,
+                                                 start: &BytesStart|
+                         -> Result<bool, String> {
+                            match name {
+                                // The EPSG code is the element's own text.
+                                "parameter" => {
+                                    let text = this.xml.read_text_content()?;
+                                    georeferencing.epsg = text.trim().parse::<i32>().unwrap_or(0);
+                                    Ok(true)
+                                }
+                                "ref_point" => {
+                                    georeferencing.ref_point_x = attr_double(start, "x", 0.0);
+                                    georeferencing.ref_point_y = attr_double(start, "y", 0.0);
+                                    this.xml.skip_current()?;
+                                    Ok(true)
+                                }
+                                _ => Ok(false),
+                            }
+                        })?;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            };
+        self.read_children(&mut handler)?;
+        Ok(georeferencing)
     }
 
     fn read_colors(&mut self) -> Result<(), String> {

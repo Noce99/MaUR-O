@@ -57,7 +57,7 @@ use std::collections::HashMap;
 use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Stroke, Transform};
 
 use crate::geometry::{add_ellipse, to_painter_path, Path, Rect};
-use crate::map::{Map, Object, PartRef, Point, Symbol};
+use crate::map::{symbol_leaves, Map, Object, Point, Symbol};
 use crate::renderer::to_skia_path;
 
 /// The default ceiling on the number of cells, past which the cell size is
@@ -205,37 +205,13 @@ fn matches(symbol_code: &str, speed_code: &str) -> bool {
     symbol_code == speed_code || base_code(symbol_code) == speed_code
 }
 
-/// The symbols a symbol actually draws with: itself, unless it is a
-/// combination, in which case its parts, recursively.
-fn leaves<'m>(symbol: &'m Symbol, map: &'m Map, out: &mut Vec<&'m Symbol>) {
-    let Symbol::Combined(combined) = symbol else {
-        out.push(symbol);
-        return;
-    };
-    for part in &combined.parts {
-        match *part {
-            PartRef::Shared(i) => {
-                if let Some(part) = map.symbols.get(i) {
-                    leaves(part, map, out);
-                }
-            }
-            PartRef::Private(i) => {
-                if let Some(part) = combined.owned_parts.get(i) {
-                    leaves(part, map, out);
-                }
-            }
-            PartRef::None => {}
-        }
-    }
-}
-
 /// How an object's shape is drawn, from the kinds of symbol it draws with.
 ///
 /// An area wins over a line and a line over a point, since a symbol which
 /// fills also outlines, and what the grid wants is the ground it covers.
 fn kind_of(symbol: &Symbol, map: &Map) -> Option<Kind> {
     let mut resolved = Vec::new();
-    leaves(symbol, map, &mut resolved);
+    symbol_leaves(symbol, map, &mut resolved);
     let mut best = None;
     for leaf in resolved {
         match leaf {

@@ -1012,6 +1012,63 @@ impl Object {
     }
 }
 
+/// The symbols a symbol actually draws with.
+///
+/// Itself, unless it is a combination -- a road is a wide line with two thin
+/// ones on it -- in which case its parts, resolved recursively and in
+/// drawing order. Anything asking what kind of thing an object is, rather
+/// than how to draw it, has to look through combinations this way.
+///
+/// Appends to `out` rather than returning, so a caller classifying every
+/// object on a map reuses one buffer.
+pub fn symbol_leaves<'m>(symbol: &'m Symbol, map: &'m Map, out: &mut Vec<&'m Symbol>) {
+    let Symbol::Combined(combined) = symbol else {
+        out.push(symbol);
+        return;
+    };
+    for part in &combined.parts {
+        match *part {
+            PartRef::Shared(i) => {
+                if let Some(part) = map.symbols.get(i) {
+                    symbol_leaves(part, map, out);
+                }
+            }
+            PartRef::Private(i) => {
+                if let Some(part) = combined.owned_parts.get(i) {
+                    symbol_leaves(part, map, out);
+                }
+            }
+            PartRef::None => {}
+        }
+    }
+}
+
+/// Where a map sits on the earth, as its file declares it.
+///
+/// Mapper writes this whether or not the map is really georeferenced: a map
+/// drawn on no ground at all still carries a scale. What makes it a
+/// georeference is the projected CRS — [`epsg`](Self::epsg) and the reference
+/// point in it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Georeferencing {
+    /// The map scale: 15000 for a 1:15000 map.
+    pub scale: i32,
+    /// The EPSG code of the projected CRS, or 0 where the file names none.
+    pub epsg: i32,
+    /// The easting of the reference point, in the projected CRS.
+    pub ref_point_x: f64,
+    /// The northing of the reference point, in the projected CRS.
+    pub ref_point_y: f64,
+    /// The angle between grid north and map north, in degrees.
+    pub grivation: f64,
+    /// Whether the file actually said so.
+    ///
+    /// Worth keeping apart from a grivation of zero: a map whose rotation is
+    /// undeclared is not a map declared to be unrotated, and anything
+    /// solving a georeference has to know which it is looking at.
+    pub grivation_specified: bool,
+}
+
 /// A map: colors, symbols, and the objects of all map parts.
 ///
 /// Map parts are merged: they are a course setting feature which does not
@@ -1033,6 +1090,11 @@ pub struct Map {
     /// Everything drawn on the map, in the order the file gives it — which is
     /// not the order it is drawn in; see [`colors`](Self::colors).
     pub objects: Vec<Object>,
+    /// Where the map sits on the earth, where the file says.
+    pub georeferencing: Option<Georeferencing>,
+    /// What symbol set the map says it is drawn with -- "ISOM 2017-2",
+    /// "ISSprOM 2019", "OCD" -- where the file names one.
+    pub symbol_set: Option<String>,
 }
 
 impl Map {

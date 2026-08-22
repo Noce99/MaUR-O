@@ -18,7 +18,7 @@
 //! track; that it is 6.7 cm of paper at 1:15000 is not the interesting half.
 
 use crate::geometry::{flatten, Rect};
-use crate::map::{Map, Point, Symbol};
+use crate::map::{symbol_leaves, Map, Point, Symbol};
 
 /// The scale assumed for a map that does not say.
 const DEFAULT_MAP_SCALE: f64 = 15000.0;
@@ -67,29 +67,6 @@ fn kind_name(symbol: &Symbol) -> &'static str {
         Symbol::Area(_) => "area",
         Symbol::Text(_) => "text",
         Symbol::Combined(_) => "combined",
-    }
-}
-
-/// The symbols a symbol draws with: itself, or the parts of a combination.
-fn leaves<'m>(symbol: &'m Symbol, map: &'m Map, out: &mut Vec<&'m Symbol>) {
-    let Symbol::Combined(combined) = symbol else {
-        out.push(symbol);
-        return;
-    };
-    for part in &combined.parts {
-        match *part {
-            crate::map::PartRef::Shared(i) => {
-                if let Some(part) = map.symbols.get(i) {
-                    leaves(part, map, out);
-                }
-            }
-            crate::map::PartRef::Private(i) => {
-                if let Some(part) = combined.owned_parts.get(i) {
-                    leaves(part, map, out);
-                }
-            }
-            crate::map::PartRef::None => {}
-        }
     }
 }
 
@@ -169,7 +146,7 @@ pub fn symbol_usage(map: &Map) -> Vec<SymbolUse> {
     let mut kinds: Vec<&'static str> = Vec::with_capacity(map.symbols.len());
     for symbol in &map.symbols {
         let mut resolved = Vec::new();
-        leaves(symbol, map, &mut resolved);
+        symbol_leaves(symbol, map, &mut resolved);
         kinds.push(resolved.first().map_or("unknown", |s| kind_name(s)));
     }
 
