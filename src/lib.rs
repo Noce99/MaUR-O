@@ -80,10 +80,16 @@
 
 pub mod all_symbols;
 pub mod archive_info;
+pub mod contour_geometry;
+pub mod contour_raster;
+pub mod contour_symbols;
+pub mod contours_to_raster_config;
+pub mod contours_to_raster_svg;
 pub mod course;
 pub mod dem;
 pub mod differences;
 pub mod geometry;
+pub mod gravity_model;
 pub mod map;
 pub mod naming;
 pub mod ocd;
@@ -97,6 +103,9 @@ pub mod route;
 pub mod runnability;
 pub mod snap;
 pub mod stats;
+pub mod step0_extract;
+pub mod step1_obvious_gravity;
+pub mod step2_rain_drop;
 pub mod svg;
 pub mod text;
 pub mod validate;

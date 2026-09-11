@@ -321,15 +321,16 @@ pub fn add_ellipse(path: &mut Path, center: Point, rx: f64, ry: f64) {
     path.close_subpath();
 }
 
-/// The index range of one part of a coordinate list.
-struct PartRange {
-    begin: usize,
-    end: usize,
-    closed: bool,
+/// The index range of one part of a coordinate list: a `[begin, end)`
+/// half-open range of one subpath within a [`CoordList`].
+pub(crate) struct PartRange {
+    pub(crate) begin: usize,
+    pub(crate) end: usize,
+    pub(crate) closed: bool,
 }
 
 /// Splits a coordinate list at the hole points.
-fn part_ranges(coords: &CoordList) -> Vec<PartRange> {
+pub(crate) fn part_ranges(coords: &CoordList) -> Vec<PartRange> {
     let mut parts = Vec::new();
     let mut begin = 0usize;
     for i in 0..coords.len() {
