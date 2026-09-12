@@ -198,8 +198,7 @@ mod tests {
     fn raster_with(contours: &[Contour]) -> ContourRaster {
         let mut r = ContourRaster::new(c(-5.0, -5.0), 1.0, 40, 40);
         for (i, contour) in contours.iter().enumerate() {
-            let densified = crate::contour_geometry::densify(&contour.lwg.ls, 0.5, 1.0);
-            r.write_contour(i as u64, &densified).unwrap();
+            r.write_contour(i as u64, &contour.lwg.ls).unwrap();
         }
         r
     }

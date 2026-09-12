@@ -662,15 +662,10 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
         } = c
         {
             for (ls, raw_poly) in lss.iter().zip(raw) {
-                let densified = contour_geometry::densify(
-                    ls,
-                    config.rasterization_step_factor,
-                    config.rasterization_px_size,
-                );
                 let idx = contours.len() as u64;
-                let conflicts = raster.find_conflicts(idx, &densified);
+                let conflicts = raster.find_conflicts(idx, ls);
                 if conflicts.is_empty() {
-                    raster.write_contour(idx, &densified)?;
+                    raster.write_contour(idx, ls)?;
                     contours.push(Contour {
                         lwg: LineWithGravity::new(ls.clone()),
                         elevation_height: None,
@@ -725,12 +720,7 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
                         }),
                     });
                 };
-                let merged_densified = contour_geometry::densify(
-                    &merged_ls,
-                    config.rasterization_step_factor,
-                    config.rasterization_px_size,
-                );
-                raster.write_contour(existing_idx, &merged_densified)?;
+                raster.write_contour(existing_idx, &merged_ls)?;
                 contours[existing_idx as usize].lwg = LineWithGravity::new(merged_ls);
                 // Only cosmetic (the `--create_svg` "before" picture): not
                 // reordered to match the merge's own end-matching, since a
@@ -986,7 +976,6 @@ mod tests {
             bezier_linearization_step: 0.1,
             contours_step: 1.0,
             rasterization_px_size: 0.5,
-            rasterization_step_factor: 0.5,
             heavy_object_width: 1.0,
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
@@ -1106,7 +1095,6 @@ mod tests {
             bezier_linearization_step: 0.1,
             contours_step: 1.0,
             rasterization_px_size: 0.5,
-            rasterization_step_factor: 0.5,
             heavy_object_width: 1.0,
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,

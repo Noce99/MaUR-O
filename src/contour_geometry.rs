@@ -2,10 +2,10 @@
 //! `contours_to_raster` (see `Contours-to-Raster.md`).
 //!
 //! [`bezier_to_linestring`] and [`resample_equal_chords`] are Appendix 1,
-//! ported close to verbatim from the doc. [`ls_to_polygon`] is Appendix 2 and
-//! [`densify`] is Appendix 3: both are thin wrappers around a `geo` trait the
-//! doc calls directly, kept here only so every step reaches them through this
-//! module rather than reaching into `geo` with slightly different call sites.
+//! ported close to verbatim from the doc. [`ls_to_polygon`] is Appendix 2: a
+//! thin wrapper around a `geo` trait the doc calls directly, kept here only
+//! so every step reaches it through this module rather than reaching into
+//! `geo` with slightly different call sites.
 //!
 //! [`coords_to_linestrings`] is the one function the doc gives no code for:
 //! it walks a `CoordList` the same way [`crate::geometry::flatten`] does
@@ -19,9 +19,7 @@
 //! and its lack of resampling; reusing just the subpath splitting is the
 //! actual overlap between the two.
 
-use geo::algorithm::line_measures::Euclidean;
 use geo::algorithm::{Area, Buffer};
-use geo::Densify;
 use geo::{Coord, LineString, MultiPolygon, Polygon};
 
 use crate::geometry::part_ranges;
@@ -364,16 +362,6 @@ pub fn ls_to_polygon(ls: &LineString<f64>, width: f64, extra_growing: f64) -> Po
         .into_iter()
         .max_by(|a, b| a.unsigned_area().total_cmp(&b.unsigned_area()))
         .expect("buffering a non-empty LineString always yields at least one polygon")
-}
-
-/// Densifies a `LineString` for writing to the Contour Raster / checking
-/// Heavy Object intersections. See Appendix 3.
-pub fn densify(
-    ls: &LineString<f64>,
-    rasterization_step_factor: f64,
-    rasterization_px_size: f64,
-) -> LineString<f64> {
-    Euclidean.densify(ls, rasterization_step_factor * rasterization_px_size)
 }
 
 #[cfg(test)]

@@ -1,9 +1,9 @@
 //! The Contour Raster (`Contours-to-Raster.md`, Step 1): a 2D grid recording,
-//! per pixel, which contour (if any) passes through it, plus Appendix 5's
-//! supercover pixel-walk used to find contour intersections in Steps 1 and 3.
+//! per pixel, which contour (if any) passes through it, plus Appendix 4's
+//! pixel-walk used both to fill it and to find contour intersections in
+//! Steps 1 and 3.
 
 use geo::{Coord, LineString, Polygon};
-use line_drawing::Supercover;
 
 /// A grid recording, per pixel, the index (plus one; zero means "no
 /// contour") of the contour that pixel was written by.
@@ -33,7 +33,7 @@ impl ContourRaster {
     }
 
     /// Converts a world-space Coord to raster pixel indices, using this
-    /// raster's own origin and pixel size. See Appendix 5.
+    /// raster's own origin and pixel size. See Appendix 4.
     pub fn to_px(&self, coord: Coord<f64>) -> (i64, i64) {
         (
             ((coord.x - self.origin.x) / self.px_size).floor() as i64,
@@ -73,46 +73,48 @@ impl ContourRaster {
         }
     }
 
-    /// Writes `contour_idx` (as `contour_idx + 1`) to every pixel the
-    /// densified `LineString` touches, walking each consecutive pair of
-    /// points with a supercover traversal so a diagonally-crossed shared
-    /// corner pixel is never skipped (Step 1). `Err`s, naming
-    /// `rasterization_px_size` as the doc suggests, if a touched pixel
-    /// already holds a *different* contour's index -- writing the same
-    /// value again is a no-op, per the doc.
-    pub fn write_contour(
-        &mut self,
-        contour_idx: u64,
-        densified_ls: &LineString<f64>,
-    ) -> Result<(), String> {
+    /// Writes `contour_idx` (as `contour_idx + 1`) to every pixel `ls`
+    /// touches, walking each consecutive pair of points with Appendix 4's
+    /// continuous pixel-walk (see [`walk_pixels`]) so every cell the line
+    /// geometrically touches is found -- including a diagonally-crossed
+    /// shared corner pixel -- regardless of how long a segment is. `Err`s,
+    /// naming `rasterization_px_size` as the doc suggests, if a touched
+    /// pixel already holds a *different* contour's index -- writing the
+    /// same value again is a no-op, per the doc.
+    pub fn write_contour(&mut self, contour_idx: u64, ls: &LineString<f64>) -> Result<(), String> {
         let value = contour_idx as u32 + 1;
-        let pts = &densified_ls.0;
+        let pts = &ls.0;
         if pts.len() < 2 {
             return Ok(());
         }
+        let (origin, px_size) = (self.origin, self.px_size);
         for w in pts.windows(2) {
-            let a = self.to_px(w[0]);
-            let b = self.to_px(w[1]);
-            for (x, y) in Supercover::new(a, b) {
+            let mut error = None;
+            walk_pixels(origin, px_size, w[0], w[1], |x, y| {
                 let current = self.get(x, y);
                 if current == 0 {
                     self.set(x, y, value);
                 } else if current != value {
-                    return Err(format!(
+                    error = Some(format!(
                         "the Contour Raster pixel at ({x}, {y}) is claimed by two different \
                          contours (index {} and index {}); decrease rasterization_px_size",
                         current - 1,
                         contour_idx
                     ));
+                    return false;
                 }
+                true
+            });
+            if let Some(error) = error {
+                return Err(error);
             }
         }
         Ok(())
     }
 
-    /// Scans, without writing anything, every pixel `densified_ls` would
-    /// touch if written as `contour_idx`, and returns the world-space center
-    /// and existing contour index of *every* pixel that already holds a
+    /// Scans, without writing anything, every pixel `ls` would touch if
+    /// written as `contour_idx`, and returns the world-space center and
+    /// existing contour index of *every* pixel that already holds a
     /// different contour's index (not just the first). A non-mutating
     /// counterpart to [`Self::write_contour`]'s own conflict check, so a
     /// caller can decide -- before committing any write -- whether to unify
@@ -124,26 +126,21 @@ impl ContourRaster {
     /// conflict is confined to a small cluster right at that gap (see
     /// `step1_extract::extract`'s contour-merging pass, which is the only
     /// caller that needs the full list).
-    pub fn find_conflicts(
-        &self,
-        contour_idx: u64,
-        densified_ls: &LineString<f64>,
-    ) -> Vec<(Coord<f64>, u64)> {
+    pub fn find_conflicts(&self, contour_idx: u64, ls: &LineString<f64>) -> Vec<(Coord<f64>, u64)> {
         let value = contour_idx as u32 + 1;
-        let pts = &densified_ls.0;
+        let pts = &ls.0;
         let mut conflicts = Vec::new();
         if pts.len() < 2 {
             return conflicts;
         }
         for w in pts.windows(2) {
-            let a = self.to_px(w[0]);
-            let b = self.to_px(w[1]);
-            for (x, y) in Supercover::new(a, b) {
+            walk_pixels(self.origin, self.px_size, w[0], w[1], |x, y| {
                 let current = self.get(x, y);
                 if current != 0 && current != value {
                     conflicts.push((self.pixel_center(x, y), (current - 1) as u64));
                 }
-            }
+                true
+            });
         }
         conflicts
     }
@@ -151,21 +148,7 @@ impl ContourRaster {
     /// Walks every pixel the segment `prev -> next` traverses and returns the
     /// first contour index encountered (excluding `exclude_contour_idx`, a
     /// rain drop's own source contour), or `None` if the step is clear. See
-    /// Appendix 5.
-    ///
-    /// Appendix 5's own reference code converts `prev` and `next` to pixel
-    /// indices *before* handing them to `Supercover`, which only ever sees
-    /// which cell each endpoint floors into, not where in that cell it
-    /// actually sits, nor anything about the pixels in between beyond the
-    /// two endpoint cells' own indices. That loses exactly the information
-    /// needed to notice a thin, diagonally-placed contour a several-pixel-
-    /// long step (`rain_drop_step` is only asked to stay "a few pixels at
-    /// most") clips for a fraction of its length without either endpoint
-    /// landing inside it. This walks the continuous segment directly in
-    /// pixel space instead (a standard grid-traversal/DDA walk, computing
-    /// exactly where it crosses each pixel boundary), so every cell the
-    /// line geometrically touches is found regardless of how long the step
-    /// is or where exactly within their own pixels the endpoints fall.
+    /// Appendix 4.
     pub fn first_hit_along_step(
         &self,
         prev: Coord<f64>,
@@ -173,7 +156,7 @@ impl ContourRaster {
         exclude_contour_idx: u64,
     ) -> Option<u64> {
         let mut hit = None;
-        self.walk_pixels(prev, next, |x, y| {
+        walk_pixels(self.origin, self.px_size, prev, next, |x, y| {
             let val = self.get(x, y);
             if val == 0 {
                 return true; // keep walking
@@ -187,112 +170,126 @@ impl ContourRaster {
         });
         hit
     }
+}
 
-    /// Calls `visit` with every pixel the segment `prev -> next` touches, in
-    /// the order visited, stopping early if `visit` returns `false`. A
-    /// proper continuous grid traversal (see [`Self::first_hit_along_step`]
-    /// for why `Supercover` on the endpoints' own pixel indices is not
-    /// enough): tracks the exact parametric position (`t`, 0 at `prev`, 1 at
-    /// `next`) at which the segment next crosses a vertical or horizontal
-    /// pixel boundary, and steps into whichever cell that crossing leads to
-    /// -- both, if it passes exactly through a shared corner, the way
-    /// `Supercover` itself is conservative about corner touches.
-    fn walk_pixels(
-        &self,
-        prev: Coord<f64>,
-        next: Coord<f64>,
-        mut visit: impl FnMut(i64, i64) -> bool,
-    ) {
-        let fx0 = (prev.x - self.origin.x) / self.px_size;
-        let fy0 = (prev.y - self.origin.y) / self.px_size;
-        let fx1 = (next.x - self.origin.x) / self.px_size;
-        let fy1 = (next.y - self.origin.y) / self.px_size;
-        let (dx, dy) = (fx1 - fx0, fy1 - fy0);
+/// Calls `visit` with every pixel the segment `prev -> next` touches, in the
+/// order visited, stopping early if `visit` returns `false`. A raster's
+/// `origin` and `px_size` place the segment (given in world-space ground
+/// meters) into pixel space. See Appendix 4.
+///
+/// A cheaper-looking alternative would convert `prev` and `next` to pixel
+/// indices first and walk something like the `line_drawing` crate's
+/// `Supercover` between *those two cells* -- but that only ever sees which
+/// cell each endpoint floors into, never where within that cell it actually
+/// sits, nor the continuous line's real path between them. A thin,
+/// diagonally-placed contour can clip a multi-pixel-long segment for a
+/// fraction of its length without either endpoint's own pixel being
+/// anywhere near it, and that crossing would be missed entirely -- whether
+/// the segment being walked is a rain drop's own step or a stretch of a
+/// contour's own `ls` being written to the raster. This instead walks the
+/// continuous segment directly in pixel space (a standard grid-traversal/
+/// DDA walk, computing exactly where it crosses each pixel boundary), so
+/// every cell the line geometrically touches is found regardless of how
+/// long the segment is or where exactly within their own pixels the
+/// endpoints fall.
+fn walk_pixels(
+    origin: Coord<f64>,
+    px_size: f64,
+    prev: Coord<f64>,
+    next: Coord<f64>,
+    mut visit: impl FnMut(i64, i64) -> bool,
+) {
+    let fx0 = (prev.x - origin.x) / px_size;
+    let fy0 = (prev.y - origin.y) / px_size;
+    let fx1 = (next.x - origin.x) / px_size;
+    let fy1 = (next.y - origin.y) / px_size;
+    let (dx, dy) = (fx1 - fx0, fy1 - fy0);
 
-        let (mut x, mut y) = (fx0.floor() as i64, fy0.floor() as i64);
-        let (end_x, end_y) = (fx1.floor() as i64, fy1.floor() as i64);
+    let (mut x, mut y) = (fx0.floor() as i64, fy0.floor() as i64);
+    let (end_x, end_y) = (fx1.floor() as i64, fy1.floor() as i64);
 
+    if !visit(x, y) {
+        return;
+    }
+    if x == end_x && y == end_y {
+        return;
+    }
+
+    let step_x = if dx > 0.0 {
+        1
+    } else if dx < 0.0 {
+        -1
+    } else {
+        0
+    };
+    let step_y = if dy > 0.0 {
+        1
+    } else if dy < 0.0 {
+        -1
+    } else {
+        0
+    };
+    let t_delta_x = if dx != 0.0 {
+        (1.0 / dx).abs()
+    } else {
+        f64::INFINITY
+    };
+    let t_delta_y = if dy != 0.0 {
+        (1.0 / dy).abs()
+    } else {
+        f64::INFINITY
+    };
+    let mut t_max_x = if dx > 0.0 {
+        ((x + 1) as f64 - fx0) / dx
+    } else if dx < 0.0 {
+        (x as f64 - fx0) / dx
+    } else {
+        f64::INFINITY
+    };
+    let mut t_max_y = if dy > 0.0 {
+        ((y + 1) as f64 - fy0) / dy
+    } else if dy < 0.0 {
+        (y as f64 - fy0) / dy
+    } else {
+        f64::INFINITY
+    };
+
+    const CORNER_EPSILON: f64 = 1e-9;
+    loop {
+        if (t_max_x - t_max_y).abs() < CORNER_EPSILON {
+            // Passes exactly through the shared corner of four cells:
+            // touches both flanking cells, not just whichever axis a
+            // tie-break would otherwise favor, before the diagonal one.
+            if !visit(x + step_x, y) {
+                return;
+            }
+            if !visit(x, y + step_y) {
+                return;
+            }
+            x += step_x;
+            y += step_y;
+            t_max_x += t_delta_x;
+            t_max_y += t_delta_y;
+        } else if t_max_x < t_max_y {
+            x += step_x;
+            t_max_x += t_delta_x;
+        } else {
+            y += step_y;
+            t_max_y += t_delta_y;
+        }
         if !visit(x, y) {
             return;
         }
         if x == end_x && y == end_y {
             return;
         }
-
-        let step_x = if dx > 0.0 {
-            1
-        } else if dx < 0.0 {
-            -1
-        } else {
-            0
-        };
-        let step_y = if dy > 0.0 {
-            1
-        } else if dy < 0.0 {
-            -1
-        } else {
-            0
-        };
-        let t_delta_x = if dx != 0.0 {
-            (1.0 / dx).abs()
-        } else {
-            f64::INFINITY
-        };
-        let t_delta_y = if dy != 0.0 {
-            (1.0 / dy).abs()
-        } else {
-            f64::INFINITY
-        };
-        let mut t_max_x = if dx > 0.0 {
-            ((x + 1) as f64 - fx0) / dx
-        } else if dx < 0.0 {
-            (x as f64 - fx0) / dx
-        } else {
-            f64::INFINITY
-        };
-        let mut t_max_y = if dy > 0.0 {
-            ((y + 1) as f64 - fy0) / dy
-        } else if dy < 0.0 {
-            (y as f64 - fy0) / dy
-        } else {
-            f64::INFINITY
-        };
-
-        const CORNER_EPSILON: f64 = 1e-9;
-        loop {
-            if (t_max_x - t_max_y).abs() < CORNER_EPSILON {
-                // Passes exactly through the shared corner of four cells:
-                // touches both flanking cells, not just whichever axis a
-                // tie-break would otherwise favor, before the diagonal one.
-                if !visit(x + step_x, y) {
-                    return;
-                }
-                if !visit(x, y + step_y) {
-                    return;
-                }
-                x += step_x;
-                y += step_y;
-                t_max_x += t_delta_x;
-                t_max_y += t_delta_y;
-            } else if t_max_x < t_max_y {
-                x += step_x;
-                t_max_x += t_delta_x;
-            } else {
-                y += step_y;
-                t_max_y += t_delta_y;
-            }
-            if !visit(x, y) {
-                return;
-            }
-            if x == end_x && y == end_y {
-                return;
-            }
-            if t_max_x > 1.0 && t_max_y > 1.0 {
-                return; // reached (or passed) `next`; nothing further to visit
-            }
+        if t_max_x > 1.0 && t_max_y > 1.0 {
+            return; // reached (or passed) `next`; nothing further to visit
         }
     }
+}
 
+impl ContourRaster {
     /// The index of the contour whose nearest pixel (by pixel-center
     /// distance) to `pos` lies within `radius` ground meters, or `None` if
     /// no contour has one that close. A Slope Line's own position is not
@@ -334,7 +331,7 @@ impl ContourRaster {
 
     /// Every pixel (by index) whose center falls inside `poly`, found by
     /// scanning the polygon's own pixel-space bounding box. The doc gives no
-    /// code for rasterizing an *area* -- Appendix 5's supercover walk only
+    /// code for rasterizing an *area* -- Appendix 4's supercover walk only
     /// answers which pixels a *line* touches -- so this is new: cheap here
     /// since the polygons Step 2 rasterizes are thin buffered Jump lines,
     /// not large area fills.
@@ -468,7 +465,7 @@ mod tests {
         // pixels are nowhere near (3, 1), even though the straight line
         // between them clips it briefly partway through. Converting `prev`
         // and `next` to pixel indices first and walking Supercover directly
-        // between *those* -- Appendix 5's own reference approach -- misses
+        // between *those* -- the naive alternative Appendix 4 rejects -- misses
         // it, since neither endpoint's own pixel is anywhere close; found
         // by sweeping random long segments against a dense, independent
         // sample of the same line until one exposed the gap.

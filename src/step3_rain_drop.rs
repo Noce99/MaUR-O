@@ -286,7 +286,7 @@ fn simulate_one_drop(
 
         // Never excluded at the raster level (u64::MAX can't match a real
         // contour index): the exemptions below are Step 3's own,
-        // time-limited rule, not Appendix 5's permanent one.
+        // time-limited rule, not Appendix 4's permanent one.
         if let Some(hit_idx) = raster.first_hit_along_step(pos, next, u64::MAX) {
             // Re-crossing the drop's own starting contour is exempt within
             // `hysteresis` steps of the drop's own creation (steps 0 ..
@@ -392,7 +392,6 @@ mod tests {
             bezier_linearization_step: 0.1,
             contours_step: 1.0,
             rasterization_px_size: 0.5,
-            rasterization_step_factor: 0.5,
             heavy_object_width: 1.0,
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
@@ -412,8 +411,7 @@ mod tests {
     fn raster_for(contours: &[Contour]) -> ContourRaster {
         let mut r = ContourRaster::new(c(-5.0, -5.0), 0.5, 60, 60);
         for (i, contour) in contours.iter().enumerate() {
-            let densified = crate::contour_geometry::densify(&contour.lwg.ls, 0.5, 0.5);
-            r.write_contour(i as u64, &densified).unwrap();
+            r.write_contour(i as u64, &contour.lwg.ls).unwrap();
         }
         r
     }
@@ -594,8 +592,7 @@ mod tests {
     fn re_crossing_a_voted_undefined_contour_within_hysteresis_does_not_evaporate() {
         let mut contours = source_and_bracket_contours();
         let mut raster = ContourRaster::new(c(0.0, 0.0), 0.5, 40, 40);
-        let densified = crate::contour_geometry::densify(&contours[1].lwg.ls, 0.5, 0.5);
-        raster.write_contour(1, &densified).unwrap();
+        raster.write_contour(1, &contours[1].lwg.ls).unwrap();
 
         let mut config = default_config();
         config.rain_drop_step = 0.25;
@@ -624,8 +621,7 @@ mod tests {
     fn re_crossing_a_voted_undefined_contour_outside_hysteresis_evaporates() {
         let mut contours = source_and_bracket_contours();
         let mut raster = ContourRaster::new(c(0.0, 0.0), 0.5, 40, 40);
-        let densified = crate::contour_geometry::densify(&contours[1].lwg.ls, 0.5, 0.5);
-        raster.write_contour(1, &densified).unwrap();
+        raster.write_contour(1, &contours[1].lwg.ls).unwrap();
 
         let mut config = default_config();
         config.rain_drop_step = 0.25;
@@ -669,8 +665,7 @@ mod tests {
             },
         ];
         let mut raster = ContourRaster::new(c(0.0, 0.0), 0.5, 20, 220);
-        let densified = crate::contour_geometry::densify(&contours[1].lwg.ls, 0.5, 0.5);
-        raster.write_contour(1, &densified).unwrap();
+        raster.write_contour(1, &contours[1].lwg.ls).unwrap();
 
         let mut config = default_config();
         // Matches the raster's own pixel size, so each step touches exactly
@@ -720,8 +715,7 @@ mod tests {
             },
         ];
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 20, 40);
-        let densified = crate::contour_geometry::densify(&contours[1].lwg.ls, 0.5, 1.0);
-        raster.write_contour(1, &densified).unwrap();
+        raster.write_contour(1, &contours[1].lwg.ls).unwrap();
 
         let mut config = default_config();
         config.rain_drop_step = 1.0;

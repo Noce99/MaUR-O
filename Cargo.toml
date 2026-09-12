@@ -49,14 +49,10 @@ zip = { version = "2", default-features = false, features = ["deflate", "time"] 
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 png = "0.17"
 tempfile = "3"
-# Contour-to-polygon buffering, densifying and point-in-polygon for
-# contours_to_raster (see Contours-to-Raster.md), whose appendices are
-# written directly against this crate's LineString/Polygon/Buffer/Densify/
-# Contains API.
+# Contour-to-polygon buffering and point-in-polygon for contours_to_raster
+# (see Contours-to-Raster.md), whose appendices are written directly against
+# this crate's LineString/Polygon/Buffer/Contains API.
 geo = "0.33"
-# The Supercover pixel-walk contours_to_raster uses to find every pixel a
-# line segment touches (Contours-to-Raster.md, Appendix 5).
-line_drawing = "1"
 # Turns contours_to_raster's own geo LineString/Polygon/Coord geometry
 # straight into an SVG for the --create_svg validation dump (Contours-to-Raster.md,
 # "## Visualization"). Depends only on geo-types, which this crate's `geo` uses too.

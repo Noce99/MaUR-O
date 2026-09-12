@@ -108,7 +108,6 @@ fn conflicting_pixel_exits_4() {
         "bezier_linearization_step = 0.5\n\
          contours_step = 5.0\n\
          rasterization_px_size = 2.0\n\
-         rasterization_step_factor = 0.5\n\
          heavy_object_width = 3.0\n\
          heavy_object_growing = 0.5\n\
          circumference_fitting_points_number = 4\n\
@@ -147,7 +146,6 @@ fn conflicting_pixel_still_writes_a_diagnostic_svg_under_create_svg() {
         "bezier_linearization_step = 0.5\n\
          contours_step = 5.0\n\
          rasterization_px_size = 2.0\n\
-         rasterization_step_factor = 0.5\n\
          heavy_object_width = 3.0\n\
          heavy_object_growing = 0.5\n\
          circumference_fitting_points_number = 4\n\

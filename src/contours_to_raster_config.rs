@@ -1,7 +1,7 @@
-//! The `contours_to_raster` config file: the thirteen parameters
+//! The `contours_to_raster` config file: the twelve parameters
 //! `Contours-to-Raster.md` names, read from a small hand-rolled `key =
 //! value` format (no `serde`/`toml` dependency exists anywhere else in this
-//! crate, and one file with thirteen numbers does not need one).
+//! crate, and one file with twelve numbers does not need one).
 
 use std::path::Path;
 
@@ -21,9 +21,6 @@ pub struct Config {
     pub contours_step: f64,
     /// Pixel size of the Contour Raster, in ground meters (Step 1).
     pub rasterization_px_size: f64,
-    /// How finely a contour's `ls` is re-densified before writing it to the
-    /// Contour Raster, as a multiple of `rasterization_px_size` (Appendix 3).
-    pub rasterization_step_factor: f64,
     /// Buffer width, in ground meters, used to turn a Jump's or a Heavy
     /// Object's own `ls` into a polygon (Appendix 2's `width`) -- for a
     /// Jump, the area Step 2 scans to find which contours it touches; for a
@@ -67,7 +64,6 @@ const KEYS: &[&str] = &[
     "bezier_linearization_step",
     "contours_step",
     "rasterization_px_size",
-    "rasterization_step_factor",
     "heavy_object_width",
     "heavy_object_growing",
     "circumference_fitting_points_number",
@@ -81,7 +77,7 @@ const KEYS: &[&str] = &[
 
 impl Config {
     /// Parses a config file: one `key = value` per line, blank lines and
-    /// lines starting with `#` ignored. All thirteen keys are required -- a
+    /// lines starting with `#` ignored. All twelve keys are required -- a
     /// config file missing one is far more likely a mistake than an
     /// intentional partial override -- and an unknown key or an unparseable
     /// value is an error naming the offending line.
@@ -131,7 +127,6 @@ impl Config {
             bezier_linearization_step: values[&"bezier_linearization_step"],
             contours_step: values[&"contours_step"],
             rasterization_px_size: values[&"rasterization_px_size"],
-            rasterization_step_factor: values[&"rasterization_step_factor"],
             heavy_object_width: values[&"heavy_object_width"],
             heavy_object_growing: values[&"heavy_object_growing"],
             circumference_fitting_points_number: values[&"circumference_fitting_points_number"]
@@ -156,7 +151,6 @@ mod tests {
 bezier_linearization_step = 0.5
 contours_step = 5.0
 rasterization_px_size = 1.0
-rasterization_step_factor = 0.5
 heavy_object_width = 3.0
 heavy_object_growing = 0.5
 circumference_fitting_points_number = 4
