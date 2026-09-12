@@ -17,8 +17,6 @@
 	- **rain_drop_starting_voting_hysteresis** (pure number, counted in **rain_drop_step**-sized steps) — a rain drop is exempt from evaporating on re-crossing its own starting contour within this many steps of being created, and, separately, exempt from evaporating on re-crossing any other contour it has already voted for within this many steps of *that vote* (Step 3). Should be just large enough (a handful of steps) to carry the drop clear of either; since each exemption is measured from its own reference point (creation, or the vote itself), it does not need to be sized relative to the distance to neighboring contours or to how far into the drop's path a vote happens to fall.
 	- **undefined_gravity_vote_threshold** (pure number, a ratio in (0, 1)) — how close left and right vote counts must be before being flagged as ambiguous (Step 3). A value near 1 only flags near-exact ties; a value near 0 flags votes on both sides however lopsided.
 	- **contour_gap_merge_radius** (meters) — how close a Contour Raster pixel conflict must be to *both* contours' own start or end node for Step 1 to join them into one contour instead of crashing (Step 1). Real contour digitizing sometimes splits one physical line into two objects whose endpoints are close but not exactly coincident; too small and a genuine gap like that still crashes, too large and two contours that only happen to end near each other risk being wrongly joined.
-- ## Step 0: Fix Human Contours Inconsistency
-	- TODO
 - ## Step 1: Extrapolate Elevation Information from an .omap
 	- Given an .omap file we extrapolate the following symbols divided into three different families:
 		- 1) **Contours**: *[Index] Contour*
