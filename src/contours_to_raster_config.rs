@@ -19,43 +19,43 @@ pub struct Config {
     /// The equally-spaced node distance every contour's final `ls` is
     /// resampled to, in ground meters (Appendix 1).
     pub contours_step: f64,
-    /// Pixel size of the Contour Raster, in ground meters (Step 0).
+    /// Pixel size of the Contour Raster, in ground meters (Step 1).
     pub rasterization_px_size: f64,
     /// How finely a contour's `ls` is re-densified before writing it to the
     /// Contour Raster, as a multiple of `rasterization_px_size` (Appendix 3).
     pub rasterization_step_factor: f64,
     /// Buffer width, in ground meters, used to turn a Jump's or a Heavy
     /// Object's own `ls` into a polygon (Appendix 2's `width`) -- for a
-    /// Jump, the area Step 1 scans to find which contours it touches; for a
-    /// Heavy Object, the area Step 0 searches for an intersecting contour,
+    /// Jump, the area Step 2 scans to find which contours it touches; for a
+    /// Heavy Object, the area Step 1 searches for an intersecting contour,
     /// instead of only the pixels directly under its digitized line.
     pub heavy_object_width: f64,
     /// Extra padding, in ground meters, buffered on top of
     /// `heavy_object_width` (Appendix 2's `extra_growing`).
     pub heavy_object_growing: f64,
     /// How many `Coord`s on each side of a Heavy Object/contour
-    /// intersection are used to fit a circle (Step 0).
+    /// intersection are used to fit a circle (Step 1).
     pub circumference_fitting_points_number: usize,
-    /// How far, in ground meters, around a Slope Line's own position Step 0
+    /// How far, in ground meters, around a Slope Line's own position Step 1
     /// searches for the nearest Contour Raster pixel to attribute its
     /// gravity reading to, since that position is not always pixel-exact on
-    /// top of its contour (Step 0).
+    /// top of its contour (Step 1).
     pub slope_lines_contours_search_radius: f64,
     /// Distance a rain drop advances per simulation step, in ground meters
-    /// (Step 2).
+    /// (Step 3).
     pub rain_drop_step: f64,
-    /// How many sources are placed per contour segment (Step 2).
+    /// How many sources are placed per contour segment (Step 3).
     pub sources_per_contour_segment: usize,
     /// How many `rain_drop_step`-sized steps a rain drop is exempt from
     /// evaporating on crossing its own starting contour, or on re-crossing
-    /// an undefined contour it has already voted for (Step 2).
+    /// an undefined contour it has already voted for (Step 3).
     pub rain_drop_starting_voting_hysteresis: u64,
     /// How close left and right vote counts must be, as a ratio in (0, 1),
-    /// before being flagged as ambiguous (Step 2).
+    /// before being flagged as ambiguous (Step 3).
     pub undefined_gravity_vote_threshold: f64,
     /// How close, in ground meters, a Contour Raster pixel conflict must be
-    /// to *both* contours' own start or end node for Step 0 to unify them
-    /// into one contour instead of crashing (Step 0) -- real contour
+    /// to *both* contours' own start or end node for Step 1 to unify them
+    /// into one contour instead of crashing (Step 1) -- real contour
     /// digitizing sometimes splits one physical line into two objects whose
     /// endpoints are close but not exactly coincident.
     pub contour_gap_merge_radius: f64,

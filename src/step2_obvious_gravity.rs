@@ -1,5 +1,5 @@
-//! Step 1 of `Contours-to-Raster.md`: setting a contour's gravity directly
-//! from the evidence Step 0 gathered, wherever that evidence alone already
+//! Step 2 of `Contours-to-Raster.md`: setting a contour's gravity directly
+//! from the evidence Step 1 gathered, wherever that evidence alone already
 //! points at an answer -- a `PointGravityDefiners` or `LineGravityDefiners`
 //! reading, or (for a closed contour enclosing nothing) the assumption that
 //! it is a hill.
@@ -14,8 +14,8 @@ use crate::gravity_model::{
     set_or_check_gravity, vector_on_side, Contour, LineGravityDefiners, PointGravityDefiners,
 };
 
-/// What Step 1 resolved, and what it could not.
-pub struct Step1Result {
+/// What Step 2 resolved, and what it could not.
+pub struct Step2Result {
     /// How many contours got their gravity set from a Slope Line or a Heavy
     /// Object intersection.
     pub resolved_by_points: u64,
@@ -32,7 +32,7 @@ pub struct Step1Result {
     pub warnings: Vec<String>,
 }
 
-/// Runs Step 1: applies every [`PointGravityDefiners`] reading, then every
+/// Runs Step 2: applies every [`PointGravityDefiners`] reading, then every
 /// [`LineGravityDefiners`] one, to the contour(s) each is evidence about
 /// (`Err`ing, naming the conflict, the moment two pieces of evidence
 /// disagree about the same contour, per the doc's "crash with an error
@@ -44,7 +44,7 @@ pub fn resolve(
     point_definers: &[PointGravityDefiners],
     line_definers: &[LineGravityDefiners],
     raster: &ContourRaster,
-) -> Result<Step1Result, String> {
+) -> Result<Step2Result, String> {
     let mut resolved_by_points = 0u64;
     let mut resolved_by_lines = 0u64;
 
@@ -66,7 +66,7 @@ pub fn resolve(
         let was_defined = contour.lwg.gravity_dx.is_some();
         set_or_check_gravity(contour, from, to, dx, dy).map_err(|e| {
             format!(
-                "Step 1: a Slope Line or Heavy Object reading at ({:.2}, {:.2}) conflicts with \
+                "Step 2: a Slope Line or Heavy Object reading at ({:.2}, {:.2}) conflicts with \
                  contour {}'s gravity: {e}",
                 definer.x, definer.y, definer.reference_contour
             )
@@ -102,7 +102,7 @@ pub fn resolve(
             let (from, to) = local_tangent(&contour.lwg.ls, idx);
             let was_defined = contour.lwg.gravity_dx.is_some();
             set_or_check_gravity(contour, from, to, dx, dy).map_err(|e| {
-                format!("Step 1: a Jump conflicts with contour {contour_idx}'s gravity: {e}")
+                format!("Step 2: a Jump conflicts with contour {contour_idx}'s gravity: {e}")
             })?;
             if !was_defined && contour.lwg.gravity_dx.is_some() {
                 resolved_by_lines += 1;
@@ -119,7 +119,7 @@ pub fn resolve(
         .map(|(i, _)| i)
         .collect();
 
-    Ok(Step1Result {
+    Ok(Step2Result {
         resolved_by_points,
         resolved_by_lines,
         resolved_by_hill,
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_contour_enclosing_another_is_left_for_step_2() {
+    fn a_closed_contour_enclosing_another_is_left_for_step_3() {
         let mut contours = vec![
             contour(square_ls(0.0, 0.0, 10.0)),
             contour(square_ls(2.0, 2.0, 2.0)),
@@ -322,7 +322,7 @@ mod tests {
         let result = resolve(&mut contours, &[], &[], &raster).unwrap();
         // Only the inner square (encloses nothing) resolves via the hill
         // heuristic; the outer one, enclosing it, is left undefined for
-        // Step 2's rain-drop production.
+        // Step 3's rain-drop production.
         assert_eq!(result.resolved_by_hill, 1);
         assert_eq!(result.still_undefined, vec![0]);
         assert!(contours[1].lwg.gravity_dx.is_some());

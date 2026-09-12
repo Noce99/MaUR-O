@@ -1,5 +1,5 @@
-//! Step 2 of `Contours-to-Raster.md`: Rain Drop Production and Anti Rain
-//! Drop Production, for every contour Step 1 left without a gravity
+//! Step 3 of `Contours-to-Raster.md`: Rain Drop Production and Anti Rain
+//! Drop Production, for every contour Step 2 left without a gravity
 //! direction (its point/line evidence and closed-hill heuristic).
 
 use std::collections::HashMap;
@@ -47,9 +47,9 @@ impl PassTrace {
     }
 }
 
-/// What Step 2 resolved, and the paths it simulated (for the `--create_svg`
+/// What Step 3 resolved, and the paths it simulated (for the `--create_svg`
 /// visualization).
-pub struct Step2Result {
+pub struct Step3Result {
     /// How many contours got their gravity from Rain Drop Production.
     pub resolved_by_rain: u64,
     /// How many contours got their gravity from Anti Rain Drop Production.
@@ -84,9 +84,9 @@ pub struct Step2Result {
     pub anti_rain_vote_segments: Vec<(Coord<f64>, Coord<f64>)>,
 }
 
-/// Runs Step 2: Rain Drop Production, then (if needed) Anti Rain Drop
-/// Production, resolve every contour Step 1 left without a gravity
-/// direction by simulation. Always returns the full [`Step2Result`] --
+/// Runs Step 3: Rain Drop Production, then (if needed) Anti Rain Drop
+/// Production, resolve every contour Step 2 left without a gravity
+/// direction by simulation. Always returns the full [`Step3Result`] --
 /// including every simulated path, for `--create_svg` to draw even on
 /// failure -- alongside an `Err` naming any contour still undefined after
 /// both passes. The doc calls that "impossible," but doesn't say what to do
@@ -96,7 +96,7 @@ pub fn resolve(
     contours: &mut [Contour],
     raster: &ContourRaster,
     config: &Config,
-) -> (Step2Result, Result<(), String>) {
+) -> (Step3Result, Result<(), String>) {
     let mut ambiguous_warnings = Vec::new();
 
     let mut rain_trace = PassTrace::default();
@@ -145,7 +145,7 @@ pub fn resolve(
     };
 
     (
-        Step2Result {
+        Step3Result {
             resolved_by_rain,
             resolved_by_anti_rain,
             ambiguous_warnings,
@@ -285,7 +285,7 @@ fn simulate_one_drop(
         }
 
         // Never excluded at the raster level (u64::MAX can't match a real
-        // contour index): the exemptions below are Step 2's own,
+        // contour index): the exemptions below are Step 3's own,
         // time-limited rule, not Appendix 5's permanent one.
         if let Some(hit_idx) = raster.first_hit_along_step(pos, next, u64::MAX) {
             // Re-crossing the drop's own starting contour is exempt within

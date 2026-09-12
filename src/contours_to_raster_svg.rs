@@ -1,9 +1,9 @@
 //! The `--create_svg` validation dumps `Contours-to-Raster.md`'s
-//! "## Visualization" section asks for: one SVG after Step 0, one after Step
-//! 1, and -- Step 2 being two separate passes -- one after each of its Rain
+//! "## Visualization" section asks for: one SVG after Step 1, one after Step
+//! 1, and -- Step 3 being two separate passes -- one after each of its Rain
 //! Drop and Anti Rain Drop Productions, so a human can check the algorithm's
 //! intermediate state by opening a picture rather than parsing numbers.
-//! Splitting Step 2 into its own two files, rather than overlaying both
+//! Splitting Step 3 into its own two files, rather than overlaying both
 //! colors on one, is what keeps a drop's path legible where the two passes
 //! cross. Ground meters throughout, unscaled -- [`geo_svg`](https://docs.rs/geo-svg)
 //! turns this crate's own `geo` geometry (already ground-meter
@@ -21,7 +21,7 @@
 //! | line definer polygon | a Jump's own buffered polygon (its `LineGravityDefiners::poly`) | light blue fill |
 //! | line definer arrow | one arrow at a Jump's own definition point | blue |
 //! | line definer span arrows | arrows spanning a Jump's buffered polygon | yellow |
-//! | heavy object polygon | a Heavy Object's own buffered polygon (`Step0Result::heavy_object_polygons`) | light pink fill |
+//! | heavy object polygon | a Heavy Object's own buffered polygon (`Step1Result::heavy_object_polygons`) | light pink fill |
 //! | point definer arrows | one arrow at a Slope Line/Heavy Object reading's own point | red |
 //! | unresolved slope line arrows | the same, for a Slope Line that found no contour to read | orange |
 //! | slope line search circles | a Slope Line's own `slope_lines_contours_search_radius` ring | red if resolved, orange if not |
@@ -32,7 +32,7 @@
 //! | hysteresis markers | a drop point still inside its `rain_drop_starting_voting_hysteresis` window | black |
 //! | vote segments | the drop step (previous position to current position) on which it cast a vote | purple |
 //!
-//! After Step 0: grid, pixels, every Jump's own buffered polygon (light
+//! After Step 1: grid, pixels, every Jump's own buffered polygon (light
 //! blue) and every Heavy Object's own (light pink), both contour layers,
 //! both line definer arrow layers, the point
 //! definer arrows, and every Slope Line's own search
@@ -41,11 +41,11 @@
 //! it resolved (matching its own arrow, already drawn by the point definer
 //! arrows layer) or orange if not (which also gets its own orange arrow here,
 //! since an unresolved one has no entry in `point_definers` to draw from
-//! otherwise). After Step 1: the same, plus a gravity arrow along every
-//! contour already resolved. After Step 2 (covering every contour, per the
+//! otherwise). After Step 2: the same, plus a gravity arrow along every
+//! contour already resolved. After Step 3 (covering every contour, per the
 //! doc's "it
 //! should be impossible to have contours with undefined gravity"): the same
-//! as Step 1, plus -- in one file -- every rain drop's path, and -- in a
+//! as Step 2, plus -- in one file -- every rain drop's path, and -- in a
 //! second file -- every anti rain drop's path. In both: a thin gray line
 //! traces each drop's whole trail first, so the path itself reads as a line
 //! rather than a scatter of dots; over that, a slightly larger black circle
@@ -55,10 +55,10 @@
 //! three.
 //!
 //! A fifth, "final" file is written once every contour's gravity is settled
-//! (after Step 2, or after Step 1 if that already resolved everything): just
+//! (after Step 3, or after Step 2 if that already resolved everything): just
 //! the algorithm's actual answer -- pixels, both contour layers, and a
 //! gravity arrow per node -- without the raster grid, the Jump-only definer
-//! arrows, or any of Step 2's own rain-drop-path diagnostics, since those are
+//! arrows, or any of Step 3's own rain-drop-path diagnostics, since those are
 //! per-step working detail rather than the final picture.
 
 use std::fmt::Write as _;
@@ -71,8 +71,8 @@ use geo_svg::{Color, Style, Svg, ToSvg, ToSvgStr, ViewBox};
 use crate::contour_geometry::RawVertex;
 use crate::contour_raster::ContourRaster;
 use crate::gravity_model::{contour_gravity_side, lwg_gravity_side, node_direction};
-use crate::step0_extract::{ConflictDiagnostics, Step0Result};
-use crate::step2_rain_drop::Step2Result;
+use crate::step1_extract::{ConflictDiagnostics, Step1Result};
+use crate::step3_rain_drop::Step3Result;
 
 const GRAY: Color = Color::Rgb(160, 160, 160);
 const BROWN: Color = Color::Rgb(139, 69, 19);
@@ -225,11 +225,11 @@ impl ToSvgStr for RawContours {
     }
 }
 
-fn raw_contour_lines(result: &Step0Result) -> RawContours {
+fn raw_contour_lines(result: &Step1Result) -> RawContours {
     RawContours(result.raw_polylines.clone())
 }
 
-fn linearized_contour_lines(result: &Step0Result) -> MultiLineString<f64> {
+fn linearized_contour_lines(result: &Step1Result) -> MultiLineString<f64> {
     MultiLineString::new(result.contours.iter().map(|c| c.lwg.ls.clone()).collect())
 }
 
@@ -244,11 +244,11 @@ fn arrow(from: Coord<f64>, dx: f64, dy: f64) -> LineString<f64> {
 }
 
 /// Every Jump's own buffered polygon (`LineGravityDefiners::poly`, built by
-/// [`crate::contour_geometry::ls_to_polygon`]) -- the actual area Step 0's
+/// [`crate::contour_geometry::ls_to_polygon`]) -- the actual area Step 1's
 /// `raster.pixels_in_polygon` scans to find which contours a Jump
 /// intersects, so seeing it drawn is what lets a `heavy_object_width`/
 /// `heavy_object_growing` choice be judged by eye against the real pixels.
-fn line_definer_polygons(result: &Step0Result) -> MultiPolygon<f64> {
+fn line_definer_polygons(result: &Step1Result) -> MultiPolygon<f64> {
     MultiPolygon::new(
         result
             .line_definers
@@ -258,13 +258,13 @@ fn line_definer_polygons(result: &Step0Result) -> MultiPolygon<f64> {
     )
 }
 
-/// Every Heavy Object's own buffered polygon (`Step0Result::heavy_object_polygons`,
-/// built the same way a Jump's is) -- the actual area Step 0 scans for
+/// Every Heavy Object's own buffered polygon (`Step1Result::heavy_object_polygons`,
+/// built the same way a Jump's is) -- the actual area Step 1 scans for
 /// intersecting contours, so seeing it drawn is what lets a
 /// `heavy_object_width`/`heavy_object_growing` choice be judged by eye
 /// against the real pixels, the same as [`line_definer_polygons`] does for
 /// Jumps.
-fn heavy_object_polygons(result: &Step0Result) -> MultiPolygon<f64> {
+fn heavy_object_polygons(result: &Step1Result) -> MultiPolygon<f64> {
     MultiPolygon::new(result.heavy_object_polygons.clone())
 }
 
@@ -273,7 +273,7 @@ fn heavy_object_polygons(result: &Step0Result) -> MultiPolygon<f64> {
 /// as [`contour_gravity_arrows`] draws a contour's, since a Jump's gravity
 /// (like a contour's) is only ever meaningful relative to its own local
 /// tangent, not a single vector valid along its whole length.
-fn line_definer_arrows(result: &Step0Result) -> MultiLineString<f64> {
+fn line_definer_arrows(result: &Step1Result) -> MultiLineString<f64> {
     let mut lines = Vec::new();
     for definer in &result.line_definers {
         let Some(side) = lwg_gravity_side(&definer.lwg) else {
@@ -292,7 +292,7 @@ fn line_definer_arrows(result: &Step0Result) -> MultiLineString<f64> {
 /// that node* (via [`node_direction`]) rather than all repeating the same
 /// fixed direction -- a curved Jump's true downhill direction varies along
 /// its length exactly like a contour's does (see [`line_definer_arrows`]).
-fn line_definer_span_arrows(result: &Step0Result) -> MultiLineString<f64> {
+fn line_definer_span_arrows(result: &Step1Result) -> MultiLineString<f64> {
     let mut lines = Vec::new();
     for definer in &result.line_definers {
         let Some(side) = lwg_gravity_side(&definer.lwg) else {
@@ -318,7 +318,7 @@ fn line_definer_span_arrows(result: &Step0Result) -> MultiLineString<f64> {
 /// Object/contour intersection's circle-fit) at its own `(x, y)`, skipping
 /// any reading whose gravity could not be derived -- same shape as
 /// [`line_definer_arrows`], but for a single point instead of a `LineString`.
-fn point_definer_arrows(result: &Step0Result) -> MultiLineString<f64> {
+fn point_definer_arrows(result: &Step1Result) -> MultiLineString<f64> {
     let mut lines = Vec::new();
     for definer in &result.point_definers {
         let (Some(dx), Some(dy)) = (definer.gravity_dx, definer.gravity_dy) else {
@@ -345,7 +345,7 @@ fn point_definer_arrows(result: &Step0Result) -> MultiLineString<f64> {
 /// drawn all at once so the two cases can be colored apart -- a resolved
 /// Slope Line's own reading is already trustworthy (red, matching
 /// [`point_definer_arrows`]), an unresolved one's is not (orange).
-fn slope_line_circle_points(result: &Step0Result, resolved: bool) -> MultiPoint<f64> {
+fn slope_line_circle_points(result: &Step1Result, resolved: bool) -> MultiPoint<f64> {
     MultiPoint::new(
         result
             .slope_lines
@@ -364,7 +364,7 @@ fn slope_line_circle_points(result: &Step0Result, resolved: bool) -> MultiPoint<
 /// unresolved Slope Line's own intended direction is still visible, in
 /// orange rather than [`point_definer_arrows`]'s red to mark it as
 /// unconfirmed.
-fn unresolved_slope_line_arrows(result: &Step0Result) -> MultiLineString<f64> {
+fn unresolved_slope_line_arrows(result: &Step1Result) -> MultiLineString<f64> {
     MultiLineString::new(
         result
             .slope_lines
@@ -381,13 +381,13 @@ fn unresolved_slope_line_arrows(result: &Step0Result) -> MultiLineString<f64> {
 /// gravity_dy)` everywhere. A closed contour repeats its first point as its
 /// last (see how contours are built), so only its `len - 1` distinct nodes
 /// get an arrow -- the duplicate would otherwise draw the same one twice.
-fn contour_gravity_arrows(result: &Step0Result) -> MultiLineString<f64> {
+fn contour_gravity_arrows(result: &Step1Result) -> MultiLineString<f64> {
     contour_gravity_arrows_filtered(result, None)
 }
 
 /// Same as [`contour_gravity_arrows`], but when `only` is given, skips any
 /// contour whose index isn't `true` in it -- used by
-/// [`write_step2_rain_svg`] to draw an arrow only for a contour Rain Drop
+/// [`write_step3_rain_svg`] to draw an arrow only for a contour Rain Drop
 /// Production (or an earlier step) itself resolved. `result.contours` is
 /// shared, mutated-in-place state: by the time any `--create_svg` file is
 /// written it already holds gravity from every step that has run so far,
@@ -395,7 +395,7 @@ fn contour_gravity_arrows(result: &Step0Result) -> MultiLineString<f64> {
 /// the rain SVG would draw an arrow for a contour no rain drop ever
 /// touched.
 fn contour_gravity_arrows_filtered(
-    result: &Step0Result,
+    result: &Step1Result,
     only: Option<&[bool]>,
 ) -> MultiLineString<f64> {
     let mut lines = Vec::new();
@@ -441,15 +441,15 @@ fn drop_trails(paths: &[Vec<Coord<f64>>]) -> MultiLineString<f64> {
     )
 }
 
-/// A flat coordinate list -- `Step2Result`'s own `rain_hysteresis_points`/
+/// A flat coordinate list -- `Step3Result`'s own `rain_hysteresis_points`/
 /// `anti_rain_hysteresis_points`, already computed by
-/// `step2_rain_drop::simulate_one_drop` itself, since only it knows which
+/// `step3_rain_drop::simulate_one_drop` itself, since only it knows which
 /// points fell inside a hysteresis window -- turned into drawable points.
 fn points(coords: &[Coord<f64>]) -> MultiPoint<f64> {
     MultiPoint::new(coords.iter().map(|&c| Point::from(c)).collect())
 }
 
-/// `Step2Result`'s own `rain_vote_segments`/`anti_rain_vote_segments` --
+/// `Step3Result`'s own `rain_vote_segments`/`anti_rain_vote_segments` --
 /// each the (previous position, current position) step a drop actually cast
 /// a vote on, since a vote belongs to the step it happened on, not to
 /// either endpoint alone -- turned into drawable segments.
@@ -568,10 +568,10 @@ fn write(path: &Path, svg: Svg) -> Result<(), String> {
     fs::write(path, finish(svg)).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-/// Writes the SVG asked for after Step 0: the raster grid and its non-zero
+/// Writes the SVG asked for after Step 1: the raster grid and its non-zero
 /// pixels, every contour raw and linearized, the Jump ("LineGravityDefiners")
 /// arrows, and the Slope Line/Heavy Object ("PointGravityDefiners") arrows.
-pub fn write_step0_svg(path: &Path, result: &Step0Result) -> Result<(), String> {
+pub fn write_step1_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
     let grid = grid_lines(&result.raster);
     let pixels = pixel_polygons(&result.raster);
     let raw = raw_contour_lines(result);
@@ -607,7 +607,7 @@ pub fn write_step0_svg(path: &Path, result: &Step0Result) -> Result<(), String> 
 }
 
 /// [`base_layers`] plus a gravity arrow along every contour already
-/// resolved -- what Step 1's own SVG shows, and what each of Step 2's two
+/// resolved -- what Step 2's own SVG shows, and what each of Step 3's two
 /// files (rain, anti rain) build further on.
 #[allow(clippy::too_many_arguments)]
 fn resolved_layers<'a>(
@@ -638,9 +638,9 @@ fn resolved_layers<'a>(
     .and(line_layer(gravity_arrows, YELLOW, 0.2))
 }
 
-/// The same as [`write_step0_svg`], plus a gravity arrow along every contour
-/// Step 1 (or Step 0's direct evidence) has already resolved.
-pub fn write_step1_svg(path: &Path, result: &Step0Result) -> Result<(), String> {
+/// The same as [`write_step1_svg`], plus a gravity arrow along every contour
+/// Step 2 (or Step 1's direct evidence) has already resolved.
+pub fn write_step2_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
     let grid = grid_lines(&result.raster);
     let pixels = pixel_polygons(&result.raster);
     let raw = raw_contour_lines(result);
@@ -681,12 +681,12 @@ pub fn write_step1_svg(path: &Path, result: &Step0Result) -> Result<(), String> 
 /// pixels, both contour layers (raw red under linearized green), and one
 /// gravity arrow per node (yellow) -- no raster grid, no Jump-only definer
 /// arrows (also yellow -- leaving them out keeps the gravity arrows the only
-/// thing that color), and none of Step 2's own rain-drop-path layers, since
+/// thing that color), and none of Step 3's own rain-drop-path layers, since
 /// those are per-step working detail rather than the final picture. Call
-/// this only after every contour is resolved (Step 1 alone, or Step 1 and
-/// Step 2 together) -- an earlier call would just draw whatever gravity
+/// this only after every contour is resolved (Step 2 alone, or Step 2 and
+/// Step 3 together) -- an earlier call would just draw whatever gravity
 /// happens to be set so far, silently mislabeled as final.
-pub fn write_final_svg(path: &Path, result: &Step0Result) -> Result<(), String> {
+pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
     let pixels = pixel_polygons(&result.raster);
     let raw = raw_contour_lines(result);
     let linearized = linearized_contour_lines(result);
@@ -708,27 +708,27 @@ pub fn write_final_svg(path: &Path, result: &Step0Result) -> Result<(), String> 
     )
 }
 
-/// The same as [`write_step1_svg`], plus every Rain Drop Production drop's
+/// The same as [`write_step2_svg`], plus every Rain Drop Production drop's
 /// full trail (gray, thin -- background context so the drop's actual path
 /// reads as a line rather than a scatter of dots), its own path (blue dots,
-/// over a black marker under any point `step2.rain_hysteresis_points` names
+/// over a black marker under any point `step3.rain_hysteresis_points` names
 /// as still inside a hysteresis window, and a purple segment over that for
-/// each (previous position, current position) step `step2.rain_vote_segments`
+/// each (previous position, current position) step `step3.rain_vote_segments`
 /// names as where it actually cast a vote -- a vote is a property of the
 /// step it happened on, not of either endpoint, so it is drawn as the step
 /// itself rather than a dot that would otherwise just sit on top of the
 /// hysteresis marker) -- kept to its own file, apart from
-/// [`write_step2_anti_rain_svg`]'s, so a drop's path stays legible where the
+/// [`write_step3_anti_rain_svg`]'s, so a drop's path stays legible where the
 /// two passes cross rather than overlaying both colors on one picture. Its
-/// gravity-arrow layer is filtered to `step2.defined_after_rain`, so it
+/// gravity-arrow layer is filtered to `step3.defined_after_rain`, so it
 /// never shows an arrow for a
 /// contour only Anti Rain Drop Production went on to resolve, even though
 /// `result.contours` itself already holds that final state by the time this
 /// runs.
-pub fn write_step2_rain_svg(
+pub fn write_step3_rain_svg(
     path: &Path,
-    result: &Step0Result,
-    step2: &Step2Result,
+    result: &Step1Result,
+    step3: &Step3Result,
 ) -> Result<(), String> {
     let grid = grid_lines(&result.raster);
     let pixels = pixel_polygons(&result.raster);
@@ -742,11 +742,11 @@ pub fn write_step2_rain_svg(
     let resolved_circles = slope_line_circle_points(result, true);
     let unresolved_circles = slope_line_circle_points(result, false);
     let unresolved_arrows = unresolved_slope_line_arrows(result);
-    let gravity_arrows = contour_gravity_arrows_filtered(result, Some(&step2.defined_after_rain));
-    let trails = drop_trails(&step2.rain_paths);
-    let hysteresis_marks = points(&step2.rain_hysteresis_points);
-    let vote_lines = segments(&step2.rain_vote_segments);
-    let rain = drop_points(&step2.rain_paths);
+    let gravity_arrows = contour_gravity_arrows_filtered(result, Some(&step3.defined_after_rain));
+    let trails = drop_trails(&step3.rain_paths);
+    let hysteresis_marks = points(&step3.rain_hysteresis_points);
+    let vote_lines = segments(&step3.rain_vote_segments);
+    let rain = drop_points(&step3.rain_paths);
     write(
         path,
         resolved_layers(
@@ -785,14 +785,14 @@ pub fn write_step2_rain_svg(
     )
 }
 
-/// The same as [`write_step1_svg`], plus every Anti Rain Drop Production
+/// The same as [`write_step2_svg`], plus every Anti Rain Drop Production
 /// drop's full trail, path, hysteresis marker and vote segment, the same
-/// way as [`write_step2_rain_svg`] -- see there for why this is a separate
+/// way as [`write_step3_rain_svg`] -- see there for why this is a separate
 /// file rather than a second layer on the same one.
-pub fn write_step2_anti_rain_svg(
+pub fn write_step3_anti_rain_svg(
     path: &Path,
-    result: &Step0Result,
-    step2: &Step2Result,
+    result: &Step1Result,
+    step3: &Step3Result,
 ) -> Result<(), String> {
     let grid = grid_lines(&result.raster);
     let pixels = pixel_polygons(&result.raster);
@@ -807,10 +807,10 @@ pub fn write_step2_anti_rain_svg(
     let unresolved_circles = slope_line_circle_points(result, false);
     let unresolved_arrows = unresolved_slope_line_arrows(result);
     let gravity_arrows = contour_gravity_arrows(result);
-    let trails = drop_trails(&step2.anti_rain_paths);
-    let hysteresis_marks = points(&step2.anti_rain_hysteresis_points);
-    let vote_lines = segments(&step2.anti_rain_vote_segments);
-    let anti_rain = drop_points(&step2.anti_rain_paths);
+    let trails = drop_trails(&step3.anti_rain_paths);
+    let hysteresis_marks = points(&step3.anti_rain_hysteresis_points);
+    let vote_lines = segments(&step3.anti_rain_vote_segments);
+    let anti_rain = drop_points(&step3.anti_rain_paths);
     write(
         path,
         resolved_layers(
@@ -1009,7 +1009,7 @@ const LOCAL_WINDOW_MIN: f64 = 15.0;
 /// already conveys) while still adding to the file linearly forever.
 const MAX_DRAWN_CONFLICT_PIXELS: usize = 300;
 
-/// Writes a diagnostic picture of a Contour Raster conflict `step0_extract::extract`
+/// Writes a diagnostic picture of a Contour Raster conflict `step1_extract::extract`
 /// could not resolve by unifying the two contours involved (see
 /// `ExtractError::Conflict`): every other already-accepted contour in light
 /// gray, for terrain context, the already-accepted contour actually involved
@@ -1029,7 +1029,7 @@ pub fn write_conflict_svg(path: &Path, diagnostics: &ConflictDiagnostics) -> Res
     // Only the conflicting pixels inside the local window itself, and even
     // then capped -- see `conflict_pixel_polygons`'s and
     // `MAX_DRAWN_CONFLICT_PIXELS`'s own doc comments for why a long run of
-    // them cannot all be drawn here the way `write_step0_svg` draws every
+    // them cannot all be drawn here the way `write_step1_svg` draws every
     // one of `result.raster`'s own non-zero pixels.
     let local_positions: Vec<Coord<f64>> = diagnostics
         .conflict_positions
@@ -1093,7 +1093,7 @@ mod tests {
         gravity_vector_for_side, Contour, LineGravityDefiners, LineWithGravity,
         PointGravityDefiners,
     };
-    use crate::step0_extract::SlopeLineMark;
+    use crate::step1_extract::SlopeLineMark;
 
     fn c(x: f64, y: f64) -> Coord<f64> {
         Coord { x, y }
@@ -1106,7 +1106,7 @@ mod tests {
         }
     }
 
-    fn sample_result() -> Step0Result {
+    fn sample_result() -> Step1Result {
         let ls = LineString::new(vec![c(0.0, 0.0), c(5.0, 0.0), c(10.0, 0.0)]);
         let mut contour = Contour {
             lwg: LineWithGravity::new(ls.clone()),
@@ -1118,7 +1118,7 @@ mod tests {
         let mut raster = ContourRaster::new(c(-1.0, -1.0), 1.0, 12, 3);
         raster.write_contour(0, &ls).unwrap();
 
-        Step0Result {
+        Step1Result {
             contours: vec![contour],
             raw_polylines: vec![vec![
                 v(0.0, 0.0, false),
@@ -1337,9 +1337,9 @@ mod tests {
     #[test]
     fn red_raw_contour_is_drawn_under_green_linearized_contour_at_half_the_width() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step0.svg");
+        let path = dir.path().join("step1.svg");
         let result = sample_result();
-        write_step0_svg(&path, &result).unwrap();
+        write_step1_svg(&path, &result).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
 
         let red_pos = text.find("rgb(220,20,60)").expect("red contour missing");
@@ -1361,11 +1361,11 @@ mod tests {
     }
 
     #[test]
-    fn step0_svg_has_contours_and_no_gravity_arrows_yet() {
+    fn step1_svg_has_contours_and_no_gravity_arrows_yet() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step0.svg");
+        let path = dir.path().join("step1.svg");
         let result = sample_result();
-        write_step0_svg(&path, &result).unwrap();
+        write_step1_svg(&path, &result).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("<svg"));
@@ -1376,11 +1376,11 @@ mod tests {
     }
 
     #[test]
-    fn step1_svg_adds_one_gravity_arrow_per_node() {
+    fn step2_svg_adds_one_gravity_arrow_per_node() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step1.svg");
+        let path = dir.path().join("step2.svg");
         let result = sample_result();
-        write_step1_svg(&path, &result).unwrap();
+        write_step2_svg(&path, &result).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(count(&text, "rgb(230,200,20)"), 3);
     }
@@ -1420,9 +1420,9 @@ mod tests {
     }
 
     #[test]
-    fn step0_svg_draws_a_red_point_definer_arrow() {
+    fn step1_svg_draws_a_red_point_definer_arrow() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step0.svg");
+        let path = dir.path().join("step1.svg");
         let mut result = sample_result();
         result.point_definers = vec![PointGravityDefiners {
             x: 3.0,
@@ -1431,7 +1431,7 @@ mod tests {
             gravity_dx: Some(1.0),
             gravity_dy: Some(0.0),
         }];
-        write_step0_svg(&path, &result).unwrap();
+        write_step1_svg(&path, &result).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         // one raw contour segment plus one point definer arrow, both red.
         assert_eq!(count(&text, "rgb(220,20,60)"), 2);
@@ -1485,12 +1485,12 @@ mod tests {
     }
 
     #[test]
-    fn step0_svg_colors_slope_line_circles_and_arrows_by_resolution() {
+    fn step1_svg_colors_slope_line_circles_and_arrows_by_resolution() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step0.svg");
+        let path = dir.path().join("step1.svg");
         let mut result = sample_result();
         // A resolved reading also needs a matching point_definers entry --
-        // that's what actually draws its (red) arrow, mirroring how Step 0
+        // that's what actually draws its (red) arrow, mirroring how Step 1
         // itself only ever produces a resolved SlopeLineMark alongside one.
         result.point_definers = vec![PointGravityDefiners {
             x: 3.0,
@@ -1512,7 +1512,7 @@ mod tests {
             },
         ];
         result.slope_lines_contours_search_radius = 4.5;
-        write_step0_svg(&path, &result).unwrap();
+        write_step1_svg(&path, &result).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
 
         assert_eq!(count(&text, "<circle"), 2);
@@ -1533,9 +1533,9 @@ mod tests {
     }
 
     #[test]
-    fn step0_svg_fills_a_line_definer_polygon_light_blue() {
+    fn step1_svg_fills_a_line_definer_polygon_light_blue() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step0.svg");
+        let path = dir.path().join("step1.svg");
         let mut result = sample_result();
         let ls = LineString::new(vec![c(0.0, 0.0), c(5.0, 0.0)]);
         let mut lwg = LineWithGravity::new(ls);
@@ -1552,7 +1552,7 @@ mod tests {
             vec![],
         );
         result.line_definers = vec![LineGravityDefiners { lwg, poly }];
-        write_step0_svg(&path, &result).unwrap();
+        write_step1_svg(&path, &result).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
 
         let tag_start = text
@@ -1568,9 +1568,9 @@ mod tests {
     }
 
     #[test]
-    fn step0_svg_fills_a_heavy_object_polygon_light_pink() {
+    fn step1_svg_fills_a_heavy_object_polygon_light_pink() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step0.svg");
+        let path = dir.path().join("step1.svg");
         let mut result = sample_result();
         result.heavy_object_polygons = vec![Polygon::new(
             LineString::new(vec![
@@ -1582,7 +1582,7 @@ mod tests {
             ]),
             vec![],
         )];
-        write_step0_svg(&path, &result).unwrap();
+        write_step1_svg(&path, &result).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
 
         let tag_start = text
@@ -1597,7 +1597,7 @@ mod tests {
         );
     }
 
-    fn result_for(ls: LineString<f64>, side: f64) -> Step0Result {
+    fn result_for(ls: LineString<f64>, side: f64) -> Step1Result {
         let (gx, gy) = gravity_vector_for_side(&ls, side);
         let mut contour = Contour {
             lwg: LineWithGravity::new(ls),
@@ -1605,7 +1605,7 @@ mod tests {
         };
         contour.lwg.gravity_dx = Some(gx);
         contour.lwg.gravity_dy = Some(gy);
-        Step0Result {
+        Step1Result {
             contours: vec![contour],
             raw_polylines: vec![Vec::new()],
             raster: ContourRaster::new(c(-1.0, -1.0), 1.0, 30, 30),
@@ -1697,11 +1697,11 @@ mod tests {
     }
 
     #[test]
-    fn step2_rain_svg_has_only_rain_drop_points() {
+    fn step3_rain_svg_has_only_rain_drop_points() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step2_rain.svg");
+        let path = dir.path().join("step3_rain.svg");
         let result = sample_result();
-        let step2 = Step2Result {
+        let step3 = Step3Result {
             resolved_by_rain: 0,
             resolved_by_anti_rain: 0,
             ambiguous_warnings: Vec::new(),
@@ -1713,14 +1713,14 @@ mod tests {
             rain_vote_segments: Vec::new(),
             anti_rain_vote_segments: Vec::new(),
         };
-        write_step2_rain_svg(&path, &result, &step2).unwrap();
+        write_step3_rain_svg(&path, &result, &step3).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(count(&text, "<circle"), 3); // only the 3 rain-drop dots, no hysteresis markers
         assert_eq!(count(&text, "rgb(220,20,60)"), 1); // the raw contour, not an anti-rain-drop dot
     }
 
     #[test]
-    fn step2_rain_svg_omits_a_gravity_arrow_for_a_contour_only_anti_rain_resolved() {
+    fn step3_rain_svg_omits_a_gravity_arrow_for_a_contour_only_anti_rain_resolved() {
         // `result.contours` is shared, mutated-in-place state: by the time
         // any --create_svg file is written it already holds gravity from
         // every step that ran, including Anti Rain Drop Production. Without
@@ -1729,7 +1729,7 @@ mod tests {
         // Anti Rain Drop Production, which by this point has already run --
         // would still show an arrow here.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step2_rain.svg");
+        let path = dir.path().join("step3_rain.svg");
 
         let ls0 = LineString::new(vec![c(0.0, 0.0), c(5.0, 0.0), c(10.0, 0.0)]);
         let ls1 = LineString::new(vec![c(0.0, 5.0), c(5.0, 5.0), c(10.0, 5.0)]);
@@ -1748,7 +1748,7 @@ mod tests {
         contour1.lwg.gravity_dx = Some(gx1);
         contour1.lwg.gravity_dy = Some(gy1);
 
-        let result = Step0Result {
+        let result = Step1Result {
             contours: vec![contour0, contour1],
             raw_polylines: vec![Vec::new(), Vec::new()],
             raster: ContourRaster::new(c(-1.0, -1.0), 1.0, 30, 30),
@@ -1760,7 +1760,7 @@ mod tests {
             warnings: Vec::new(),
         };
 
-        let step2 = Step2Result {
+        let step3 = Step3Result {
             resolved_by_rain: 0,
             resolved_by_anti_rain: 0,
             ambiguous_warnings: Vec::new(),
@@ -1773,18 +1773,18 @@ mod tests {
             anti_rain_vote_segments: Vec::new(),
         };
 
-        write_step2_rain_svg(&path, &result, &step2).unwrap();
+        write_step3_rain_svg(&path, &result, &step3).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         // 3 nodes on each contour; only contour 0's arrows should be drawn.
         assert_eq!(count(&text, "rgb(230,200,20)"), 3);
     }
 
     #[test]
-    fn step2_rain_svg_draws_a_gray_trail_under_everything_else() {
+    fn step3_rain_svg_draws_a_gray_trail_under_everything_else() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step2_rain.svg");
+        let path = dir.path().join("step3_rain.svg");
         let result = sample_result();
-        let step2 = Step2Result {
+        let step3 = Step3Result {
             resolved_by_rain: 0,
             resolved_by_anti_rain: 0,
             ambiguous_warnings: Vec::new(),
@@ -1796,7 +1796,7 @@ mod tests {
             rain_vote_segments: vec![(c(0.0, 0.0), c(0.0, 1.0))],
             anti_rain_vote_segments: Vec::new(),
         };
-        write_step2_rain_svg(&path, &result, &step2).unwrap();
+        write_step3_rain_svg(&path, &result, &step3).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
 
         // One gray trail path -- one rain path, drawn as a single polyline
@@ -1818,11 +1818,11 @@ mod tests {
     }
 
     #[test]
-    fn step2_anti_rain_svg_has_only_anti_rain_drop_points() {
+    fn step3_anti_rain_svg_has_only_anti_rain_drop_points() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step2_anti_rain.svg");
+        let path = dir.path().join("step3_anti_rain.svg");
         let result = sample_result();
-        let step2 = Step2Result {
+        let step3 = Step3Result {
             resolved_by_rain: 0,
             resolved_by_anti_rain: 0,
             ambiguous_warnings: Vec::new(),
@@ -1834,24 +1834,24 @@ mod tests {
             rain_vote_segments: Vec::new(),
             anti_rain_vote_segments: Vec::new(),
         };
-        write_step2_anti_rain_svg(&path, &result, &step2).unwrap();
+        write_step3_anti_rain_svg(&path, &result, &step3).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(count(&text, "<circle"), 1); // only the 1 anti-rain-drop dot, no hysteresis markers
     }
 
     #[test]
-    fn step2_rain_svg_draws_a_black_marker_under_each_hysteresis_point() {
+    fn step3_rain_svg_draws_a_black_marker_under_each_hysteresis_point() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step2_rain.svg");
+        let path = dir.path().join("step3_rain.svg");
         let result = sample_result();
-        let step2 = Step2Result {
+        let step3 = Step3Result {
             resolved_by_rain: 0,
             resolved_by_anti_rain: 0,
             ambiguous_warnings: Vec::new(),
             defined_after_rain: vec![true],
             rain_paths: vec![vec![c(0.0, 0.0), c(0.0, 1.0), c(0.0, 2.0)]],
             anti_rain_paths: Vec::new(),
-            // Whichever points step2_rain_drop::simulate_one_drop reported
+            // Whichever points step3_rain_drop::simulate_one_drop reported
             // as still inside a hysteresis window -- this layer just draws
             // them, it doesn't recompute which ones those are.
             rain_hysteresis_points: vec![c(0.0, 0.0), c(0.0, 1.0)],
@@ -1859,7 +1859,7 @@ mod tests {
             rain_vote_segments: Vec::new(),
             anti_rain_vote_segments: Vec::new(),
         };
-        write_step2_rain_svg(&path, &result, &step2).unwrap();
+        write_step3_rain_svg(&path, &result, &step3).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
 
         // 3 rain-drop dots, plus a black marker under each of the 2
@@ -1877,11 +1877,11 @@ mod tests {
     }
 
     #[test]
-    fn step2_rain_svg_draws_a_purple_segment_for_each_vote_step() {
+    fn step3_rain_svg_draws_a_purple_segment_for_each_vote_step() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step2_rain.svg");
+        let path = dir.path().join("step3_rain.svg");
         let result = sample_result();
-        let step2 = Step2Result {
+        let step3 = Step3Result {
             resolved_by_rain: 0,
             resolved_by_anti_rain: 0,
             ambiguous_warnings: Vec::new(),
@@ -1890,13 +1890,13 @@ mod tests {
             anti_rain_paths: Vec::new(),
             rain_hysteresis_points: vec![c(0.0, 0.0)],
             anti_rain_hysteresis_points: Vec::new(),
-            // Whichever step step2_rain_drop::simulate_one_drop reported as
+            // Whichever step step3_rain_drop::simulate_one_drop reported as
             // where it actually cast a vote -- this layer just draws it, it
             // doesn't recompute which one that is.
             rain_vote_segments: vec![(c(0.0, 0.0), c(0.0, 1.0))],
             anti_rain_vote_segments: Vec::new(),
         };
-        write_step2_rain_svg(&path, &result, &step2).unwrap();
+        write_step3_rain_svg(&path, &result, &step3).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
 
         // 3 rain-drop dots and 1 black hysteresis marker are circles; the

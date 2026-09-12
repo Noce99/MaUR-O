@@ -1,4 +1,4 @@
-//! Step 0's data model (`Contours-to-Raster.md`): what a contour knows about
+//! Step 1's data model (`Contours-to-Raster.md`): what a contour knows about
 //! its own downhill direction, and the two kinds of evidence ("definers")
 //! that pin it down. [`side_of_tangent`] and [`encloses_another_contour`]
 //! (Appendix 4) are ported verbatim from the doc; everything else here is the
@@ -53,11 +53,11 @@ impl LineWithGravity {
     }
 }
 
-/// One contour line, and the elevation Step 3 will eventually assign it.
+/// One contour line, and the elevation Step 4 will eventually assign it.
 pub struct Contour {
     /// The contour's own line and gravity.
     pub lwg: LineWithGravity,
-    /// Step 3's output; always `None` until Step 3 exists.
+    /// Step 4's output; always `None` until Step 4 exists.
     pub elevation_height: Option<f64>,
 }
 
@@ -79,7 +79,7 @@ pub struct PointGravityDefiners {
 
 /// A Jump, whose gravity direction Mapper's own symbol definition gives
 /// directly (see [`crate::contour_symbols::jump_gravity_side`]), together
-/// with the polygon Step 1 rasterizes to find which contours it touches.
+/// with the polygon Step 2 rasterizes to find which contours it touches.
 pub struct LineGravityDefiners {
     /// The Jump's own line and (always defined) gravity.
     pub lwg: LineWithGravity,
@@ -91,7 +91,7 @@ pub struct LineGravityDefiners {
 /// `(dx, dy)` points to: a positive result means left, a negative result
 /// means right. Comparing the sign computed here at `ls[0] -> ls[1]` against
 /// the sign computed at any other point's local tangent is how "in
-/// accordance" is decided everywhere in Step 1 and Step 2 -- never a direct
+/// accordance" is decided everywhere in Step 2 and Step 3 -- never a direct
 /// comparison of raw `(dx, dy)` components, which are only valid relative to
 /// the tangent they were computed against.
 pub fn side_of_tangent(tangent_from: Coord<f64>, tangent_to: Coord<f64>, dx: f64, dy: f64) -> f64 {
@@ -101,7 +101,7 @@ pub fn side_of_tangent(tangent_from: Coord<f64>, tangent_to: Coord<f64>, dx: f64
 
 /// The unit vector perpendicular to the tangent `tangent_from -> tangent_to`,
 /// on the side [`side_of_tangent`] would call left (`side > 0.0`) or right
-/// (`side <= 0.0`). This is how Step 2 recovers the actual gravity vector
+/// (`side <= 0.0`). This is how Step 3 recovers the actual gravity vector
 /// *at* any point along a contour from the contour's own stored side (see
 /// [`contour_gravity_side`]): the doc's own commentary on `side_of_tangent`
 /// is that a "side" -- unlike a raw `(dx, dy)` -- means the same thing at

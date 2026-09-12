@@ -1,4 +1,4 @@
-//! Step 0 of `Contours-to-Raster.md`: pulling Contours, Slope Lines, Jumps
+//! Step 1 of `Contours-to-Raster.md`: pulling Contours, Slope Lines, Jumps
 //! and Heavy Objects out of a parsed map, building the Contour Raster, and
 //! turning the supporting symbols into gravity evidence.
 
@@ -86,12 +86,12 @@ impl From<String> for ExtractError {
     }
 }
 
-/// Everything Step 0 produces: the contours (gravity still mostly
+/// Everything Step 1 produces: the contours (gravity still mostly
 /// undefined), the Contour Raster they were written to, the gravity evidence
-/// Step 1 and Step 2 consume, and any warnings along the way (a Slope Line
+/// Step 2 and Step 3 consume, and any warnings along the way (a Slope Line
 /// with no contour under it, a Jump with no derivable direction, a
 /// degenerate circle fit).
-pub struct Step0Result {
+pub struct Step1Result {
     /// One entry per contour subpath found on the map.
     pub contours: Vec<Contour>,
     /// The same contours' raw, unprocessed node sequence (still curved,
@@ -132,7 +132,7 @@ pub struct Step0Result {
 
 /// One Slope Line found on the map: its own position and rotation, kept
 /// (regardless of whether it resolved) for `--create_svg`'s benefit -- see
-/// `Step0Result::slope_lines`.
+/// `Step1Result::slope_lines`.
 #[derive(Clone, Copy)]
 pub struct SlopeLineMark {
     /// Ground-meter position of the Slope Line symbol.
@@ -143,7 +143,7 @@ pub struct SlopeLineMark {
     pub rotation: f64,
     /// Whether this one found a contour within
     /// `slope_lines_contours_search_radius` and was pushed to
-    /// `Step0Result::point_definers` -- kept so `--create_svg` can tell the
+    /// `Step1Result::point_definers` -- kept so `--create_svg` can tell the
     /// two apart (e.g. by color) without re-deriving it.
     pub resolved: bool,
 }
@@ -267,7 +267,7 @@ fn endpoint_key(p: crate::map::Point) -> (i64, i64) {
 /// Mapper sometimes splits one physical contour line across several `.omap`
 /// objects -- observed directly in real map data (`maps/forest_sample.omap`):
 /// one Contour object's last coordinate is bit-identical to the next
-/// Contour object's first. Left unmerged, Step 0 would treat the two pieces
+/// Contour object's first. Left unmerged, Step 1 would treat the two pieces
 /// as separate `Contour`s that happen to touch at exactly one point, which
 /// both crashes the Contour Raster's conflict check (both pieces claim the
 /// pixel at the shared point) and would wrongly split one contour's gravity
@@ -480,12 +480,12 @@ fn nearest_end_is_start(ls: &LineString<f64>, near: Coord<f64>, radius: f64) -> 
 /// Real contour digitizing sometimes splits one physical line into two
 /// objects whose endpoints are close but not bit-identical (unlike
 /// `merge_contour_object_chains`'s exact-match join, done earlier on the raw
-/// `.omap` coordinates, before any geometry conversion); this is Step 0's
+/// `.omap` coordinates, before any geometry conversion); this is Step 1's
 /// later, geometry-based fallback for that same situation once it surfaces
 /// as a Contour Raster pixel conflict. Neither contour has any gravity of
-/// its own yet at this point in Step 0, so reordering/reversing either
+/// its own yet at this point in Step 1, so reordering/reversing either
 /// one's nodes here is free of any of the direction-dependent meaning
-/// `LineWithGravity`'s own fields carry once Step 1/2 run.
+/// `LineWithGravity`'s own fields carry once Step 2/2 run.
 fn merge_close_endpoints(
     a: &LineString<f64>,
     b: &LineString<f64>,
@@ -595,10 +595,10 @@ fn push_heavy_object_reading(
     }
 }
 
-/// Runs Step 0: extracts Contours, Slope Lines, Jumps and Heavy Objects from
+/// Runs Step 1: extracts Contours, Slope Lines, Jumps and Heavy Objects from
 /// `map`, builds the Contour Raster, and turns the supporting symbols into
-/// gravity evidence for Step 1 and Step 2.
-pub fn extract(map: &Map, config: &Config) -> Result<Step0Result, ExtractError> {
+/// gravity evidence for Step 2 and Step 3.
+pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> {
     let meters_per_mm = contour_geometry::meters_per_mm(map.scale_denominator);
     let mut warnings = Vec::new();
 
@@ -872,7 +872,7 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step0Result, ExtractError> 
         }
     }
 
-    Ok(Step0Result {
+    Ok(Step1Result {
         contours,
         raw_polylines,
         raster,

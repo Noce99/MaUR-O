@@ -1,5 +1,5 @@
 //! Classifying a map's symbols into the four families
-//! [`Contours-to-Raster.md`](../../Contours-to-Raster.md) builds Step 0 out
+//! [`Contours-to-Raster.md`](../../Contours-to-Raster.md) builds Step 1 out
 //! of: Contours, Slope Lines, Jumps and Heavy Objects. Nothing in the rest of
 //! the crate needs this classification, so it lives here rather than as
 //! baked-in knowledge in `map.rs`.
@@ -18,7 +18,7 @@ use crate::map::{LineSymbol, PointSymbol, Symbol};
 /// Which of the doc's four symbol families a symbol belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolFamily {
-    /// *\[Index\] Contour* -- what Step 0 builds a [`crate::gravity_model::Contour`] for.
+    /// *\[Index\] Contour* -- what Step 1 builds a [`crate::gravity_model::Contour`] for.
     Contour,
     /// *Slope Line*, for a contour (not for a form line).
     SlopeLine,

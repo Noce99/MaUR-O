@@ -1,6 +1,6 @@
-//! The Contour Raster (`Contours-to-Raster.md`, Step 0): a 2D grid recording,
+//! The Contour Raster (`Contours-to-Raster.md`, Step 1): a 2D grid recording,
 //! per pixel, which contour (if any) passes through it, plus Appendix 5's
-//! supercover pixel-walk used to find contour intersections in Steps 0 and 2.
+//! supercover pixel-walk used to find contour intersections in Steps 1 and 3.
 
 use geo::{Coord, LineString, Polygon};
 use line_drawing::Supercover;
@@ -76,7 +76,7 @@ impl ContourRaster {
     /// Writes `contour_idx` (as `contour_idx + 1`) to every pixel the
     /// densified `LineString` touches, walking each consecutive pair of
     /// points with a supercover traversal so a diagonally-crossed shared
-    /// corner pixel is never skipped (Step 0). `Err`s, naming
+    /// corner pixel is never skipped (Step 1). `Err`s, naming
     /// `rasterization_px_size` as the doc suggests, if a touched pixel
     /// already holds a *different* contour's index -- writing the same
     /// value again is a no-op, per the doc.
@@ -122,7 +122,7 @@ impl ContourRaster {
     /// `rasterization_px_size` is the only fix) apart from two pieces of the
     /// same physical line separated by a small digitizing gap, where the
     /// conflict is confined to a small cluster right at that gap (see
-    /// `step0_extract::extract`'s contour-merging pass, which is the only
+    /// `step1_extract::extract`'s contour-merging pass, which is the only
     /// caller that needs the full list).
     pub fn find_conflicts(
         &self,
@@ -296,7 +296,7 @@ impl ContourRaster {
     /// The index of the contour whose nearest pixel (by pixel-center
     /// distance) to `pos` lies within `radius` ground meters, or `None` if
     /// no contour has one that close. A Slope Line's own position is not
-    /// always pixel-exact on top of its contour, so Step 0 uses this
+    /// always pixel-exact on top of its contour, so Step 1 uses this
     /// (`slope_lines_contours_search_radius`) instead of a single
     /// under-the-point pixel lookup. Scans the pixel-space bounding box of
     /// the search circle; a tie between two different contours' pixels at
@@ -336,7 +336,7 @@ impl ContourRaster {
     /// scanning the polygon's own pixel-space bounding box. The doc gives no
     /// code for rasterizing an *area* -- Appendix 5's supercover walk only
     /// answers which pixels a *line* touches -- so this is new: cheap here
-    /// since the polygons Step 1 rasterizes are thin buffered Jump lines,
+    /// since the polygons Step 2 rasterizes are thin buffered Jump lines,
     /// not large area fills.
     pub fn pixels_in_polygon(&self, poly: &Polygon<f64>) -> Vec<(i64, i64)> {
         let exterior = poly.exterior();

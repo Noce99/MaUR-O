@@ -145,7 +145,7 @@ fn circle_exit(a: Coord<f64>, b: Coord<f64>, c: Coord<f64>, r: f64, t_min: f64) 
 /// a remainder into, so it is handled differently in two ways -- otherwise
 /// the ring's closing segment could come out anywhere from a full `step`
 /// down to a near-zero sliver, which starves it of
-/// `sources_per_contour_segment`'s intended spacing in Step 2 and, at the
+/// `sources_per_contour_segment`'s intended spacing in Step 3 and, at the
 /// zero extreme, hands `vector_on_side` a zero-length tangent:
 /// - `step` is shrunk to the nearest length that divides the perimeter
 ///   evenly. This is exact on straight stretches, but each hop that crosses
@@ -314,9 +314,9 @@ pub fn coords_to_linestrings(
     out
 }
 
-/// The index of `ls`'s closest node to `p`. Shared by Step 0 (locating a
+/// The index of `ls`'s closest node to `p`. Shared by Step 1 (locating a
 /// Heavy Object intersection along the contour it crosses, for the circle
-/// fit) and Step 1 (locating a definer's own local tangent on the contour it
+/// fit) and Step 2 (locating a definer's own local tangent on the contour it
 /// gives evidence about).
 pub(crate) fn nearest_index(ls: &LineString<f64>, p: Coord<f64>) -> usize {
     ls.0.iter()

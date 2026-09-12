@@ -1,4 +1,4 @@
-//! CLI-level checks for `contours_to_raster`: it runs Steps 0-2 end to end
+//! CLI-level checks for `contours_to_raster`: it runs Steps 1-3 end to end
 //! on a small fixture, `--create_svg` writes the five validation files, and
 //! the documented exit codes fire on a missing map and on a genuine
 //! Contour-Raster pixel conflict.
@@ -10,8 +10,8 @@ fn contours_to_raster() -> Command {
 }
 
 /// Two nested closed contours, one resolved by a Slope Line and the other by
-/// the closed-hill heuristic -- both within Step 1, so this fixture never
-/// reaches Step 2. See the fixture's own comment in
+/// the closed-hill heuristic -- both within Step 2, so this fixture never
+/// reaches Step 3. See the fixture's own comment in
 /// `tests/data/contours.xmap`.
 #[test]
 fn contours() {
@@ -61,7 +61,7 @@ fn create_svg_writes_five_non_empty_files_in_a_timestamped_run_folder() {
         run_dir.display()
     );
 
-    for step in ["step0", "step1", "step2_rain", "step2_anti_rain", "final"] {
+    for step in ["step1", "step2", "step3_rain", "step3_anti_rain", "final"] {
         let svg = run_dir.join(format!("contours_{step}.svg"));
         let contents =
             std::fs::read_to_string(&svg).unwrap_or_else(|e| panic!("{}: {e}", svg.display()));
@@ -187,7 +187,7 @@ fn conflicting_pixel_still_writes_a_diagnostic_svg_under_create_svg() {
     // with no fill (an unfilled stroke), same convention as every other
     // ring this crate's SVGs draw.
     assert!(text.contains(r#"stroke="rgb(220,20,60)""#));
-    // Only Step 0 ever ran before this failure -- no other step's own SVG
+    // Only Step 1 ever ran before this failure -- no other step's own SVG
     // should exist alongside the diagnostic one.
-    assert!(!run_dir.join("conflict_step0.svg").exists());
+    assert!(!run_dir.join("conflict_step1.svg").exists());
 }
