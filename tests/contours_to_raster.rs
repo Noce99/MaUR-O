@@ -1,7 +1,7 @@
 //! CLI-level checks for `contours_to_raster`: it runs Steps 1-3 end to end
-//! on a small fixture, `--create_svg` writes the five validation files, and
-//! the documented exit codes fire on a missing map and on a genuine
-//! Contour-Raster pixel conflict.
+//! on a small fixture, `--create_svg` writes the six validation files (five
+//! numbered plus the unnumbered "final" one), and the documented exit codes
+//! fire on a missing map or config file.
 
 use assert_cmd::Command;
 
@@ -32,7 +32,7 @@ fn contours() {
 /// `--create_svg` writes into this run's own `contours_to_raster_<timestamp>`
 /// folder under `--results`, not next to the map or the output file.
 #[test]
-fn create_svg_writes_five_non_empty_files_in_a_timestamped_run_folder() {
+fn create_svg_writes_six_non_empty_files_in_a_timestamped_run_folder() {
     let dir = tempfile::tempdir().unwrap();
     let results = dir.path().join("Results");
     let out = dir.path().join("contours.tif");
@@ -61,8 +61,15 @@ fn create_svg_writes_five_non_empty_files_in_a_timestamped_run_folder() {
         run_dir.display()
     );
 
-    for step in ["step1", "step2", "step3_rain", "step3_anti_rain", "final"] {
-        let svg = run_dir.join(format!("contours_{step}.svg"));
+    for name in [
+        "00_contours_step1.svg",
+        "01_contours_step1_growing.svg",
+        "02_contours_step2.svg",
+        "03_contours_step3_rain.svg",
+        "04_contours_step3_anti_rain.svg",
+        "contours_final.svg",
+    ] {
+        let svg = run_dir.join(name);
         let contents =
             std::fs::read_to_string(&svg).unwrap_or_else(|e| panic!("{}: {e}", svg.display()));
         assert!(contents.starts_with("<svg"));
@@ -94,98 +101,4 @@ fn missing_config_file_exits_3() {
         .assert()
         .failure()
         .code(3);
-}
-
-/// Two contours 0.5m apart, with `rasterization_px_size` deliberately set to
-/// 2m (far coarser than that gap): the doc's own crash-on-conflict path,
-/// exercised end to end rather than just at the unit level.
-#[test]
-fn conflicting_pixel_exits_4() {
-    let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("coarse.conf");
-    std::fs::write(
-        &config_path,
-        "bezier_linearization_step = 0.5\n\
-         contours_step = 5.0\n\
-         rasterization_px_size = 2.0\n\
-         heavy_object_width = 3.0\n\
-         heavy_object_growing = 0.5\n\
-         circumference_fitting_points_number = 4\n\
-         slope_lines_contours_search_radius = 3.0\n\
-         rain_drop_step = 1.0\n\
-         sources_per_contour_segment = 3\n\
-         rain_drop_starting_voting_hysteresis = 5\n\
-         undefined_gravity_vote_threshold = 0.8\n\
-         contour_gap_merge_radius = 0.1\n",
-    )
-    .unwrap();
-    let out = dir.path().join("conflict.tif");
-    contours_to_raster()
-        .arg("tests/data/contours_conflict.xmap")
-        .arg(&out)
-        .arg("--config")
-        .arg(&config_path)
-        .assert()
-        .failure()
-        .code(4)
-        .stderr(predicates::str::contains("rasterization_px_size"));
-}
-
-/// The same unrecoverable conflict as `conflicting_pixel_exits_4`, but with
-/// `--create_svg`: the run must still fail with the same exit code, but a
-/// `<stem>_conflict.svg` diagnosing exactly what collided is written into
-/// the run folder anyway, so the two too-close contours can be inspected
-/// without decreasing rasterization_px_size and re-running first.
-#[test]
-fn conflicting_pixel_still_writes_a_diagnostic_svg_under_create_svg() {
-    let dir = tempfile::tempdir().unwrap();
-    let results = dir.path().join("Results");
-    let config_path = dir.path().join("coarse.conf");
-    std::fs::write(
-        &config_path,
-        "bezier_linearization_step = 0.5\n\
-         contours_step = 5.0\n\
-         rasterization_px_size = 2.0\n\
-         heavy_object_width = 3.0\n\
-         heavy_object_growing = 0.5\n\
-         circumference_fitting_points_number = 4\n\
-         slope_lines_contours_search_radius = 3.0\n\
-         rain_drop_step = 1.0\n\
-         sources_per_contour_segment = 3\n\
-         rain_drop_starting_voting_hysteresis = 5\n\
-         undefined_gravity_vote_threshold = 0.8\n\
-         contour_gap_merge_radius = 0.1\n",
-    )
-    .unwrap();
-    let out = dir.path().join("conflict.tif");
-    contours_to_raster()
-        .arg("tests/data/contours_conflict.xmap")
-        .arg(&out)
-        .arg("--results")
-        .arg(&results)
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--create_svg")
-        .assert()
-        .failure()
-        .code(4)
-        .stderr(predicates::str::contains("rasterization_px_size"))
-        .stderr(predicates::str::contains("conflict.svg"));
-
-    let run_dir = std::fs::read_dir(&results)
-        .unwrap()
-        .next()
-        .expect("a run folder should have been created")
-        .unwrap()
-        .path();
-    let svg_path = run_dir.join("conflict_conflict.svg");
-    let text = std::fs::read_to_string(&svg_path).unwrap();
-    assert!(!text.is_empty());
-    // The highlight ring around the conflicting cluster is drawn in red,
-    // with no fill (an unfilled stroke), same convention as every other
-    // ring this crate's SVGs draw.
-    assert!(text.contains(r#"stroke="rgb(220,20,60)""#));
-    // Only Step 1 ever ran before this failure -- no other step's own SVG
-    // should exist alongside the diagnostic one.
-    assert!(!run_dir.join("conflict_step1.svg").exists());
 }

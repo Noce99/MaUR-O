@@ -14,6 +14,7 @@
 //!
 //! | Layer | Meaning | Color |
 //! | --- | --- | --- |
+//! | out-of-bound area | the whole `OUT_OF_BOUND` region, traced into a handful of rings rather than one square per pixel (see [`oob_area`]) | black |
 //! | grid | the raster's pixel grid | gray |
 //! | pixel | a non-zero Contour Raster pixel | brown |
 //! | contour (raw) | a pre-linearization (still-curved) contour | red |
@@ -61,6 +62,7 @@
 //! arrows, or any of Step 3's own rain-drop-path diagnostics, since those are
 //! per-step working detail rather than the final picture.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -69,9 +71,10 @@ use geo::{Coord, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, P
 use geo_svg::{Color, Style, Svg, ToSvg, ToSvgStr, ViewBox};
 
 use crate::contour_geometry::RawVertex;
-use crate::contour_raster::ContourRaster;
+use crate::contour_raster::{ContourRaster, CONTOUR_0_MATRIX_VALUE, HIGH_DENSITY, OUT_OF_BOUND};
+use crate::contours_to_raster_config::Config;
 use crate::gravity_model::{contour_gravity_side, lwg_gravity_side, node_direction};
-use crate::step1_extract::{ConflictDiagnostics, Step1Result};
+use crate::step1_extract::Step1Result;
 use crate::step3_rain_drop::Step3Result;
 
 const GRAY: Color = Color::Rgb(160, 160, 160);
@@ -85,10 +88,20 @@ const PURPLE: Color = Color::Rgb(148, 0, 211);
 const ORANGE: Color = Color::Rgb(255, 140, 0);
 const LIGHT_BLUE: Color = Color::Rgb(173, 216, 230);
 const LIGHT_PINK: Color = Color::Rgb(255, 182, 193);
-/// [`write_conflict_svg`]'s own color for every other contour drawn only as
-/// background context, well lighter than [`GRAY`] so it stays clearly
-/// secondary to the two contours actually involved in the conflict.
-const LIGHT_GRAY: Color = Color::Rgb(220, 220, 220);
+/// `01_..._step1_growing.svg`'s `growing_previous_distance_direction_weight`
+/// push/pull vector layer (Appendix 5) -- see [`push_pull_vector_layers`].
+const PUSH_PULL_PREVIOUS_DIRECTION: Color = Color::Rgb(0, 191, 255);
+/// `01_..._step1_growing.svg`'s `growing_out_of_bound_direction_weight`
+/// push/pull vector layer.
+const PUSH_PULL_OUT_OF_BOUND: Color = Color::Rgb(255, 0, 255);
+/// `01_..._step1_growing.svg`'s `growing_density_direction_weight` push/pull
+/// vector layer.
+const PUSH_PULL_DENSITY: Color = Color::Rgb(0, 100, 0);
+/// `01_..._step1_growing.svg`'s `growing_other_contours_direction_weight`
+/// push/pull vector layer.
+const PUSH_PULL_OTHER_CONTOURS: Color = Color::Rgb(128, 0, 0);
+/// `3` (high density) pixels.
+const LIGHT_GREEN: Color = Color::Rgb(144, 238, 144);
 
 /// How long, in ground meters, an arrow primitive is drawn.
 const ARROW_LENGTH: f64 = 3.0;
@@ -109,19 +122,17 @@ const VOTE_SEGMENT_STROKE_WIDTH: f32 = 0.3;
 /// since it is reference context for `slope_lines_contours_search_radius`
 /// rather than a reading itself.
 const SEARCH_CIRCLE_STROKE_WIDTH: f32 = 0.15;
-/// A Contour Raster conflict's own highlight ring's stroke width: thicker
-/// than [`SEARCH_CIRCLE_STROKE_WIDTH`], since -- unlike that one, which is
-/// reference context -- this ring is the whole point of the picture it is
-/// drawn on ([`write_conflict_svg`]).
-const CONFLICT_RING_STROKE_WIDTH: f32 = 0.5;
-/// The two involved contours' own stroke width in [`write_conflict_svg`]:
-/// thicker than [`LINEARIZED_CONTOUR_STROKE_WIDTH`], so they stand out from
-/// every other, merely-contextual contour also drawn there.
-const CONFLICT_CONTOUR_STROKE_WIDTH: f32 = LINEARIZED_CONTOUR_STROKE_WIDTH * 3.0;
+/// A Flying End's own pre-growing marker ring's radius, in ground meters.
+const FLYING_END_RING_RADIUS: f32 = 1.5;
+/// A Flying End marker ring's stroke width.
+const FLYING_END_RING_STROKE_WIDTH: f32 = 0.3;
 /// A drop's own trail's stroke width: a third of a vote segment's, since
 /// it's background context for the drop's path rather than something to
 /// emphasize the way an actual vote is.
 const DROP_TRAIL_STROKE_WIDTH: f32 = VOTE_SEGMENT_STROKE_WIDTH / 3.0;
+/// A push/pull vector's own stroke width, in ground meters -- see
+/// [`push_pull_vector_layers`].
+const PUSH_PULL_VECTOR_STROKE_WIDTH: f32 = 0.15;
 /// How far, in ground meters, the viewBox is padded past the drawing's own
 /// bounds so nothing is clipped at the edge.
 const MARGIN: f32 = 2.0;
@@ -150,29 +161,267 @@ fn grid_lines(raster: &ContourRaster) -> MultiLineString<f64> {
     MultiLineString::new(lines)
 }
 
-fn pixel_polygons(raster: &ContourRaster) -> MultiPolygon<f64> {
-    let mut polys = Vec::new();
+fn pixel_square(raster: &ContourRaster, px: usize, py: usize) -> Polygon<f64> {
+    let x0 = raster.origin.x + px as f64 * raster.px_size;
+    let y0 = raster.origin.y + py as f64 * raster.px_size;
+    let (x1, y1) = (x0 + raster.px_size, y0 + raster.px_size);
+    Polygon::new(
+        LineString::new(vec![
+            Coord { x: x0, y: y0 },
+            Coord { x: x1, y: y0 },
+            Coord { x: x1, y: y1 },
+            Coord { x: x0, y: y1 },
+            Coord { x: x0, y: y0 },
+        ]),
+        vec![],
+    )
+}
+
+/// Every raster pixel worth a square in the vector output: a contour, or a
+/// high-density one -- the two values that mark something the algorithm
+/// actually resolved. `UNDEFINED`/`OUT_OF_BOUND`/`NO_CONTOUR_IN_BOUND` get no
+/// square at all: drawing every single pixel, including the two or three
+/// reserved values that typically cover most of a real map's own raster,
+/// made these files huge. `OUT_OF_BOUND` gets its own single traced polygon
+/// instead (see [`oob_area`]); `UNDEFINED`/`NO_CONTOUR_IN_BOUND` get nothing
+/// at all (the grid lines alone show the raster's extent there). The full,
+/// every-pixel-colored picture instead goes into the companion
+/// `--create_svg` PNG (see [`crate::contour_raster::ContourRaster::write_png`]).
+struct PixelLayers {
+    contours: MultiPolygon<f64>,
+    high_density: MultiPolygon<f64>,
+}
+
+fn pixel_layers(raster: &ContourRaster) -> PixelLayers {
+    let (mut contours, mut high_density) = (Vec::new(), Vec::new());
     for py in 0..raster.height {
         for px in 0..raster.width {
-            if raster.get(px as i64, py as i64) == 0 {
-                continue;
+            match raster.get(px as i64, py as i64) {
+                v if v == HIGH_DENSITY => high_density.push(pixel_square(raster, px, py)),
+                v if v < CONTOUR_0_MATRIX_VALUE => {} // UNDEFINED/OUT_OF_BOUND/NO_CONTOUR_IN_BOUND: no square
+                _ => contours.push(pixel_square(raster, px, py)),
             }
-            let x0 = raster.origin.x + px as f64 * raster.px_size;
-            let y0 = raster.origin.y + py as f64 * raster.px_size;
-            let (x1, y1) = (x0 + raster.px_size, y0 + raster.px_size);
-            polys.push(Polygon::new(
-                LineString::new(vec![
-                    Coord { x: x0, y: y0 },
-                    Coord { x: x1, y: y0 },
-                    Coord { x: x1, y: y1 },
-                    Coord { x: x0, y: y1 },
-                    Coord { x: x0, y: y0 },
-                ]),
-                vec![],
-            ));
         }
     }
-    MultiPolygon::new(polys)
+    PixelLayers {
+        contours: MultiPolygon::new(contours),
+        high_density: MultiPolygon::new(high_density),
+    }
+}
+
+/// A pixel-grid corner's world-space point -- `i` in `0..=raster.width`, `j`
+/// in `0..=raster.height` -- the same corner convention [`pixel_square`]
+/// already uses for a single pixel's own 4 corners.
+fn corner(raster: &ContourRaster, i: i64, j: i64) -> Coord<f64> {
+    Coord {
+        x: raster.origin.x + i as f64 * raster.px_size,
+        y: raster.origin.y + j as f64 * raster.px_size,
+    }
+}
+
+/// A closed rectilinear ring's own corner-index vertices (first == last),
+/// with every run of collinear points along a straight stretch collapsed
+/// into just its own two ends -- an all-out-of-bound raster's own
+/// single-pixel-wide zigzag would otherwise keep one point per pixel even
+/// along a perfectly straight run. Falls back to the input unchanged if
+/// collapsing it would leave nothing (never actually possible for a real
+/// closed rectilinear ring, which always turns at at least 4 corners, but
+/// cheaper to guard against than to prove impossible here).
+fn simplify_rectilinear_ring(points: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    if points.len() < 4 {
+        return points.to_vec();
+    }
+    let body = &points[..points.len() - 1];
+    let n = body.len();
+    let dir = |a: (i64, i64), b: (i64, i64)| (b.0 - a.0, b.1 - a.1);
+    let mut kept: Vec<(i64, i64)> = (0..n)
+        .filter(|&i| {
+            let prev = body[(i + n - 1) % n];
+            let cur = body[i];
+            let next = body[(i + 1) % n];
+            dir(prev, cur) != dir(cur, next)
+        })
+        .map(|i| body[i])
+        .collect();
+    if kept.is_empty() {
+        return points.to_vec();
+    }
+    kept.push(kept[0]);
+    kept
+}
+
+/// Every `OUT_OF_BOUND` pixel's own boundary, traced into a handful of
+/// closed rings instead of one square per pixel (Appendix 5 -- see
+/// [`pixel_layers`]'s own doc comment for why: on a real map, out-of-bound
+/// is typically the *largest* pixel value by area, and a square per pixel
+/// there made these files huge).
+///
+/// Every out-of-bound pixel is connected to the raster's own outer border
+/// (`ContourRaster::compute_out_of_bound` starts there and only ever floods
+/// or dilates outward from an already-out-of-bound pixel), so the
+/// out-of-bound area is always exactly the raster's own full bounding
+/// rectangle *minus* every "in bound" region found inside it. Rather than
+/// work out which traced ring is a hole in which (arbitrarily nested, for a
+/// map with islands within bays within islands), this returns the
+/// bounding rectangle as one ring, plus one ring per out-of-bound/in-bound
+/// transition found -- `--create_svg` renders them all as one `<path>` with
+/// `fill-rule="evenodd"` ([`OobArea`]), which fills wherever an odd number
+/// of rings cover a point, the correct out-of-bound area regardless of how
+/// deep that nesting goes or which way each ring happens to wind.
+///
+/// Traced via directed unit edges around each out-of-bound pixel's own
+/// exposed sides (skipped wherever the neighbor across that side is also
+/// out-of-bound, including one that falls outside the raster entirely,
+/// exactly like [`ContourRaster::get`]'s own semantics already treat it --
+/// so no edge is ever placed on the raster's own true border, which the
+/// explicit bounding-rectangle ring covers instead): every vertex this
+/// produces has as many outgoing edges as incoming ones, so repeatedly
+/// walking from any vertex with a remaining outgoing edge, consuming edges
+/// as it goes, is guaranteed to return to that same vertex and close a
+/// simple ring -- even where two out-of-bound pixels only touch at a shared
+/// corner (diagonally, which `compute_out_of_bound`'s own 8-connected flood
+/// allows), where the ring can end up touching itself at that one point
+/// rather than crossing itself, which `fill-rule="evenodd"` still renders
+/// correctly either way.
+fn oob_area(raster: &ContourRaster) -> OobArea {
+    let (w, h) = (raster.width as i64, raster.height as i64);
+    if w == 0 || h == 0 {
+        return OobArea(Vec::new());
+    }
+
+    let mut out_edges: HashMap<(i64, i64), Vec<(i64, i64)>> = HashMap::new();
+    for y in 0..h {
+        for x in 0..w {
+            if raster.get(x, y) != OUT_OF_BOUND {
+                continue;
+            }
+            if raster.get(x, y - 1) != OUT_OF_BOUND {
+                out_edges.entry((x, y)).or_default().push((x + 1, y));
+            }
+            if raster.get(x + 1, y) != OUT_OF_BOUND {
+                out_edges
+                    .entry((x + 1, y))
+                    .or_default()
+                    .push((x + 1, y + 1));
+            }
+            if raster.get(x, y + 1) != OUT_OF_BOUND {
+                out_edges
+                    .entry((x + 1, y + 1))
+                    .or_default()
+                    .push((x, y + 1));
+            }
+            if raster.get(x - 1, y) != OUT_OF_BOUND {
+                out_edges.entry((x, y + 1)).or_default().push((x, y));
+            }
+        }
+    }
+
+    let mut rings: Vec<Vec<(i64, i64)>> = vec![vec![(0, 0), (w, 0), (w, h), (0, h), (0, 0)]];
+    for start in out_edges.keys().copied().collect::<Vec<_>>() {
+        while out_edges.get(&start).is_some_and(|v| !v.is_empty()) {
+            let mut ring = vec![start];
+            let mut current = start;
+            loop {
+                let next = out_edges
+                    .get_mut(&current)
+                    .expect(
+                        "in-degree == out-degree at every vertex this tracer touches, so a \
+                         still-open ring can never get stuck at a non-start vertex",
+                    )
+                    .pop()
+                    .expect("checked non-empty by the while condition above");
+                ring.push(next);
+                current = next;
+                if current == start {
+                    break;
+                }
+            }
+            rings.push(ring);
+        }
+    }
+
+    OobArea(
+        rings
+            .into_iter()
+            .map(|ring| {
+                LineString::new(
+                    simplify_rectilinear_ring(&ring)
+                        .into_iter()
+                        .map(|(i, j)| corner(raster, i, j))
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// [`oob_area`]'s own traced rings, drawn as one `<path>` with
+/// `fill-rule="evenodd"` rather than as ordinary `geo` polygons -- evenodd
+/// fills wherever an odd number of rings cover a point, so the rings can be
+/// emitted in any order, wound either way, without first working out which
+/// nest inside which (see `oob_area`'s own doc comment).
+struct OobArea(Vec<LineString<f64>>);
+
+impl ToSvgStr for OobArea {
+    fn to_svg_str(&self, style: &Style) -> String {
+        let mut d = String::new();
+        for ring in &self.0 {
+            let Some(first) = ring.0.first() else {
+                continue;
+            };
+            let _ = write!(d, "M {:?} {:?}", first.x, first.y);
+            for p in &ring.0[1..] {
+                let _ = write!(d, " L {:?} {:?}", p.x, p.y);
+            }
+            d.push_str(" Z ");
+        }
+        format!(r#"<path d="{d}"{style} fill-rule="evenodd"/>"#)
+    }
+
+    fn viewbox(&self, _style: &Style) -> ViewBox {
+        self.0.iter().flatten().fold(ViewBox::default(), |vb, p| {
+            vb.add(&ViewBox::new(
+                p.x as f32, p.y as f32, p.x as f32, p.y as f32,
+            ))
+        })
+    }
+}
+
+/// One unfilled ring per Flying End position, in red -- `Step1Result::pre_growing_flying_ends`,
+/// drawn the same on both `00_..._step1.svg` and `01_..._step1_growing.svg`
+/// (see the doc's Visualization section).
+fn flying_end_rings(result: &Step1Result) -> MultiPoint<f64> {
+    MultiPoint::new(
+        result
+            .pre_growing_flying_ends
+            .iter()
+            .map(|&p| Point::from(p))
+            .collect(),
+    )
+}
+
+/// The post-linearization line of every contour the Growing Process did
+/// *not* touch (green, `linearized_contour_lines`'s usual color) and every
+/// one it did (blue) -- `01_..._step1_growing.svg` (and everything built on
+/// it) shows grown/merged contours in blue instead of green, per the doc.
+fn linearized_contour_lines_split(
+    result: &Step1Result,
+) -> (MultiLineString<f64>, MultiLineString<f64>) {
+    let mut not_grown = Vec::new();
+    let mut grown = Vec::new();
+    for (idx, contour) in result.contours.iter().enumerate() {
+        if result
+            .grown_by_growing_process
+            .get(idx)
+            .copied()
+            .unwrap_or(false)
+        {
+            grown.push(contour.lwg.ls.clone());
+        } else {
+            not_grown.push(contour.lwg.ls.clone());
+        }
+    }
+    (MultiLineString::new(not_grown), MultiLineString::new(grown))
 }
 
 /// The raw, still-curved contour layer. Unlike every other layer here, this
@@ -229,10 +478,6 @@ fn raw_contour_lines(result: &Step1Result) -> RawContours {
     RawContours(result.raw_polylines.clone())
 }
 
-fn linearized_contour_lines(result: &Step1Result) -> MultiLineString<f64> {
-    MultiLineString::new(result.contours.iter().map(|c| c.lwg.ls.clone()).collect())
-}
-
 fn arrow(from: Coord<f64>, dx: f64, dy: f64) -> LineString<f64> {
     LineString::new(vec![
         from,
@@ -241,6 +486,89 @@ fn arrow(from: Coord<f64>, dx: f64, dy: f64) -> LineString<f64> {
             y: from.y + dy * ARROW_LENGTH,
         },
     ])
+}
+
+/// One push/pull contribution: tail at `from` (a Flying End's own position
+/// *before* the growing step), head at `from + v * scale` -- unlike
+/// [`arrow`], whose every caller already hands it a unit vector to stretch
+/// to a fixed [`ARROW_LENGTH`], `v`'s own raw magnitude *is* the point here
+/// (Appendix 5's own weighted pull/push), so it is scaled by
+/// `growing_visualization_push_pull_vectors_scale` instead of normalized.
+fn push_pull_vector(from: Coord<f64>, v: (f64, f64), scale: f64) -> LineString<f64> {
+    LineString::new(vec![
+        from,
+        Coord {
+            x: from.x + v.0 * scale,
+            y: from.y + v.1 * scale,
+        },
+    ])
+}
+
+/// The four push/pull vector layers `01_..._step1_growing.svg` draws for
+/// every case-(c) growing step recorded in
+/// `Step1Result::growing_push_pull_vectors` -- one per
+/// `growing_*_direction_weight` term, all sharing the same tail (that step's
+/// own pre-step Flying End position) but scaled and colored separately per
+/// [`push_pull_vector`].
+struct PushPullVectorLayers {
+    previous_direction: MultiLineString<f64>,
+    out_of_bound: MultiLineString<f64>,
+    density: MultiLineString<f64>,
+    other_contours: MultiLineString<f64>,
+}
+
+fn push_pull_vector_layers(result: &Step1Result, scale: f64) -> PushPullVectorLayers {
+    let (mut previous_direction, mut out_of_bound, mut density, mut other_contours) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for forces in &result.growing_push_pull_vectors {
+        previous_direction.push(push_pull_vector(
+            forces.flying_end,
+            forces.previous_direction,
+            scale,
+        ));
+        out_of_bound.push(push_pull_vector(
+            forces.flying_end,
+            forces.out_of_bound,
+            scale,
+        ));
+        density.push(push_pull_vector(forces.flying_end, forces.density, scale));
+        other_contours.push(push_pull_vector(
+            forces.flying_end,
+            forces.other_contours,
+            scale,
+        ));
+    }
+    PushPullVectorLayers {
+        previous_direction: MultiLineString::new(previous_direction),
+        out_of_bound: MultiLineString::new(out_of_bound),
+        density: MultiLineString::new(density),
+        other_contours: MultiLineString::new(other_contours),
+    }
+}
+
+/// Draws [`push_pull_vector_layers`]' four layers over `svg`, one color per
+/// term (see the `PUSH_PULL_*` constants).
+fn with_push_pull_vectors<'a>(svg: Svg<'a>, layers: &'a PushPullVectorLayers) -> Svg<'a> {
+    svg.and(line_layer(
+        &layers.previous_direction,
+        PUSH_PULL_PREVIOUS_DIRECTION,
+        PUSH_PULL_VECTOR_STROKE_WIDTH,
+    ))
+    .and(line_layer(
+        &layers.out_of_bound,
+        PUSH_PULL_OUT_OF_BOUND,
+        PUSH_PULL_VECTOR_STROKE_WIDTH,
+    ))
+    .and(line_layer(
+        &layers.density,
+        PUSH_PULL_DENSITY,
+        PUSH_PULL_VECTOR_STROKE_WIDTH,
+    ))
+    .and(line_layer(
+        &layers.other_contours,
+        PUSH_PULL_OTHER_CONTOURS,
+        PUSH_PULL_VECTOR_STROKE_WIDTH,
+    ))
 }
 
 /// Every Jump's own buffered polygon (`LineGravityDefiners::poly`, built by
@@ -474,20 +802,6 @@ fn line_layer<T: ToSvgStr>(geom: &T, color: Color, stroke_width: f32) -> Svg<'_>
         .with_fill_opacity(0.0)
 }
 
-/// The Slope Line search-radius circle/unresolved-arrow layers, bundled
-/// together so [`base_layers`] and [`resolved_layers`] don't need several
-/// more separate positional parameters on top of everything else they
-/// already take. A resolved Slope Line's own arrow is already drawn by
-/// [`point_definer_arrows`] (red, alongside Heavy Object readings) -- this
-/// only adds `unresolved_arrows` (orange, see
-/// [`unresolved_slope_line_arrows`]) plus both circle groups.
-struct SlopeLineLayers<'a> {
-    resolved_circles: &'a MultiPoint<f64>,
-    unresolved_circles: &'a MultiPoint<f64>,
-    circle_radius: f32,
-    unresolved_arrows: &'a MultiLineString<f64>,
-}
-
 /// An unfilled search-radius ring per point, in `color`.
 fn circle_layer(points: &MultiPoint<f64>, radius: f32, color: Color) -> Svg<'_> {
     points
@@ -498,63 +812,127 @@ fn circle_layer(points: &MultiPoint<f64>, radius: f32, color: Color) -> Svg<'_> 
         .with_stroke_width(SEARCH_CIRCLE_STROKE_WIDTH)
 }
 
-/// Draws the raw (red) layer before the linearized (green) one -- later
-/// layers paint over earlier ones in SVG, so this keeps the linearized line
-/// on top wherever the two coincide, with the wider red line still peeking
-/// out on either side.
-#[allow(clippy::too_many_arguments)]
-fn base_layers<'a>(
-    grid: &'a MultiLineString<f64>,
-    pixels: &'a MultiPolygon<f64>,
-    line_polygons: &'a MultiPolygon<f64>,
-    heavy_object_polygons: &'a MultiPolygon<f64>,
-    raw: &'a RawContours,
-    linearized: &'a MultiLineString<f64>,
-    line_arrows: &'a MultiLineString<f64>,
-    line_span_arrows: &'a MultiLineString<f64>,
-    point_arrows: &'a MultiLineString<f64>,
-    slope_lines: SlopeLineLayers<'a>,
-) -> Svg<'a> {
-    pixels
+/// Everything [`base_layers`] needs, computed once from a [`Step1Result`] so
+/// every `write_step*_svg` function just builds one of these instead of ten
+/// separate local variables.
+struct BaseLayerData {
+    oob: OobArea,
+    grid: MultiLineString<f64>,
+    pixels: PixelLayers,
+    line_polygons: MultiPolygon<f64>,
+    heavy_object_polygons: MultiPolygon<f64>,
+    raw: RawContours,
+    linearized: MultiLineString<f64>,
+    grown_linearized: MultiLineString<f64>,
+    line_arrows: MultiLineString<f64>,
+    line_span_arrows: MultiLineString<f64>,
+    point_arrows: MultiLineString<f64>,
+    resolved_circles: MultiPoint<f64>,
+    unresolved_circles: MultiPoint<f64>,
+    unresolved_arrows: MultiLineString<f64>,
+    flying_ends: MultiPoint<f64>,
+    circle_radius: f32,
+}
+
+impl BaseLayerData {
+    fn new(result: &Step1Result) -> BaseLayerData {
+        let (linearized, grown_linearized) = linearized_contour_lines_split(result);
+        BaseLayerData {
+            oob: oob_area(&result.raster),
+            grid: grid_lines(&result.raster),
+            pixels: pixel_layers(&result.raster),
+            line_polygons: line_definer_polygons(result),
+            heavy_object_polygons: heavy_object_polygons(result),
+            raw: raw_contour_lines(result),
+            linearized,
+            grown_linearized,
+            line_arrows: line_definer_arrows(result),
+            line_span_arrows: line_definer_span_arrows(result),
+            point_arrows: point_definer_arrows(result),
+            resolved_circles: slope_line_circle_points(result, true),
+            unresolved_circles: slope_line_circle_points(result, false),
+            unresolved_arrows: unresolved_slope_line_arrows(result),
+            flying_ends: flying_end_rings(result),
+            circle_radius: result.slope_lines_contours_search_radius as f32,
+        }
+    }
+}
+
+/// Draws [`oob_area`]'s own black polygon first, under every other layer
+/// (a plain SVG paint order: everything drawn after it lands on top), then
+/// the raw (red) contour layer before the linearized (green, or blue for a
+/// contour the Growing Process touched) one -- later layers paint over
+/// earlier ones in SVG, so this keeps the linearized line on top wherever
+/// the two coincide, with the wider red line still peeking out on either
+/// side.
+fn base_layers(data: &BaseLayerData) -> Svg<'_> {
+    data.oob
         .to_svg()
-        .with_fill_color(BROWN)
-        .with_fill_opacity(0.5)
+        .with_fill_color(BLACK)
         .with_stroke_opacity(0.0)
         .and(
-            line_polygons
+            data.pixels
+                .high_density
+                .to_svg()
+                .with_fill_color(LIGHT_GREEN)
+                .with_stroke_opacity(0.0),
+        )
+        .and(
+            data.pixels
+                .contours
+                .to_svg()
+                .with_fill_color(BROWN)
+                .with_fill_opacity(0.5)
+                .with_stroke_opacity(0.0),
+        )
+        .and(
+            data.line_polygons
                 .to_svg()
                 .with_fill_color(LIGHT_BLUE)
                 .with_fill_opacity(0.4)
                 .with_stroke_opacity(0.0),
         )
         .and(
-            heavy_object_polygons
+            data.heavy_object_polygons
                 .to_svg()
                 .with_fill_color(LIGHT_PINK)
                 .with_fill_opacity(0.4)
                 .with_stroke_opacity(0.0),
         )
-        .and(line_layer(grid, GRAY, 0.05))
-        .and(line_layer(raw, RED, RAW_CONTOUR_STROKE_WIDTH))
+        .and(line_layer(&data.grid, GRAY, 0.05))
+        .and(line_layer(&data.raw, RED, RAW_CONTOUR_STROKE_WIDTH))
         .and(line_layer(
-            linearized,
+            &data.linearized,
             GREEN,
             LINEARIZED_CONTOUR_STROKE_WIDTH,
         ))
-        .and(line_layer(line_arrows, BLUE, 0.2))
-        .and(line_layer(line_span_arrows, YELLOW, 0.15))
-        .and(line_layer(point_arrows, RED, 0.2))
-        .and(line_layer(slope_lines.unresolved_arrows, ORANGE, 0.2))
+        .and(line_layer(
+            &data.grown_linearized,
+            BLUE,
+            LINEARIZED_CONTOUR_STROKE_WIDTH,
+        ))
+        .and(line_layer(&data.line_arrows, BLUE, 0.2))
+        .and(line_layer(&data.line_span_arrows, YELLOW, 0.15))
+        .and(line_layer(&data.point_arrows, RED, 0.2))
+        .and(line_layer(&data.unresolved_arrows, ORANGE, 0.2))
         .and(circle_layer(
-            slope_lines.resolved_circles,
-            slope_lines.circle_radius,
+            &data.resolved_circles,
+            data.circle_radius,
             RED,
         ))
         .and(circle_layer(
-            slope_lines.unresolved_circles,
-            slope_lines.circle_radius,
+            &data.unresolved_circles,
+            data.circle_radius,
             ORANGE,
         ))
+        .and(
+            data.flying_ends
+                .to_svg()
+                .with_radius(FLYING_END_RING_RADIUS)
+                .with_fill_opacity(0.0)
+                .with_stroke_color(RED)
+                .with_stroke_width(FLYING_END_RING_STROKE_WIDTH),
+        )
 }
 
 /// Pads the composed drawing's own bounds by [`MARGIN`] and renders it, so
@@ -568,132 +946,77 @@ fn write(path: &Path, svg: Svg) -> Result<(), String> {
     fs::write(path, finish(svg)).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-/// Writes the SVG asked for after Step 1: the raster grid and its non-zero
-/// pixels, every contour raw and linearized, the Jump ("LineGravityDefiners")
-/// arrows, and the Slope Line/Heavy Object ("PointGravityDefiners") arrows.
+/// Writes the SVG asked for after Step 1's own Contour Raster (fill,
+/// Jump density stamping, out-of-bound) is complete, but before its Growing
+/// Process sub-step runs: the raster grid and every pixel (colored by
+/// value), every contour raw and linearized, the Jump ("LineGravityDefiners")
+/// arrows, the Slope Line/Heavy Object ("PointGravityDefiners") arrows, and
+/// a red ring around every Flying End's own (pre-growing) position.
+/// `00_<map_name>_step1.svg`.
 pub fn write_step1_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
-    let grid = grid_lines(&result.raster);
-    let pixels = pixel_polygons(&result.raster);
-    let raw = raw_contour_lines(result);
-    let linearized = linearized_contour_lines(result);
-    let line_polygons = line_definer_polygons(result);
-    let heavy_object_polygons = heavy_object_polygons(result);
-    let line_arrows = line_definer_arrows(result);
-    let line_span_arrows = line_definer_span_arrows(result);
-    let point_arrows = point_definer_arrows(result);
-    let resolved_circles = slope_line_circle_points(result, true);
-    let unresolved_circles = slope_line_circle_points(result, false);
-    let unresolved_arrows = unresolved_slope_line_arrows(result);
+    write(path, base_layers(&BaseLayerData::new(result)))
+}
+
+/// Identical to [`write_step1_svg`] (including the same red Flying-End
+/// rings, still at their original pre-growing positions), except called
+/// after `step1_extract::run_growing` has run: the Contour Raster and every
+/// contour's `ls` reflect the post-growing state, any contour the
+/// Growing Process touched (grown, merged into, or both) is drawn in blue
+/// instead of green, and every case-(c) growing step's own four push/pull
+/// contributions (`Step1Result::growing_push_pull_vectors`, Appendix 5) are
+/// drawn as separate colored vectors, scaled by
+/// `config.growing_visualization_push_pull_vectors_scale`.
+/// `01_<map_name>_step1_growing.svg`.
+pub fn write_step1_growing_svg(
+    path: &Path,
+    result: &Step1Result,
+    config: &Config,
+) -> Result<(), String> {
+    let push_pull =
+        push_pull_vector_layers(result, config.growing_visualization_push_pull_vectors_scale);
     write(
         path,
-        base_layers(
-            &grid,
-            &pixels,
-            &line_polygons,
-            &heavy_object_polygons,
-            &raw,
-            &linearized,
-            &line_arrows,
-            &line_span_arrows,
-            &point_arrows,
-            SlopeLineLayers {
-                resolved_circles: &resolved_circles,
-                unresolved_circles: &unresolved_circles,
-                circle_radius: result.slope_lines_contours_search_radius as f32,
-                unresolved_arrows: &unresolved_arrows,
-            },
-        ),
+        with_push_pull_vectors(base_layers(&BaseLayerData::new(result)), &push_pull),
     )
 }
 
 /// [`base_layers`] plus a gravity arrow along every contour already
 /// resolved -- what Step 2's own SVG shows, and what each of Step 3's two
 /// files (rain, anti rain) build further on.
-#[allow(clippy::too_many_arguments)]
 fn resolved_layers<'a>(
-    grid: &'a MultiLineString<f64>,
-    pixels: &'a MultiPolygon<f64>,
-    line_polygons: &'a MultiPolygon<f64>,
-    heavy_object_polygons: &'a MultiPolygon<f64>,
-    raw: &'a RawContours,
-    linearized: &'a MultiLineString<f64>,
-    line_arrows: &'a MultiLineString<f64>,
-    line_span_arrows: &'a MultiLineString<f64>,
-    point_arrows: &'a MultiLineString<f64>,
-    slope_lines: SlopeLineLayers<'a>,
+    data: &'a BaseLayerData,
     gravity_arrows: &'a MultiLineString<f64>,
 ) -> Svg<'a> {
-    base_layers(
-        grid,
-        pixels,
-        line_polygons,
-        heavy_object_polygons,
-        raw,
-        linearized,
-        line_arrows,
-        line_span_arrows,
-        point_arrows,
-        slope_lines,
-    )
-    .and(line_layer(gravity_arrows, YELLOW, 0.2))
+    base_layers(data).and(line_layer(gravity_arrows, YELLOW, 0.2))
 }
 
-/// The same as [`write_step1_svg`], plus a gravity arrow along every contour
-/// Step 2 (or Step 1's direct evidence) has already resolved.
+/// The same as [`write_step1_growing_svg`], plus a gravity arrow along every
+/// contour Step 2 (or Step 1's direct evidence) has already resolved.
+/// `02_<map_name>_step2.svg`.
 pub fn write_step2_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
-    let grid = grid_lines(&result.raster);
-    let pixels = pixel_polygons(&result.raster);
-    let raw = raw_contour_lines(result);
-    let linearized = linearized_contour_lines(result);
-    let line_polygons = line_definer_polygons(result);
-    let heavy_object_polygons = heavy_object_polygons(result);
-    let line_arrows = line_definer_arrows(result);
-    let line_span_arrows = line_definer_span_arrows(result);
-    let point_arrows = point_definer_arrows(result);
-    let resolved_circles = slope_line_circle_points(result, true);
-    let unresolved_circles = slope_line_circle_points(result, false);
-    let unresolved_arrows = unresolved_slope_line_arrows(result);
+    let data = BaseLayerData::new(result);
     let gravity_arrows = contour_gravity_arrows(result);
-    write(
-        path,
-        resolved_layers(
-            &grid,
-            &pixels,
-            &line_polygons,
-            &heavy_object_polygons,
-            &raw,
-            &linearized,
-            &line_arrows,
-            &line_span_arrows,
-            &point_arrows,
-            SlopeLineLayers {
-                resolved_circles: &resolved_circles,
-                unresolved_circles: &unresolved_circles,
-                circle_radius: result.slope_lines_contours_search_radius as f32,
-                unresolved_arrows: &unresolved_arrows,
-            },
-            &gravity_arrows,
-        ),
-    )
+    write(path, resolved_layers(&data, &gravity_arrows))
 }
 
 /// The algorithm's actual answer, once every contour's gravity is settled:
-/// pixels, both contour layers (raw red under linearized green), and one
-/// gravity arrow per node (yellow) -- no raster grid, no Jump-only definer
-/// arrows (also yellow -- leaving them out keeps the gravity arrows the only
-/// thing that color), and none of Step 3's own rain-drop-path layers, since
-/// those are per-step working detail rather than the final picture. Call
-/// this only after every contour is resolved (Step 2 alone, or Step 2 and
-/// Step 3 together) -- an earlier call would just draw whatever gravity
-/// happens to be set so far, silently mislabeled as final.
+/// pixels, both contour layers (raw red under linearized green/blue), and
+/// one gravity arrow per node (yellow) -- no raster grid, no Jump-only
+/// definer arrows (also yellow -- leaving them out keeps the gravity arrows
+/// the only thing that color), and none of Step 3's own rain-drop-path
+/// layers, since those are per-step working detail rather than the final
+/// picture. Call this only after every contour is resolved (Step 2 alone, or
+/// Step 2 and Step 3 together) -- an earlier call would just draw whatever
+/// gravity happens to be set so far, silently mislabeled as final.
 pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
-    let pixels = pixel_polygons(&result.raster);
+    let pixels = pixel_layers(&result.raster);
     let raw = raw_contour_lines(result);
-    let linearized = linearized_contour_lines(result);
+    let (linearized, grown_linearized) = linearized_contour_lines_split(result);
     let gravity_arrows = contour_gravity_arrows(result);
     write(
         path,
         pixels
+            .contours
             .to_svg()
             .with_fill_color(BROWN)
             .with_fill_opacity(0.5)
@@ -702,6 +1025,11 @@ pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
             .and(line_layer(
                 &linearized,
                 GREEN,
+                LINEARIZED_CONTOUR_STROKE_WIDTH,
+            ))
+            .and(line_layer(
+                &grown_linearized,
+                BLUE,
                 LINEARIZED_CONTOUR_STROKE_WIDTH,
             ))
             .and(line_layer(&gravity_arrows, YELLOW, 0.2)),
@@ -724,24 +1052,13 @@ pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
 /// never shows an arrow for a
 /// contour only Anti Rain Drop Production went on to resolve, even though
 /// `result.contours` itself already holds that final state by the time this
-/// runs.
+/// runs. `03_<map_name>_step3_rain.svg`.
 pub fn write_step3_rain_svg(
     path: &Path,
     result: &Step1Result,
     step3: &Step3Result,
 ) -> Result<(), String> {
-    let grid = grid_lines(&result.raster);
-    let pixels = pixel_polygons(&result.raster);
-    let raw = raw_contour_lines(result);
-    let linearized = linearized_contour_lines(result);
-    let line_polygons = line_definer_polygons(result);
-    let heavy_object_polygons = heavy_object_polygons(result);
-    let line_arrows = line_definer_arrows(result);
-    let line_span_arrows = line_definer_span_arrows(result);
-    let point_arrows = point_definer_arrows(result);
-    let resolved_circles = slope_line_circle_points(result, true);
-    let unresolved_circles = slope_line_circle_points(result, false);
-    let unresolved_arrows = unresolved_slope_line_arrows(result);
+    let data = BaseLayerData::new(result);
     let gravity_arrows = contour_gravity_arrows_filtered(result, Some(&step3.defined_after_rain));
     let trails = drop_trails(&step3.rain_paths);
     let hysteresis_marks = points(&step3.rain_hysteresis_points);
@@ -749,39 +1066,22 @@ pub fn write_step3_rain_svg(
     let rain = drop_points(&step3.rain_paths);
     write(
         path,
-        resolved_layers(
-            &grid,
-            &pixels,
-            &line_polygons,
-            &heavy_object_polygons,
-            &raw,
-            &linearized,
-            &line_arrows,
-            &line_span_arrows,
-            &point_arrows,
-            SlopeLineLayers {
-                resolved_circles: &resolved_circles,
-                unresolved_circles: &unresolved_circles,
-                circle_radius: result.slope_lines_contours_search_radius as f32,
-                unresolved_arrows: &unresolved_arrows,
-            },
-            &gravity_arrows,
-        )
-        .and(line_layer(&trails, GRAY, DROP_TRAIL_STROKE_WIDTH))
-        .and(
-            hysteresis_marks
-                .to_svg()
-                .with_radius(HYSTERESIS_DOT_RADIUS)
-                .with_fill_color(BLACK)
-                .with_stroke_opacity(0.0),
-        )
-        .and(line_layer(&vote_lines, PURPLE, VOTE_SEGMENT_STROKE_WIDTH))
-        .and(
-            rain.to_svg()
-                .with_radius(DOT_RADIUS)
-                .with_fill_color(BLUE)
-                .with_stroke_opacity(0.0),
-        ),
+        resolved_layers(&data, &gravity_arrows)
+            .and(line_layer(&trails, GRAY, DROP_TRAIL_STROKE_WIDTH))
+            .and(
+                hysteresis_marks
+                    .to_svg()
+                    .with_radius(HYSTERESIS_DOT_RADIUS)
+                    .with_fill_color(BLACK)
+                    .with_stroke_opacity(0.0),
+            )
+            .and(line_layer(&vote_lines, PURPLE, VOTE_SEGMENT_STROKE_WIDTH))
+            .and(
+                rain.to_svg()
+                    .with_radius(DOT_RADIUS)
+                    .with_fill_color(BLUE)
+                    .with_stroke_opacity(0.0),
+            ),
     )
 }
 
@@ -789,23 +1089,13 @@ pub fn write_step3_rain_svg(
 /// drop's full trail, path, hysteresis marker and vote segment, the same
 /// way as [`write_step3_rain_svg`] -- see there for why this is a separate
 /// file rather than a second layer on the same one.
+/// `04_<map_name>_step3_anti_rain.svg`.
 pub fn write_step3_anti_rain_svg(
     path: &Path,
     result: &Step1Result,
     step3: &Step3Result,
 ) -> Result<(), String> {
-    let grid = grid_lines(&result.raster);
-    let pixels = pixel_polygons(&result.raster);
-    let raw = raw_contour_lines(result);
-    let linearized = linearized_contour_lines(result);
-    let line_polygons = line_definer_polygons(result);
-    let heavy_object_polygons = heavy_object_polygons(result);
-    let line_arrows = line_definer_arrows(result);
-    let line_span_arrows = line_definer_span_arrows(result);
-    let point_arrows = point_definer_arrows(result);
-    let resolved_circles = slope_line_circle_points(result, true);
-    let unresolved_circles = slope_line_circle_points(result, false);
-    let unresolved_arrows = unresolved_slope_line_arrows(result);
+    let data = BaseLayerData::new(result);
     let gravity_arrows = contour_gravity_arrows(result);
     let trails = drop_trails(&step3.anti_rain_paths);
     let hysteresis_marks = points(&step3.anti_rain_hysteresis_points);
@@ -813,274 +1103,22 @@ pub fn write_step3_anti_rain_svg(
     let anti_rain = drop_points(&step3.anti_rain_paths);
     write(
         path,
-        resolved_layers(
-            &grid,
-            &pixels,
-            &line_polygons,
-            &heavy_object_polygons,
-            &raw,
-            &linearized,
-            &line_arrows,
-            &line_span_arrows,
-            &point_arrows,
-            SlopeLineLayers {
-                resolved_circles: &resolved_circles,
-                unresolved_circles: &unresolved_circles,
-                circle_radius: result.slope_lines_contours_search_radius as f32,
-                unresolved_arrows: &unresolved_arrows,
-            },
-            &gravity_arrows,
-        )
-        .and(line_layer(&trails, GRAY, DROP_TRAIL_STROKE_WIDTH))
-        .and(
-            hysteresis_marks
-                .to_svg()
-                .with_radius(HYSTERESIS_DOT_RADIUS)
-                .with_fill_color(BLACK)
-                .with_stroke_opacity(0.0),
-        )
-        .and(line_layer(&vote_lines, PURPLE, VOTE_SEGMENT_STROKE_WIDTH))
-        .and(
-            anti_rain
-                .to_svg()
-                .with_radius(DOT_RADIUS)
-                .with_fill_color(RED)
-                .with_stroke_opacity(0.0),
-        ),
-    )
-}
-
-/// The contiguous run of `ls`'s own points that stays within `radius` ground
-/// meters of `center`, containing whichever point is nearest to it.
-///
-/// A contour involved in a Contour Raster conflict can be arbitrarily long
-/// -- most of a map's own extent, in the real case this was written for --
-/// while the conflict itself only ever happens at one small, local spot on
-/// it. `geo_svg` always auto-fits its output `viewBox` to the full bounds of
-/// everything it is asked to draw (see [`finish`]), with no way to draw a
-/// shape while excluding it from that fit; drawing either contour's own full
-/// length in [`write_conflict_svg`] would zoom the picture out to the whole
-/// map instead of the small area that actually matters. Clipping to a local
-/// window first, rather than drawing the whole line and cropping the view
-/// after the fact, is what keeps the picture actually zoomed in.
-fn local_window(ls: &LineString<f64>, center: Coord<f64>, radius: f64) -> LineString<f64> {
-    let pts = &ls.0;
-    if pts.is_empty() {
-        return LineString::new(Vec::new());
-    }
-    let dist = |p: &Coord<f64>| (p.x - center.x).hypot(p.y - center.y);
-    let nearest = pts
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| dist(a).total_cmp(&dist(b)))
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    let mut start = nearest;
-    while start > 0 && dist(&pts[start - 1]) <= radius {
-        start -= 1;
-    }
-    let mut end = nearest;
-    while end + 1 < pts.len() && dist(&pts[end + 1]) <= radius {
-        end += 1;
-    }
-    LineString::new(pts[start..=end].to_vec())
-}
-
-/// Every other already-accepted contour's own local window around `center`
-/// (see [`local_window`]) -- background context for
-/// [`write_conflict_svg`]'s picture, so the two contours actually involved
-/// in the conflict can be judged against the shape of the terrain around
-/// them rather than floating alone. Skips `existing_contour_idx` (drawn
-/// separately, highlighted) and any contour with nothing inside the window
-/// (most of a map's own contours, for a small local conflict).
-fn other_local_contour_lines(
-    diagnostics: &ConflictDiagnostics,
-    center: Coord<f64>,
-    radius: f64,
-) -> MultiLineString<f64> {
-    MultiLineString::new(
-        diagnostics
-            .contours_so_far
-            .iter()
-            .enumerate()
-            .filter(|&(idx, _)| idx as u64 != diagnostics.existing_contour_idx)
-            .map(|(_, contour)| local_window(&contour.lwg.ls, center, radius))
-            .filter(|ls| ls.0.len() >= 2)
-            .collect(),
-    )
-}
-
-/// One filled square, `px_size` wide, centered on each of `positions` -- the
-/// exact pixels a conflict happened on, drawn solid so they are legible even
-/// where the two contours' own lines sit almost on top of each other. Takes
-/// a plain slice, not `ConflictDiagnostics` itself, so [`write_conflict_svg`]
-/// can pass only the ones inside its own local window rather than every
-/// conflicting pixel there is -- for a long run of conflicts (a genuinely
-/// too-closely-spaced pair, not a digitizing-gap splice) that can be nearly
-/// all of a contour's own length, and every one of them left in would drag
-/// `geo_svg`'s auto-fitted `viewBox` right back out to it (see
-/// `local_window`'s own doc comment).
-fn conflict_pixel_polygons(positions: &[Coord<f64>], px_size: f64) -> MultiPolygon<f64> {
-    let half = px_size / 2.0;
-    MultiPolygon::new(
-        positions
-            .iter()
-            .map(|&center| {
-                Polygon::new(
-                    LineString::new(vec![
-                        Coord {
-                            x: center.x - half,
-                            y: center.y - half,
-                        },
-                        Coord {
-                            x: center.x + half,
-                            y: center.y - half,
-                        },
-                        Coord {
-                            x: center.x + half,
-                            y: center.y + half,
-                        },
-                        Coord {
-                            x: center.x - half,
-                            y: center.y + half,
-                        },
-                        Coord {
-                            x: center.x - half,
-                            y: center.y - half,
-                        },
-                    ]),
-                    vec![],
-                )
-            })
-            .collect(),
-    )
-}
-
-/// The centroid of every conflicting pixel, and a radius that reaches a few
-/// pixels past the furthest one from it, capped at [`CONFLICT_RING_MAX_RADIUS`]
-/// -- so [`write_conflict_svg`]'s own ring stays a single circle drawn
-/// clearly around the conflicting cluster (never collapsing to a dot for a
-/// single-pixel conflict, and never growing past a sane size for a long run
-/// of them -- a genuinely too-closely-spaced pair, not a digitizing-gap
-/// splice, can otherwise span most of a contour's own length) rather than
-/// one ring per pixel, which would be an unreadable pile of overlapping
-/// circles.
-fn conflict_ring(diagnostics: &ConflictDiagnostics) -> (MultiPoint<f64>, f32) {
-    let positions = &diagnostics.conflict_positions;
-    let n = positions.len() as f64;
-    let centroid = positions
-        .iter()
-        .fold(Coord { x: 0.0, y: 0.0 }, |acc, p| Coord {
-            x: acc.x + p.x / n,
-            y: acc.y + p.y / n,
-        });
-    let furthest = positions
-        .iter()
-        .map(|p| (p.x - centroid.x).hypot(p.y - centroid.y))
-        .fold(0.0_f64, f64::max);
-    let radius = (furthest + 3.0 * diagnostics.raster.px_size).min(CONFLICT_RING_MAX_RADIUS) as f32;
-    (MultiPoint::new(vec![Point::from(centroid)]), radius)
-}
-
-/// The most [`conflict_ring`]'s own drawn radius ever grows to, in ground
-/// meters, regardless of how far its own conflicting pixels actually spread
-/// -- `Point`'s own `viewbox` (in the `geo_svg` crate this module is built
-/// on) grows to include a drawn circle's full radius, so an uncapped ring
-/// around a long run of conflicts would defeat [`local_window`]'s whole
-/// point the same way drawing that whole run's own contour length would.
-const CONFLICT_RING_MAX_RADIUS: f64 = 30.0;
-/// How far past [`conflict_ring`]'s own (already-capped) radius
-/// [`write_conflict_svg`] clips each contour, filters which conflicting
-/// pixels it draws, and draws its local pixel grid, in multiples of that
-/// radius -- generous enough to still show real local shape/curvature around
-/// the conflict, not just the bare colliding segment.
-const LOCAL_WINDOW_FACTOR: f64 = 6.0;
-/// A floor under [`LOCAL_WINDOW_FACTOR`]'s own window, in ground meters, so
-/// a single-pixel conflict (where [`conflict_ring`]'s radius is already tiny)
-/// still gets a picture with real spatial context rather than a close-up of
-/// nothing.
-const LOCAL_WINDOW_MIN: f64 = 15.0;
-
-/// The most conflicting pixels [`write_conflict_svg`] ever draws as their
-/// own solid squares -- a genuinely too-closely-spaced pair of contours (not
-/// a small digitizing-gap splice) can conflict on thousands of pixels in a
-/// row, and past a few hundred, the individual squares stop adding real
-/// information over just knowing the cluster is large (which the ring
-/// already conveys) while still adding to the file linearly forever.
-const MAX_DRAWN_CONFLICT_PIXELS: usize = 300;
-
-/// Writes a diagnostic picture of a Contour Raster conflict `step1_extract::extract`
-/// could not resolve by unifying the two contours involved (see
-/// `ExtractError::Conflict`): every other already-accepted contour in light
-/// gray, for terrain context, the already-accepted contour actually involved
-/// (red) and the newly read one that never made it in (orange) -- each
-/// clipped to a window around the conflict (see `local_window`, since any of
-/// them can otherwise be most of the map) -- every conflicting pixel inside
-/// that same window as its own solid red square, and one red ring around the
-/// whole conflicting cluster.
-pub fn write_conflict_svg(path: &Path, diagnostics: &ConflictDiagnostics) -> Result<(), String> {
-    let (ring_center, ring_radius) = conflict_ring(diagnostics);
-    let Some(&centroid) = ring_center.0.first() else {
-        return Err("a conflict with no conflicting pixels was reported".to_string());
-    };
-    let centroid = centroid.0;
-    let window_radius = (ring_radius as f64 * LOCAL_WINDOW_FACTOR).max(LOCAL_WINDOW_MIN);
-
-    // Only the conflicting pixels inside the local window itself, and even
-    // then capped -- see `conflict_pixel_polygons`'s and
-    // `MAX_DRAWN_CONFLICT_PIXELS`'s own doc comments for why a long run of
-    // them cannot all be drawn here the way `write_step1_svg` draws every
-    // one of `result.raster`'s own non-zero pixels.
-    let local_positions: Vec<Coord<f64>> = diagnostics
-        .conflict_positions
-        .iter()
-        .copied()
-        .filter(|p| (p.x - centroid.x).hypot(p.y - centroid.y) <= window_radius)
-        .take(MAX_DRAWN_CONFLICT_PIXELS)
-        .collect();
-    let conflict_pixels = conflict_pixel_polygons(&local_positions, diagnostics.raster.px_size);
-
-    let other_contours = other_local_contour_lines(diagnostics, centroid, window_radius);
-    let existing_contour = MultiLineString::new(vec![local_window(
-        &diagnostics.contours_so_far[diagnostics.existing_contour_idx as usize]
-            .lwg
-            .ls,
-        centroid,
-        window_radius,
-    )]);
-    let new_contour = MultiLineString::new(vec![local_window(
-        &diagnostics.new_ls,
-        centroid,
-        window_radius,
-    )]);
-
-    write(
-        path,
-        line_layer(&other_contours, LIGHT_GRAY, LINEARIZED_CONTOUR_STROKE_WIDTH)
-            .and(line_layer(
-                &existing_contour,
-                RED,
-                CONFLICT_CONTOUR_STROKE_WIDTH,
-            ))
-            .and(line_layer(
-                &new_contour,
-                ORANGE,
-                CONFLICT_CONTOUR_STROKE_WIDTH,
-            ))
+        resolved_layers(&data, &gravity_arrows)
+            .and(line_layer(&trails, GRAY, DROP_TRAIL_STROKE_WIDTH))
             .and(
-                conflict_pixels
+                hysteresis_marks
                     .to_svg()
-                    .with_fill_color(RED)
-                    .with_fill_opacity(0.7)
+                    .with_radius(HYSTERESIS_DOT_RADIUS)
+                    .with_fill_color(BLACK)
                     .with_stroke_opacity(0.0),
             )
+            .and(line_layer(&vote_lines, PURPLE, VOTE_SEGMENT_STROKE_WIDTH))
             .and(
-                ring_center
+                anti_rain
                     .to_svg()
-                    .with_radius(ring_radius)
-                    .with_fill_opacity(0.0)
-                    .with_stroke_color(RED)
-                    .with_stroke_width(CONFLICT_RING_STROKE_WIDTH),
+                    .with_radius(DOT_RADIUS)
+                    .with_fill_color(RED)
+                    .with_stroke_opacity(0.0),
             ),
     )
 }
@@ -1093,7 +1131,8 @@ mod tests {
         gravity_vector_for_side, Contour, LineGravityDefiners, LineWithGravity,
         PointGravityDefiners,
     };
-    use crate::step1_extract::SlopeLineMark;
+    use crate::step1_extract::{GrowingStepForces, SlopeLineMark};
+    use geo::Contains;
 
     fn c(x: f64, y: f64) -> Coord<f64> {
         Coord { x, y }
@@ -1116,7 +1155,7 @@ mod tests {
         contour.lwg.gravity_dy = Some(1.0);
 
         let mut raster = ContourRaster::new(c(-1.0, -1.0), 1.0, 12, 3);
-        raster.write_contour(0, &ls).unwrap();
+        raster.write_contour(0, &ls);
 
         Step1Result {
             contours: vec![contour],
@@ -1131,177 +1170,15 @@ mod tests {
             slope_lines: Vec::new(),
             slope_lines_contours_search_radius: 3.0,
             heavy_object_polygons: Vec::new(),
+            pre_growing_flying_ends: Vec::new(),
+            grown_by_growing_process: vec![false],
+            growing_push_pull_vectors: Vec::new(),
             warnings: Vec::new(),
         }
     }
 
     fn count(haystack: &str, needle: &str) -> usize {
         haystack.matches(needle).count()
-    }
-
-    fn viewbox_width(svg_text: &str) -> f32 {
-        let viewbox = svg_text
-            .split("viewBox=\"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("viewBox attribute missing");
-        viewbox.split_whitespace().nth(2).unwrap().parse().unwrap()
-    }
-
-    #[test]
-    fn conflict_svg_highlights_both_contours_and_rings_the_conflicting_pixels() {
-        let existing = Contour {
-            lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(5.0, 0.0)])),
-            elevation_height: None,
-        };
-        let mut raster = ContourRaster::new(c(-1.0, -1.0), 1.0, 25, 25);
-        raster.write_contour(0, &existing.lwg.ls).unwrap();
-
-        let diagnostics = ConflictDiagnostics {
-            raster,
-            contours_so_far: vec![existing],
-            new_ls: LineString::new(vec![c(0.2, 0.0), c(5.2, 0.0)]),
-            existing_contour_idx: 0,
-            conflict_positions: vec![c(0.5, 0.5), c(1.5, 0.5)],
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("conflict.svg");
-        write_conflict_svg(&path, &diagnostics).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-
-        assert!(!text.is_empty());
-        // The involved contour (red) and the newly read one (orange) both
-        // drawn, plus one red ring around the conflicting cluster.
-        assert!(text.contains(r#"stroke="rgb(220,20,60)""#));
-        assert!(text.contains(r#"stroke="rgb(255,140,0)""#));
-        assert_eq!(
-            count(&text, "<circle"),
-            1,
-            "exactly one ring, not one per pixel"
-        );
-    }
-
-    #[test]
-    fn conflict_svg_draws_nearby_other_contours_light_gray_but_leaves_out_far_away_ones() {
-        let existing = Contour {
-            lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(5.0, 0.0)])),
-            elevation_height: None,
-        };
-        // Close enough to fall inside the local window: real context.
-        let nearby = Contour {
-            lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 3.0), c(5.0, 3.0)])),
-            elevation_height: None,
-        };
-        // A thousand meters away: must be left out entirely, or it would
-        // drag the auto-fitted viewBox back out to the whole map.
-        let far_away = Contour {
-            lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 1000.0), c(5.0, 1000.0)])),
-            elevation_height: None,
-        };
-        let mut raster = ContourRaster::new(c(-1.0, -1.0), 1.0, 25, 1010);
-        raster.write_contour(0, &existing.lwg.ls).unwrap();
-        raster.write_contour(1, &nearby.lwg.ls).unwrap();
-        raster.write_contour(2, &far_away.lwg.ls).unwrap();
-
-        let diagnostics = ConflictDiagnostics {
-            raster,
-            contours_so_far: vec![existing, nearby, far_away],
-            new_ls: LineString::new(vec![c(0.2, 0.0), c(5.2, 0.0)]),
-            existing_contour_idx: 0,
-            conflict_positions: vec![c(0.5, 0.5), c(1.5, 0.5)],
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("conflict.svg");
-        write_conflict_svg(&path, &diagnostics).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-
-        assert!(
-            text.contains(r#"stroke="rgb(220,220,220)""#),
-            "the nearby other contour should be drawn in light gray"
-        );
-        assert!(
-            viewbox_width(&text) < 200.0,
-            "the far-away other contour must not be drawn -- it would blow up the viewBox"
-        );
-    }
-
-    #[test]
-    fn conflict_svg_stays_zoomed_in_even_when_either_contour_spans_most_of_the_map() {
-        // Both contours run for a kilometer; they only ever collide in one
-        // small spot, at the very start of each. Drawing either one's whole
-        // length would drag geo_svg's auto-fitted viewBox out to the whole
-        // map instead of the small area that actually matters.
-        let long_existing = LineString::new(vec![c(0.0, 0.0), c(1000.0, 0.0)]);
-        let long_new = LineString::new(vec![c(0.2, 0.0), c(1000.2, 0.0)]);
-        let existing = Contour {
-            lwg: LineWithGravity::new(long_existing.clone()),
-            elevation_height: None,
-        };
-        let mut raster = ContourRaster::new(c(-1.0, -1.0), 1.0, 1005, 5);
-        raster.write_contour(0, &long_existing).unwrap();
-
-        let diagnostics = ConflictDiagnostics {
-            raster,
-            contours_so_far: vec![existing],
-            new_ls: long_new,
-            existing_contour_idx: 0,
-            conflict_positions: vec![c(0.5, 0.5)],
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("conflict.svg");
-        write_conflict_svg(&path, &diagnostics).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-
-        assert!(
-            viewbox_width(&text) < 200.0,
-            "expected a local, zoomed-in viewBox around the conflict, not one stretched to \
-             cover a kilometer-long contour"
-        );
-    }
-
-    #[test]
-    fn conflict_svg_stays_zoomed_in_even_over_a_long_run_of_conflicting_pixels() {
-        // Not just a long contour (the previous test) but a long *run of
-        // conflicting pixels itself* -- the genuine "too closely spaced,
-        // must still crash" case, not a small digitizing-gap splice. Every
-        // one of those pixels, and the ring around them, must still stay
-        // capped to a sane local size rather than ballooning the viewBox out
-        // to cover the whole run.
-        let long_existing = LineString::new(vec![c(0.0, 0.0), c(1000.0, 0.0)]);
-        let long_new = LineString::new(vec![c(0.0, 0.3), c(1000.0, 0.3)]);
-        let existing = Contour {
-            lwg: LineWithGravity::new(long_existing.clone()),
-            elevation_height: None,
-        };
-        let mut raster = ContourRaster::new(c(-1.0, -1.0), 1.0, 1005, 5);
-        raster.write_contour(0, &long_existing).unwrap();
-        let conflict_positions: Vec<Coord<f64>> =
-            (0..1000).map(|x| c(x as f64 + 0.5, 0.5)).collect();
-
-        let diagnostics = ConflictDiagnostics {
-            raster,
-            contours_so_far: vec![existing],
-            new_ls: long_new,
-            existing_contour_idx: 0,
-            conflict_positions,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("conflict.svg");
-        write_conflict_svg(&path, &diagnostics).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-
-        assert!(
-            viewbox_width(&text) < 500.0,
-            "a thousand-pixel-long conflict must still be capped to a bounded, zoomed-in \
-             picture, not one stretched across the whole run"
-        );
-        // Only the conflicting pixels inside the local window (roughly
-        // 2*window_radius wide) are drawn, not all thousand of them.
-        assert!(count(&text, "<path") < 500, "{}", count(&text, "<path"));
     }
 
     #[test]
@@ -1311,11 +1188,182 @@ mod tests {
     }
 
     #[test]
-    fn pixel_polygons_match_non_zero_pixels() {
+    fn pixel_layers_only_squares_contours_and_high_density() {
         let result = sample_result();
         // The 10m-long horizontal contour at y=0 through a raster whose
-        // origin is (-1, -1): every pixel it touches, one polygon each.
-        assert!(!pixel_polygons(&result.raster).0.is_empty());
+        // origin is (-1, -1): its own pixels show up in the contour layer;
+        // the rest of the (all-undefined) grid gets no square at all.
+        let layers = pixel_layers(&result.raster);
+        assert!(!layers.contours.0.is_empty());
+        assert!(layers.high_density.0.is_empty());
+        let total_squares = layers.contours.0.len() + layers.high_density.0.len();
+        assert!(
+            total_squares < result.raster.width * result.raster.height,
+            "expected far fewer squares than raster pixels"
+        );
+    }
+
+    #[test]
+    fn simplify_rectilinear_ring_keeps_only_the_corners_of_a_straight_run() {
+        // A closed rectangle whose left and right sides are each split into
+        // 3 collinear pieces -- only the 4 true corners should survive.
+        let ring = vec![(0, 0), (0, 1), (0, 2), (2, 2), (2, 1), (2, 0), (0, 0)];
+        assert_eq!(
+            simplify_rectilinear_ring(&ring),
+            vec![(0, 0), (0, 2), (2, 2), (2, 0), (0, 0)]
+        );
+    }
+
+    #[test]
+    fn oob_area_traces_the_border_and_a_hole_for_an_enclosed_in_bound_region() {
+        // A closed ring of contour pixels a couple of pixels in from the
+        // border blocks `compute_out_of_bound`'s own flood (same fixture as
+        // `contour_raster`'s own
+        // `compute_out_of_bound_is_blocked_by_a_ring_of_contour_pixels`):
+        // the interior it encloses stays undefined, i.e. "in bound", and
+        // must come back as its own hole ring.
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 11, 11);
+        raster.write_contour(
+            0,
+            &LineString::new(vec![
+                c(2.5, 2.5),
+                c(8.5, 2.5),
+                c(8.5, 8.5),
+                c(2.5, 8.5),
+                c(2.5, 2.5),
+            ]),
+        );
+        raster.compute_out_of_bound(0);
+
+        let area = oob_area(&raster);
+        assert_eq!(
+            area.0.len(),
+            2,
+            "the raster's own bounding rectangle, plus one ring for the enclosed region"
+        );
+        for ring in &area.0 {
+            assert_eq!(
+                ring.0.first(),
+                ring.0.last(),
+                "every ring must be closed: {ring:?}"
+            );
+        }
+
+        let rings_containing = |pt: Coord<f64>| -> usize {
+            area.0
+                .iter()
+                .filter(|ring| Polygon::new((*ring).clone(), vec![]).contains(&pt))
+                .count()
+        };
+        // Deep inside the enclosed region: covered by the bounding
+        // rectangle *and* the hole ring -- an even count, so
+        // `fill-rule="evenodd"` leaves it unfilled (correctly "in bound").
+        assert_eq!(rings_containing(c(5.5, 5.5)) % 2, 0);
+        // A corner pixel, genuinely out of bound: covered by the bounding
+        // rectangle alone -- odd, so evenodd fills it.
+        assert_eq!(rings_containing(c(0.5, 0.5)) % 2, 1);
+    }
+
+    #[test]
+    fn oob_area_handles_a_diagonally_touching_pinch_without_panicking() {
+        // Protects pixels (1, 1) and (2, 2) as non-out-of-bound contour
+        // pixels; (1, 2) and (2, 1) are left undefined and get flooded to
+        // out-of-bound from the border via `compute_out_of_bound`'s own
+        // 8-connectedness -- leaving two out-of-bound pixels that touch
+        // only diagonally, at the one corner shared by all 4, the exact
+        // ambiguous case `oob_area`'s own boundary tracer must decompose
+        // into simple (if self-touching) rings rather than choke on.
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 4, 4);
+        raster.write_contour(0, &LineString::new(vec![c(1.5, 1.5), c(1.9, 1.5)]));
+        raster.write_contour(1, &LineString::new(vec![c(2.5, 2.5), c(2.9, 2.5)]));
+        raster.compute_out_of_bound(0);
+
+        assert_eq!(raster.get(1, 1), CONTOUR_0_MATRIX_VALUE);
+        assert_eq!(raster.get(2, 2), CONTOUR_0_MATRIX_VALUE + 1);
+        assert_eq!(raster.get(1, 2), OUT_OF_BOUND);
+        assert_eq!(raster.get(2, 1), OUT_OF_BOUND);
+
+        let area = oob_area(&raster); // must not panic
+        assert!(!area.0.is_empty());
+        for ring in &area.0 {
+            assert_eq!(ring.0.first(), ring.0.last());
+        }
+    }
+
+    fn sample_config() -> Config {
+        Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 1.0,
+            rasterization_px_size: 0.5,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 4,
+            slope_lines_contours_search_radius: 3.0,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            out_of_bound_extra_dilation: 0,
+            growing_oob_seeking_max_steps: 0,
+            growing_window_size_px_contours: 4,
+            growing_window_size_px_attractions: 4,
+            growing_step_length: 1.0,
+            growing_previous_distance_direction_weight: 1.0,
+            growing_out_of_bound_direction_weight: 1.0,
+            growing_density_direction_weight: 1.0,
+            growing_other_contours_direction_weight: -1.0,
+            growing_visualization_push_pull_vectors_scale: 2.0,
+        }
+    }
+
+    #[test]
+    fn push_pull_vector_layers_scale_each_contribution_from_its_own_flying_end() {
+        let mut result = sample_result();
+        result.growing_push_pull_vectors = vec![GrowingStepForces {
+            flying_end: c(3.0, 4.0),
+            previous_direction: (1.0, 0.0),
+            out_of_bound: (0.0, 2.0),
+            density: (0.0, 0.0),
+            other_contours: (-1.0, -1.0),
+        }];
+        let layers = push_pull_vector_layers(&result, 2.0);
+        assert_eq!(layers.previous_direction.0[0].0[0], c(3.0, 4.0));
+        assert_eq!(layers.previous_direction.0[0].0[1], c(5.0, 4.0));
+        assert_eq!(layers.out_of_bound.0[0].0[1], c(3.0, 8.0));
+        assert_eq!(
+            layers.density.0[0].0[1],
+            c(3.0, 4.0),
+            "a zero contribution is a zero-length vector, not skipped"
+        );
+        assert_eq!(layers.other_contours.0[0].0[1], c(1.0, 2.0));
+    }
+
+    #[test]
+    fn step1_growing_svg_draws_one_colored_vector_per_push_pull_contribution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("step1_growing.svg");
+        let mut result = sample_result();
+        result.growing_push_pull_vectors = vec![GrowingStepForces {
+            flying_end: c(3.0, 4.0),
+            previous_direction: (1.0, 0.0),
+            out_of_bound: (0.0, 1.0),
+            density: (1.0, 1.0),
+            other_contours: (-1.0, 0.0),
+        }];
+        write_step1_growing_svg(&path, &result, &sample_config()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+
+        for needle in [
+            "rgb(0,191,255)", // PUSH_PULL_PREVIOUS_DIRECTION
+            "rgb(255,0,255)", // PUSH_PULL_OUT_OF_BOUND
+            "rgb(0,100,0)",   // PUSH_PULL_DENSITY
+            "rgb(128,0,0)",   // PUSH_PULL_OTHER_CONTOURS
+        ] {
+            assert!(
+                text.contains(needle),
+                "expected a layer stroked {needle}; got: {text}"
+            );
+        }
     }
 
     #[test]
@@ -1551,7 +1599,11 @@ mod tests {
             ]),
             vec![],
         );
-        result.line_definers = vec![LineGravityDefiners { lwg, poly }];
+        result.line_definers = vec![LineGravityDefiners {
+            lwg,
+            poly,
+            touched_contours: Vec::new(),
+        }];
         write_step1_svg(&path, &result).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
 
@@ -1614,6 +1666,9 @@ mod tests {
             slope_lines: Vec::new(),
             slope_lines_contours_search_radius: 3.0,
             heavy_object_polygons: Vec::new(),
+            pre_growing_flying_ends: Vec::new(),
+            grown_by_growing_process: vec![false],
+            growing_push_pull_vectors: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -1757,6 +1812,9 @@ mod tests {
             slope_lines: Vec::new(),
             slope_lines_contours_search_radius: 3.0,
             heavy_object_polygons: Vec::new(),
+            pre_growing_flying_ends: Vec::new(),
+            grown_by_growing_process: vec![false, false],
+            growing_push_pull_vectors: Vec::new(),
             warnings: Vec::new(),
         };
 
@@ -1797,12 +1855,20 @@ mod tests {
             anti_rain_vote_segments: Vec::new(),
         };
         write_step3_rain_svg(&path, &result, &step3).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
+        let full_text = std::fs::read_to_string(&path).unwrap();
+        // `oob_area`'s own black polygon is always the very first layer,
+        // drawn under everything else (see `base_layers`) -- excluded here
+        // so its own "rgb(0,0,0)" fill doesn't get mistaken for the
+        // hysteresis marker's.
+        let oob_end = full_text
+            .find(r#"fill-rule="evenodd""#)
+            .expect("oob layer missing");
+        let text = &full_text[oob_end..];
 
         // One gray trail path -- one rain path, drawn as a single polyline
         // through all 3 of its points, not per-step segments.
         let trail_width_attr = format!(r#"stroke-width="{DROP_TRAIL_STROKE_WIDTH}""#);
-        assert_eq!(count(&text, &trail_width_attr), 1);
+        assert_eq!(count(text, &trail_width_attr), 1);
 
         let trail_pos = text.find(&trail_width_attr).expect("drop trail missing");
         let black_pos = text.find("rgb(0,0,0)").expect("hysteresis marker missing");
@@ -1860,12 +1926,19 @@ mod tests {
             anti_rain_vote_segments: Vec::new(),
         };
         write_step3_rain_svg(&path, &result, &step3).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
+        let full_text = std::fs::read_to_string(&path).unwrap();
+        // Excludes `oob_area`'s own black polygon, always the first layer
+        // drawn (see `base_layers`) -- its own "rgb(0,0,0)" fill would
+        // otherwise be mistaken for one of the hysteresis markers' below.
+        let oob_end = full_text
+            .find(r#"fill-rule="evenodd""#)
+            .expect("oob layer missing");
+        let text = &full_text[oob_end..];
 
         // 3 rain-drop dots, plus a black marker under each of the 2
         // hysteresis points.
-        assert_eq!(count(&text, "<circle"), 5);
-        assert_eq!(count(&text, r#"fill="rgb(0,0,0)""#), 2);
+        assert_eq!(count(text, "<circle"), 5);
+        assert_eq!(count(text, r#"fill="rgb(0,0,0)""#), 2);
 
         let black_pos = text.find("rgb(0,0,0)").expect("hysteresis marker missing");
         let blue_pos = text.find("rgb(30,60,200)").expect("rain-drop dot missing");

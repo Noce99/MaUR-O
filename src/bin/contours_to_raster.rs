@@ -24,12 +24,10 @@
 //!
 //! Exit codes: 0 success, 1 usage error, 2 the map could not be read, 3 the
 //! config file could not be read or parsed, 4 the run folder or a
-//! `--create_svg` file could not be written, or a Step 1 geometry/raster
-//! error (a conflicting Contour Raster pixel two contours could not be
-//! unified across -- see `step1_extract::ExtractError::Conflict`, which
-//! still gets its own `<stem>_conflict.svg` under `--create_svg` -- or a
-//! degenerate buffer polygon), 5 a Step 2/Step 3 gravity conflict, or a
-//! contour left undefined after both rain-drop passes.
+//! `--create_svg` file could not be written, or a Step 1 geometry error (a
+//! degenerate buffer polygon -- a raster conflict no longer fails the run at
+//! all, see `Contours-to-Raster.md`'s Step 1), or 5 a Step 2/Step 3 gravity
+//! conflict, or a contour left undefined after both rain-drop passes.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -38,10 +36,10 @@ use clap::Parser;
 
 use maur_o::contours_to_raster_config::{Config, DEFAULT_CONFIG_PATH};
 use maur_o::contours_to_raster_svg::{
-    write_conflict_svg, write_final_svg, write_step1_svg, write_step2_svg,
+    write_final_svg, write_step1_growing_svg, write_step1_svg, write_step2_svg,
     write_step3_anti_rain_svg, write_step3_rain_svg,
 };
-use maur_o::step1_extract::{self, ExtractError};
+use maur_o::step1_extract;
 use maur_o::step2_obvious_gravity;
 use maur_o::step3_rain_drop;
 use maur_o::xml_reader::read_xml_map;
@@ -72,11 +70,14 @@ struct Args {
     #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
     config: PathBuf,
 
-    /// Write the four per-step validation SVGs Contours-to-Raster.md's
-    /// "Visualization" section describes (Step 1, Step 2, and Step 3's Rain
-    /// and Anti Rain Drop Productions each in their own file), plus a fifth
-    /// "final" SVG with just the algorithm's actual answer once every
-    /// contour is resolved, inside this run's own folder.
+    /// Write the five per-step validation SVGs Contours-to-Raster.md's
+    /// "Visualization" section describes (Step 1 before and after its own
+    /// Growing Process sub-step, Step 2, and Step 3's Rain and Anti Rain Drop
+    /// Productions each in their own file), an unnumbered "final" SVG with
+    /// just the algorithm's actual answer once every contour is resolved,
+    /// and a full-raster, every-pixel-colored PNG (the vector SVGs only
+    /// square a contour or high-density pixel, to keep their file size
+    /// sane), all inside this run's own folder.
     #[arg(long = "create_svg")]
     create_svg: bool,
 }
@@ -87,13 +88,34 @@ fn default_output_name(map_path: &Path) -> PathBuf {
     Path::new(map_path.file_stem().unwrap_or_default()).with_extension("tif")
 }
 
-/// `<output>_step{0,1,2_rain,2_anti_rain}.svg`, next to `output_path`.
+/// `<prefix>_<output>_<step>.svg`, next to `output_path` -- the five numbered
+/// `--create_svg` files (`00`.."04", see the doc's Visualization section).
+fn numbered_svg_path(output_path: &Path, prefix: &str, step: &str) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    output_path.with_file_name(format!("{prefix}_{stem}_{step}.svg"))
+}
+
+/// `<output>_<step>.svg`, next to `output_path` -- for the unnumbered "final"
+/// file, which the rename to `00`.."04" doesn't touch.
 fn step_svg_path(output_path: &Path, step: &str) -> PathBuf {
     let stem = output_path
         .file_stem()
         .unwrap_or_default()
         .to_string_lossy();
     output_path.with_file_name(format!("{stem}_{step}.svg"))
+}
+
+/// `<output>_raster.png`, next to `output_path` -- the full-raster,
+/// every-pixel-colored companion to the (deliberately sparser) vector SVGs.
+fn raster_png_path(output_path: &Path) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    output_path.with_file_name(format!("{stem}_raster.png"))
 }
 
 /// Step 3's two files: one with every Rain Drop Production drop's path, one
@@ -105,10 +127,18 @@ fn write_step3_svgs(
     step1: &step1_extract::Step1Result,
     step3: &step3_rain_drop::Step3Result,
 ) -> Result<(), (ExitCode, String)> {
-    write_step3_rain_svg(&step_svg_path(output_path, "step3_rain"), step1, step3)
-        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
-    write_step3_anti_rain_svg(&step_svg_path(output_path, "step3_anti_rain"), step1, step3)
-        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+    write_step3_rain_svg(
+        &numbered_svg_path(output_path, "03", "step3_rain"),
+        step1,
+        step3,
+    )
+    .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+    write_step3_anti_rain_svg(
+        &numbered_svg_path(output_path, "04", "step3_anti_rain"),
+        step1,
+        step3,
+    )
+    .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     Ok(())
 }
 
@@ -151,10 +181,6 @@ fn run() -> Result<(), (ExitCode, String)> {
         eprintln!("Warning: {warning}");
     }
 
-    // Created before Step 1 even runs (rather than only once it succeeds),
-    // so a Contour Raster conflict it cannot recover from can still write
-    // its own diagnostic picture into this run's folder before the whole
-    // run fails.
     if args.create_svg {
         std::fs::create_dir_all(&run_dir).map_err(|e| {
             (
@@ -164,41 +190,40 @@ fn run() -> Result<(), (ExitCode, String)> {
         })?;
     }
 
-    let mut step1 = match step1_extract::extract(&map, &config) {
-        Ok(step1) => step1,
-        Err(ExtractError::Conflict {
-            message,
-            diagnostics,
-        }) => {
-            if args.create_svg {
-                let conflict_path = step_svg_path(&output_path, "conflict");
-                match write_conflict_svg(&conflict_path, &diagnostics) {
-                    Ok(()) => eprintln!(
-                        "Note: wrote {} showing the two colliding contours before failing.",
-                        conflict_path.display()
-                    ),
-                    Err(e) => {
-                        eprintln!("Warning: could not write {}: {e}", conflict_path.display())
-                    }
-                }
-            }
-            return Err((ExitCode::from(4), format!("Error: {message}")));
-        }
-        Err(ExtractError::Message(message)) => {
-            return Err((ExitCode::from(4), format!("Error: {message}")));
-        }
-    };
+    let mut step1 = step1_extract::extract(&map, &config)
+        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     for warning in &step1.warnings {
         eprintln!("Warning: {warning}");
     }
 
-    // Each SVG is written right after its own step, before the next step
-    // mutates `step1.contours` further -- writing all four only at the end
-    // (against the same, by-then fully-resolved `step1`) would make the
-    // "step1" and "step2" files silently show the final state instead of
-    // their own step's.
+    // Written before `step1_extract::run_growing` mutates `step1.contours`
+    // and `step1.raster` further, so `00_..._step1.svg` shows the pre-growing
+    // state -- Flying-End rings on contours that haven't grown yet.
     if args.create_svg {
-        write_step1_svg(&step_svg_path(&output_path, "step1"), &step1)
+        write_step1_svg(&numbered_svg_path(&output_path, "00", "step1"), &step1)
+            .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+    }
+
+    let growing_warnings = step1_extract::run_growing(&mut step1, &config);
+    for warning in &growing_warnings {
+        eprintln!("Warning: {warning}");
+    }
+    step1.warnings.extend(growing_warnings);
+
+    if args.create_svg {
+        write_step1_growing_svg(
+            &numbered_svg_path(&output_path, "01", "step1_growing"),
+            &step1,
+            &config,
+        )
+        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        // The Contour Raster itself never changes again past this point
+        // (only contours' own gravity does, in Steps 2/3), so this is the
+        // one point a full-raster, every-pixel-colored PNG companion to the
+        // (deliberately sparser) vector SVGs is worth writing.
+        step1
+            .raster
+            .write_png(&raster_png_path(&output_path))
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     }
 
@@ -206,7 +231,6 @@ fn run() -> Result<(), (ExitCode, String)> {
         &mut step1.contours,
         &step1.point_definers,
         &step1.line_definers,
-        &step1.raster,
     )
     .map_err(|e| (ExitCode::from(5), format!("Error: {e}")))?;
     for warning in &step2.warnings {
@@ -214,7 +238,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     }
 
     if args.create_svg {
-        write_step2_svg(&step_svg_path(&output_path, "step2"), &step1)
+        write_step2_svg(&numbered_svg_path(&output_path, "02", "step2"), &step1)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     }
 
@@ -222,7 +246,7 @@ fn run() -> Result<(), (ExitCode, String)> {
         None
     } else {
         let (result, outcome) =
-            step3_rain_drop::resolve(&mut step1.contours, &step1.raster, &config);
+            step3_rain_drop::resolve(&mut step1.contours, &mut step1.raster, &config);
         for warning in &result.ambiguous_warnings {
             eprintln!("Warning: {warning}");
         }
@@ -235,8 +259,8 @@ fn run() -> Result<(), (ExitCode, String)> {
             if outcome.is_err() {
                 eprintln!(
                     "Note: wrote {} and {} for inspection despite the failure below.",
-                    step_svg_path(&output_path, "step3_rain").display(),
-                    step_svg_path(&output_path, "step3_anti_rain").display(),
+                    numbered_svg_path(&output_path, "03", "step3_rain").display(),
+                    numbered_svg_path(&output_path, "04", "step3_anti_rain").display(),
                 );
             }
         }
@@ -247,8 +271,8 @@ fn run() -> Result<(), (ExitCode, String)> {
     if args.create_svg {
         if step3.is_none() {
             // Every contour was already resolved before Step 3 ran: write
-            // the same picture Step 2 saw, so all four files always exist
-            // together under --create_svg.
+            // the same picture Step 2 saw, so all five numbered files always
+            // exist together under --create_svg.
             let empty_step3 = step3_rain_drop::Step3Result {
                 resolved_by_rain: 0,
                 resolved_by_anti_rain: 0,
@@ -270,11 +294,13 @@ fn run() -> Result<(), (ExitCode, String)> {
         write_final_svg(&step_svg_path(&output_path, "final"), &step1)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
         println!(
-            "wrote {}, {}, {}, {} and {}",
-            step_svg_path(&output_path, "step1").display(),
-            step_svg_path(&output_path, "step2").display(),
-            step_svg_path(&output_path, "step3_rain").display(),
-            step_svg_path(&output_path, "step3_anti_rain").display(),
+            "wrote {}, {}, {}, {}, {}, {} and {}",
+            numbered_svg_path(&output_path, "00", "step1").display(),
+            numbered_svg_path(&output_path, "01", "step1_growing").display(),
+            raster_png_path(&output_path).display(),
+            numbered_svg_path(&output_path, "02", "step2").display(),
+            numbered_svg_path(&output_path, "03", "step3_rain").display(),
+            numbered_svg_path(&output_path, "04", "step3_anti_rain").display(),
             step_svg_path(&output_path, "final").display(),
         );
     }

@@ -4,8 +4,10 @@
 
 use geo::{Coord, LineString, Polygon};
 
-use crate::contour_geometry::{self, coords_to_linestrings, nearest_index};
-use crate::contour_raster::ContourRaster;
+use crate::contour_geometry::{self, coords_to_linestrings, nearest_index, resample_equal_chords};
+use crate::contour_raster::{
+    ContourRaster, CONTOUR_0_MATRIX_VALUE, HIGH_DENSITY, OUT_OF_BOUND, TEMPORARY_CONTOUR,
+};
 use crate::contour_symbols::{classify_symbol, jump_gravity_side, SymbolFamily};
 use crate::contours_to_raster_config::Config;
 use crate::gravity_model::{
@@ -13,53 +15,15 @@ use crate::gravity_model::{
 };
 use crate::map::{Map, ObjectKind, Symbol};
 
-/// Everything needed to draw a diagnostic picture of a Contour Raster
-/// conflict `extract` could not resolve by unifying the two contours
-/// involved -- carried alongside the plain error message (see
-/// [`ExtractError::Conflict`]) so `--create_svg` can still show exactly what
-/// collided, and why it was not just a small digitizing gap, even though the
-/// run itself must still fail.
-pub struct ConflictDiagnostics {
-    /// The Contour Raster as it stood at the moment of the conflict -- every
-    /// contour successfully written so far, including `existing_contour_idx`.
-    pub raster: ContourRaster,
-    /// Every contour successfully added before the conflicting one was
-    /// reached, parallel to what `raster` itself already reflects.
-    pub contours_so_far: Vec<Contour>,
-    /// The contour that was being read when it collided with
-    /// `existing_contour_idx` -- never got an index or a place in
-    /// `contours_so_far`, since the run failed before either could happen.
-    pub new_ls: LineString<f64>,
-    /// Which of `contours_so_far` the new one collided with.
-    pub existing_contour_idx: u64,
-    /// The world-space center of every conflicting pixel found between the
-    /// two -- not just one, since that is what told `extract` this was a
-    /// genuine, sustained overlap rather than a small splice-able gap.
-    pub conflict_positions: Vec<Coord<f64>>,
-}
-
-/// `extract`'s own error: either a plain message, or -- for a Contour Raster
-/// conflict it could not resolve -- a message plus enough state to draw a
-/// diagnostic picture of it (see [`ConflictDiagnostics`]).
-pub enum ExtractError {
-    /// Any other, non-diagnosable failure.
-    Message(String),
-    /// An unresolved Contour Raster conflict.
-    Conflict {
-        /// The error's own human-readable message.
-        message: String,
-        /// Enough state to draw a picture of exactly what collided.
-        diagnostics: Box<ConflictDiagnostics>,
-    },
-}
+/// `extract`'s own error: a plain message (no more Contour Raster crash to
+/// diagnose -- a conflicting pixel is marked high density instead, see
+/// `extract`'s raster-fill loop).
+pub struct ExtractError(String);
 
 impl ExtractError {
-    /// The error's own human-readable message, regardless of variant.
+    /// The error's own human-readable message.
     pub fn message(&self) -> &str {
-        match self {
-            ExtractError::Message(m) => m,
-            ExtractError::Conflict { message, .. } => message,
-        }
+        &self.0
     }
 }
 
@@ -69,11 +33,6 @@ impl std::fmt::Display for ExtractError {
     }
 }
 
-// A hand-written, message-only Debug: `ConflictDiagnostics` holds a
-// `ContourRaster`/`Vec<Contour>` that derive no `Debug` of their own (there
-// is no useful textual form for a pixel grid), so deriving here would just
-// push that requirement onto them for no real benefit -- the message alone
-// is all `Result::unwrap`'s panic output needs.
 impl std::fmt::Debug for ExtractError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.message())
@@ -82,7 +41,7 @@ impl std::fmt::Debug for ExtractError {
 
 impl From<String> for ExtractError {
     fn from(message: String) -> Self {
-        ExtractError::Message(message)
+        ExtractError(message)
     }
 }
 
@@ -94,10 +53,19 @@ impl From<String> for ExtractError {
 pub struct Step1Result {
     /// One entry per contour subpath found on the map.
     pub contours: Vec<Contour>,
-    /// The same contours' raw, unprocessed node sequence (still curved,
+    /// Every contour's own raw, unprocessed node sequence (still curved,
     /// mm-on-paper converted straight to ground meters, no flattening or
-    /// resampling), parallel to `contours` -- kept only for the
-    /// `--create_svg` visualization's "before" picture.
+    /// resampling) -- kept only for the `--create_svg` visualization's
+    /// "before" picture. One entry per originally-digitized contour object,
+    /// same as `contours` at the moment Step 1's raster fill finishes, but
+    /// *not* index-parallel to it from then on: the Growing Process can
+    /// merge two contours into one (shrinking `contours` by one), and does
+    /// not also try to splice their two raw node sequences into a single,
+    /// geometrically continuous one (there is no meaningful single curve
+    /// through two originally-separate digitized objects) -- so after
+    /// growing, this is simply every contour's own raw trace, drawn as its
+    /// own separate SVG subpath, with no correspondence to `contours`'
+    /// indices assumed or needed.
     pub raw_polylines: Vec<Vec<contour_geometry::RawVertex>>,
     /// The rasterized contour set, at `config.rasterization_px_size`.
     pub raster: ContourRaster,
@@ -126,8 +94,64 @@ pub struct Step1Result {
     /// `heavy_object_width`/`heavy_object_growing` choice produces can be
     /// judged by eye against the real pixels.
     pub heavy_object_polygons: Vec<Polygon<f64>>,
+    /// Every Flying End's own position *before* the Growing Process ran --
+    /// kept only for the `--create_svg` visualization's red rings (see
+    /// `run_growing_process`).
+    pub pre_growing_flying_ends: Vec<Coord<f64>>,
+    /// Parallel to `contours`: whether that contour was touched by the
+    /// Growing Process (grown, merged into, or both) -- kept only for
+    /// `--create_svg`'s `01_..._step1_growing.svg`, which draws these in
+    /// blue instead of green.
+    pub grown_by_growing_process: Vec<bool>,
+    /// One entry per case-(c) growing step actually taken (see
+    /// `grow_one_step`), empty until `run_growing` runs -- kept only for
+    /// `--create_svg`'s `01_..._step1_growing.svg`, which draws each step's
+    /// own four push/pull contributions as separate colored vectors
+    /// (`growing_visualization_push_pull_vectors_scale`-scaled).
+    pub growing_push_pull_vectors: Vec<GrowingStepForces>,
     /// Recoverable problems found along the way.
     pub warnings: Vec<String>,
+}
+
+/// One case-(c) growing step's own flying-end position (the vectors' shared
+/// tail, *before* the step) and the four separate push/pull contributions
+/// [`growing_forces`] computes there ([Appendix 5](6aa1e4f7-8b2d-4c6a-9f1e-2d8b4a6c9f3e)),
+/// before they are summed into the step's actual direction ([`GrowingStepForces::total`]) --
+/// kept only for `--create_svg`'s `01_..._step1_growing.svg` visualization.
+#[derive(Clone, Copy, Debug)]
+pub struct GrowingStepForces {
+    /// The Flying End's own position before this step.
+    pub flying_end: Coord<f64>,
+    /// `growing_previous_distance_direction_weight`'s own contribution:
+    /// `previous_direction`, scaled by that weight.
+    pub previous_direction: (f64, f64),
+    /// `growing_out_of_bound_direction_weight`'s own contribution -- always
+    /// `(0.0, 0.0)` while `phase` is `MatchingEnds`, since the term is
+    /// dropped entirely then (see `growing_forces`).
+    pub out_of_bound: (f64, f64),
+    /// `growing_density_direction_weight`'s own contribution.
+    pub density: (f64, f64),
+    /// `growing_other_contours_direction_weight`'s own contribution
+    /// (negative weight, so this typically points away from nearby hits).
+    pub other_contours: (f64, f64),
+}
+
+impl GrowingStepForces {
+    /// The single direction [`next_grown_node`] actually steps along: the
+    /// four contributions summed, exactly as `growing_direction` used to
+    /// compute it directly.
+    fn total(&self) -> (f64, f64) {
+        (
+            self.previous_direction.0
+                + self.out_of_bound.0
+                + self.density.0
+                + self.other_contours.0,
+            self.previous_direction.1
+                + self.out_of_bound.1
+                + self.density.1
+                + self.other_contours.1,
+        )
+    }
 }
 
 /// One Slope Line found on the map: its own position and rotation, kept
@@ -457,57 +481,6 @@ fn solve3(m: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
     Some([det3(&mx) / det, det3(&my) / det, det3(&mz) / det])
 }
 
-/// Whether `ls`'s own start node lies within `radius` ground meters of
-/// `near` -- `Some(true)`, or its end node does -- `Some(false)` (whichever
-/// is closer, if both are), or `None` if neither is. Used to tell which end
-/// of a contour a Contour Raster conflict happened next to, so the two
-/// contours it involves can be joined at the right ends.
-fn nearest_end_is_start(ls: &LineString<f64>, near: Coord<f64>, radius: f64) -> Option<bool> {
-    let start = *ls.0.first()?;
-    let end = *ls.0.last()?;
-    let dist = |p: Coord<f64>| (p.x - near.x).hypot(p.y - near.y);
-    let (d_start, d_end) = (dist(start), dist(end));
-    if d_start > radius && d_end > radius {
-        return None;
-    }
-    Some(d_start <= d_end)
-}
-
-/// Joins `a` and `b` into one continuous `LineString`, oriented so the ends
-/// nearest `near` actually meet, if (and only if) both of them have an end
-/// within `radius` ground meters of `near` -- otherwise `None`.
-///
-/// Real contour digitizing sometimes splits one physical line into two
-/// objects whose endpoints are close but not bit-identical (unlike
-/// `merge_contour_object_chains`'s exact-match join, done earlier on the raw
-/// `.omap` coordinates, before any geometry conversion); this is Step 1's
-/// later, geometry-based fallback for that same situation once it surfaces
-/// as a Contour Raster pixel conflict. Neither contour has any gravity of
-/// its own yet at this point in Step 1, so reordering/reversing either
-/// one's nodes here is free of any of the direction-dependent meaning
-/// `LineWithGravity`'s own fields carry once Step 2/2 run.
-fn merge_close_endpoints(
-    a: &LineString<f64>,
-    b: &LineString<f64>,
-    near: Coord<f64>,
-    radius: f64,
-) -> Option<LineString<f64>> {
-    let a_is_start = nearest_end_is_start(a, near, radius)?;
-    let b_is_start = nearest_end_is_start(b, near, radius)?;
-    // Both halves end up with their own near end last/first respectively,
-    // so simply concatenating them joins the two close ends together.
-    let mut merged = a.0.clone();
-    if a_is_start {
-        merged.reverse();
-    }
-    let mut tail = b.0.clone();
-    if !b_is_start {
-        tail.reverse();
-    }
-    merged.extend(tail);
-    Some(LineString::new(merged))
-}
-
 /// The number of *distinct* points in a `LineString`, treating a closed
 /// one's repeated last point as the same point as its first.
 fn ring_len(ls: &LineString<f64>) -> usize {
@@ -536,6 +509,48 @@ fn point_offset(ls: &LineString<f64>, center: usize, offset: isize) -> Option<Co
             Some(ls.0[idx as usize])
         }
     }
+}
+
+/// Groups every contour pixel `poly` covers by contour index, returning one
+/// `(contour_idx, centroid)` pair per contour touched -- not one per pixel,
+/// since a buffered polygon commonly covers many pixels of the very same
+/// nearby contour (its own width). A `BTreeMap`, not a `HashMap`, so the
+/// order these come back in stays the same across runs. Used both for a
+/// Heavy Object's own circle-fit readings and, since it must be called
+/// *before* a Jump's polygon is stamped high density (which would otherwise
+/// erase the very evidence of which contours were under it), for
+/// `LineGravityDefiners::touched_contours`.
+fn contour_centroids_in_polygon(
+    raster: &ContourRaster,
+    poly: &Polygon<f64>,
+) -> Vec<(u64, Coord<f64>)> {
+    let mut hits: std::collections::BTreeMap<u64, (Coord<f64>, usize)> =
+        std::collections::BTreeMap::new();
+    for (px, py) in raster.pixels_in_polygon(poly) {
+        let val = raster.get(px, py);
+        if val < CONTOUR_0_MATRIX_VALUE {
+            continue;
+        }
+        let contour_idx = (val - CONTOUR_0_MATRIX_VALUE) as u64;
+        let center = raster.pixel_center(px, py);
+        let entry = hits
+            .entry(contour_idx)
+            .or_insert((Coord { x: 0.0, y: 0.0 }, 0));
+        entry.0.x += center.x;
+        entry.0.y += center.y;
+        entry.1 += 1;
+    }
+    hits.into_iter()
+        .map(|(idx, (sum, count))| {
+            (
+                idx,
+                Coord {
+                    x: sum.x / count as f64,
+                    y: sum.y / count as f64,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Fits a circle to `contour_idx`'s own `ls` around the point nearest `at`
@@ -631,7 +646,7 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
         }
     }
     if !min.x.is_finite() {
-        return Err(ExtractError::Message(
+        return Err(ExtractError(
             "no Contour, Slope Line, Jump or Heavy Object symbols were found on the map"
                 .to_string(),
         ));
@@ -663,86 +678,37 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
         {
             for (ls, raw_poly) in lss.iter().zip(raw) {
                 let idx = contours.len() as u64;
-                let conflicts = raster.find_conflicts(idx, ls);
-                if conflicts.is_empty() {
-                    raster.write_contour(idx, ls)?;
-                    contours.push(Contour {
-                        lwg: LineWithGravity::new(ls.clone()),
-                        elevation_height: None,
-                    });
-                    raw_polylines.push(raw_poly.clone());
-                    continue;
-                }
-
-                // Every conflicting pixel must point at the same already-
-                // written contour, and every one of them (not just one) must
-                // fall near both contours' own terminal nodes -- otherwise
-                // this is a genuine, sustained overlap (e.g. two truly
-                // parallel, too-closely-spaced contours), not a small
-                // digitizing gap, and must still crash.
-                let existing_idx = conflicts[0].1;
-                let existing_ls = &contours[existing_idx as usize].lwg.ls;
-                let mergeable = conflicts.iter().all(|&(pos, i)| {
-                    i == existing_idx
-                        && !existing_ls.is_closed()
-                        && !ls.is_closed()
-                        && nearest_end_is_start(existing_ls, pos, config.contour_gap_merge_radius)
-                            .is_some()
-                        && nearest_end_is_start(ls, pos, config.contour_gap_merge_radius).is_some()
+                raster.write_contour(idx, ls);
+                contours.push(Contour {
+                    lwg: LineWithGravity::new(ls.clone()),
+                    elevation_height: None,
                 });
-                let merged_ls = mergeable
-                    .then(|| {
-                        merge_close_endpoints(
-                            existing_ls,
-                            ls,
-                            conflicts[0].0,
-                            config.contour_gap_merge_radius,
-                        )
-                    })
-                    .flatten();
-                let Some(merged_ls) = merged_ls else {
-                    let message = format!(
-                        "the Contour Raster pixel at ({:.2}, {:.2}) is claimed by two \
-                         different contours (index {existing_idx} and a newly read one); \
-                         decrease rasterization_px_size, or -- if these are really the same \
-                         physical line split by a small digitizing gap -- increase \
-                         contour_gap_merge_radius",
-                        conflicts[0].0.x, conflicts[0].0.y
-                    );
-                    return Err(ExtractError::Conflict {
-                        message,
-                        diagnostics: Box::new(ConflictDiagnostics {
-                            raster,
-                            contours_so_far: contours,
-                            new_ls: ls.clone(),
-                            existing_contour_idx: existing_idx,
-                            conflict_positions: conflicts.iter().map(|&(pos, _)| pos).collect(),
-                        }),
-                    });
-                };
-                raster.write_contour(existing_idx, &merged_ls)?;
-                contours[existing_idx as usize].lwg = LineWithGravity::new(merged_ls);
-                // Only cosmetic (the `--create_svg` "before" picture): not
-                // reordered to match the merge's own end-matching, since a
-                // RawVertex's is_curve_start marks the first of a run of
-                // four vertices forming one Bezier segment, and reversing
-                // that grouping correctly is more machinery than a
-                // visualization-only picture is worth.
-                raw_polylines[existing_idx as usize].extend(raw_poly.iter().copied());
-                warnings.push(format!(
-                    "two contour objects near ({:.2}, {:.2}) had endpoints closer than \
-                     contour_gap_merge_radius ({}m) apart; joined into one contour \
-                     (index {existing_idx}) instead of crashing on the Contour Raster conflict",
-                    conflicts[0].0.x, conflicts[0].0.y, config.contour_gap_merge_radius
-                ));
+                raw_polylines.push(raw_poly.clone());
             }
         }
     }
     if contours.is_empty() {
-        return Err(ExtractError::Message(
+        return Err(ExtractError(
             "no Contour symbols (codes 101/102) were found on the map".to_string(),
         ));
     }
+
+    // Step 1's flood-fill sub-step: a Hot Rain Drop Production and a Hot
+    // Anti Rain Drop Production from every contour, marking every reachable
+    // `UNDEFINED` pixel `NO_CONTOUR_IN_BOUND`. No contour has a real gravity
+    // direction yet, so an arbitrary fixed placeholder side is used -- Rain
+    // and Anti Rain together cover both perpendicular sides regardless of
+    // which one is picked.
+    for (idx, contour) in contours.iter().enumerate() {
+        crate::step3_rain_drop::flood_fill_from_contour(
+            &mut raster,
+            &contour.lwg.ls,
+            idx as u64,
+            1.0,
+            config,
+        );
+    }
+    raster.compute_out_of_bound(config.out_of_bound_extra_dilation);
 
     let mut point_definers = Vec::new();
     let mut line_definers = Vec::new();
@@ -798,7 +764,22 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
                         config.heavy_object_width,
                         config.heavy_object_growing,
                     );
-                    line_definers.push(LineGravityDefiners { lwg, poly });
+                    // Captured before the polygon's own area is stamped high
+                    // density below, which would otherwise erase the very
+                    // evidence (a contour's own raster value) of which
+                    // contours were under it -- Step 2 uses this list
+                    // instead of re-scanning the (by then high-density)
+                    // raster itself.
+                    let touched_contours = contour_centroids_in_polygon(&raster, &poly);
+                    // A Jump is real terrain: the ground under and around it
+                    // is marked high density, independently of whatever
+                    // value it held before.
+                    raster.mark_high_density_polygon(&poly);
+                    line_definers.push(LineGravityDefiners {
+                        lwg,
+                        poly,
+                        touched_contours,
+                    });
                 }
             }
             Classified::HeavyObject(lss) => {
@@ -815,37 +796,7 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
                         config.heavy_object_width,
                         config.heavy_object_growing,
                     );
-                    // Group every non-zero pixel the polygon covers by which
-                    // contour it belongs to -- a BTreeMap, not a HashMap, so
-                    // the order these readings are produced in stays the
-                    // same across runs. One reading per contour the polygon
-                    // touches, at that contour's own matched pixels'
-                    // centroid, rather than one per pixel: the polygon
-                    // commonly covers many pixels of the very same nearby
-                    // contour (its own width), and treating each separately
-                    // would flood point_definers with near-duplicate circle
-                    // fits of the same physical crossing.
-                    let mut hits: std::collections::BTreeMap<u64, (Coord<f64>, usize)> =
-                        std::collections::BTreeMap::new();
-                    for (px, py) in raster.pixels_in_polygon(&poly) {
-                        let val = raster.get(px, py);
-                        if val == 0 {
-                            continue;
-                        }
-                        let contour_idx = (val - 1) as u64;
-                        let center = raster.pixel_center(px, py);
-                        let entry = hits
-                            .entry(contour_idx)
-                            .or_insert((Coord { x: 0.0, y: 0.0 }, 0));
-                        entry.0.x += center.x;
-                        entry.0.y += center.y;
-                        entry.1 += 1;
-                    }
-                    for (contour_idx, (sum, count)) in hits {
-                        let at = Coord {
-                            x: sum.x / count as f64,
-                            y: sum.y / count as f64,
-                        };
+                    for (contour_idx, at) in contour_centroids_in_polygon(&raster, &poly) {
                         push_heavy_object_reading(
                             &contours,
                             contour_idx,
@@ -862,6 +813,17 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
         }
     }
 
+    // Captured now, before the Growing Process runs (see `run_growing`,
+    // called separately so `--create_svg` can write a "before" picture in
+    // between): every open contour's own end not yet resolved to an
+    // out-of-bound or high-density pixel.
+    let pending = collect_flying_ends(&contours, &raster);
+    let pre_growing_flying_ends: Vec<Coord<f64>> = pending
+        .iter()
+        .map(|e| flying_end_position(&contours[e.contour_idx].lwg.ls, e.is_start))
+        .collect();
+    let grown_by_growing_process = vec![false; contours.len()];
+
     Ok(Step1Result {
         contours,
         raw_polylines,
@@ -871,8 +833,630 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
         slope_lines,
         slope_lines_contours_search_radius: config.slope_lines_contours_search_radius,
         heavy_object_polygons,
+        pre_growing_flying_ends,
+        grown_by_growing_process,
+        growing_push_pull_vectors: Vec::new(),
         warnings,
     })
+}
+
+/// One open contour's start (`is_start`) or end node not yet resolved to an
+/// out-of-bound or high-density pixel (Step 1's Growing Process).
+#[derive(Clone, Copy)]
+struct FlyingEnd {
+    contour_idx: usize,
+    is_start: bool,
+}
+
+/// Which of the Growing Process's two passes [`grow_one_step`] is advancing
+/// a Flying End through (see the doc). Two contours that run close and
+/// parallel near the border can land in each other's window purely because
+/// they're both, independently, trying to reach that same border -- not
+/// because they're actually the same physical line split in two -- so every
+/// Flying End first spends up to `growing_oob_seeking_max_steps` steps
+/// (`SeekingOutOfBound`) reacting only to the raster itself, matching
+/// against another Flying End disabled outright; only a Flying End that
+/// hasn't reached the border within that budget falls through to
+/// `MatchingEnds`, the full process, with matching restored and the
+/// out-of-bound attraction term dropped (having failed to find a border on
+/// its own, it's assumed to actually belong with a nearby Flying End
+/// instead of still chasing one).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrowingPhase {
+    SeekingOutOfBound,
+    MatchingEnds,
+}
+
+fn flying_end_position(ls: &LineString<f64>, is_start: bool) -> Coord<f64> {
+    if is_start {
+        ls.0[0]
+    } else {
+        *ls.0.last().unwrap()
+    }
+}
+
+fn is_flying(raster: &ContourRaster, pos: Coord<f64>) -> bool {
+    let (px, py) = raster.to_px(pos);
+    let val = raster.get(px, py);
+    val != OUT_OF_BOUND && val != HIGH_DENSITY
+}
+
+fn collect_flying_ends(contours: &[Contour], raster: &ContourRaster) -> Vec<FlyingEnd> {
+    let mut ends = Vec::new();
+    for (i, c) in contours.iter().enumerate() {
+        let ls = &c.lwg.ls;
+        if ls.is_closed() || ls.0.len() < 2 {
+            continue;
+        }
+        for &is_start in &[true, false] {
+            if is_flying(raster, flying_end_position(ls, is_start)) {
+                ends.push(FlyingEnd {
+                    contour_idx: i,
+                    is_start,
+                });
+            }
+        }
+    }
+    ends
+}
+
+/// The unit vector of `ls`'s own last segment, in the direction the Growing
+/// Process should continue past `is_start`'s own end (away from the
+/// contour's body).
+fn previous_direction(ls: &LineString<f64>, is_start: bool) -> (f64, f64) {
+    let n = ls.0.len();
+    let (from, to) = if is_start {
+        (ls.0[1], ls.0[0])
+    } else {
+        (ls.0[n - 2], ls.0[n - 1])
+    };
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let len = dx.hypot(dy);
+    if len < 1e-12 {
+        (1.0, 0.0)
+    } else {
+        (dx / len, dy / len)
+    }
+}
+
+enum WindowPixelKind {
+    OutOfBound,
+    HighDensity,
+    Contour,
+}
+
+/// Every out-of-bound, high-density, or contour pixel's world-space center
+/// found around `center_px` (Appendix 5), each kind checked against its own
+/// square window: a `Contour` pixel (a real one, or a `TEMPORARY_CONTOUR`
+/// tail -- some Flying End's own not-yet-final tail, see
+/// [`ContourRaster::mark_temporary_step`], counts as one here too, so two
+/// Flying Ends growing at the same time repel each other's tails instead of
+/// only reacting to already-finalized contours) only counts between 2 and
+/// `2*half_contours+1` pixels of `center_px` -- `center_px` itself and its 8
+/// immediate neighbors are always excluded from repulsion, since the Flying
+/// End always sits right on top of its own just-written body there, and
+/// that self-proximity would otherwise swamp the term with a huge,
+/// meaningless push instead of reflecting genuinely nearby contour pixels.
+/// An `OutOfBound`/`HighDensity` pixel only counts within
+/// `2*half_attractions+1` pixels, no such exclusion. Both windows are
+/// scanned in one pass, over their shared (larger) bounding box, each pixel
+/// then kept or dropped by its own kind's own radius (Chebyshev distance,
+/// i.e. `max(|dx|, |dy|)`, matching each window's own square shape).
+fn growing_window_hits(
+    raster: &ContourRaster,
+    center_px: (i64, i64),
+    half_contours: i64,
+    half_attractions: i64,
+) -> Vec<(WindowPixelKind, Coord<f64>)> {
+    let half = half_contours.max(half_attractions);
+    let mut hits = Vec::new();
+    for y in (center_px.1 - half)..=(center_px.1 + half) {
+        for x in (center_px.0 - half)..=(center_px.0 + half) {
+            let cheby = (x - center_px.0).abs().max((y - center_px.1).abs());
+            let val = raster.get(x, y);
+            let kind = if val == OUT_OF_BOUND {
+                if cheby > half_attractions {
+                    continue;
+                }
+                WindowPixelKind::OutOfBound
+            } else if val == HIGH_DENSITY {
+                if cheby > half_attractions {
+                    continue;
+                }
+                WindowPixelKind::HighDensity
+            } else if val == TEMPORARY_CONTOUR || val >= CONTOUR_0_MATRIX_VALUE {
+                if cheby <= 1 || cheby > half_contours {
+                    continue;
+                }
+                WindowPixelKind::Contour
+            } else {
+                continue;
+            };
+            hits.push((kind, raster.pixel_center(x, y)));
+        }
+    }
+    hits
+}
+
+/// Appendix 5's weighted attraction/repulsion, broken down by term rather
+/// than pre-summed: `1`/`3` pixels attract, any contour pixel repels,
+/// blended with the contour's own previous heading. Once a Flying End has
+/// moved on to `MatchingEnds` (see [`GrowingPhase`]), the out-of-bound term
+/// is dropped entirely -- it's already had its dedicated, matching-free
+/// budget to reach the border on its own and didn't, so no longer being
+/// pulled toward one lets it settle into matching another nearby Flying End
+/// instead. The breakdown itself (rather than just [`GrowingStepForces::total`])
+/// is kept only so `grow_one_step` can record it into
+/// `Step1Result::growing_push_pull_vectors` for `--create_svg`'s benefit --
+/// the Growing Process itself only ever needs the summed direction.
+fn growing_forces(
+    flying_end: Coord<f64>,
+    previous_direction: (f64, f64),
+    hits: &[(WindowPixelKind, Coord<f64>)],
+    config: &Config,
+    phase: GrowingPhase,
+) -> GrowingStepForces {
+    let mut forces = GrowingStepForces {
+        flying_end,
+        previous_direction: (
+            config.growing_previous_distance_direction_weight * previous_direction.0,
+            config.growing_previous_distance_direction_weight * previous_direction.1,
+        ),
+        out_of_bound: (0.0, 0.0),
+        density: (0.0, 0.0),
+        other_contours: (0.0, 0.0),
+    };
+    for (kind, center) in hits {
+        if phase == GrowingPhase::MatchingEnds && matches!(kind, WindowPixelKind::OutOfBound) {
+            continue;
+        }
+        let (bx, by) = (center.x - flying_end.x, center.y - flying_end.y);
+        let d = bx.hypot(by);
+        if d < 1e-12 {
+            continue; // the pixel sits exactly on the Flying End
+        }
+        let w = match kind {
+            WindowPixelKind::OutOfBound => config.growing_out_of_bound_direction_weight,
+            WindowPixelKind::HighDensity => config.growing_density_direction_weight,
+            WindowPixelKind::Contour => config.growing_other_contours_direction_weight,
+        };
+        let term = match kind {
+            WindowPixelKind::OutOfBound => &mut forces.out_of_bound,
+            WindowPixelKind::HighDensity => &mut forces.density,
+            WindowPixelKind::Contour => &mut forces.other_contours,
+        };
+        term.0 += w * bx / (d * d);
+        term.1 += w * by / (d * d);
+    }
+    forces
+}
+
+/// The next grown node, `step` away from `flying_end` along `direction`, or
+/// straight ahead along `previous_direction` if `direction` came out zero
+/// (the window held nothing to react to).
+fn next_grown_node(
+    flying_end: Coord<f64>,
+    previous_direction: (f64, f64),
+    direction: (f64, f64),
+    step: f64,
+) -> Coord<f64> {
+    let len = direction.0.hypot(direction.1);
+    let (ux, uy) = if len < 1e-12 {
+        previous_direction
+    } else {
+        (direction.0 / len, direction.1 / len)
+    };
+    Coord {
+        x: flying_end.x + ux * step,
+        y: flying_end.y + uy * step,
+    }
+}
+
+fn append_node(contours: &mut [Contour], contour_idx: usize, is_start: bool, node: Coord<f64>) {
+    let ls = &mut contours[contour_idx].lwg.ls;
+    if is_start {
+        ls.0.insert(0, node);
+    } else {
+        ls.0.push(node);
+    }
+}
+
+/// Closes `contour_idx`'s own `ls` into a ring (Step 1's Growing Process,
+/// case (a), when the "other Flying End" the window found turns out to be
+/// this same contour's own other end): appends a copy of that other end's
+/// own current position -- exactly what "set the new node on top of it"
+/// means here, since there is only one contour's worth of nodes to place it
+/// on top of -- so the first and last `Coord` end up identical, then
+/// re-samples the whole thing as the closed contour it now is (Appendix 1
+/// shrinks the step to evenly divide the perimeter instead of leaving a
+/// short closing segment).
+///
+/// That perimeter-wide re-derivation can shift *every* node, not just the
+/// newly closed one -- including ones from the contour's own original body,
+/// already drawn into the Contour Raster long before growing ever started --
+/// so its whole previous footprint is cleared first (see
+/// [`ContourRaster::clear_contour`]) rather than drawing the new one
+/// additively on top of the old.
+fn close_contour(
+    contour_idx: usize,
+    is_start: bool,
+    contours: &mut [Contour],
+    raster: &mut ContourRaster,
+    config: &Config,
+    grown: &mut [bool],
+) {
+    let other_end_pos = flying_end_position(&contours[contour_idx].lwg.ls, !is_start);
+    append_node(contours, contour_idx, is_start, other_end_pos);
+    let closed = resample_equal_chords(&contours[contour_idx].lwg.ls, config.contours_step);
+    contours[contour_idx].lwg.ls = closed.clone();
+    raster.clear_contour(contour_idx as u64);
+    raster.write_contour(contour_idx as u64, &closed);
+    grown[contour_idx] = true;
+}
+
+/// Merges the contour at `a_idx` (its Flying End at `a_is_start`) with the
+/// one at `b_idx` (`b_is_start`), which the Growing Process found close
+/// enough to snap onto (Step 1's Growing Process, case (a)). Keeps the
+/// smaller of the two indices (an arbitrary but deterministic pick -- either
+/// choice satisfies the doc's own "choose randomly one of the two"), and
+/// re-numbers every reference to the discarded index -- the Contours vector,
+/// every already-written Contour Raster pixel, every pending Flying End, and
+/// every already-collected `PointGravityDefiners.reference_contour`.
+#[allow(clippy::too_many_arguments)]
+fn merge_contours(
+    a_idx: usize,
+    a_is_start: bool,
+    b_idx: usize,
+    b_is_start: bool,
+    contours: &mut Vec<Contour>,
+    point_definers: &mut [PointGravityDefiners],
+    pending: &mut std::collections::VecDeque<FlyingEnd>,
+    grown: &mut Vec<bool>,
+    raster: &mut ContourRaster,
+    config: &Config,
+) {
+    let (keep_idx, keep_is_start, remove_idx) = if a_idx < b_idx {
+        (a_idx, a_is_start, b_idx)
+    } else {
+        (b_idx, b_is_start, a_idx)
+    };
+    let remove_is_start = if a_idx < b_idx {
+        b_is_start
+    } else {
+        a_is_start
+    };
+
+    let mut merged_pts = contours[keep_idx].lwg.ls.0.clone();
+    if keep_is_start {
+        merged_pts.reverse();
+    }
+    let mut tail_pts = contours[remove_idx].lwg.ls.0.clone();
+    if !remove_is_start {
+        tail_pts.reverse();
+    }
+    // The Growing Process placed both Flying Ends at (effectively) the same
+    // position -- drop the duplicate rather than keep a zero-length segment.
+    if !tail_pts.is_empty() {
+        tail_pts.remove(0);
+    }
+    merged_pts.extend(tail_pts);
+    let merged_ls = resample_equal_chords(&LineString::new(merged_pts), config.contours_step);
+
+    contours[keep_idx].lwg.ls = merged_ls.clone();
+    contours.remove(remove_idx);
+
+    // The new joint segment's own (arbitrary) length can shift every node
+    // downstream of it out of phase with whichever pixels its own original,
+    // already-drawn position claimed -- not just the two contours' own
+    // Flying Ends -- so both contours' whole previous footprints are
+    // cleared before the merged, resampled `ls` is drawn fresh, the same
+    // reasoning as `close_contour`'s own (see its doc comment).
+    raster.clear_contour(keep_idx as u64);
+    raster.clear_contour(remove_idx as u64);
+    raster.merge_contour_indices(keep_idx as u64, remove_idx as u64);
+    raster.write_contour(keep_idx as u64, &merged_ls);
+
+    for pd in point_definers.iter_mut() {
+        if pd.reference_contour == remove_idx as u64 {
+            pd.reference_contour = keep_idx as u64;
+        } else if pd.reference_contour > remove_idx as u64 {
+            pd.reference_contour -= 1;
+        }
+    }
+    // `merged_pts` is always built as [keep's surviving end ... join ...
+    // remove's surviving end] -- whichever of keep's two ends didn't just
+    // merge always ends up at the front (index 0), and whichever of remove's
+    // two ends didn't just merge always ends up at the back, regardless of
+    // `keep_is_start`/`remove_is_start` (those only control which raw point
+    // list gets reversed to make that true). So any *other* Flying End still
+    // waiting in `pending` on one of these same two contours -- not the ones
+    // just consumed by this merge, already removed from `pending` by the
+    // caller -- needs remapping onto that fixed shape, not just an index
+    // shift: keep's own other end always becomes the new start, and remove's
+    // own other end always becomes the new end of the merged contour (at
+    // `keep_idx`, since `remove_idx` no longer exists).
+    for p in pending.iter_mut() {
+        if p.contour_idx == keep_idx {
+            p.is_start = true;
+        } else if p.contour_idx == remove_idx {
+            p.contour_idx = keep_idx;
+            p.is_start = false;
+        } else if p.contour_idx > remove_idx {
+            p.contour_idx -= 1;
+        }
+    }
+    grown[keep_idx] = true;
+    grown.remove(remove_idx);
+}
+
+/// A generous cap on the *total* number of growth steps taken across every
+/// Flying End combined, scaled by how many there were to start with --
+/// purely a safety valve against an unbounded loop (e.g. an oscillating
+/// limit cycle between two density clusters), not part of the doc's own
+/// algorithm, which assumes every path eventually reaches the out-of-bound
+/// ring.
+const MAX_GROWING_STEPS_PER_END: u64 = 100_000;
+
+/// What one call to [`grow_one_step`] did to the Flying End it was given.
+enum GrowStepOutcome {
+    /// Resolved (landed on an out-of-bound/high-density pixel, or merged
+    /// with another Flying End) -- nothing left to grow.
+    Resolved,
+    /// Still flying after this one step; here's its new position.
+    StillFlying(FlyingEnd),
+}
+
+/// Advances one Flying End by exactly one step of the Growing Process (case
+/// (a), (b), or (c) -- see the doc). `pending` is every *other* Flying End
+/// still waiting on its own next step (`end` itself is not in it -- the
+/// caller already popped it off before calling this); ignored entirely
+/// while `phase` is `SeekingOutOfBound`, since case (a) is skipped then.
+#[allow(clippy::too_many_arguments)]
+fn grow_one_step(
+    end: FlyingEnd,
+    pending: &mut std::collections::VecDeque<FlyingEnd>,
+    contours: &mut Vec<Contour>,
+    point_definers: &mut [PointGravityDefiners],
+    grown: &mut Vec<bool>,
+    raster: &mut ContourRaster,
+    config: &Config,
+    phase: GrowingPhase,
+    push_pull_vectors: &mut Vec<GrowingStepForces>,
+) -> GrowStepOutcome {
+    let (contour_idx, is_start) = (end.contour_idx, end.is_start);
+    let half_contours = ((config.growing_window_size_px_contours / 2) as i64).max(1);
+    let half_attractions = ((config.growing_window_size_px_attractions / 2) as i64).max(1);
+
+    let pos = flying_end_position(&contours[contour_idx].lwg.ls, is_start);
+    if !is_flying(raster, pos) {
+        return GrowStepOutcome::Resolved;
+    }
+    let (px, py) = raster.to_px(pos);
+
+    // (a) another pending Flying End inside the window? Skipped outright
+    // while still seeking the out-of-bound area on its own (see
+    // `GrowingPhase`) -- two contours running close and parallel near the
+    // border must each reach it independently, not snap onto each other
+    // just because they happen to sit in each other's window. Uses the
+    // attraction window (`half_attractions`), grouped with the
+    // out-of-bound/high-density pull terms as another thing the Growing
+    // Process can move toward, rather than the contour-repulsion window.
+    if phase == GrowingPhase::MatchingEnds {
+        let x_range = (px - half_attractions)..=(px + half_attractions);
+        let y_range = (py - half_attractions)..=(py + half_attractions);
+        let other = pending.iter().position(|o| {
+            let other_pos = flying_end_position(&contours[o.contour_idx].lwg.ls, o.is_start);
+            let (ox, oy) = raster.to_px(other_pos);
+            x_range.contains(&ox) && y_range.contains(&oy)
+        });
+        if let Some(i) = other {
+            let other_end = pending.remove(i).expect("index just found by position()");
+            if other_end.contour_idx == contour_idx {
+                // The other end found is this same contour's own other end
+                // (its only other possible flying end, so no self-match
+                // ambiguity beyond this): close it into a ring instead of
+                // merging it with a second contour, then equal-chord
+                // resample it the way any closed contour is (Appendix 1
+                // shrinks the step to evenly divide the perimeter, rather
+                // than leaving a short closing segment).
+                close_contour(contour_idx, is_start, contours, raster, config, grown);
+            } else {
+                merge_contours(
+                    contour_idx,
+                    is_start,
+                    other_end.contour_idx,
+                    other_end.is_start,
+                    contours,
+                    point_definers,
+                    pending,
+                    grown,
+                    raster,
+                    config,
+                );
+            }
+            return GrowStepOutcome::Resolved;
+        }
+    }
+
+    let hits = growing_window_hits(raster, (px, py), half_contours, half_attractions);
+
+    // (b) nearest out-of-bound/high-density pixel closer than this step's
+    // own length (contours_step * growing_step_length) -- the same
+    // distance case (c) would otherwise move by, so a pixel case (c) would
+    // already land on or past is settled on directly here instead.
+    let step_length = config.contours_step * config.growing_step_length;
+    let mut nearest: Option<(f64, Coord<f64>)> = None;
+    for (kind, center) in &hits {
+        if matches!(
+            kind,
+            WindowPixelKind::OutOfBound | WindowPixelKind::HighDensity
+        ) {
+            let d = (center.x - pos.x).hypot(center.y - pos.y);
+            if d < step_length && nearest.as_ref().is_none_or(|&(bd, _)| d < bd) {
+                nearest = Some((d, *center));
+            }
+        }
+    }
+    if let Some((_, target)) = nearest {
+        append_node(contours, contour_idx, is_start, target);
+        let resampled = resample_equal_chords(&contours[contour_idx].lwg.ls, config.contours_step);
+        contours[contour_idx].lwg.ls = resampled.clone();
+        // As in `close_contour`: resampling can in principle shift nodes
+        // other than the newly snapped one, so the contour's previous
+        // footprint is cleared before redrawing it fresh, rather than
+        // drawn additively on top of whatever was there before.
+        raster.clear_contour(contour_idx as u64);
+        raster.write_contour(contour_idx as u64, &resampled);
+        grown[contour_idx] = true;
+        return GrowStepOutcome::Resolved;
+    }
+
+    // (c) attraction/repulsion direction. Not written under this contour's
+    // own real index yet while still flying (see `close_contour`'s own doc
+    // comment for why: only once this contour's `ls` reaches its actual
+    // final shape -- here, or in case (a)/(b) above -- is it drawn under
+    // that index, in one shot, so the raster never ends up holding pixels
+    // from an intermediate, not-yet-final position under a real contour's
+    // value). The step just taken is, however, marked `TEMPORARY_CONTOUR`
+    // right away, so a different Flying End growing in parallel repels off
+    // of it instead of being blind to it -- otherwise two contours each
+    // independently seeking the border, close and parallel, can cross one
+    // another unnoticed (neither has written anything real yet for the
+    // other to react to).
+    let prev_dir = previous_direction(&contours[contour_idx].lwg.ls, is_start);
+    let forces = growing_forces(pos, prev_dir, &hits, config, phase);
+    let dir = forces.total();
+    push_pull_vectors.push(forces);
+    let next = next_grown_node(pos, prev_dir, dir, step_length);
+    raster.mark_temporary_step(pos, next);
+    append_node(contours, contour_idx, is_start, next);
+    grown[contour_idx] = true;
+    if is_flying(raster, next) {
+        GrowStepOutcome::StillFlying(FlyingEnd {
+            contour_idx,
+            is_start,
+        })
+    } else {
+        // Landed directly on an out-of-bound/high-density pixel by chance,
+        // rather than being snapped there by case (b): this `ls` is now
+        // final too, so it gets its one, whole-`ls` write here.
+        raster.write_contour(contour_idx as u64, &contours[contour_idx].lwg.ls);
+        GrowStepOutcome::Resolved
+    }
+}
+
+/// Step 1's final sub-step (see the doc): extends every open contour's
+/// Flying End until it resolves to an out-of-bound or high-density pixel,
+/// in two passes -- see [`GrowingPhase`]. Within each pass, Flying Ends are
+/// never advanced in parallel, but round-robin rather than one at a time to
+/// completion: every still-pending Flying End gets exactly one growth step,
+/// then the whole list is cycled through again, and so on until none are
+/// left (resolving one, by merging two contours together, can also resolve
+/// another already in the list -- `MatchingEnds` only).
+///
+/// Deliberately not run as part of `extract` itself: `--create_svg` needs to
+/// write `00_..._step1.svg` (the pre-growing state, with `result`'s own
+/// `pre_growing_flying_ends` as red rings) before this runs, then
+/// `01_..._step1_growing.svg` (this function's own result) after -- see the
+/// doc's Visualization section. Sets `result.grown_by_growing_process` (used
+/// by `01_..._step1_growing.svg` to draw a touched contour in blue instead
+/// of green) and returns any new warnings raised along the way (`MatchingEnds`'
+/// own step budget, `MAX_GROWING_STEPS_PER_END` times however many Flying
+/// Ends entered that pass, running out before every one resolved).
+pub fn run_growing(result: &mut Step1Result, config: &Config) -> Vec<String> {
+    let mut grown = vec![false; result.contours.len()];
+    let mut warnings = Vec::new();
+    let mut push_pull_vectors = Vec::new();
+
+    // Phase 1 (`SeekingOutOfBound`): every Flying End gets up to
+    // `growing_oob_seeking_max_steps` steps entirely on its own -- no
+    // merging, no closing, `contours`/`grown` never change length here, so
+    // tracking each end's own step count by its (stable) `(contour_idx,
+    // is_start)` is safe for the whole pass. A budget of `0` turns this
+    // phase off outright: every Flying End starts straight in `MatchingEnds`.
+    let initial_ends: std::collections::VecDeque<FlyingEnd> =
+        collect_flying_ends(&result.contours, &result.raster).into();
+    let seek_phase_enabled = config.growing_oob_seeking_max_steps > 0;
+    let mut seeking = if seek_phase_enabled {
+        initial_ends.clone()
+    } else {
+        std::collections::VecDeque::new()
+    };
+    let mut steps_taken: std::collections::HashMap<(usize, bool), u64> =
+        std::collections::HashMap::new();
+    let mut unused_pending: std::collections::VecDeque<FlyingEnd> =
+        std::collections::VecDeque::new();
+    let mut matching = if seek_phase_enabled {
+        std::collections::VecDeque::new()
+    } else {
+        initial_ends
+    };
+    while let Some(end) = seeking.pop_front() {
+        match grow_one_step(
+            end,
+            &mut unused_pending,
+            &mut result.contours,
+            &mut result.point_definers,
+            &mut grown,
+            &mut result.raster,
+            config,
+            GrowingPhase::SeekingOutOfBound,
+            &mut push_pull_vectors,
+        ) {
+            GrowStepOutcome::Resolved => {}
+            GrowStepOutcome::StillFlying(new_end) => {
+                let count = steps_taken
+                    .entry((new_end.contour_idx, new_end.is_start))
+                    .or_insert(0);
+                *count += 1;
+                if *count >= config.growing_oob_seeking_max_steps {
+                    matching.push_back(new_end);
+                } else {
+                    seeking.push_back(new_end);
+                }
+            }
+        }
+    }
+
+    // Phase 2 (`MatchingEnds`): the full process for whatever didn't reach
+    // the border on its own within phase 1's budget.
+    let mut pending = matching;
+    let max_steps = MAX_GROWING_STEPS_PER_END * pending.len().max(1) as u64;
+    let mut steps_taken = 0u64;
+    while let Some(end) = pending.pop_front() {
+        match grow_one_step(
+            end,
+            &mut pending,
+            &mut result.contours,
+            &mut result.point_definers,
+            &mut grown,
+            &mut result.raster,
+            config,
+            GrowingPhase::MatchingEnds,
+            &mut push_pull_vectors,
+        ) {
+            GrowStepOutcome::Resolved => {}
+            GrowStepOutcome::StillFlying(new_end) => pending.push_back(new_end),
+        }
+        steps_taken += 1;
+        if steps_taken >= max_steps {
+            warnings.push(format!(
+                "the Growing Process did not resolve every Flying End within its step budget \
+                 ({max_steps} steps total); {} left unresolved",
+                pending.len()
+            ));
+            break;
+        }
+    }
+    // Every remaining `TEMPORARY_CONTOUR` pixel is a stretch of tail some
+    // Flying End tried and abandoned along the way (e.g. resampling after a
+    // merge or a close moved its nodes elsewhere) -- swept back to
+    // `NO_CONTOUR_IN_BOUND` only now that both passes are done and no
+    // still-flying neighbor could still need it as a repeller.
+    result.raster.clear_temporary_contours();
+    result.grown_by_growing_process = grown;
+    result.growing_push_pull_vectors = push_pull_vectors;
+    warnings
 }
 
 #[cfg(test)]
@@ -984,7 +1568,16 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
-            contour_gap_merge_radius: 2.0,
+            out_of_bound_extra_dilation: 0,
+            growing_oob_seeking_max_steps: 0,
+            growing_window_size_px_contours: 4,
+            growing_window_size_px_attractions: 4,
+            growing_step_length: 1.0,
+            growing_previous_distance_direction_weight: 1.0,
+            growing_out_of_bound_direction_weight: 1.0,
+            growing_density_direction_weight: 1.0,
+            growing_other_contours_direction_weight: -1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
         };
 
         let contour_symbol = Symbol::Line(LineSymbol {
@@ -1050,45 +1643,46 @@ mod tests {
     }
 
     #[test]
-    fn nearest_end_is_start_picks_whichever_end_is_closer() {
-        let ls = LineString::new(vec![c(0.0, 0.0), c(5.0, 0.0), c(10.0, 0.0)]);
-        assert_eq!(nearest_end_is_start(&ls, c(0.2, 0.0), 1.0), Some(true));
-        assert_eq!(nearest_end_is_start(&ls, c(9.8, 0.0), 1.0), Some(false));
-        assert_eq!(nearest_end_is_start(&ls, c(5.0, 0.0), 1.0), None);
-    }
+    fn contour_centroids_in_polygon_survives_a_later_high_density_stamp() {
+        // Mirrors the order Jump handling uses: capture which contours a
+        // polygon covers *before* marking that polygon's own area high
+        // density, since that stamp would otherwise erase the very evidence
+        // (a plain contour value in the raster) of which contour was there
+        // -- exactly what used to make Step 2 find nothing under a Jump.
+        let ls = LineString::new(vec![c(0.0, 5.0), c(20.0, 5.0)]);
+        let mut raster = ContourRaster::new(c(-5.0, -5.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls);
 
-    #[test]
-    fn merge_close_endpoints_joins_at_the_closer_ends_in_either_orientation() {
-        let a = LineString::new(vec![c(0.0, 0.0), c(5.0, 0.0)]);
-        let b = LineString::new(vec![c(5.05, 0.0), c(10.0, 0.0)]);
-        // a's end meets b's start: straight concatenation.
-        let merged = merge_close_endpoints(&a, &b, c(5.0, 0.0), 1.0).unwrap();
-        assert_eq!(
-            merged.0,
-            vec![c(0.0, 0.0), c(5.0, 0.0), c(5.05, 0.0), c(10.0, 0.0)]
+        let poly = Polygon::new(
+            LineString::new(vec![
+                c(8.0, 0.0),
+                c(12.0, 0.0),
+                c(12.0, 10.0),
+                c(8.0, 10.0),
+                c(8.0, 0.0),
+            ]),
+            vec![],
         );
 
-        // a's end meets b's end (b digitized the other way around): b is
-        // reversed before joining.
-        let b_rev = LineString::new(vec![c(10.0, 0.0), c(5.05, 0.0)]);
-        let merged = merge_close_endpoints(&a, &b_rev, c(5.0, 0.0), 1.0).unwrap();
-        assert_eq!(
-            merged.0,
-            vec![c(0.0, 0.0), c(5.0, 0.0), c(5.05, 0.0), c(10.0, 0.0)]
-        );
+        let touched = contour_centroids_in_polygon(&raster, &poly);
+        assert_eq!(touched.len(), 1);
+        assert_eq!(touched[0].0, 0);
+
+        raster.mark_high_density_polygon(&poly);
+        // The polygon's own area is now high density, not contour 0 -- the
+        // state that used to make a later, raster-based re-scan find
+        // nothing.
+        let (px, py) = raster.to_px(touched[0].1);
+        assert_eq!(raster.get(px, py), crate::contour_raster::HIGH_DENSITY);
+        // The already-captured evidence itself is unaffected, since it was
+        // read before the stamp, not re-derived from the (by now
+        // corrupted) raster.
+        assert_eq!(touched.len(), 1);
+        assert_eq!(touched[0].0, 0);
     }
 
     #[test]
-    fn merge_close_endpoints_is_none_when_the_conflict_is_nowhere_near_either_end() {
-        let a = LineString::new(vec![c(0.0, 0.0), c(10.0, 0.0)]);
-        let b = LineString::new(vec![c(0.0, 0.1), c(10.0, 0.1)]);
-        // Two long parallel lines: the "conflict" sits in the middle of
-        // both, nowhere near either one's own start or end.
-        assert!(merge_close_endpoints(&a, &b, c(5.0, 0.05), 1.0).is_none());
-    }
-
-    #[test]
-    fn extract_unifies_two_contours_split_by_a_small_digitizing_gap() {
+    fn extract_marks_a_raster_conflict_high_density_instead_of_crashing() {
         use crate::map::{Coord as MapCoord, LineSymbol, Object, PathObject};
 
         let config = Config {
@@ -1103,7 +1697,16 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
-            contour_gap_merge_radius: 1.0,
+            out_of_bound_extra_dilation: 0,
+            growing_oob_seeking_max_steps: 0,
+            growing_window_size_px_contours: 4,
+            growing_window_size_px_attractions: 4,
+            growing_step_length: 1.0,
+            growing_previous_distance_direction_weight: 1.0,
+            growing_out_of_bound_direction_weight: 1.0,
+            growing_density_direction_weight: 1.0,
+            growing_other_contours_direction_weight: -1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
         };
 
         let contour_symbol = Symbol::Line(LineSymbol {
@@ -1111,21 +1714,20 @@ mod tests {
             ..Default::default()
         });
 
-        // Two straight contour pieces, 0.05m apart at x=5 -- close enough
-        // that a 0.5m Contour Raster pixel written by both collides, but far
-        // too small a gap to be two genuinely distinct contours.
+        // Two straight, parallel contour pieces 0.05m apart -- close enough
+        // that a 0.5m Contour Raster pixel written by both collides.
         let piece_a = Object {
             kind: ObjectKind::Path(PathObject::default()),
             symbol_id: 0,
             symbol_index: Some(0),
-            coords: vec![MapCoord::new(0.0, 0.0, 0), MapCoord::new(5.0, 0.0, 0)],
+            coords: vec![MapCoord::new(0.0, 0.0, 0), MapCoord::new(10.0, 0.0, 0)],
             rotation: 0.0,
         };
         let piece_b = Object {
             kind: ObjectKind::Path(PathObject::default()),
             symbol_id: 0,
             symbol_index: Some(0),
-            coords: vec![MapCoord::new(5.05, 0.0, 0), MapCoord::new(10.0, 0.0, 0)],
+            coords: vec![MapCoord::new(0.0, 0.05, 0), MapCoord::new(10.0, 0.05, 0)],
             rotation: 0.0,
         };
 
@@ -1139,22 +1741,22 @@ mod tests {
             symbol_set: None,
         };
 
+        // Must not crash: the doc's old crash-on-conflict path is gone.
         let result = extract(&map, &config).unwrap();
-
         assert_eq!(
             result.contours.len(),
-            1,
-            "the two pieces must be joined into a single contour, not crash or stay separate"
+            2,
+            "both pieces stay separate contours"
         );
-        assert_eq!(
-            result.warnings.len(),
-            1,
-            "joining them is a recoverable, warned-about condition, not a silent one"
-        );
-        assert!(result.warnings[0].contains("contour_gap_merge_radius"));
-        let ls = &result.contours[0].lwg.ls;
-        assert!((ls.0.first().unwrap().x - 0.0).abs() < 1e-6);
-        assert!((ls.0.last().unwrap().x - 10.0).abs() < 1e-6);
+
+        // At least one pixel along the shared run must have been marked
+        // high density rather than silently claimed by whichever contour
+        // happened to write it second.
+        let has_high_density = (0..result.raster.height as i64).any(|y| {
+            (0..result.raster.width as i64)
+                .any(|x| result.raster.get(x, y) == crate::contour_raster::HIGH_DENSITY)
+        });
+        assert!(has_high_density, "expected at least one high-density pixel");
     }
 
     #[test]
@@ -1170,5 +1772,1058 @@ mod tests {
         assert_eq!(point_offset(&ls, 0, -1), None);
         assert_eq!(point_offset(&ls, 2, 1), None);
         assert_eq!(point_offset(&ls, 1, 1), Some(c(2.0, 0.0)));
+    }
+
+    #[test]
+    fn growing_closes_a_contour_whose_own_two_flying_ends_meet_each_other() {
+        // A wide, shallow "V": both ends sit at y=10, only 4m apart --
+        // comfortably inside each other's growing window -- and they belong
+        // to the very same (single) contour. Case (a) should close it into
+        // a ring (not corrupt it by feeding both into `merge_contours` as
+        // if they were two different contours, and not silently ignore the
+        // match either -- a contour's own other end is a valid, and good,
+        // case-(a) partner).
+        let ls = LineString::new(vec![c(15.0, 10.0), c(17.0, 15.0), c(19.0, 10.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls);
+        raster.compute_out_of_bound(0);
+        let contour = Contour {
+            lwg: LineWithGravity::new(ls),
+            elevation_height: None,
+        };
+
+        let mut result = Step1Result {
+            contours: vec![contour],
+            raw_polylines: vec![Vec::new()],
+            raster,
+            point_definers: Vec::new(),
+            line_definers: Vec::new(),
+            slope_lines: Vec::new(),
+            slope_lines_contours_search_radius: 3.0,
+            heavy_object_polygons: Vec::new(),
+            pre_growing_flying_ends: Vec::new(),
+            grown_by_growing_process: vec![false],
+            growing_push_pull_vectors: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let config = Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 5.0,
+            rasterization_px_size: 1.0,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 4,
+            slope_lines_contours_search_radius: 3.0,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            out_of_bound_extra_dilation: 0,
+            growing_oob_seeking_max_steps: 0,
+            growing_window_size_px_contours: 10,
+            growing_window_size_px_attractions: 10,
+            growing_step_length: 1.0,
+            growing_previous_distance_direction_weight: 1.0,
+            growing_out_of_bound_direction_weight: 1.0,
+            growing_density_direction_weight: 1.0,
+            growing_other_contours_direction_weight: -1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
+        };
+
+        let warnings = run_growing(&mut result, &config);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(
+            result.contours.len(),
+            1,
+            "still one contour -- closed, not merged away or duplicated"
+        );
+        assert!(
+            result.contours[0].lwg.ls.is_closed(),
+            "expected the contour to have been closed into a ring, got {:?}",
+            result.contours[0].lwg.ls
+        );
+        assert_eq!(result.grown_by_growing_process, vec![true]);
+    }
+
+    #[test]
+    fn growing_merge_keeps_the_two_contours_raw_polylines_separate() {
+        // Two short, separate open contours whose near ends (A's end, B's
+        // start) are only 2m apart -- well inside each other's growing
+        // window -- while each contour's own two ends stay 10m apart, safely
+        // outside it, so this merges A with B rather than either closing on
+        // itself. A's own far end and B's own far end each just grow
+        // straight toward the raster's border and resolve there.
+        let ls_a = LineString::new(vec![c(0.0, 10.0), c(10.0, 10.0)]);
+        let ls_b = LineString::new(vec![c(12.0, 10.0), c(22.0, 10.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls_a);
+        raster.write_contour(1, &ls_b);
+        raster.compute_out_of_bound(0);
+
+        let raw_a = vec![
+            contour_geometry::RawVertex {
+                coord: c(0.0, 10.0),
+                is_curve_start: false,
+            },
+            contour_geometry::RawVertex {
+                coord: c(10.0, 10.0),
+                is_curve_start: false,
+            },
+        ];
+        let raw_b = vec![
+            contour_geometry::RawVertex {
+                coord: c(12.0, 10.0),
+                is_curve_start: false,
+            },
+            contour_geometry::RawVertex {
+                coord: c(22.0, 10.0),
+                is_curve_start: false,
+            },
+        ];
+
+        let mut result = Step1Result {
+            contours: vec![
+                Contour {
+                    lwg: LineWithGravity::new(ls_a),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_b),
+                    elevation_height: None,
+                },
+            ],
+            raw_polylines: vec![raw_a.clone(), raw_b.clone()],
+            raster,
+            point_definers: Vec::new(),
+            line_definers: Vec::new(),
+            slope_lines: Vec::new(),
+            slope_lines_contours_search_radius: 3.0,
+            heavy_object_polygons: Vec::new(),
+            pre_growing_flying_ends: Vec::new(),
+            grown_by_growing_process: vec![false, false],
+            growing_push_pull_vectors: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let config = Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 5.0,
+            rasterization_px_size: 1.0,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 4,
+            slope_lines_contours_search_radius: 3.0,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            out_of_bound_extra_dilation: 0,
+            growing_oob_seeking_max_steps: 0,
+            growing_window_size_px_contours: 10,
+            growing_window_size_px_attractions: 10,
+            growing_step_length: 1.0,
+            growing_previous_distance_direction_weight: 1.0,
+            growing_out_of_bound_direction_weight: 1.0,
+            growing_density_direction_weight: 1.0,
+            growing_other_contours_direction_weight: -1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
+        };
+
+        let warnings = run_growing(&mut result, &config);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(result.contours.len(), 1, "A and B merged into one contour");
+        // Both originally-separate raw traces must survive as their own,
+        // separate SVG subpaths -- never spliced into one, which would draw
+        // a false connecting segment straight across the gap between them
+        // (there is no meaningful single curve through two originally
+        // distinct digitized objects).
+        assert_eq!(result.raw_polylines.len(), 2);
+        assert!(result.raw_polylines.contains(&raw_a));
+        assert!(result.raw_polylines.contains(&raw_b));
+    }
+
+    #[test]
+    fn growing_seeking_phase_reaches_the_border_instead_of_matching_a_nearby_contour() {
+        // Two separate contours, close and parallel (2m apart), with
+        // nothing else drawn anywhere else on this 40x40 raster: once
+        // `compute_out_of_bound` runs, virtually every pixel that isn't on
+        // one of the two lines is out of bound, including plenty right
+        // beside each contour's own end. Each end's *own* nearest
+        // out-of-bound pixel (about 1m away, immediately off the line) is
+        // much closer than the other contour's end (2m away) -- but the old,
+        // single-phase code checked case (a) (matching against a nearby
+        // Flying End) before ever looking for one, so it merged these two
+        // anyway, despite each having a perfectly good border of its own
+        // right there. With `growing_oob_seeking_max_steps` giving both ends
+        // a matching-free first pass, each must instead resolve on its own.
+        let ls_a = LineString::new(vec![c(5.0, 10.0), c(15.0, 10.0)]);
+        let ls_b = LineString::new(vec![c(5.0, 12.0), c(15.0, 12.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls_a);
+        raster.write_contour(1, &ls_b);
+        raster.compute_out_of_bound(0);
+
+        let mut result = Step1Result {
+            contours: vec![
+                Contour {
+                    lwg: LineWithGravity::new(ls_a),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_b),
+                    elevation_height: None,
+                },
+            ],
+            raw_polylines: vec![Vec::new(), Vec::new()],
+            raster,
+            point_definers: Vec::new(),
+            line_definers: Vec::new(),
+            slope_lines: Vec::new(),
+            slope_lines_contours_search_radius: 3.0,
+            heavy_object_polygons: Vec::new(),
+            pre_growing_flying_ends: Vec::new(),
+            grown_by_growing_process: vec![false, false],
+            growing_push_pull_vectors: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let config = Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 3.0,
+            rasterization_px_size: 1.0,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 4,
+            slope_lines_contours_search_radius: 3.0,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            out_of_bound_extra_dilation: 0,
+            growing_oob_seeking_max_steps: 5,
+            growing_window_size_px_contours: 6,
+            growing_window_size_px_attractions: 6,
+            growing_step_length: 1.0,
+            growing_previous_distance_direction_weight: 1.0,
+            growing_out_of_bound_direction_weight: 1.0,
+            growing_density_direction_weight: 1.0,
+            growing_other_contours_direction_weight: -1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
+        };
+
+        let warnings = run_growing(&mut result, &config);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(
+            result.contours.len(),
+            2,
+            "A and B each had their own out-of-bound pixel right there -- neither should have \
+             matched the other instead"
+        );
+    }
+
+    #[test]
+    fn growing_step_is_deflected_by_another_flying_ends_temporary_tail() {
+        // Case (c) during `SeekingOutOfBound`: a Flying End heading due
+        // east, with no permanent contour or out-of-bound/high-density
+        // pixel anywhere nearby -- so, absent any other hit, it just
+        // continues dead straight (unaffected by `previous_direction`'s own
+        // weight, since it's the only term). Two otherwise-identical runs,
+        // the only difference being whether some *other* Flying End's own
+        // not-yet-final tail happens to sit just ahead and to one side,
+        // marked `TEMPORARY_CONTOUR` by `mark_temporary_step` exactly as
+        // Step 1's Growing Process itself does for every step it takes
+        // while still flying (see `grow_one_step`, case (c)). Before this
+        // was wired up, a Flying End's own tail was invisible to any other
+        // Flying End growing alongside it until it finally resolved -- two
+        // contours seeking the border independently, close and parallel,
+        // could fly right through each other. With it, the second run's new
+        // node must swing measurably away from that pixel instead of
+        // continuing on the same straight line as the first.
+        fn grow_east_once(mark_temporary_pixel: bool) -> Coord<f64> {
+            // Pixel-center coordinates throughout (as the rest of the
+            // codebase's own tests do, e.g. `contour_raster.rs`'s): a Flying
+            // End's own position is always its `ls`'s last point, which is
+            // therefore always among the pixels its own body just wrote --
+            // landing it exactly on that pixel's center (rather than an
+            // arbitrary offset toward one corner) makes that self-distance
+            // exactly `0`, which `growing_direction` already skips, instead
+            // of contributing an incidental, corner-biased nudge that has
+            // nothing to do with what this test is actually checking.
+            let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
+            let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
+            raster.write_contour(0, &ls);
+            let mut interior = Vec::new();
+            for y in 1..(raster.height as i64 - 1) {
+                for x in 1..(raster.width as i64 - 1) {
+                    interior.push((x, y));
+                }
+            }
+            raster.commit_flood_pixels(&interior);
+            raster.compute_out_of_bound(0);
+            if mark_temporary_pixel {
+                // Simulates some other Flying End's own last grow step,
+                // landing just ahead of this one and one pixel above its
+                // straight-line path.
+                raster.mark_temporary_step(c(19.5, 51.5), c(20.0, 51.9));
+            }
+
+            let mut contours = vec![Contour {
+                lwg: LineWithGravity::new(ls),
+                elevation_height: None,
+            }];
+            let mut point_definers = Vec::new();
+            let mut grown = vec![false];
+            let mut pending = std::collections::VecDeque::new();
+            let config = Config {
+                bezier_linearization_step: 0.1,
+                contours_step: 3.0,
+                rasterization_px_size: 1.0,
+                heavy_object_width: 1.0,
+                heavy_object_growing: 0.2,
+                circumference_fitting_points_number: 4,
+                slope_lines_contours_search_radius: 3.0,
+                rain_drop_step: 0.25,
+                sources_per_contour_segment: 3,
+                rain_drop_starting_voting_hysteresis: 3,
+                undefined_gravity_vote_threshold: 0.8,
+                out_of_bound_extra_dilation: 0,
+                growing_oob_seeking_max_steps: 10,
+                growing_window_size_px_contours: 6,
+                growing_window_size_px_attractions: 6,
+                growing_step_length: 1.0,
+                growing_previous_distance_direction_weight: 1.0,
+                growing_out_of_bound_direction_weight: 1.0,
+                growing_density_direction_weight: 1.0,
+                growing_other_contours_direction_weight: -1.0,
+                growing_visualization_push_pull_vectors_scale: 1.0,
+            };
+            let outcome = grow_one_step(
+                FlyingEnd {
+                    contour_idx: 0,
+                    is_start: false,
+                },
+                &mut pending,
+                &mut contours,
+                &mut point_definers,
+                &mut grown,
+                &mut raster,
+                &config,
+                GrowingPhase::SeekingOutOfBound,
+                &mut Vec::new(),
+            );
+            match outcome {
+                GrowStepOutcome::StillFlying(_) => *contours[0].lwg.ls.0.last().unwrap(),
+                GrowStepOutcome::Resolved => panic!("expected it to still be flying"),
+            }
+        }
+
+        let straight = grow_east_once(false);
+        assert!(
+            (straight.y - 50.5).abs() < 1e-6,
+            "with nothing nearby, the step should continue dead straight: {straight:?}"
+        );
+        let deflected = grow_east_once(true);
+        assert!(
+            deflected.y < 50.5 - 0.05,
+            "a repelling TEMPORARY_CONTOUR pixel just above the straight path should have \
+             pushed the next node measurably below it, got {deflected:?}"
+        );
+    }
+
+    #[test]
+    fn growing_step_marks_its_own_new_segment_temporary_while_still_flying() {
+        // Case (c) itself, on the raster it actually runs against (not the
+        // hand-simulated stand-in the previous test uses): once a step
+        // leaves a Flying End still flying, the segment it just grew must
+        // already read back as `TEMPORARY_CONTOUR`, or a second Flying End
+        // scanning its own window a moment later would find nothing there
+        // to repel from at all.
+        let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
+        raster.write_contour(0, &ls);
+        let mut interior = Vec::new();
+        for y in 1..(raster.height as i64 - 1) {
+            for x in 1..(raster.width as i64 - 1) {
+                interior.push((x, y));
+            }
+        }
+        raster.commit_flood_pixels(&interior);
+        raster.compute_out_of_bound(0);
+
+        let mut contours = vec![Contour {
+            lwg: LineWithGravity::new(ls),
+            elevation_height: None,
+        }];
+        let mut point_definers = Vec::new();
+        let mut grown = vec![false];
+        let mut pending = std::collections::VecDeque::new();
+        let config = Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 3.0,
+            rasterization_px_size: 1.0,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 4,
+            slope_lines_contours_search_radius: 3.0,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            out_of_bound_extra_dilation: 0,
+            growing_oob_seeking_max_steps: 10,
+            growing_window_size_px_contours: 6,
+            growing_window_size_px_attractions: 6,
+            growing_step_length: 1.0,
+            growing_previous_distance_direction_weight: 1.0,
+            growing_out_of_bound_direction_weight: 1.0,
+            growing_density_direction_weight: 1.0,
+            growing_other_contours_direction_weight: -1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
+        };
+        let outcome = grow_one_step(
+            FlyingEnd {
+                contour_idx: 0,
+                is_start: false,
+            },
+            &mut pending,
+            &mut contours,
+            &mut point_definers,
+            &mut grown,
+            &mut raster,
+            &config,
+            GrowingPhase::SeekingOutOfBound,
+            &mut Vec::new(),
+        );
+        assert!(matches!(outcome, GrowStepOutcome::StillFlying(_)));
+        let next = *contours[0].lwg.ls.0.last().unwrap();
+        let (px, py) = raster.to_px(next);
+        assert_eq!(
+            raster.get(px, py),
+            TEMPORARY_CONTOUR,
+            "the just-grown segment's own new end should already read back as TEMPORARY_CONTOUR"
+        );
+    }
+
+    #[test]
+    fn grow_one_step_records_the_four_push_pull_contributions_separately() {
+        // Same east-heading setup as
+        // `growing_step_is_deflected_by_another_flying_ends_temporary_tail`,
+        // run twice, with and without one other Flying End's own temporary
+        // tail nearby (repulsion, above and ahead of the straight path) --
+        // isolates that one extra hit's own effect on `other_contours`
+        // (it must not leak into any other term), and, unlike that other
+        // test, checks the recorded breakdown itself rather than just the
+        // resulting node.
+        fn forces_for(mark_temporary_pixel: bool) -> GrowingStepForces {
+            let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
+            let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
+            raster.write_contour(0, &ls);
+            let mut interior = Vec::new();
+            for y in 1..(raster.height as i64 - 1) {
+                for x in 1..(raster.width as i64 - 1) {
+                    interior.push((x, y));
+                }
+            }
+            raster.commit_flood_pixels(&interior);
+            raster.compute_out_of_bound(0);
+            if mark_temporary_pixel {
+                // Some other Flying End's own last grow step, landing just
+                // ahead and one pixel above this one's straight-line path.
+                raster.mark_temporary_step(c(19.5, 51.5), c(20.0, 51.9));
+            }
+
+            let mut contours = vec![Contour {
+                lwg: LineWithGravity::new(ls),
+                elevation_height: None,
+            }];
+            let mut point_definers = Vec::new();
+            let mut grown = vec![false];
+            let mut pending = std::collections::VecDeque::new();
+            let config = Config {
+                bezier_linearization_step: 0.1,
+                contours_step: 3.0,
+                rasterization_px_size: 1.0,
+                heavy_object_width: 1.0,
+                heavy_object_growing: 0.2,
+                circumference_fitting_points_number: 4,
+                slope_lines_contours_search_radius: 3.0,
+                rain_drop_step: 0.25,
+                sources_per_contour_segment: 3,
+                rain_drop_starting_voting_hysteresis: 3,
+                undefined_gravity_vote_threshold: 0.8,
+                out_of_bound_extra_dilation: 0,
+                growing_oob_seeking_max_steps: 10,
+                growing_window_size_px_contours: 6,
+                growing_window_size_px_attractions: 6,
+                growing_step_length: 1.0,
+                growing_previous_distance_direction_weight: 2.0,
+                growing_out_of_bound_direction_weight: 1.0,
+                growing_density_direction_weight: 1.0,
+                growing_other_contours_direction_weight: -3.0,
+                growing_visualization_push_pull_vectors_scale: 1.0,
+            };
+            let mut push_pull_vectors = Vec::new();
+            let outcome = grow_one_step(
+                FlyingEnd {
+                    contour_idx: 0,
+                    is_start: false,
+                },
+                &mut pending,
+                &mut contours,
+                &mut point_definers,
+                &mut grown,
+                &mut raster,
+                &config,
+                GrowingPhase::SeekingOutOfBound,
+                &mut push_pull_vectors,
+            );
+            assert!(matches!(outcome, GrowStepOutcome::StillFlying(_)));
+            assert_eq!(
+                push_pull_vectors.len(),
+                1,
+                "exactly one case-(c) step was taken"
+            );
+            push_pull_vectors[0]
+        }
+
+        let without_temp = forces_for(false);
+        let with_temp = forces_for(true);
+
+        assert_eq!(without_temp.flying_end, c(16.5, 50.5));
+        assert_eq!(
+            without_temp.previous_direction,
+            (2.0, 0.0),
+            "heading due east, weighted by growing_previous_distance_direction_weight"
+        );
+        assert_eq!(
+            without_temp.out_of_bound,
+            (0.0, 0.0),
+            "no out-of-bound pixel anywhere in this window"
+        );
+        assert_eq!(
+            without_temp.density,
+            (0.0, 0.0),
+            "no high-density pixel anywhere in this window"
+        );
+        assert_ne!(
+            without_temp.other_contours,
+            (0.0, 0.0),
+            "the growing contour's own trailing pixels, directly behind the Flying End, \
+             must already contribute a (forward-pushing) repulsion term on their own"
+        );
+
+        // Adding the one extra temporary pixel must only move
+        // `other_contours` -- the other three terms have nothing to do with
+        // it and must come out exactly the same.
+        assert_eq!(
+            with_temp.previous_direction,
+            without_temp.previous_direction
+        );
+        assert_eq!(with_temp.out_of_bound, without_temp.out_of_bound);
+        assert_eq!(with_temp.density, without_temp.density);
+        assert!(
+            with_temp.other_contours.1 < without_temp.other_contours.1 - 0.05,
+            "a temporary pixel sitting above the straight path must push the y component \
+             further negative than the contour's own (symmetric, y=0) trailing pixels alone \
+             do: without={:?} with={:?}",
+            without_temp.other_contours,
+            with_temp.other_contours
+        );
+
+        assert_eq!(
+            with_temp.total(),
+            (
+                with_temp.previous_direction.0
+                    + with_temp.out_of_bound.0
+                    + with_temp.density.0
+                    + with_temp.other_contours.0,
+                with_temp.previous_direction.1
+                    + with_temp.out_of_bound.1
+                    + with_temp.density.1
+                    + with_temp.other_contours.1
+            )
+        );
+    }
+
+    #[test]
+    fn growing_window_hits_excludes_the_center_pixel_and_its_8_neighbors_from_contour_repulsion() {
+        // Directly on `growing_window_hits`, not through `grow_one_step`:
+        // three TEMPORARY_CONTOUR pixels at Chebyshev distance 0 (the
+        // center itself), 1 (an immediate neighbor), and 2 from
+        // `center_px` -- only the one at distance 2 should come back, even
+        // with a contour window generous enough (`half_contours = 5`) to
+        // reach all three.
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 20, 20);
+        let center = raster.pixel_center(10, 10);
+        let neighbor = raster.pixel_center(11, 10);
+        let farther = raster.pixel_center(12, 10);
+        raster.mark_temporary_step(center, center);
+        raster.mark_temporary_step(neighbor, neighbor);
+        raster.mark_temporary_step(farther, farther);
+
+        let hits = growing_window_hits(&raster, (10, 10), 5, 0);
+        let contour_hits: Vec<Coord<f64>> = hits
+            .iter()
+            .filter(|(kind, _)| matches!(kind, WindowPixelKind::Contour))
+            .map(|(_, center)| *center)
+            .collect();
+
+        assert_eq!(
+            contour_hits,
+            vec![farther],
+            "only the pixel at Chebyshev distance 2 should count -- the center pixel and its \
+             8 neighbors must be excluded from contour repulsion entirely: {contour_hits:?}"
+        );
+    }
+
+    #[test]
+    fn growing_window_size_px_contours_controls_how_far_the_repulsion_window_reaches() {
+        // Same east-heading fixture again, this time with the one extra
+        // temporary pixel placed 7m straight ahead (well past
+        // contours_step's own 3m) -- a `growing_window_size_px_contours` of
+        // 4 (half = 2px at this raster's 1m pixels) must miss it entirely,
+        // while a wider one of 20 (half = 10px) must not, even though
+        // `contours_step`, `rasterization_px_size`, and
+        // `growing_window_size_px_attractions` are all unchanged between the
+        // two: only the contour-repulsion window is under test here.
+        fn other_contours_for(window_px_contours: u64, mark_far_pixel: bool) -> (f64, f64) {
+            let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
+            let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
+            raster.write_contour(0, &ls);
+            let mut interior = Vec::new();
+            for y in 1..(raster.height as i64 - 1) {
+                for x in 1..(raster.width as i64 - 1) {
+                    interior.push((x, y));
+                }
+            }
+            raster.commit_flood_pixels(&interior);
+            raster.compute_out_of_bound(0);
+            if mark_far_pixel {
+                // 7m straight ahead of the Flying End at (16.5, 50.5).
+                raster.mark_temporary_step(c(23.0, 50.5), c(23.5, 50.5));
+            }
+
+            let mut contours = vec![Contour {
+                lwg: LineWithGravity::new(ls),
+                elevation_height: None,
+            }];
+            let mut point_definers = Vec::new();
+            let mut grown = vec![false];
+            let mut pending = std::collections::VecDeque::new();
+            let config = Config {
+                bezier_linearization_step: 0.1,
+                contours_step: 3.0,
+                rasterization_px_size: 1.0,
+                heavy_object_width: 1.0,
+                heavy_object_growing: 0.2,
+                circumference_fitting_points_number: 4,
+                slope_lines_contours_search_radius: 3.0,
+                rain_drop_step: 0.25,
+                sources_per_contour_segment: 3,
+                rain_drop_starting_voting_hysteresis: 3,
+                undefined_gravity_vote_threshold: 0.8,
+                out_of_bound_extra_dilation: 0,
+                growing_oob_seeking_max_steps: 10,
+                growing_window_size_px_contours: window_px_contours,
+                growing_window_size_px_attractions: 4,
+                growing_step_length: 1.0,
+                growing_previous_distance_direction_weight: 2.0,
+                growing_out_of_bound_direction_weight: 1.0,
+                growing_density_direction_weight: 1.0,
+                growing_other_contours_direction_weight: -3.0,
+                growing_visualization_push_pull_vectors_scale: 1.0,
+            };
+            let mut push_pull_vectors = Vec::new();
+            let outcome = grow_one_step(
+                FlyingEnd {
+                    contour_idx: 0,
+                    is_start: false,
+                },
+                &mut pending,
+                &mut contours,
+                &mut point_definers,
+                &mut grown,
+                &mut raster,
+                &config,
+                GrowingPhase::SeekingOutOfBound,
+                &mut push_pull_vectors,
+            );
+            assert!(matches!(outcome, GrowStepOutcome::StillFlying(_)));
+            push_pull_vectors[0].other_contours
+        }
+
+        // At each window size, compare with vs without the far pixel, so
+        // widening the window is the only thing that changes between the
+        // two comparisons -- comparing across window sizes directly would
+        // also mix in how much of the contour's own (always-visible)
+        // trailing pixels each window happens to see.
+        assert_eq!(
+            other_contours_for(4, true),
+            other_contours_for(4, false),
+            "a pixel 7m away must be invisible to a growing_window_size_px_contours of 4 \
+             (half = 2px)"
+        );
+        assert_ne!(
+            other_contours_for(20, true),
+            other_contours_for(20, false),
+            "the same pixel must be seen once growing_window_size_px_contours is widened to 20 \
+             (half = 10px)"
+        );
+    }
+
+    #[test]
+    fn growing_window_size_px_attractions_controls_how_far_the_matching_window_reaches() {
+        // Two Flying Ends (each its own contour) 7m apart -- far past
+        // contours_step's own 3m -- during the Matching phase, where case
+        // (a) checks for another pending Flying End inside the attraction
+        // window. A `growing_window_size_px_attractions` of 4 (half = 2px)
+        // must not match them; one of 20 (half = 10px) must, even with
+        // `growing_window_size_px_contours` held fixed throughout.
+        fn resolves_by_matching(window_px_attractions: u64) -> bool {
+            let ls_a = LineString::new(vec![c(0.5, 50.5), c(6.5, 50.5)]);
+            let ls_b = LineString::new(vec![c(20.5, 50.5), c(13.5, 50.5)]);
+            let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
+            raster.write_contour(0, &ls_a);
+            raster.write_contour(1, &ls_b);
+            let mut interior = Vec::new();
+            for y in 1..(raster.height as i64 - 1) {
+                for x in 1..(raster.width as i64 - 1) {
+                    interior.push((x, y));
+                }
+            }
+            raster.commit_flood_pixels(&interior);
+            raster.compute_out_of_bound(0);
+
+            let mut contours = vec![
+                Contour {
+                    lwg: LineWithGravity::new(ls_a),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_b),
+                    elevation_height: None,
+                },
+            ];
+            let mut point_definers = Vec::new();
+            let mut grown = vec![false, false];
+            let end_a = FlyingEnd {
+                contour_idx: 0,
+                is_start: false,
+            };
+            let end_b = FlyingEnd {
+                contour_idx: 1,
+                is_start: false,
+            };
+            let mut pending = std::collections::VecDeque::from([end_b]);
+            let config = Config {
+                bezier_linearization_step: 0.1,
+                contours_step: 3.0,
+                rasterization_px_size: 1.0,
+                heavy_object_width: 1.0,
+                heavy_object_growing: 0.2,
+                circumference_fitting_points_number: 4,
+                slope_lines_contours_search_radius: 3.0,
+                rain_drop_step: 0.25,
+                sources_per_contour_segment: 3,
+                rain_drop_starting_voting_hysteresis: 3,
+                undefined_gravity_vote_threshold: 0.8,
+                out_of_bound_extra_dilation: 0,
+                growing_oob_seeking_max_steps: 0,
+                growing_window_size_px_contours: 4,
+                growing_window_size_px_attractions: window_px_attractions,
+                growing_step_length: 1.0,
+                growing_previous_distance_direction_weight: 1.0,
+                growing_out_of_bound_direction_weight: 1.0,
+                growing_density_direction_weight: 1.0,
+                growing_other_contours_direction_weight: -1.0,
+                growing_visualization_push_pull_vectors_scale: 1.0,
+            };
+            let mut push_pull_vectors = Vec::new();
+            let outcome = grow_one_step(
+                end_a,
+                &mut pending,
+                &mut contours,
+                &mut point_definers,
+                &mut grown,
+                &mut raster,
+                &config,
+                GrowingPhase::MatchingEnds,
+                &mut push_pull_vectors,
+            );
+            matches!(outcome, GrowStepOutcome::Resolved)
+        }
+
+        assert!(
+            !resolves_by_matching(4),
+            "two Flying Ends 7m apart must not match through a growing_window_size_px_attractions \
+             of 4 (half = 2px)"
+        );
+        assert!(
+            resolves_by_matching(20),
+            "the same two Flying Ends must match once growing_window_size_px_attractions is \
+             widened to 20 (half = 10px)"
+        );
+    }
+
+    #[test]
+    fn growing_step_length_scales_the_case_c_step_distance() {
+        // Straight, empty stretch (no out-of-bound/high-density/other-contour
+        // pixel anywhere in the window) -- the Flying End just continues
+        // along `previous_direction`, `growing_step_length * contours_step`
+        // at a time.
+        fn step_distance(growing_step_length: f64) -> f64 {
+            let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
+            let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
+            raster.write_contour(0, &ls);
+            let mut interior = Vec::new();
+            for y in 1..(raster.height as i64 - 1) {
+                for x in 1..(raster.width as i64 - 1) {
+                    interior.push((x, y));
+                }
+            }
+            raster.commit_flood_pixels(&interior);
+            raster.compute_out_of_bound(0);
+
+            let mut contours = vec![Contour {
+                lwg: LineWithGravity::new(ls),
+                elevation_height: None,
+            }];
+            let mut point_definers = Vec::new();
+            let mut grown = vec![false];
+            let mut pending = std::collections::VecDeque::new();
+            let config = Config {
+                bezier_linearization_step: 0.1,
+                contours_step: 3.0,
+                rasterization_px_size: 1.0,
+                heavy_object_width: 1.0,
+                heavy_object_growing: 0.2,
+                circumference_fitting_points_number: 4,
+                slope_lines_contours_search_radius: 3.0,
+                rain_drop_step: 0.25,
+                sources_per_contour_segment: 3,
+                rain_drop_starting_voting_hysteresis: 3,
+                undefined_gravity_vote_threshold: 0.8,
+                out_of_bound_extra_dilation: 0,
+                growing_oob_seeking_max_steps: 10,
+                growing_window_size_px_contours: 1,
+                growing_window_size_px_attractions: 1,
+                growing_step_length,
+                growing_previous_distance_direction_weight: 1.0,
+                growing_out_of_bound_direction_weight: 1.0,
+                growing_density_direction_weight: 1.0,
+                growing_other_contours_direction_weight: -1.0,
+                growing_visualization_push_pull_vectors_scale: 1.0,
+            };
+            let mut push_pull_vectors = Vec::new();
+            let outcome = grow_one_step(
+                FlyingEnd {
+                    contour_idx: 0,
+                    is_start: false,
+                },
+                &mut pending,
+                &mut contours,
+                &mut point_definers,
+                &mut grown,
+                &mut raster,
+                &config,
+                GrowingPhase::SeekingOutOfBound,
+                &mut push_pull_vectors,
+            );
+            let next = match outcome {
+                GrowStepOutcome::StillFlying(_) => *contours[0].lwg.ls.0.last().unwrap(),
+                GrowStepOutcome::Resolved => panic!("expected it to still be flying"),
+            };
+            (next.x - 16.5).hypot(next.y - 50.5)
+        }
+
+        assert!(
+            (step_distance(1.0) - 3.0).abs() < 1e-9,
+            "growing_step_length of 1.0 must move the full contours_step"
+        );
+        assert!(
+            (step_distance(0.5) - 1.5).abs() < 1e-9,
+            "growing_step_length of 0.5 must move half of contours_step"
+        );
+    }
+
+    #[test]
+    fn growing_step_length_scales_the_case_b_snap_distance_too() {
+        // An out-of-bound border pixel sitting exactly 3m ahead of the
+        // Flying End, with contours_step = 4.0: closer than
+        // growing_step_length(1.0) * contours_step = 4.0, so case (b) snaps
+        // onto it directly, but *not* closer than
+        // growing_step_length(0.5) * contours_step = 2.0, so with the
+        // smaller step length it must fall through to case (c) instead and
+        // still be flying afterward -- landing at (18.5, 50.5) (a pixel
+        // *center*, comfortably short of the border column, rather than
+        // exactly on a pixel edge as a step of 1.5 from x = 16.5 would,
+        // which is why 4.0/0.5 rather than the more obvious 3.0/0.5 is used
+        // here).
+        fn outcome_for(growing_step_length: f64) -> GrowStepOutcome {
+            let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
+            // Right border at pixel column 19 (width 20): its own pixel
+            // center, (19.5, 50.5), sits exactly 3m from the Flying End at
+            // (16.5, 50.5).
+            let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 20, 60);
+            raster.write_contour(0, &ls);
+            let mut interior = Vec::new();
+            for y in 1..(raster.height as i64 - 1) {
+                for x in 1..(raster.width as i64 - 1) {
+                    interior.push((x, y));
+                }
+            }
+            raster.commit_flood_pixels(&interior);
+            raster.compute_out_of_bound(0);
+
+            let mut contours = vec![Contour {
+                lwg: LineWithGravity::new(ls),
+                elevation_height: None,
+            }];
+            let mut point_definers = Vec::new();
+            let mut grown = vec![false];
+            let mut pending = std::collections::VecDeque::new();
+            let config = Config {
+                bezier_linearization_step: 0.1,
+                contours_step: 4.0,
+                rasterization_px_size: 1.0,
+                heavy_object_width: 1.0,
+                heavy_object_growing: 0.2,
+                circumference_fitting_points_number: 4,
+                slope_lines_contours_search_radius: 3.0,
+                rain_drop_step: 0.25,
+                sources_per_contour_segment: 3,
+                rain_drop_starting_voting_hysteresis: 3,
+                undefined_gravity_vote_threshold: 0.8,
+                out_of_bound_extra_dilation: 0,
+                growing_oob_seeking_max_steps: 10,
+                growing_window_size_px_contours: 6,
+                growing_window_size_px_attractions: 8,
+                growing_step_length,
+                growing_previous_distance_direction_weight: 1.0,
+                growing_out_of_bound_direction_weight: 1.0,
+                growing_density_direction_weight: 1.0,
+                growing_other_contours_direction_weight: -1.0,
+                growing_visualization_push_pull_vectors_scale: 1.0,
+            };
+            let mut push_pull_vectors = Vec::new();
+            grow_one_step(
+                FlyingEnd {
+                    contour_idx: 0,
+                    is_start: false,
+                },
+                &mut pending,
+                &mut contours,
+                &mut point_definers,
+                &mut grown,
+                &mut raster,
+                &config,
+                GrowingPhase::SeekingOutOfBound,
+                &mut push_pull_vectors,
+            )
+        }
+
+        assert!(
+            matches!(outcome_for(1.0), GrowStepOutcome::Resolved),
+            "3m is closer than 1.0 * 4.0 = 4.0m: case (b) should snap onto the border directly"
+        );
+        assert!(
+            matches!(outcome_for(0.5), GrowStepOutcome::StillFlying(_)),
+            "3m is not closer than 0.5 * 4.0 = 2.0m: case (b) should not trigger, leaving it to \
+             case (c) instead"
+        );
+    }
+
+    #[test]
+    fn growing_raster_matches_the_final_ls_even_after_several_steps_then_closing() {
+        // A tilted "C": both ends start well outside each other's growing
+        // window, angled slightly inward, so each takes several case-(c)
+        // steps (moving in a straight line -- nothing else is on this map
+        // to react to) before finally entering the other's window and
+        // closing. Closing re-samples the *whole* ring against a
+        // perimeter-adjusted step (Appendix 1), which does not, in general,
+        // land back on the exact intermediate points each step produced --
+        // so if those intermediate steps had each written themselves into
+        // the Contour Raster as they were grown, stale pixels from before
+        // that final shift would be left behind. They must not be: nothing
+        // gets written until each end's own final shape is known.
+        let ls = LineString::new(vec![
+            c(12.0, 10.0),
+            c(10.0, 20.0),
+            c(20.0, 20.0),
+            c(18.0, 10.0),
+        ]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls);
+        raster.compute_out_of_bound(0);
+        let contour = Contour {
+            lwg: LineWithGravity::new(ls),
+            elevation_height: None,
+        };
+
+        let mut result = Step1Result {
+            contours: vec![contour],
+            raw_polylines: vec![Vec::new()],
+            raster,
+            point_definers: Vec::new(),
+            line_definers: Vec::new(),
+            slope_lines: Vec::new(),
+            slope_lines_contours_search_radius: 3.0,
+            heavy_object_polygons: Vec::new(),
+            pre_growing_flying_ends: Vec::new(),
+            grown_by_growing_process: vec![false],
+            growing_push_pull_vectors: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let config = Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 5.0,
+            rasterization_px_size: 1.0,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 4,
+            slope_lines_contours_search_radius: 3.0,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            out_of_bound_extra_dilation: 0,
+            growing_oob_seeking_max_steps: 0,
+            growing_window_size_px_contours: 10,
+            growing_window_size_px_attractions: 10,
+            growing_step_length: 1.0,
+            growing_previous_distance_direction_weight: 1.0,
+            growing_out_of_bound_direction_weight: 1.0,
+            growing_density_direction_weight: 1.0,
+            growing_other_contours_direction_weight: -1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
+        };
+
+        let warnings = run_growing(&mut result, &config);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(result.contours.len(), 1);
+
+        // Every pixel cleanly marked as contour 0 in the grown raster (not
+        // conflicted into high density by the original body, out-of-bound,
+        // or anything else already there) must also be touched by a fresh
+        // draw of the *final* `ls` alone -- otherwise it is a stale pixel
+        // left over from an intermediate, pre-resample position that was
+        // written and then abandoned once resampling moved on.
+        let contour_0 = crate::contour_raster::CONTOUR_0_MATRIX_VALUE;
+        let mut expected = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        expected.write_contour(0, &result.contours[0].lwg.ls);
+        let mut any_contour_pixel = false;
+        for y in 0..40i64 {
+            for x in 0..40i64 {
+                if result.raster.get(x, y) == contour_0 {
+                    any_contour_pixel = true;
+                    assert_eq!(
+                        expected.get(x, y),
+                        contour_0,
+                        "pixel ({x},{y}) is marked contour 0 in the grown raster but isn't \
+                         on the final ls's own path -- a stale pixel from an intermediate, \
+                         pre-resample position"
+                    );
+                }
+            }
+        }
+        assert!(any_contour_pixel, "expected at least one contour pixel");
     }
 }

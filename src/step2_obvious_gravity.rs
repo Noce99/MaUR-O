@@ -8,7 +8,6 @@ use geo::algorithm::Contains;
 use geo::Coord;
 
 use crate::contour_geometry::{local_tangent, nearest_index};
-use crate::contour_raster::ContourRaster;
 use crate::gravity_model::{
     contour_polygon, encloses_another_contour, gravity_vector_for_side, lwg_gravity_side,
     set_or_check_gravity, vector_on_side, Contour, LineGravityDefiners, PointGravityDefiners,
@@ -38,12 +37,16 @@ pub struct Step2Result {
 /// disagree about the same contour, per the doc's "crash with an error
 /// explaining the problem"); then assumes every closed contour enclosing
 /// nothing else is a hill, with gravity pointing away from its own enclosed
-/// area.
+/// area. Takes no `ContourRaster` -- unlike Step 1's own use of one to find
+/// this evidence in the first place, applying it here only ever needs each
+/// definer's own already-recorded position and index, not a fresh raster
+/// scan (a `LineGravityDefiners`' own `touched_contours` is captured before
+/// its polygon's area is stamped high density, precisely so Step 2 never
+/// needs to read the raster again for it).
 pub fn resolve(
     contours: &mut [Contour],
     point_definers: &[PointGravityDefiners],
     line_definers: &[LineGravityDefiners],
-    raster: &ContourRaster,
 ) -> Result<Step2Result, String> {
     let mut resolved_by_points = 0u64;
     let mut resolved_by_lines = 0u64;
@@ -80,16 +83,15 @@ pub fn resolve(
         let Some(side) = lwg_gravity_side(&definer.lwg) else {
             continue;
         };
-        for (px, py) in raster.pixels_in_polygon(&definer.poly) {
-            let val = raster.get(px, py);
-            if val == 0 {
-                continue;
-            }
-            let contour_idx = (val - 1) as usize;
-            let Some(contour) = contours.get_mut(contour_idx) else {
+        // Read from `touched_contours`, captured back in Step 1 before this
+        // Jump's own polygon was stamped high density -- re-scanning
+        // `definer.poly` against the raster here, the way this used to
+        // work, would find nothing: every one of those pixels shows high
+        // density now, not the contour that (still) actually runs under it.
+        for &(contour_idx, center) in &definer.touched_contours {
+            let Some(contour) = contours.get_mut(contour_idx as usize) else {
                 continue;
             };
-            let center = raster.pixel_center(px, py);
             // The gravity reading itself must be perpendicular to the Jump's
             // own line *at this point*, not the fixed vector its lwg stores
             // relative to its own ls[0] -> ls[1] -- a curved Jump's true
@@ -195,18 +197,9 @@ mod tests {
         }
     }
 
-    fn raster_with(contours: &[Contour]) -> ContourRaster {
-        let mut r = ContourRaster::new(c(-5.0, -5.0), 1.0, 40, 40);
-        for (i, contour) in contours.iter().enumerate() {
-            r.write_contour(i as u64, &contour.lwg.ls).unwrap();
-        }
-        r
-    }
-
     #[test]
     fn agreeing_point_definers_set_gravity_once() {
         let mut contours = vec![straight_contour()];
-        let raster = raster_with(&contours);
         let definers = vec![
             PointGravityDefiners {
                 x: 10.0,
@@ -223,7 +216,7 @@ mod tests {
                 gravity_dy: Some(-1.0),
             },
         ];
-        let result = resolve(&mut contours, &definers, &[], &raster).unwrap();
+        let result = resolve(&mut contours, &definers, &[]).unwrap();
         assert_eq!(result.resolved_by_points, 1);
         assert!(result.still_undefined.is_empty());
     }
@@ -231,7 +224,6 @@ mod tests {
     #[test]
     fn disagreeing_point_definers_error() {
         let mut contours = vec![straight_contour()];
-        let raster = raster_with(&contours);
         let definers = vec![
             PointGravityDefiners {
                 x: 10.0,
@@ -248,13 +240,12 @@ mod tests {
                 gravity_dy: Some(1.0),
             },
         ];
-        assert!(resolve(&mut contours, &definers, &[], &raster).is_err());
+        assert!(resolve(&mut contours, &definers, &[]).is_err());
     }
 
     #[test]
     fn a_line_definer_sets_gravity_on_the_contours_its_polygon_overlaps() {
         let mut contours = vec![straight_contour()];
-        let raster = raster_with(&contours);
         // A diagonal Jump crossing the horizontal contour near x=10 -- not
         // exactly perpendicular to it (unlike a purely vertical Jump would
         // be), so its own perpendicular gravity reading is a genuine,
@@ -277,9 +268,17 @@ mod tests {
             ]),
             vec![],
         );
-        let definers = vec![LineGravityDefiners { lwg, poly }];
+        // Where the Jump actually crosses the contour (x=8+ (12-8)*5/10=10,
+        // at the contour's own y=5) -- what Step 1 would have captured into
+        // `touched_contours` before stamping this polygon's area high
+        // density.
+        let definers = vec![LineGravityDefiners {
+            lwg,
+            poly,
+            touched_contours: vec![(0, c(10.0, 5.0))],
+        }];
 
-        let result = resolve(&mut contours, &[], &definers, &raster).unwrap();
+        let result = resolve(&mut contours, &[], &definers).unwrap();
         assert_eq!(result.resolved_by_lines, 1);
         assert!(contours[0].lwg.gravity_dx.is_some());
     }
@@ -304,8 +303,7 @@ mod tests {
     #[test]
     fn a_closed_contour_enclosing_nothing_resolves_by_the_hill_heuristic() {
         let mut contours = vec![contour(square_ls(0.0, 0.0, 10.0))];
-        let raster = raster_with(&contours);
-        let result = resolve(&mut contours, &[], &[], &raster).unwrap();
+        let result = resolve(&mut contours, &[], &[]).unwrap();
         assert_eq!(result.resolved_by_hill, 1);
         assert!(result.still_undefined.is_empty());
         assert!(contours[0].lwg.gravity_dx.is_some());
@@ -317,8 +315,7 @@ mod tests {
             contour(square_ls(0.0, 0.0, 10.0)),
             contour(square_ls(2.0, 2.0, 2.0)),
         ];
-        let raster = raster_with(&contours);
-        let result = resolve(&mut contours, &[], &[], &raster).unwrap();
+        let result = resolve(&mut contours, &[], &[]).unwrap();
         // Only the inner square (encloses nothing) resolves via the hill
         // heuristic; the outer one, enclosing it, is left undefined for
         // Step 3's rain-drop production.

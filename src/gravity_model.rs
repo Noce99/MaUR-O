@@ -85,6 +85,13 @@ pub struct LineGravityDefiners {
     pub lwg: LineWithGravity,
     /// The buffered polygon (Appendix 2) used to find intersected contours.
     pub poly: Polygon<f64>,
+    /// Every contour the polygon covered at least one pixel of, and that
+    /// contour's own matched-pixels' centroid within the polygon -- captured
+    /// *before* the polygon's own area is stamped high density (which would
+    /// otherwise erase the very evidence of which contours were under it).
+    /// One entry per contour, not one per pixel, the same reasoning as
+    /// `PointGravityDefiners`' own Heavy Object readings.
+    pub touched_contours: Vec<(u64, Coord<f64>)>,
 }
 
 /// Which side of the tangent `tangent_from -> tangent_to` the vector
