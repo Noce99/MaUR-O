@@ -1082,21 +1082,31 @@ fn growing_forces(
             if d < 1e-12 || d > config.attraction_force_window {
                 continue;
             }
-            // Linear falloff from `flying_end_force` at zero distance to
+            // Cubic falloff from `flying_end_force` at zero distance to
             // zero at `attraction_force_window` -- unlike `out_of_bound_force`/
             // `density_region_force`, which stay full-strength across their
-            // own window. Without this, every pending Flying End within
-            // range pulled with the same full, undamped magnitude regardless
-            // of distance, so in a crowded cluster (several ends converging
-            // at once) the *nearest* end's own pull was easily swamped by
-            // the combined pull of several more distant ones, and that
-            // combined pull's own direction could swing sharply from one
-            // integration step to the next as other ends resolved out of
+            // own window. Without any falloff at all, every pending Flying
+            // End within range pulled with the same full, undamped magnitude
+            // regardless of distance, so in a crowded cluster (several ends
+            // converging at once) the *nearest* end's own pull was easily
+            // swamped by the combined pull of several more distant ones, and
+            // that combined pull's own direction could swing sharply from
+            // one integration step to the next as other ends resolved out of
             // range -- producing a sharp, physically implausible kink right
             // where two contours finally merge (see `merge_contours`), which
             // then reads as a genuine gravity conflict in Step 2 even though
             // the two readings around it agree about which side is downhill.
-            let falloff = 1.0 - d / config.attraction_force_window;
+            // A *linear* falloff (`1 - d / window`) fixed that, but spends
+            // most of the window at a small fraction of `flying_end_force`,
+            // so two ends starting out near the far edge of each other's
+            // window crawl for many integration steps before the pull ever
+            // becomes meaningful. Cubing the normalized distance instead
+            // keeps the pull near full strength across most of the window
+            // and only rolls it off sharply right near the edge -- still
+            // exactly `0` at `d = attraction_force_window`, so the boundary
+            // stays continuous and the kink above doesn't come back.
+            let t = d / config.attraction_force_window;
+            let falloff = 1.0 - t * t * t;
             let mag = config.flying_end_force * falloff;
             forces.flying_end_force.0 += mag * bx / d;
             forces.flying_end_force.1 += mag * by / d;
@@ -2113,14 +2123,20 @@ mod tests {
     fn growing_merge_keeps_the_two_contours_raw_polylines_separate() {
         // Two short, separate open contours whose near ends (A's end, B's
         // start) are only 2m apart -- well inside `flying_end_merge_distance`
-        // -- while each contour's own two ends stay 10m apart, safely
-        // outside it, so this merges A with B rather than either closing on
-        // itself. A's own far end is already out of bound at x=0 (never a
-        // Flying End to begin with); B's own far end grows on its own,
-        // repelled forward by its own already-drawn trailing body (contour
-        // force), until it resolves at the raster's border.
+        // -- while each contour's own two ends stay safely outside it, so
+        // this merges A with B rather than either closing on itself. Both
+        // far ends already sit on the raster's own border (x=0 for A, x=39
+        // for the 40-wide raster's B) and so are already out of bound before
+        // growing even starts -- neither is ever a Flying End to begin with,
+        // which sidesteps needing `growing_oob_seeking_max_steps` (0 here,
+        // disabled outright) to grow either of them there itself: with
+        // Seeking off, `MatchingEnds` alone has nothing to move a lone,
+        // unmatched Flying End with (contour/out-of-bound force are
+        // Seeking-only, and there is no other pending end nearby for
+        // `flying_end_force` to react to), so a far end that still needed to
+        // grow to its own border would never resolve.
         let ls_a = LineString::new(vec![c(0.0, 10.0), c(10.0, 10.0)]);
-        let ls_b = LineString::new(vec![c(12.0, 10.0), c(22.0, 10.0)]);
+        let ls_b = LineString::new(vec![c(12.0, 10.0), c(39.0, 10.0)]);
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
         raster.write_contour(0, &ls_a);
         raster.write_contour(1, &ls_b);
@@ -2142,7 +2158,7 @@ mod tests {
                 is_curve_start: false,
             },
             contour_geometry::RawVertex {
-                coord: c(22.0, 10.0),
+                coord: c(39.0, 10.0),
                 is_curve_start: false,
             },
         ];
@@ -2363,9 +2379,9 @@ mod tests {
                 contour_force_window: 6.0,
                 attraction_force_window: 6.0,
                 contour_force_max_repulsion: 4.0,
-                contour_force_equilibrium: 2.0,
+                contour_force_equilibrium: 5.0,
                 contour_force_max_attraction: -0.5,
-                contour_force_second_equilibrium: 4.0,
+                contour_force_second_equilibrium: 8.0,
                 out_of_bound_force: 2.0,
                 density_region_force: 2.0,
                 flying_end_force: 2.0,
@@ -2452,9 +2468,9 @@ mod tests {
             contour_force_window: 6.0,
             attraction_force_window: 6.0,
             contour_force_max_repulsion: 4.0,
-            contour_force_equilibrium: 2.0,
+            contour_force_equilibrium: 5.0,
             contour_force_max_attraction: -0.5,
-            contour_force_second_equilibrium: 4.0,
+            contour_force_second_equilibrium: 8.0,
             out_of_bound_force: 2.0,
             density_region_force: 2.0,
             flying_end_force: 2.0,
@@ -2540,9 +2556,9 @@ mod tests {
                 contour_force_window: 6.0,
                 attraction_force_window: 6.0,
                 contour_force_max_repulsion: 4.0,
-                contour_force_equilibrium: 2.0,
+                contour_force_equilibrium: 5.0,
                 contour_force_max_attraction: -0.5,
-                contour_force_second_equilibrium: 4.0,
+                contour_force_second_equilibrium: 8.0,
                 out_of_bound_force: 2.0,
                 density_region_force: 2.0,
                 flying_end_force: 2.0,
@@ -2903,7 +2919,11 @@ mod tests {
                 &mut grown,
                 &mut raster,
                 &config,
-                GrowingPhase::SeekingOutOfBound,
+                // `density_region_force` only applies during `MatchingEnds`
+                // (see `growing_forces`) -- `SeekingOutOfBound` drops it
+                // entirely, which would leave this step with no force at
+                // all.
+                GrowingPhase::MatchingEnds,
                 &mut push_pull_vectors,
                 &mut Vec::new(),
                 &mut std::collections::HashMap::new(),
