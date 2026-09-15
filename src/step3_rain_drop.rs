@@ -556,6 +556,7 @@ mod tests {
             density_region_force: 1.0,
             flying_end_force: 1.0,
             flying_end_merge_distance: 0.5,
+            matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         }

@@ -1,7 +1,7 @@
-//! The `contours_to_raster` config file: the twenty-four parameters
+//! The `contours_to_raster` config file: the twenty-five parameters
 //! `Contours-to-Raster.md` names, read from a small hand-rolled `key =
 //! value` format (no `serde`/`toml` dependency exists anywhere else in this
-//! crate, and one file with twenty-four numbers does not need one).
+//! crate, and one file with twenty-five numbers does not need one).
 
 use std::path::Path;
 
@@ -129,6 +129,20 @@ pub struct Config {
     /// ends) or splicing two contours together (Step 1's Growing Process,
     /// Matching phase only).
     pub flying_end_merge_distance: f64,
+    /// The smallest net force magnitude, in Newtons, a Matching-phase
+    /// integration step is allowed: a nonzero net force smaller than this
+    /// (`density_region_force`/`flying_end_force` combined -- the only two
+    /// terms Matching ever sees) is scaled up to this magnitude, direction
+    /// preserved, before becoming a displacement. Without it, two Flying
+    /// Ends near the far edge of each other's `attraction_force_window`
+    /// (see `flying_end_force`'s own falloff), or forces that partly cancel
+    /// against a third nearby end, can end up crawling toward a merge over
+    /// an impractically large number of integration steps. Seeking is
+    /// unaffected -- its own `growing_oob_seeking_max_steps` budget already
+    /// bounds it, and a weak contour-pixel pull there genuinely means
+    /// little is nearby to react to, not something to force along faster.
+    /// `0.0` turns this off outright.
+    pub matching_min_force: f64,
     /// How many seconds of simulated time each Growing Process integration
     /// step advances by (Appendix 5): a Flying End's displacement each step
     /// is its net force (Newtons, used directly as meters/second -- no
@@ -171,13 +185,14 @@ const KEYS: &[&str] = &[
     "density_region_force",
     "flying_end_force",
     "flying_end_merge_distance",
+    "matching_min_force",
     "grow_time_step",
     "growing_visualization_push_pull_vectors_scale",
 ];
 
 impl Config {
     /// Parses a config file: one `key = value` per line, blank lines and
-    /// lines starting with `#` ignored. All twenty-four keys are required --
+    /// lines starting with `#` ignored. All twenty-five keys are required --
     /// a config file missing one is far more likely a mistake than an
     /// intentional partial override -- and an unknown key or an unparseable
     /// value is an error naming the offending line.
@@ -248,6 +263,7 @@ impl Config {
             density_region_force: values[&"density_region_force"],
             flying_end_force: values[&"flying_end_force"],
             flying_end_merge_distance: values[&"flying_end_merge_distance"],
+            matching_min_force: values[&"matching_min_force"],
             grow_time_step: values[&"grow_time_step"],
             growing_visualization_push_pull_vectors_scale: values
                 [&"growing_visualization_push_pull_vectors_scale"],
@@ -283,6 +299,7 @@ out_of_bound_force = 0.5
 density_region_force = 1.0
 flying_end_force = 1.0
 flying_end_merge_distance = 1.0
+matching_min_force = 0.1
 grow_time_step = 1.0
 growing_visualization_push_pull_vectors_scale = 1.0
 ";
@@ -304,6 +321,7 @@ growing_visualization_push_pull_vectors_scale = 1.0
         assert_eq!(config.density_region_force, 1.0);
         assert_eq!(config.flying_end_force, 1.0);
         assert_eq!(config.flying_end_merge_distance, 1.0);
+        assert_eq!(config.matching_min_force, 0.1);
         assert_eq!(config.grow_time_step, 1.0);
         assert_eq!(config.growing_visualization_push_pull_vectors_scale, 1.0);
     }

@@ -1423,6 +1423,30 @@ fn grow_one_step(
             is_start,
         });
     }
+    // `matching_min_force` (Matching only): a nonzero net force can still be
+    // vanishingly small -- two Flying Ends near the far edge of each other's
+    // `attraction_force_window` (see `flying_end_force`'s own falloff), or a
+    // density/flying-end pull partly cancelling against a third nearby end
+    // -- and without a floor, that crawls toward a merge over an
+    // impractically large number of integration steps. Scaling the net
+    // force up to `matching_min_force`'s own magnitude here, direction
+    // unchanged, guarantees a step always covers at least
+    // `matching_min_force * grow_time_step` meters. Seeking is left alone:
+    // its own `growing_oob_seeking_max_steps` budget already bounds how
+    // long a Flying End can spend there, and a weak contour-pixel pull
+    // genuinely means little is nearby to react to, not something to force
+    // along faster.
+    let total = if phase == GrowingPhase::MatchingEnds {
+        let mag = total.0.hypot(total.1);
+        if mag < config.matching_min_force {
+            let scale = config.matching_min_force / mag;
+            (total.0 * scale, total.1 * scale)
+        } else {
+            total
+        }
+    } else {
+        total
+    };
     let raw_next = Coord {
         x: pos.x + total.0 * config.grow_time_step,
         y: pos.y + total.1 * config.grow_time_step,
@@ -1843,6 +1867,7 @@ mod tests {
             density_region_force: 1.0,
             flying_end_force: 1.0,
             flying_end_merge_distance: 0.5,
+            matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
@@ -1975,6 +2000,7 @@ mod tests {
             density_region_force: 1.0,
             flying_end_force: 1.0,
             flying_end_merge_distance: 0.5,
+            matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
@@ -2100,6 +2126,7 @@ mod tests {
             density_region_force: 2.0,
             flying_end_force: 2.0,
             flying_end_merge_distance: 5.0,
+            matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
@@ -2210,6 +2237,7 @@ mod tests {
             density_region_force: 2.0,
             flying_end_force: 2.0,
             flying_end_merge_distance: 5.0,
+            matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
@@ -2295,6 +2323,7 @@ mod tests {
             density_region_force: 2.0,
             flying_end_force: 2.0,
             flying_end_merge_distance: 1.0,
+            matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
@@ -2386,6 +2415,7 @@ mod tests {
                 density_region_force: 2.0,
                 flying_end_force: 2.0,
                 flying_end_merge_distance: 1.0,
+                matching_min_force: 0.0,
                 grow_time_step: 1.0,
                 growing_visualization_push_pull_vectors_scale: 1.0,
             };
@@ -2475,6 +2505,7 @@ mod tests {
             density_region_force: 2.0,
             flying_end_force: 2.0,
             flying_end_merge_distance: 1.0,
+            matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
@@ -2563,6 +2594,7 @@ mod tests {
                 density_region_force: 2.0,
                 flying_end_force: 2.0,
                 flying_end_merge_distance: 1.0,
+                matching_min_force: 0.0,
                 grow_time_step: 1.0,
                 growing_visualization_push_pull_vectors_scale: 1.0,
             };
@@ -2679,6 +2711,7 @@ mod tests {
             density_region_force: 2.0,
             flying_end_force: 2.0,
             flying_end_merge_distance: 1.0,
+            matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         }
@@ -2859,6 +2892,86 @@ mod tests {
         assert!(
             resolves_by_matching(20.0),
             "the same two Flying Ends must match once flying_end_merge_distance is widened to 20m"
+        );
+    }
+
+    #[test]
+    fn matching_min_force_floors_a_vanishingly_small_flying_end_pull() {
+        // Two separate contours' own Flying Ends, 19m apart, with
+        // `attraction_force_window` at 20m: `flying_end_force`'s own cubic
+        // falloff (`1 - (d / window)^3`) is deep in its tail there (t =
+        // 19/20 = 0.95, falloff ~= 0.143), so the raw pull is barely an
+        // eighth of `flying_end_force`'s own full magnitude -- exactly the
+        // "far apart, crawling" case `matching_min_force` exists to fix. A
+        // tiny `contour_force_window` keeps each end's own trailing body
+        // out of it, so `flying_end_force` is the only term in play.
+        fn step_displacement(matching_min_force: f64) -> (f64, f64) {
+            let ls_a = LineString::new(vec![c(0.5, 50.5), c(1.5, 50.5)]);
+            let ls_b = LineString::new(vec![c(40.0, 50.5), c(20.5, 50.5)]);
+            let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
+            raster.write_contour(0, &ls_a);
+            raster.write_contour(1, &ls_b);
+
+            let mut contours = vec![
+                Contour {
+                    lwg: LineWithGravity::new(ls_a),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_b),
+                    elevation_height: None,
+                },
+            ];
+            let mut point_definers = Vec::new();
+            let mut grown = vec![false, false];
+            let end_a = FlyingEnd {
+                contour_idx: 0,
+                is_start: false,
+            };
+            let end_b = FlyingEnd {
+                contour_idx: 1,
+                is_start: false,
+            };
+            let mut pending = std::collections::VecDeque::from([end_b]);
+            let mut config = window_test_config(0.1, 20.0);
+            config.flying_end_merge_distance = 1.0;
+            config.matching_min_force = matching_min_force;
+            let mut push_pull_vectors = Vec::new();
+            let outcome = grow_one_step(
+                end_a,
+                &mut pending,
+                &mut contours,
+                &mut point_definers,
+                &mut grown,
+                &mut raster,
+                &config,
+                GrowingPhase::MatchingEnds,
+                &mut push_pull_vectors,
+                &mut Vec::new(),
+                &mut std::collections::HashMap::new(),
+                &mut Vec::new(),
+            );
+            let next = match outcome {
+                GrowStepOutcome::StillFlying(_) => *contours[0].lwg.ls.0.last().unwrap(),
+                GrowStepOutcome::Resolved => panic!("expected it to still be flying"),
+            };
+            (next.x - 1.5, next.y - 50.5)
+        }
+
+        let (unfloored_x, unfloored_y) = step_displacement(0.0);
+        assert!(unfloored_y.abs() < 1e-9, "pull is due east, no y component");
+        assert!(
+            (unfloored_x - 0.285_25).abs() < 1e-6,
+            "raw pull at d=19, window=20, flying_end_force=2.0 must be \
+             2.0 * (1 - (19/20)^3) = 0.28525m: got {unfloored_x}"
+        );
+
+        let (floored_x, floored_y) = step_displacement(1.0);
+        assert!(floored_y.abs() < 1e-9, "the floor must not change direction");
+        assert!(
+            (floored_x - 1.0).abs() < 1e-9,
+            "matching_min_force(1.0) * grow_time_step(1.0) must move exactly 1.0m \
+             east, overriding the raw, much weaker pull: got {floored_x}"
         );
     }
 
@@ -3095,6 +3208,7 @@ mod tests {
             density_region_force: 2.0,
             flying_end_force: 1.0,
             flying_end_merge_distance: 2.0,
+            matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
