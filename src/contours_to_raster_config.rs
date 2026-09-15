@@ -1,7 +1,7 @@
-//! The `contours_to_raster` config file: the twenty parameters
+//! The `contours_to_raster` config file: the twenty-four parameters
 //! `Contours-to-Raster.md` names, read from a small hand-rolled `key =
 //! value` format (no `serde`/`toml` dependency exists anywhere else in this
-//! crate, and one file with twenty numbers does not need one).
+//! crate, and one file with twenty-four numbers does not need one).
 
 use std::path::Path;
 
@@ -17,8 +17,7 @@ pub struct Config {
     /// Bezier segment into straight lines (Appendix 1).
     pub bezier_linearization_step: f64,
     /// The equally-spaced node distance every contour's final `ls` is
-    /// resampled to, in ground meters (Appendix 1) -- also the Growing
-    /// Process's own step size and window scale (Appendix 5).
+    /// resampled to, in ground meters (Appendix 1).
     pub contours_step: f64,
     /// Pixel size of the Contour Raster, in ground meters (Step 1).
     pub rasterization_px_size: f64,
@@ -64,47 +63,86 @@ pub struct Config {
     /// when what both should actually do is each reach the border on their
     /// own.
     pub growing_oob_seeking_max_steps: u64,
-    /// The Growing Process's own square scan window for contour-pixel
-    /// repulsion, in pixels (Appendix 5) -- any real contour pixel or
-    /// `TEMPORARY_CONTOUR` tail is only seen (and only repels) within
-    /// `2*half+1` pixels of the Flying End, where `half = max(1,
-    /// growing_window_size_px_contours / 2)`.
-    pub growing_window_size_px_contours: u64,
-    /// The Growing Process's own square scan window for attraction, in
-    /// pixels (Appendix 5): an out-of-bound (`1`) or high-density (`3`)
-    /// pixel, and another pending Flying End to match against (case (a)),
-    /// are only seen within `2*half+1` pixels of the Flying End, where
-    /// `half = max(1, growing_window_size_px_attractions / 2)`. Kept
-    /// separate from `growing_window_size_px_contours` so how far the
-    /// Growing Process reaches for something to move toward can be tuned
+    /// The Growing Process's own scan radius, in ground meters, for
+    /// contour-pixel force (Appendix 5): a real contour pixel or
+    /// `TEMPORARY_CONTOUR` tail only contributes its own contour force
+    /// (`contour_force_max_repulsion`/`_equilibrium`/`_max_attraction`/
+    /// `_second_equilibrium`) if its Euclidean distance from the Flying End
+    /// is within this radius -- the Flying End's own pixel and its 8
+    /// immediate neighbors are always excluded regardless, since the Flying
+    /// End always sits right on top of its own just-written body there.
+    pub contour_force_window: f64,
+    /// The Growing Process's own scan radius, in ground meters, for
+    /// out-of-bound/high-density/other-Flying-End force (Appendix 5): an
+    /// out-of-bound pixel, a high-density pixel, or another pending Flying
+    /// End only contributes its own constant force
+    /// (`out_of_bound_force`/`density_region_force`/`flying_end_force`) if
+    /// its Euclidean distance from the Flying End is within this radius.
+    /// Kept separate from `contour_force_window` so how far the Growing
+    /// Process reaches for something to move toward can be tuned
     /// independently of how far it reaches for something to repel it.
-    pub growing_window_size_px_attractions: u64,
-    /// The Growing Process's own case-(c) step length, as a fraction of
-    /// `contours_step` (Appendix 5) -- `0.5` means each case-(c) step moves
-    /// `contours_step / 2`, not the full `contours_step`.
-    pub growing_step_length: f64,
-    /// How strongly the Growing Process's next step favors continuing in
-    /// the direction the contour was already heading, relative to the pull
-    /// of nearby out-of-bound/high-density/other-contour pixels
-    /// (Appendix 5).
-    pub growing_previous_distance_direction_weight: f64,
-    /// How strongly an out-of-bound pixel attracts the Growing Process
-    /// toward it (Appendix 5). Positive.
-    pub growing_out_of_bound_direction_weight: f64,
-    /// How strongly a high-density pixel attracts the Growing Process
-    /// toward it (Appendix 5). Positive.
-    pub growing_density_direction_weight: f64,
-    /// How strongly any contour pixel repels the Growing Process away from
-    /// it (Appendix 5). Negative, unlike the other two
-    /// `growing_*_direction_weight` parameters.
-    pub growing_other_contours_direction_weight: f64,
+    pub attraction_force_window: f64,
+    /// The contour-pixel force curve's own repulsion magnitude at zero
+    /// distance, in Newtons (Appendix 5) -- `cfmr` in the doc's own
+    /// notation. Positive: a contour pixel closer than
+    /// `contour_force_equilibrium` pushes the Flying End away.
+    pub contour_force_max_repulsion: f64,
+    /// The contour-pixel force curve's own equilibrium distance, in ground
+    /// meters (Appendix 5) -- `cfe`. The distance at which a contour
+    /// pixel's own force is exactly zero: closer than this repels
+    /// (`contour_force_max_repulsion` at distance zero, fading to zero
+    /// here), farther than this attracts (up to
+    /// `contour_force_second_equilibrium`).
+    pub contour_force_equilibrium: f64,
+    /// The contour-pixel force curve's own attraction magnitude at
+    /// `contour_force_second_equilibrium` and beyond, in Newtons
+    /// (Appendix 5) -- `cfma`. Negative: a contour pixel farther than
+    /// `contour_force_equilibrium` gently pulls the Flying End back toward
+    /// it, up to this magnitude, so a Flying End doesn't drift arbitrarily
+    /// far from a contour it's meant to stay loosely leashed near.
+    pub contour_force_max_attraction: f64,
+    /// The contour-pixel force curve's own second equilibrium distance, in
+    /// ground meters (Appendix 5) -- `cfse`, always greater than
+    /// `contour_force_equilibrium`. The distance beyond which a contour
+    /// pixel's own attraction saturates at `contour_force_max_attraction`
+    /// rather than continuing to grow.
+    pub contour_force_second_equilibrium: f64,
+    /// Constant-magnitude attraction, in Newtons, contributed by every
+    /// out-of-bound pixel found within `attraction_force_window` (Appendix
+    /// 5). Positive; summed over every such pixel found, not just the
+    /// nearest one.
+    pub out_of_bound_force: f64,
+    /// Constant-magnitude attraction, in Newtons, contributed by every
+    /// high-density pixel found within `attraction_force_window` (Appendix
+    /// 5). Positive; summed over every such pixel found, not just the
+    /// nearest one.
+    pub density_region_force: f64,
+    /// Constant-magnitude attraction, in Newtons, contributed by every
+    /// other pending Flying End found within `attraction_force_window`
+    /// (Appendix 5). Positive; summed over every such end found, not just
+    /// the nearest one. Only applied during the Matching phase (Step 1's
+    /// Growing Process) -- dropped entirely during Seeking, same as
+    /// matching itself.
+    pub flying_end_force: f64,
+    /// Euclidean distance, in ground meters, below which two pending Flying
+    /// Ends merge -- either closing one contour into a ring (its own two
+    /// ends) or splicing two contours together (Step 1's Growing Process,
+    /// Matching phase only).
+    pub flying_end_merge_distance: f64,
+    /// How many seconds of simulated time each Growing Process integration
+    /// step advances by (Appendix 5): a Flying End's displacement each step
+    /// is its net force (Newtons, used directly as meters/second -- no
+    /// mass, no inertia) times this. `1.0` unless there's a specific reason
+    /// to change it.
+    pub grow_time_step: f64,
     /// Scales the four push/pull vectors `--create_svg` draws in
-    /// `01_<map_name>_step1_growing.svg` for every case-(c) growing step
-    /// (Appendix 5) -- one per `growing_*_direction_weight` term, tail on
-    /// the Flying End's own pre-step position, length proportional to that
-    /// term's own (unscaled) magnitude. Purely a visualization knob: it
-    /// never affects the Growing Process itself, only how long those arrows
-    /// are drawn.
+    /// `01_<map_name>_step1_growing.svg` for every integration step
+    /// (Appendix 5) -- one per force term (contour, out-of-bound, density,
+    /// flying-end), tail on the Flying End's own pre-step position, length
+    /// proportional to that term's own (unscaled, now genuinely
+    /// Newton-valued) magnitude. Purely a visualization knob: it never
+    /// affects the Growing Process itself, only how long those arrows are
+    /// drawn.
     pub growing_visualization_push_pull_vectors_scale: f64,
 }
 
@@ -123,20 +161,24 @@ const KEYS: &[&str] = &[
     "rain_drop_starting_voting_hysteresis",
     "undefined_gravity_vote_threshold",
     "growing_oob_seeking_max_steps",
-    "growing_window_size_px_contours",
-    "growing_window_size_px_attractions",
-    "growing_step_length",
-    "growing_previous_distance_direction_weight",
-    "growing_out_of_bound_direction_weight",
-    "growing_density_direction_weight",
-    "growing_other_contours_direction_weight",
+    "contour_force_window",
+    "attraction_force_window",
+    "contour_force_max_repulsion",
+    "contour_force_equilibrium",
+    "contour_force_max_attraction",
+    "contour_force_second_equilibrium",
+    "out_of_bound_force",
+    "density_region_force",
+    "flying_end_force",
+    "flying_end_merge_distance",
+    "grow_time_step",
     "growing_visualization_push_pull_vectors_scale",
 ];
 
 impl Config {
     /// Parses a config file: one `key = value` per line, blank lines and
-    /// lines starting with `#` ignored. All twenty keys are required -- a
-    /// config file missing one is far more likely a mistake than an
+    /// lines starting with `#` ignored. All twenty-four keys are required --
+    /// a config file missing one is far more likely a mistake than an
     /// intentional partial override -- and an unknown key or an unparseable
     /// value is an error naming the offending line.
     pub fn load(path: &Path) -> Result<Config, String> {
@@ -196,16 +238,17 @@ impl Config {
                 as u64,
             undefined_gravity_vote_threshold: values[&"undefined_gravity_vote_threshold"],
             growing_oob_seeking_max_steps: values[&"growing_oob_seeking_max_steps"] as u64,
-            growing_window_size_px_contours: values[&"growing_window_size_px_contours"] as u64,
-            growing_window_size_px_attractions: values[&"growing_window_size_px_attractions"]
-                as u64,
-            growing_step_length: values[&"growing_step_length"],
-            growing_previous_distance_direction_weight: values
-                [&"growing_previous_distance_direction_weight"],
-            growing_out_of_bound_direction_weight: values[&"growing_out_of_bound_direction_weight"],
-            growing_density_direction_weight: values[&"growing_density_direction_weight"],
-            growing_other_contours_direction_weight: values
-                [&"growing_other_contours_direction_weight"],
+            contour_force_window: values[&"contour_force_window"],
+            attraction_force_window: values[&"attraction_force_window"],
+            contour_force_max_repulsion: values[&"contour_force_max_repulsion"],
+            contour_force_equilibrium: values[&"contour_force_equilibrium"],
+            contour_force_max_attraction: values[&"contour_force_max_attraction"],
+            contour_force_second_equilibrium: values[&"contour_force_second_equilibrium"],
+            out_of_bound_force: values[&"out_of_bound_force"],
+            density_region_force: values[&"density_region_force"],
+            flying_end_force: values[&"flying_end_force"],
+            flying_end_merge_distance: values[&"flying_end_merge_distance"],
+            grow_time_step: values[&"grow_time_step"],
             growing_visualization_push_pull_vectors_scale: values
                 [&"growing_visualization_push_pull_vectors_scale"],
         })
@@ -230,13 +273,17 @@ sources_per_contour_segment = 3
 rain_drop_starting_voting_hysteresis = 5
 undefined_gravity_vote_threshold = 0.8
 growing_oob_seeking_max_steps = 10
-growing_window_size_px_contours = 10
-growing_window_size_px_attractions = 10
-growing_step_length = 1.0
-growing_previous_distance_direction_weight = 1.0
-growing_out_of_bound_direction_weight = 1.0
-growing_density_direction_weight = 1.0
-growing_other_contours_direction_weight = -1.0
+contour_force_window = 15.0
+attraction_force_window = 20.0
+contour_force_max_repulsion = 2.0
+contour_force_equilibrium = 2.5
+contour_force_max_attraction = -0.5
+contour_force_second_equilibrium = 7.5
+out_of_bound_force = 0.5
+density_region_force = 1.0
+flying_end_force = 1.0
+flying_end_merge_distance = 1.0
+grow_time_step = 1.0
 growing_visualization_push_pull_vectors_scale = 1.0
 ";
 
@@ -247,10 +294,17 @@ growing_visualization_push_pull_vectors_scale = 1.0
         assert_eq!(config.circumference_fitting_points_number, 4);
         assert_eq!(config.sources_per_contour_segment, 3);
         assert_eq!(config.growing_oob_seeking_max_steps, 10);
-        assert_eq!(config.growing_window_size_px_contours, 10);
-        assert_eq!(config.growing_window_size_px_attractions, 10);
-        assert_eq!(config.growing_step_length, 1.0);
-        assert_eq!(config.growing_other_contours_direction_weight, -1.0);
+        assert_eq!(config.contour_force_window, 15.0);
+        assert_eq!(config.attraction_force_window, 20.0);
+        assert_eq!(config.contour_force_max_repulsion, 2.0);
+        assert_eq!(config.contour_force_equilibrium, 2.5);
+        assert_eq!(config.contour_force_max_attraction, -0.5);
+        assert_eq!(config.contour_force_second_equilibrium, 7.5);
+        assert_eq!(config.out_of_bound_force, 0.5);
+        assert_eq!(config.density_region_force, 1.0);
+        assert_eq!(config.flying_end_force, 1.0);
+        assert_eq!(config.flying_end_merge_distance, 1.0);
+        assert_eq!(config.grow_time_step, 1.0);
         assert_eq!(config.growing_visualization_push_pull_vectors_scale, 1.0);
     }
 

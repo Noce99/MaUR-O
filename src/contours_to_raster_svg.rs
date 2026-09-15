@@ -1,14 +1,20 @@
 //! The `--create_svg` validation dumps `Contours-to-Raster.md`'s
-//! "## Visualization" section asks for: one SVG after Step 1, one after Step
-//! 1, and -- Step 3 being two separate passes -- one after each of its Rain
-//! Drop and Anti Rain Drop Productions, so a human can check the algorithm's
-//! intermediate state by opening a picture rather than parsing numbers.
-//! Splitting Step 3 into its own two files, rather than overlaying both
-//! colors on one, is what keeps a drop's path legible where the two passes
-//! cross. Ground meters throughout, unscaled -- [`geo_svg`](https://docs.rs/geo-svg)
-//! turns this crate's own `geo` geometry (already ground-meter
-//! `LineString`/`Polygon`/`Coord`) straight into `<path>`/`<circle>`
-//! elements and works out a `viewBox` to fit them all.
+//! "## Visualization" section asks for: one SVG after Step 1 (before its own
+//! Growing Process sub-step runs), one after each of that sub-step's own two
+//! phases (Seeking, then Matching), one after Step 2, and -- Step 3 being two
+//! separate passes -- one after each of its Rain Drop and Anti Rain Drop
+//! Productions, so a human can check the algorithm's intermediate state by
+//! opening a picture rather than parsing numbers. Splitting Step 3 into its
+//! own two files, rather than overlaying both colors on one, is what keeps a
+//! drop's path legible where the two passes cross; Seeking and Matching get
+//! their own two files for a related reason -- the Seeking file shows what
+//! Phase 1 managed strictly on its own, before Phase 2's own, different
+//! physics (and whatever it went on to resolve or merge) gets a chance to
+//! obscure it. Ground meters throughout, unscaled --
+//! [`geo_svg`](https://docs.rs/geo-svg) turns this crate's own `geo`
+//! geometry (already ground-meter `LineString`/`Polygon`/`Coord`) straight
+//! into `<path>`/`<circle>` elements and works out a `viewBox` to fit them
+//! all.
 //!
 //! One color per layer:
 //!
@@ -42,7 +48,14 @@
 //! it resolved (matching its own arrow, already drawn by the point definer
 //! arrows layer) or orange if not (which also gets its own orange arrow here,
 //! since an unresolved one has no entry in `point_definers` to draw from
-//! otherwise). After Step 2: the same, plus a gravity arrow along every
+//! otherwise). After each of Seeking and Matching: the same, plus any
+//! contour the Growing Process has touched *so far* (in either phase) drawn
+//! in blue instead of green, plus every integration step *that one phase
+//! itself* took drawn as its own four push/pull vectors and a green dot at
+//! its own resulting position -- Matching's own file starts that one layer
+//! fresh rather than continuing Seeking's own, so each file shows only its
+//! own phase's own steps. After Step 2: the same as Matching's own file, plus
+//! a gravity arrow along every
 //! contour already resolved. After Step 3 (covering every contour, per the
 //! doc's "it
 //! should be impossible to have contours with undefined gravity"): the same
@@ -55,12 +68,13 @@
 //! which it actually cast a vote; the drop's own dot shows on top of all
 //! three.
 //!
-//! A fifth, "final" file is written once every contour's gravity is settled
-//! (after Step 3, or after Step 2 if that already resolved everything): just
-//! the algorithm's actual answer -- pixels, both contour layers, and a
-//! gravity arrow per node -- without the raster grid, the Jump-only definer
-//! arrows, or any of Step 3's own rain-drop-path diagnostics, since those are
-//! per-step working detail rather than the final picture.
+//! One more, unnumbered "final" file is written once every contour's gravity
+//! is settled (after Step 3, or after Step 2 if that already resolved
+//! everything): just the algorithm's actual answer -- pixels, both contour
+//! layers, and a gravity arrow per node -- without the raster grid, the
+//! Jump-only definer arrows, or any of Step 3's own rain-drop-path
+//! diagnostics, since those are per-step working detail rather than the
+//! final picture.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -74,7 +88,7 @@ use crate::contour_geometry::RawVertex;
 use crate::contour_raster::{ContourRaster, CONTOUR_0_MATRIX_VALUE, HIGH_DENSITY, OUT_OF_BOUND};
 use crate::contours_to_raster_config::Config;
 use crate::gravity_model::{contour_gravity_side, lwg_gravity_side, node_direction};
-use crate::step1_extract::Step1Result;
+use crate::step1_extract::{contour_force_magnitude, Step1Result};
 use crate::step3_rain_drop::Step3Result;
 
 const GRAY: Color = Color::Rgb(160, 160, 160);
@@ -88,20 +102,26 @@ const PURPLE: Color = Color::Rgb(148, 0, 211);
 const ORANGE: Color = Color::Rgb(255, 140, 0);
 const LIGHT_BLUE: Color = Color::Rgb(173, 216, 230);
 const LIGHT_PINK: Color = Color::Rgb(255, 182, 193);
-/// `01_..._step1_growing.svg`'s `growing_previous_distance_direction_weight`
-/// push/pull vector layer (Appendix 5) -- see [`push_pull_vector_layers`].
-const PUSH_PULL_PREVIOUS_DIRECTION: Color = Color::Rgb(0, 191, 255);
-/// `01_..._step1_growing.svg`'s `growing_out_of_bound_direction_weight`
-/// push/pull vector layer.
+/// `01_..._step1_growing_seeking.svg`/`02_..._step1_growing_matching.svg`'s
+/// own contour-pixel potential-well force vector layer (Appendix 5) -- see
+/// [`push_pull_vector_layers`].
+const PUSH_PULL_CONTOUR_FORCE: Color = Color::Rgb(128, 0, 0);
+/// `01_..._step1_growing_seeking.svg`/`02_..._step1_growing_matching.svg`'s
+/// own `out_of_bound_force` vector layer.
 const PUSH_PULL_OUT_OF_BOUND: Color = Color::Rgb(255, 0, 255);
-/// `01_..._step1_growing.svg`'s `growing_density_direction_weight` push/pull
-/// vector layer.
+/// `01_..._step1_growing_seeking.svg`/`02_..._step1_growing_matching.svg`'s
+/// own `density_region_force` vector layer.
 const PUSH_PULL_DENSITY: Color = Color::Rgb(0, 100, 0);
-/// `01_..._step1_growing.svg`'s `growing_other_contours_direction_weight`
-/// push/pull vector layer.
-const PUSH_PULL_OTHER_CONTOURS: Color = Color::Rgb(128, 0, 0);
+/// `01_..._step1_growing_seeking.svg`/`02_..._step1_growing_matching.svg`'s
+/// own `flying_end_force` vector layer.
+const PUSH_PULL_FLYING_END: Color = Color::Rgb(0, 191, 255);
 /// `3` (high density) pixels.
 const LIGHT_GREEN: Color = Color::Rgb(144, 238, 144);
+/// `01_..._step1_growing_seeking.svg`/`02_..._step1_growing_matching.svg`'s
+/// own integration-step dot layer -- a more saturated green than [`GREEN`]
+/// (the un-grown linearized-contour layer) so the two read as distinct even
+/// though both are "green".
+const INTEGRATION_STEP_DOT: Color = Color::Rgb(0, 255, 0);
 
 /// How long, in ground meters, an arrow primitive is drawn.
 const ARROW_LENGTH: f64 = 3.0;
@@ -113,6 +133,10 @@ const RAW_CONTOUR_STROKE_WIDTH: f32 = 0.3;
 const LINEARIZED_CONTOUR_STROKE_WIDTH: f32 = RAW_CONTOUR_STROKE_WIDTH / 2.0;
 /// A rain/anti-rain drop dot's radius, in ground meters.
 const DOT_RADIUS: f32 = 0.3;
+/// A Growing Process integration-step dot's radius, in ground meters --
+/// smaller than [`DOT_RADIUS`], since one is drawn per integration step
+/// taken and they can sit close together.
+const INTEGRATION_STEP_DOT_RADIUS: f32 = 0.15;
 /// A hysteresis marker's radius: slightly larger than [`DOT_RADIUS`] so it
 /// peeks out from underneath a drop's own dot rather than being hidden by it.
 const HYSTERESIS_DOT_RADIUS: f32 = DOT_RADIUS + 0.15;
@@ -136,6 +160,13 @@ const PUSH_PULL_VECTOR_STROKE_WIDTH: f32 = 0.15;
 /// How far, in ground meters, the viewBox is padded past the drawing's own
 /// bounds so nothing is clipped at the edge.
 const MARGIN: f32 = 2.0;
+/// `contours_function`'s own sampling step along `x`, in meters, per the
+/// task that asked for this diagnostic.
+const CONTOURS_FUNCTION_STEP: f64 = 0.1;
+/// `contours_function`'s own curve/axis stroke width. Unrelated to any
+/// ground-meter scale (this file plots a function, not a map), so a plain
+/// small constant rather than one of the ground-meter widths above.
+const CONTOURS_FUNCTION_STROKE_WIDTH: f32 = 0.05;
 
 fn grid_lines(raster: &ContourRaster) -> MultiLineString<f64> {
     let (x0, y0) = (raster.origin.x, raster.origin.y);
@@ -388,8 +419,10 @@ impl ToSvgStr for OobArea {
 }
 
 /// One unfilled ring per Flying End position, in red -- `Step1Result::pre_growing_flying_ends`,
-/// drawn the same on both `00_..._step1.svg` and `01_..._step1_growing.svg`
-/// (see the doc's Visualization section).
+/// drawn the same on `00_..._step1.svg` and both of the Growing Process's
+/// own files, `01_..._step1_growing_seeking.svg`/
+/// `02_..._step1_growing_matching.svg` (see the doc's Visualization
+/// section).
 fn flying_end_rings(result: &Step1Result) -> MultiPoint<f64> {
     MultiPoint::new(
         result
@@ -402,8 +435,9 @@ fn flying_end_rings(result: &Step1Result) -> MultiPoint<f64> {
 
 /// The post-linearization line of every contour the Growing Process did
 /// *not* touch (green, `linearized_contour_lines`'s usual color) and every
-/// one it did (blue) -- `01_..._step1_growing.svg` (and everything built on
-/// it) shows grown/merged contours in blue instead of green, per the doc.
+/// one it did (blue) -- `01_..._step1_growing_seeking.svg`/
+/// `02_..._step1_growing_matching.svg` (and everything built on them) show
+/// grown/merged contours in blue instead of green, per the doc.
 fn linearized_contour_lines_split(
     result: &Step1Result,
 ) -> (MultiLineString<f64>, MultiLineString<f64>) {
@@ -488,11 +522,11 @@ fn arrow(from: Coord<f64>, dx: f64, dy: f64) -> LineString<f64> {
     ])
 }
 
-/// One push/pull contribution: tail at `from` (a Flying End's own position
-/// *before* the growing step), head at `from + v * scale` -- unlike
+/// One force contribution: tail at `from` (a Flying End's own position
+/// *before* the integration step), head at `from + v * scale` -- unlike
 /// [`arrow`], whose every caller already hands it a unit vector to stretch
 /// to a fixed [`ARROW_LENGTH`], `v`'s own raw magnitude *is* the point here
-/// (Appendix 5's own weighted pull/push), so it is scaled by
+/// (Appendix 5's own genuinely Newton-valued force), so it is scaled by
 /// `growing_visualization_push_pull_vectors_scale` instead of normalized.
 fn push_pull_vector(from: Coord<f64>, v: (f64, f64), scale: f64) -> LineString<f64> {
     LineString::new(vec![
@@ -504,45 +538,41 @@ fn push_pull_vector(from: Coord<f64>, v: (f64, f64), scale: f64) -> LineString<f
     ])
 }
 
-/// The four push/pull vector layers `01_..._step1_growing.svg` draws for
-/// every case-(c) growing step recorded in
-/// `Step1Result::growing_push_pull_vectors` -- one per
-/// `growing_*_direction_weight` term, all sharing the same tail (that step's
-/// own pre-step Flying End position) but scaled and colored separately per
-/// [`push_pull_vector`].
+/// The four force vector layers `01_..._step1_growing_seeking.svg`/
+/// `02_..._step1_growing_matching.svg` draw for every integration step
+/// recorded in `Step1Result::growing_push_pull_vectors` --
+/// one per force term (contour, out-of-bound, density, flying-end), all
+/// sharing the same tail (that step's own pre-step Flying End position) but
+/// scaled and colored separately per [`push_pull_vector`].
 struct PushPullVectorLayers {
-    previous_direction: MultiLineString<f64>,
+    contour: MultiLineString<f64>,
     out_of_bound: MultiLineString<f64>,
     density: MultiLineString<f64>,
-    other_contours: MultiLineString<f64>,
+    flying_end: MultiLineString<f64>,
 }
 
 fn push_pull_vector_layers(result: &Step1Result, scale: f64) -> PushPullVectorLayers {
-    let (mut previous_direction, mut out_of_bound, mut density, mut other_contours) =
+    let (mut contour, mut out_of_bound, mut density, mut flying_end) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for forces in &result.growing_push_pull_vectors {
-        previous_direction.push(push_pull_vector(
-            forces.flying_end,
-            forces.previous_direction,
-            scale,
-        ));
+        contour.push(push_pull_vector(forces.flying_end, forces.contour, scale));
         out_of_bound.push(push_pull_vector(
             forces.flying_end,
             forces.out_of_bound,
             scale,
         ));
         density.push(push_pull_vector(forces.flying_end, forces.density, scale));
-        other_contours.push(push_pull_vector(
+        flying_end.push(push_pull_vector(
             forces.flying_end,
-            forces.other_contours,
+            forces.flying_end_force,
             scale,
         ));
     }
     PushPullVectorLayers {
-        previous_direction: MultiLineString::new(previous_direction),
+        contour: MultiLineString::new(contour),
         out_of_bound: MultiLineString::new(out_of_bound),
         density: MultiLineString::new(density),
-        other_contours: MultiLineString::new(other_contours),
+        flying_end: MultiLineString::new(flying_end),
     }
 }
 
@@ -550,8 +580,8 @@ fn push_pull_vector_layers(result: &Step1Result, scale: f64) -> PushPullVectorLa
 /// term (see the `PUSH_PULL_*` constants).
 fn with_push_pull_vectors<'a>(svg: Svg<'a>, layers: &'a PushPullVectorLayers) -> Svg<'a> {
     svg.and(line_layer(
-        &layers.previous_direction,
-        PUSH_PULL_PREVIOUS_DIRECTION,
+        &layers.contour,
+        PUSH_PULL_CONTOUR_FORCE,
         PUSH_PULL_VECTOR_STROKE_WIDTH,
     ))
     .and(line_layer(
@@ -565,8 +595,8 @@ fn with_push_pull_vectors<'a>(svg: Svg<'a>, layers: &'a PushPullVectorLayers) ->
         PUSH_PULL_VECTOR_STROKE_WIDTH,
     ))
     .and(line_layer(
-        &layers.other_contours,
-        PUSH_PULL_OTHER_CONTOURS,
+        &layers.flying_end,
+        PUSH_PULL_FLYING_END,
         PUSH_PULL_VECTOR_STROKE_WIDTH,
     ))
 }
@@ -959,14 +989,23 @@ pub fn write_step1_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
 
 /// Identical to [`write_step1_svg`] (including the same red Flying-End
 /// rings, still at their original pre-growing positions), except called
-/// after `step1_extract::run_growing` has run: the Contour Raster and every
-/// contour's `ls` reflect the post-growing state, any contour the
-/// Growing Process touched (grown, merged into, or both) is drawn in blue
-/// instead of green, and every case-(c) growing step's own four push/pull
-/// contributions (`Step1Result::growing_push_pull_vectors`, Appendix 5) are
-/// drawn as separate colored vectors, scaled by
-/// `config.growing_visualization_push_pull_vectors_scale`.
-/// `01_<map_name>_step1_growing.svg`.
+/// once after each of Step 1's own Growing Process phases
+/// (`step1_extract::run_growing_seeking`/`run_growing_matching`, Seeking
+/// then Matching -- see the doc's Visualization section): the Contour Raster
+/// and every contour's `ls` reflect however far growing has gotten by that
+/// call, and any contour the Growing Process has touched so far, in either
+/// phase, (grown, merged into, or both) is drawn in blue instead of green.
+/// Every integration step's own four force contributions
+/// (`Step1Result::growing_push_pull_vectors`, Appendix 5) are drawn as
+/// separate colored vectors scaled by
+/// `config.growing_visualization_push_pull_vectors_scale`, and every
+/// integration step's own resulting position
+/// (`Step1Result::growing_integration_step_dots`) is drawn as a small green
+/// dot on top of everything else -- but only *that one phase's own* steps:
+/// `run_growing_matching` starts both of those two fields fresh rather than
+/// reclaiming Seeking's own, so `01_<map_name>_step1_growing_seeking.svg`
+/// shows Seeking's own steps and `02_<map_name>_step1_growing_matching.svg`
+/// shows only Matching's, never both overlaid on one picture.
 pub fn write_step1_growing_svg(
     path: &Path,
     result: &Step1Result,
@@ -974,9 +1013,15 @@ pub fn write_step1_growing_svg(
 ) -> Result<(), String> {
     let push_pull =
         push_pull_vector_layers(result, config.growing_visualization_push_pull_vectors_scale);
+    let dots = points(&result.growing_integration_step_dots);
     write(
         path,
-        with_push_pull_vectors(base_layers(&BaseLayerData::new(result)), &push_pull),
+        with_push_pull_vectors(base_layers(&BaseLayerData::new(result)), &push_pull).and(
+            dots.to_svg()
+                .with_radius(INTEGRATION_STEP_DOT_RADIUS)
+                .with_fill_color(INTEGRATION_STEP_DOT)
+                .with_stroke_opacity(0.0),
+        ),
     )
 }
 
@@ -992,7 +1037,7 @@ fn resolved_layers<'a>(
 
 /// The same as [`write_step1_growing_svg`], plus a gravity arrow along every
 /// contour Step 2 (or Step 1's direct evidence) has already resolved.
-/// `02_<map_name>_step2.svg`.
+/// `03_<map_name>_step2.svg`.
 pub fn write_step2_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
     let data = BaseLayerData::new(result);
     let gravity_arrows = contour_gravity_arrows(result);
@@ -1052,7 +1097,7 @@ pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
 /// never shows an arrow for a
 /// contour only Anti Rain Drop Production went on to resolve, even though
 /// `result.contours` itself already holds that final state by the time this
-/// runs. `03_<map_name>_step3_rain.svg`.
+/// runs. `04_<map_name>_step3_rain.svg`.
 pub fn write_step3_rain_svg(
     path: &Path,
     result: &Step1Result,
@@ -1089,7 +1134,7 @@ pub fn write_step3_rain_svg(
 /// drop's full trail, path, hysteresis marker and vote segment, the same
 /// way as [`write_step3_rain_svg`] -- see there for why this is a separate
 /// file rather than a second layer on the same one.
-/// `04_<map_name>_step3_anti_rain.svg`.
+/// `05_<map_name>_step3_anti_rain.svg`.
 pub fn write_step3_anti_rain_svg(
     path: &Path,
     result: &Step1Result,
@@ -1120,6 +1165,65 @@ pub fn write_step3_anti_rain_svg(
                     .with_fill_color(RED)
                     .with_stroke_opacity(0.0),
             ),
+    )
+}
+
+/// `contour_force_magnitude`'s own curve (Appendix 5): `x` the distance from
+/// a single contour/`TEMPORARY_CONTOUR` pixel in meters, `y` that pixel's
+/// resulting force -- sampled every `CONTOURS_FUNCTION_STEP` meters from `0`
+/// to `2 * contour_force_second_equilibrium`, twice the distance at which
+/// the curve settles at its own `contour_force_max_attraction` plateau, so
+/// the plateau itself is visible rather than just the point it starts at.
+fn contours_function_curve(config: &Config) -> LineString<f64> {
+    let max_x = 2.0 * config.contour_force_second_equilibrium;
+    let steps = (max_x / CONTOURS_FUNCTION_STEP).round() as i64;
+    LineString::new(
+        (0..=steps)
+            .map(|i| {
+                let x = i as f64 * CONTOURS_FUNCTION_STEP;
+                Coord {
+                    x,
+                    y: contour_force_magnitude(x, config),
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Writes `<map_name>_contours_function.svg`: a plain 2D plot of
+/// [`contour_force_magnitude`]'s own potential-well curve (Appendix 5) --
+/// not a map, so no grid/pixels/out-of-bound layer, and its axes are the
+/// function's own domain/range rather than ground positions. The curve is
+/// drawn maroon, matching `01_<map_name>_step1_growing_seeking.svg`/
+/// `02_<map_name>_step1_growing_matching.svg`'s own contour-pixel push/pull
+/// vector layer, over a gray `y = 0` line (the
+/// x-axis) and a gray `x = 0` line spanning the curve's own min/max (the
+/// y-axis), so the repulsion/attraction crossover at
+/// `contour_force_equilibrium` and the attraction plateau at
+/// `contour_force_second_equilibrium` both read at a glance. Depends only on
+/// `config`, unlike every other `write_*_svg` here, so it is written once
+/// per `--create_svg` run regardless of the map or how far Step 1-3 got.
+pub fn write_contours_function_svg(path: &Path, config: &Config) -> Result<(), String> {
+    let curve = contours_function_curve(config);
+    let max_x = 2.0 * config.contour_force_second_equilibrium;
+    let (min_y, max_y) = curve
+        .0
+        .iter()
+        .fold((0.0_f64, 0.0_f64), |(lo, hi), c| (lo.min(c.y), hi.max(c.y)));
+    let x_axis = LineString::new(vec![Coord { x: 0.0, y: 0.0 }, Coord { x: max_x, y: 0.0 }]);
+    let y_axis = LineString::new(vec![
+        Coord { x: 0.0, y: min_y },
+        Coord { x: 0.0, y: max_y },
+    ]);
+    write(
+        path,
+        line_layer(&x_axis, GRAY, CONTOURS_FUNCTION_STROKE_WIDTH)
+            .and(line_layer(&y_axis, GRAY, CONTOURS_FUNCTION_STROKE_WIDTH))
+            .and(line_layer(
+                &curve,
+                PUSH_PULL_CONTOUR_FORCE,
+                CONTOURS_FUNCTION_STROKE_WIDTH,
+            )),
     )
 }
 
@@ -1173,6 +1277,7 @@ mod tests {
             pre_growing_flying_ends: Vec::new(),
             grown_by_growing_process: vec![false],
             growing_push_pull_vectors: Vec::new(),
+            growing_integration_step_dots: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -1304,13 +1409,17 @@ mod tests {
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
             growing_oob_seeking_max_steps: 0,
-            growing_window_size_px_contours: 4,
-            growing_window_size_px_attractions: 4,
-            growing_step_length: 1.0,
-            growing_previous_distance_direction_weight: 1.0,
-            growing_out_of_bound_direction_weight: 1.0,
-            growing_density_direction_weight: 1.0,
-            growing_other_contours_direction_weight: -1.0,
+            contour_force_window: 4.0,
+            attraction_force_window: 4.0,
+            contour_force_max_repulsion: 2.0,
+            contour_force_equilibrium: 1.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 3.0,
+            out_of_bound_force: 0.5,
+            density_region_force: 1.0,
+            flying_end_force: 1.0,
+            flying_end_merge_distance: 0.5,
+            grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 2.0,
         }
     }
@@ -1320,21 +1429,21 @@ mod tests {
         let mut result = sample_result();
         result.growing_push_pull_vectors = vec![GrowingStepForces {
             flying_end: c(3.0, 4.0),
-            previous_direction: (1.0, 0.0),
+            contour: (1.0, 0.0),
             out_of_bound: (0.0, 2.0),
             density: (0.0, 0.0),
-            other_contours: (-1.0, -1.0),
+            flying_end_force: (-1.0, -1.0),
         }];
         let layers = push_pull_vector_layers(&result, 2.0);
-        assert_eq!(layers.previous_direction.0[0].0[0], c(3.0, 4.0));
-        assert_eq!(layers.previous_direction.0[0].0[1], c(5.0, 4.0));
+        assert_eq!(layers.contour.0[0].0[0], c(3.0, 4.0));
+        assert_eq!(layers.contour.0[0].0[1], c(5.0, 4.0));
         assert_eq!(layers.out_of_bound.0[0].0[1], c(3.0, 8.0));
         assert_eq!(
             layers.density.0[0].0[1],
             c(3.0, 4.0),
             "a zero contribution is a zero-length vector, not skipped"
         );
-        assert_eq!(layers.other_contours.0[0].0[1], c(1.0, 2.0));
+        assert_eq!(layers.flying_end.0[0].0[1], c(1.0, 2.0));
     }
 
     #[test]
@@ -1344,19 +1453,19 @@ mod tests {
         let mut result = sample_result();
         result.growing_push_pull_vectors = vec![GrowingStepForces {
             flying_end: c(3.0, 4.0),
-            previous_direction: (1.0, 0.0),
+            contour: (1.0, 0.0),
             out_of_bound: (0.0, 1.0),
             density: (1.0, 1.0),
-            other_contours: (-1.0, 0.0),
+            flying_end_force: (-1.0, 0.0),
         }];
         write_step1_growing_svg(&path, &result, &sample_config()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
 
         for needle in [
-            "rgb(0,191,255)", // PUSH_PULL_PREVIOUS_DIRECTION
+            "rgb(128,0,0)",   // PUSH_PULL_CONTOUR_FORCE
             "rgb(255,0,255)", // PUSH_PULL_OUT_OF_BOUND
             "rgb(0,100,0)",   // PUSH_PULL_DENSITY
-            "rgb(128,0,0)",   // PUSH_PULL_OTHER_CONTOURS
+            "rgb(0,191,255)", // PUSH_PULL_FLYING_END
         ] {
             assert!(
                 text.contains(needle),
@@ -1668,6 +1777,7 @@ mod tests {
             pre_growing_flying_ends: Vec::new(),
             grown_by_growing_process: vec![false],
             growing_push_pull_vectors: Vec::new(),
+            growing_integration_step_dots: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -1814,6 +1924,7 @@ mod tests {
             pre_growing_flying_ends: Vec::new(),
             grown_by_growing_process: vec![false, false],
             growing_push_pull_vectors: Vec::new(),
+            growing_integration_step_dots: Vec::new(),
             warnings: Vec::new(),
         };
 

@@ -18,19 +18,20 @@ pub const NO_CONTOUR_IN_BOUND: u32 = 2;
 /// covers it (see [`ContourRaster::write_contour`],
 /// [`ContourRaster::mark_high_density_polygon`]).
 pub const HIGH_DENSITY: u32 = 3;
-/// A Flying End's own not-yet-final tail, one grow step at a time (Step 1's
-/// Growing Process, case (c)): while a Flying End is still flying, its own
+/// A Flying End's own not-yet-final tail, one integration step at a time
+/// (Step 1's Growing Process): while a Flying End is still flying, its own
 /// growth so far isn't drawn under its real contour index (that only
 /// happens once it resolves -- [`ContourRaster::write_contour`]), but it
 /// still needs to act as a repeller for every *other* Flying End growing
 /// alongside it, or two contours seeking the border independently, close
 /// and parallel, can cross one another unnoticed. Set by
-/// [`ContourRaster::mark_temporary_step`], read the same as any real
-/// contour pixel by the Growing Process's own window scan, and swept back
-/// to `NO_CONTOUR_IN_BOUND` by [`ContourRaster::clear_temporary_contours`]
-/// once the whole Growing Process (both passes, every Flying End resolved)
-/// finishes -- not per contour as it resolves, since a still-flying
-/// neighbor may still need it as a repeller.
+/// [`ContourRaster::walk_growing_integration_step`], read the same as any
+/// real contour pixel by the Growing Process's own force-window scan, and
+/// swept back to `NO_CONTOUR_IN_BOUND` by
+/// [`ContourRaster::clear_temporary_contours`] once the whole Growing
+/// Process (both passes, every Flying End resolved) finishes -- not per
+/// contour as it resolves, since a still-flying neighbor may still need it
+/// as a repeller.
 pub const TEMPORARY_CONTOUR: u32 = 4;
 /// A raster value at or above this means "contour (value -
 /// `CONTOUR_0_MATRIX_VALUE`)". Kept as a single named constant, not a
@@ -63,6 +64,52 @@ pub enum StepHit {
     OutOfBound,
     /// A high-density (`3`) pixel.
     HighDensity,
+}
+
+/// One walked pixel's own outcome during
+/// [`ContourRaster::walk_growing_integration_step`] (Step 1's Growing
+/// Process): either newly claimed as this Flying End's own not-yet-final
+/// trail, or found already claimed by something else and left untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelWalkStep {
+    /// The pixel was `UNDEFINED` or `NO_CONTOUR_IN_BOUND` and is now
+    /// `TEMPORARY_CONTOUR`.
+    Marked,
+    /// The pixel already held a real contour's own value or another Flying
+    /// End's own `TEMPORARY_CONTOUR` tail -- left exactly as it was, not
+    /// overwritten and not turned into `HIGH_DENSITY` (unlike
+    /// [`ContourRaster::write_contour`]'s own conflict rule; the caller is
+    /// expected to warn about this itself, since only it can tell its own
+    /// past trail apart from a genuine conflict). The value the pixel
+    /// already held.
+    Conflict(u32),
+}
+
+/// [`ContourRaster::walk_growing_integration_step`]'s own outcome: either
+/// the whole step was walked with nothing but `Marked`/`Conflict` pixels
+/// along the way, or an out-of-bound/high-density pixel was crossed before
+/// reaching the step's own raw endpoint -- the Flying End's actual landing
+/// spot, found by walking its real continuous path rather than only
+/// checking the endpoint itself.
+#[derive(Debug, Clone)]
+pub enum StepWalkOutcome {
+    /// No out-of-bound/high-density pixel was crossed; the Flying End is
+    /// still flying at the step's own raw endpoint. Every pixel walked
+    /// along the way.
+    Clear(Vec<(i64, i64, PixelWalkStep)>),
+    /// An out-of-bound/high-density pixel was crossed before the step's own
+    /// raw endpoint; the Flying End's step finalizes there instead, at that
+    /// pixel's own center (a clean, reproducible landing spot, rather than
+    /// an arbitrary point exactly on a pixel edge). `before` is every pixel
+    /// walked strictly before the landing one.
+    Landed {
+        /// What kind of pixel was landed on.
+        hit: StepHit,
+        /// The landing pixel's own world-space center.
+        center: Coord<f64>,
+        /// Every pixel walked strictly before the landing one.
+        before: Vec<(i64, i64, PixelWalkStep)>,
+    },
 }
 
 impl ContourRaster {
@@ -129,17 +176,17 @@ impl ContourRaster {
     /// shared corner pixel -- regardless of how long a segment is. A pixel
     /// that's `UNDEFINED`, `NO_CONTOUR_IN_BOUND`, or `TEMPORARY_CONTOUR` is
     /// free to claim (the last of those is exactly this contour's own
-    /// tentative trail from Step 1's Growing Process, case (c), becoming
-    /// real as this contour resolves -- see
-    /// [`Self::mark_temporary_step`]); a pixel that already holds this same
-    /// contour's value is a no-op; a pixel that's `OUT_OF_BOUND` is left
-    /// alone -- it is the map's own edge, not another contour, and Step 1's
-    /// Growing Process routinely walks a contour's very last segment right
-    /// up to one on purpose (case (b)'s snap, or case (c) landing on one
-    /// directly), so this is the intended, successful way for a contour to
-    /// end, not a conflict to flag; any other existing value (another
-    /// contour's, or already `HIGH_DENSITY`) means the pixel becomes
-    /// `HIGH_DENSITY` instead -- there is no crash path any more (Step 1).
+    /// tentative trail from Step 1's Growing Process, becoming real as this
+    /// contour resolves -- see [`Self::walk_growing_integration_step`]); a
+    /// pixel that already holds this same contour's value is a no-op; a
+    /// pixel that's `OUT_OF_BOUND` is left alone -- it is the map's own
+    /// edge, not another contour, and Step 1's Growing Process routinely
+    /// walks a contour's very last segment right up to one on purpose (its
+    /// own integration step landing on one directly), so this is the
+    /// intended, successful way for a contour to end, not a conflict to
+    /// flag; any other existing value (another contour's, or already
+    /// `HIGH_DENSITY`) means the pixel becomes `HIGH_DENSITY` instead --
+    /// there is no crash path any more (Step 1).
     pub fn write_contour(&mut self, contour_idx: u64, ls: &LineString<f64>) {
         let value = CONTOUR_0_MATRIX_VALUE + contour_idx as u32;
         let pts = &ls.0;
@@ -165,27 +212,64 @@ impl ContourRaster {
         }
     }
 
-    /// Marks every pixel walked between `prev` and `next` -- one Growing
-    /// Process step's worth of new, not-yet-final path (case (c)) -- as
-    /// `TEMPORARY_CONTOUR`, so it acts as a repeller
-    /// (`WindowPixelKind::Contour` in `step1_extract`'s own window scan) for
-    /// every other Flying End still growing, even though this Flying End's
-    /// contour hasn't resolved yet and so can't claim it under its real
-    /// index. Only `UNDEFINED` and `NO_CONTOUR_IN_BOUND` pixels are
-    /// overwritten; an `OUT_OF_BOUND`/`HIGH_DENSITY` pixel (a genuine,
-    /// successful landing spot, not a conflict) and a real contour's own
-    /// pixel (whatever conflict that may or may not turn out to be is
-    /// caught for real once this contour resolves, via
-    /// [`Self::write_contour`]) are both left exactly as they are.
-    pub fn mark_temporary_step(&mut self, prev: Coord<f64>, next: Coord<f64>) {
+    /// Walks one Growing Process integration step's own real, continuous
+    /// path from `prev` to `next` (Step 1's Growing Process) pixel by pixel
+    /// via Appendix 4's walk, rather than only checking `next` itself --
+    /// necessary now that a single integration step's displacement is
+    /// governed by a real force integration rather than a fixed, short
+    /// length, and so can in principle cross several pixels, including a
+    /// thin out-of-bound/high-density strip that checking only the raw
+    /// endpoint could jump clean over. Every pixel that's
+    /// `UNDEFINED`/`NO_CONTOUR_IN_BOUND` is claimed as this Flying End's own
+    /// not-yet-final `TEMPORARY_CONTOUR` trail, exactly as this method's own
+    /// predecessor (`mark_temporary_step`) used to; every pixel that already
+    /// holds a real contour's value or another Flying End's own
+    /// `TEMPORARY_CONTOUR` is left completely untouched -- never turned into
+    /// `HIGH_DENSITY` the way [`Self::write_contour`]'s own conflict rule
+    /// does, since only the caller knows which contour this step belongs to
+    /// and so can tell its own past trail apart from a genuine conflict
+    /// worth warning about. The walk stops the instant an
+    /// `OUT_OF_BOUND`/`HIGH_DENSITY` pixel is reached, reporting that pixel
+    /// -- not `next` -- as the step's actual landing spot. Symmetric in
+    /// `prev`/`next`: `prev`'s own pixel is walked and reported exactly
+    /// like any other (a caller for whom `prev` is always some already-owned
+    /// position, e.g. Step 1's Growing Process advancing a Flying End from
+    /// its own current position, is expected to disregard that first
+    /// reported pixel itself -- see `step1_extract::grow_one_step`).
+    pub fn walk_growing_integration_step(
+        &mut self,
+        prev: Coord<f64>,
+        next: Coord<f64>,
+    ) -> StepWalkOutcome {
         let (origin, px_size) = (self.origin, self.px_size);
+        let mut steps = Vec::new();
+        let mut landed = None;
         walk_pixels(origin, px_size, prev, next, |x, y| {
             let current = self.get(x, y);
+            if current == OUT_OF_BOUND {
+                landed = Some((StepHit::OutOfBound, self.pixel_center(x, y)));
+                return false;
+            }
+            if current == HIGH_DENSITY {
+                landed = Some((StepHit::HighDensity, self.pixel_center(x, y)));
+                return false;
+            }
             if current == UNDEFINED || current == NO_CONTOUR_IN_BOUND {
                 self.set(x, y, TEMPORARY_CONTOUR);
+                steps.push((x, y, PixelWalkStep::Marked));
+            } else {
+                steps.push((x, y, PixelWalkStep::Conflict(current)));
             }
             true
         });
+        match landed {
+            Some((hit, center)) => StepWalkOutcome::Landed {
+                hit,
+                center,
+                before: steps,
+            },
+            None => StepWalkOutcome::Clear(steps),
+        }
     }
 
     /// Resets every remaining `TEMPORARY_CONTOUR` pixel to
@@ -206,6 +290,51 @@ impl ContourRaster {
                     *cell = NO_CONTOUR_IN_BOUND;
                 }
             }
+        }
+    }
+
+    /// Undoes one specific, still-abandoned stretch of `TEMPORARY_CONTOUR`
+    /// trail: every pixel `path` (walked the same way
+    /// [`Self::write_contour`]/[`Self::walk_growing_integration_step`] walk
+    /// their own segments) touches is reset to `NO_CONTOUR_IN_BOUND`, but
+    /// only if it is *still* `TEMPORARY_CONTOUR` (a sibling Flying End of
+    /// the same open contour resolving first, mid-way through this path's
+    /// own walk, can already have turned some of it into a real, final
+    /// contour pixel via its own [`Self::write_contour`] re-derivation --
+    /// genuinely final by then, not this abandoned attempt's own any more,
+    /// so left alone) *and* `temp_owner` says `contour_idx` was the one
+    /// that actually marked it -- never a different contour's, or this same
+    /// contour's *other* end's, still-live trail that this path also
+    /// happens to cross.
+    ///
+    /// Used by Step 1's Growing Process (`step1_extract::revert_seeking_growth`)
+    /// when a Flying End's own `SeekingOutOfBound` attempt runs out its
+    /// budget without resolving: unlike [`Self::clear_temporary_contours`]'s
+    /// own end-of-everything sweep (which must leave a still-flying
+    /// neighbor's own repeller alone), this specific stretch is known dead
+    /// the moment it is reverted -- the Flying End it belongs to is about to
+    /// restart `MatchingEnds` from a different, earlier position, and
+    /// leaving these pixels marked would let that Flying End react to its
+    /// own just-abandoned trail as though it were a real, separate object.
+    pub(crate) fn revert_temporary_trail(
+        &mut self,
+        contour_idx: usize,
+        path: &[Coord<f64>],
+        temp_owner: &std::collections::HashMap<(i64, i64), usize>,
+    ) {
+        if path.len() < 2 {
+            return;
+        }
+        let (origin, px_size) = (self.origin, self.px_size);
+        for w in path.windows(2) {
+            walk_pixels(origin, px_size, w[0], w[1], |x, y| {
+                if self.get(x, y) == TEMPORARY_CONTOUR
+                    && temp_owner.get(&(x, y)) == Some(&contour_idx)
+                {
+                    self.set(x, y, NO_CONTOUR_IN_BOUND);
+                }
+                true
+            });
         }
     }
 
@@ -705,30 +834,74 @@ mod tests {
     }
 
     #[test]
-    fn mark_temporary_step_only_claims_undefined_and_no_contour_in_bound_pixels() {
+    fn walk_growing_integration_step_only_claims_undefined_and_no_contour_in_bound_pixels() {
         let mut r = raster();
         r.grid[1][1] = NO_CONTOUR_IN_BOUND;
-        r.grid[1][3] = OUT_OF_BOUND;
-        r.grid[1][5] = HIGH_DENSITY;
-        r.write_contour(0, &ls(&[(7.5, 1.5), (7.6, 1.5)])); // a real contour pixel at (7, 1)
-        r.mark_temporary_step(Coord { x: 0.5, y: 1.5 }, Coord { x: 8.5, y: 1.5 });
+        let outcome = r.walk_growing_integration_step(Coord { x: 0.5, y: 1.5 }, Coord { x: 2.5, y: 1.5 });
         assert_eq!(r.get(0, 1), TEMPORARY_CONTOUR); // was UNDEFINED
         assert_eq!(r.get(1, 1), TEMPORARY_CONTOUR); // was NO_CONTOUR_IN_BOUND
-        assert_eq!(r.get(3, 1), OUT_OF_BOUND); // left alone
-        assert_eq!(r.get(5, 1), HIGH_DENSITY); // left alone
-        assert_eq!(r.get(7, 1), CONTOUR_0_MATRIX_VALUE); // left alone
+        assert_eq!(r.get(2, 1), TEMPORARY_CONTOUR); // was UNDEFINED
+        let steps = match outcome {
+            StepWalkOutcome::Clear(steps) => steps,
+            StepWalkOutcome::Landed { .. } => panic!("expected a clear step"),
+        };
+        assert!(steps.iter().all(|&(_, _, s)| s == PixelWalkStep::Marked));
+    }
+
+    #[test]
+    fn walk_growing_integration_step_lands_on_the_first_out_of_bound_pixel_crossed() {
+        // A single integration step's displacement is no longer bounded to
+        // one pixel -- the walk must stop at the *first*
+        // out-of-bound/high-density pixel it crosses, not tunnel through to
+        // whatever lies past it.
+        let mut r = raster();
+        r.grid[1][3] = OUT_OF_BOUND;
+        r.grid[1][5] = HIGH_DENSITY;
+        let outcome = r.walk_growing_integration_step(Coord { x: 0.5, y: 1.5 }, Coord { x: 8.5, y: 1.5 });
+        match outcome {
+            StepWalkOutcome::Landed { hit, center, before } => {
+                assert_eq!(hit, StepHit::OutOfBound);
+                assert_eq!(center, r.pixel_center(3, 1));
+                assert!(before.iter().any(|&(x, y, _)| (x, y) == (0, 1)));
+                assert!(!before.iter().any(|&(x, y, _)| (x, y) == (5, 1)));
+            }
+            StepWalkOutcome::Clear(_) => panic!("expected a landing"),
+        }
+        // Never overwritten -- left exactly as it was.
+        assert_eq!(r.get(3, 1), OUT_OF_BOUND);
+        assert_eq!(r.get(5, 1), HIGH_DENSITY);
+        // Nothing past the landing pixel was even visited, let alone marked.
+        assert_eq!(r.get(7, 1), UNDEFINED);
+    }
+
+    #[test]
+    fn walk_growing_integration_step_reports_a_conflict_without_overwriting_it() {
+        let mut r = raster();
+        r.write_contour(0, &ls(&[(3.5, 1.5), (3.6, 1.5)])); // a real contour pixel at (3, 1)
+        let outcome = r.walk_growing_integration_step(Coord { x: 0.5, y: 1.5 }, Coord { x: 5.5, y: 1.5 });
+        let steps = match outcome {
+            StepWalkOutcome::Clear(steps) => steps,
+            StepWalkOutcome::Landed { .. } => panic!("expected a clear step"),
+        };
+        assert_eq!(
+            steps.iter().find(|&&(x, y, _)| (x, y) == (3, 1)),
+            Some(&(3, 1, PixelWalkStep::Conflict(CONTOUR_0_MATRIX_VALUE)))
+        );
+        // Left exactly as it was -- never turned into `HIGH_DENSITY`.
+        assert_eq!(r.get(3, 1), CONTOUR_0_MATRIX_VALUE);
     }
 
     #[test]
     fn write_contour_claims_its_own_temporary_trail_without_becoming_high_density() {
         // Exactly what Step 1's Growing Process does as a Flying End
         // resolves: its own not-yet-final tail was marked `TEMPORARY_CONTOUR`
-        // one step at a time as it grew (`mark_temporary_step`); the final
-        // `write_contour` call that draws its whole, now-final `ls` in one
-        // shot must claim that trail as this contour's own real value, not
-        // treat it as a conflict with some other contour.
+        // one integration step at a time as it grew
+        // (`walk_growing_integration_step`); the final `write_contour` call
+        // that draws its whole, now-final `ls` in one shot must claim that
+        // trail as this contour's own real value, not treat it as a
+        // conflict with some other contour.
         let mut r = raster();
-        r.mark_temporary_step(Coord { x: 1.5, y: 1.5 }, Coord { x: 5.5, y: 1.5 });
+        r.walk_growing_integration_step(Coord { x: 1.5, y: 1.5 }, Coord { x: 5.5, y: 1.5 });
         assert_eq!(r.get(3, 1), TEMPORARY_CONTOUR);
         r.write_contour(0, &ls(&[(1.5, 1.5), (5.5, 1.5)]));
         assert_eq!(r.get(3, 1), CONTOUR_0_MATRIX_VALUE);
@@ -737,7 +910,7 @@ mod tests {
     #[test]
     fn clear_temporary_contours_resets_remaining_pixels_to_no_contour_in_bound() {
         let mut r = raster();
-        r.mark_temporary_step(Coord { x: 1.5, y: 1.5 }, Coord { x: 5.5, y: 1.5 });
+        r.walk_growing_integration_step(Coord { x: 1.5, y: 1.5 }, Coord { x: 5.5, y: 1.5 });
         r.clear_temporary_contours();
         assert_eq!(r.get(1, 1), NO_CONTOUR_IN_BOUND);
         assert_eq!(r.get(5, 1), NO_CONTOUR_IN_BOUND);

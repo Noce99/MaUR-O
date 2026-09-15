@@ -6,7 +6,8 @@ use geo::{Coord, LineString, Polygon};
 
 use crate::contour_geometry::{self, coords_to_linestrings, nearest_index, resample_equal_chords};
 use crate::contour_raster::{
-    ContourRaster, CONTOUR_0_MATRIX_VALUE, HIGH_DENSITY, OUT_OF_BOUND, TEMPORARY_CONTOUR,
+    ContourRaster, PixelWalkStep, StepWalkOutcome, CONTOUR_0_MATRIX_VALUE, HIGH_DENSITY,
+    OUT_OF_BOUND, TEMPORARY_CONTOUR,
 };
 use crate::contour_symbols::{classify_symbol, jump_gravity_side, SymbolFamily};
 use crate::contours_to_raster_config::Config;
@@ -103,53 +104,55 @@ pub struct Step1Result {
     /// `--create_svg`'s `01_..._step1_growing.svg`, which draws these in
     /// blue instead of green.
     pub grown_by_growing_process: Vec<bool>,
-    /// One entry per case-(c) growing step actually taken (see
+    /// One entry per integration step actually taken (see
     /// `grow_one_step`), empty until `run_growing` runs -- kept only for
     /// `--create_svg`'s `01_..._step1_growing.svg`, which draws each step's
-    /// own four push/pull contributions as separate colored vectors
+    /// own four force contributions as separate colored vectors
     /// (`growing_visualization_push_pull_vectors_scale`-scaled).
     pub growing_push_pull_vectors: Vec<GrowingStepForces>,
+    /// Every integration step's own resulting position (Step 1's Growing
+    /// Process) -- one entry per step actually taken (an ordinary
+    /// still-flying position, or a tunneling-safe landing position), empty
+    /// until `run_growing` runs. A merge/close produces no integration step
+    /// and so contributes no entry. Kept only for `--create_svg`'s
+    /// `01_..._step1_growing.svg`, which draws each as a small dot.
+    pub growing_integration_step_dots: Vec<Coord<f64>>,
     /// Recoverable problems found along the way.
     pub warnings: Vec<String>,
 }
 
-/// One case-(c) growing step's own flying-end position (the vectors' shared
-/// tail, *before* the step) and the four separate push/pull contributions
+/// One integration step's own flying-end position (the vectors' shared
+/// tail, *before* the step) and the four separate force contributions
 /// [`growing_forces`] computes there ([Appendix 5](6aa1e4f7-8b2d-4c6a-9f1e-2d8b4a6c9f3e)),
-/// before they are summed into the step's actual direction ([`GrowingStepForces::total`]) --
-/// kept only for `--create_svg`'s `01_..._step1_growing.svg` visualization.
+/// before they are summed into the step's actual net force
+/// ([`GrowingStepForces::total`]) -- kept only for `--create_svg`'s
+/// `01_..._step1_growing.svg` visualization.
 #[derive(Clone, Copy, Debug)]
 pub struct GrowingStepForces {
     /// The Flying End's own position before this step.
     pub flying_end: Coord<f64>,
-    /// `growing_previous_distance_direction_weight`'s own contribution:
-    /// `previous_direction`, scaled by that weight.
-    pub previous_direction: (f64, f64),
-    /// `growing_out_of_bound_direction_weight`'s own contribution -- always
-    /// `(0.0, 0.0)` while `phase` is `MatchingEnds`, since the term is
-    /// dropped entirely then (see `growing_forces`).
+    /// The contour-pixel potential-well force's own contribution, summed
+    /// over every qualifying pixel in `contour_force_window` (Appendix 5).
+    pub contour: (f64, f64),
+    /// `out_of_bound_force`'s own contribution -- always `(0.0, 0.0)` while
+    /// `phase` is `MatchingEnds`, since the term is dropped entirely then
+    /// (see `growing_forces`).
     pub out_of_bound: (f64, f64),
-    /// `growing_density_direction_weight`'s own contribution.
+    /// `density_region_force`'s own contribution.
     pub density: (f64, f64),
-    /// `growing_other_contours_direction_weight`'s own contribution
-    /// (negative weight, so this typically points away from nearby hits).
-    pub other_contours: (f64, f64),
+    /// `flying_end_force`'s own contribution -- always `(0.0, 0.0)` while
+    /// `phase` is `SeekingOutOfBound`, since matching (and so this term) is
+    /// disabled entirely then (see `growing_forces`).
+    pub flying_end_force: (f64, f64),
 }
 
 impl GrowingStepForces {
-    /// The single direction [`next_grown_node`] actually steps along: the
-    /// four contributions summed, exactly as `growing_direction` used to
-    /// compute it directly.
+    /// The Flying End's actual net force this step, used directly as its
+    /// velocity (no mass, no inertia): the four contributions summed.
     fn total(&self) -> (f64, f64) {
         (
-            self.previous_direction.0
-                + self.out_of_bound.0
-                + self.density.0
-                + self.other_contours.0,
-            self.previous_direction.1
-                + self.out_of_bound.1
-                + self.density.1
-                + self.other_contours.1,
+            self.contour.0 + self.out_of_bound.0 + self.density.0 + self.flying_end_force.0,
+            self.contour.1 + self.out_of_bound.1 + self.density.1 + self.flying_end_force.1,
         )
     }
 }
@@ -842,6 +845,7 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
         pre_growing_flying_ends,
         grown_by_growing_process,
         growing_push_pull_vectors: Vec::new(),
+        growing_integration_step_dots: Vec::new(),
         warnings,
     })
 }
@@ -906,25 +910,6 @@ fn collect_flying_ends(contours: &[Contour], raster: &ContourRaster) -> Vec<Flyi
     ends
 }
 
-/// The unit vector of `ls`'s own last segment, in the direction the Growing
-/// Process should continue past `is_start`'s own end (away from the
-/// contour's body).
-fn previous_direction(ls: &LineString<f64>, is_start: bool) -> (f64, f64) {
-    let n = ls.0.len();
-    let (from, to) = if is_start {
-        (ls.0[1], ls.0[0])
-    } else {
-        (ls.0[n - 2], ls.0[n - 1])
-    };
-    let (dx, dy) = (to.x - from.x, to.y - from.y);
-    let len = dx.hypot(dy);
-    if len < 1e-12 {
-        (1.0, 0.0)
-    } else {
-        (dx / len, dy / len)
-    }
-}
-
 enum WindowPixelKind {
     OutOfBound,
     HighDensity,
@@ -932,88 +917,136 @@ enum WindowPixelKind {
 }
 
 /// Every out-of-bound, high-density, or contour pixel's world-space center
-/// found around `center_px` (Appendix 5), each kind checked against its own
-/// square window: a `Contour` pixel (a real one, or a `TEMPORARY_CONTOUR`
-/// tail -- some Flying End's own not-yet-final tail, see
-/// [`ContourRaster::mark_temporary_step`], counts as one here too, so two
-/// Flying Ends growing at the same time repel each other's tails instead of
-/// only reacting to already-finalized contours) only counts between 2 and
-/// `2*half_contours+1` pixels of `center_px` -- `center_px` itself and its 8
-/// immediate neighbors are always excluded from repulsion, since the Flying
-/// End always sits right on top of its own just-written body there, and
-/// that self-proximity would otherwise swamp the term with a huge,
-/// meaningless push instead of reflecting genuinely nearby contour pixels.
-/// An `OutOfBound`/`HighDensity` pixel only counts within
-/// `2*half_attractions+1` pixels, no such exclusion. Both windows are
-/// scanned in one pass, over their shared (larger) bounding box, each pixel
-/// then kept or dropped by its own kind's own radius (Chebyshev distance,
-/// i.e. `max(|dx|, |dy|)`, matching each window's own square shape).
+/// found around `flying_end` (Appendix 5), each kind checked against its own
+/// circular window, in ground meters: a `Contour` pixel (a real one, or a
+/// `TEMPORARY_CONTOUR` tail -- some Flying End's own not-yet-final tail, see
+/// [`ContourRaster::walk_growing_integration_step`], counts as one here too,
+/// so two Flying Ends growing at the same time repel each other's tails
+/// instead of only reacting to already-finalized contours) only counts
+/// within `contour_force_window` meters of `flying_end` -- its own pixel and
+/// its 8 immediate neighbors (grid adjacency, not distance) are always
+/// excluded, since the Flying End always sits right on top of its own
+/// just-written body there, and that self-proximity would otherwise swamp
+/// the force with a huge, meaningless push instead of reflecting genuinely
+/// nearby contour pixels. An `OutOfBound`/`HighDensity` pixel only counts
+/// within `attraction_force_window` meters, no such exclusion. Both windows
+/// are scanned in one pass, over their shared (larger) pixel-space bounding
+/// box, each pixel then kept or dropped by its own kind's own radius (true
+/// Euclidean distance from `flying_end`'s own continuous position, not the
+/// pixel grid).
 fn growing_window_hits(
     raster: &ContourRaster,
+    flying_end: Coord<f64>,
     center_px: (i64, i64),
-    half_contours: i64,
-    half_attractions: i64,
+    config: &Config,
 ) -> Vec<(WindowPixelKind, Coord<f64>)> {
-    let half = half_contours.max(half_attractions);
+    let half_contours_px = (config.contour_force_window / raster.px_size).ceil() as i64;
+    let half_attractions_px = (config.attraction_force_window / raster.px_size).ceil() as i64;
+    let half_px = half_contours_px.max(half_attractions_px).max(1);
     let mut hits = Vec::new();
-    for y in (center_px.1 - half)..=(center_px.1 + half) {
-        for x in (center_px.0 - half)..=(center_px.0 + half) {
-            let cheby = (x - center_px.0).abs().max((y - center_px.1).abs());
+    for y in (center_px.1 - half_px)..=(center_px.1 + half_px) {
+        for x in (center_px.0 - half_px)..=(center_px.0 + half_px) {
             let val = raster.get(x, y);
             let kind = if val == OUT_OF_BOUND {
-                if cheby > half_attractions {
-                    continue;
-                }
                 WindowPixelKind::OutOfBound
             } else if val == HIGH_DENSITY {
-                if cheby > half_attractions {
-                    continue;
-                }
                 WindowPixelKind::HighDensity
             } else if val == TEMPORARY_CONTOUR || val >= CONTOUR_0_MATRIX_VALUE {
-                if cheby <= 1 || cheby > half_contours {
-                    continue;
+                let cheby = (x - center_px.0).abs().max((y - center_px.1).abs());
+                if cheby <= 1 {
+                    continue; // the Flying End's own pixel and its 8 neighbors
                 }
                 WindowPixelKind::Contour
             } else {
                 continue;
             };
-            hits.push((kind, raster.pixel_center(x, y)));
+            let center = raster.pixel_center(x, y);
+            let d = (center.x - flying_end.x).hypot(center.y - flying_end.y);
+            let within = match kind {
+                WindowPixelKind::Contour => d <= config.contour_force_window,
+                WindowPixelKind::OutOfBound | WindowPixelKind::HighDensity => {
+                    d <= config.attraction_force_window
+                }
+            };
+            if within {
+                hits.push((kind, center));
+            }
         }
     }
     hits
 }
 
-/// Appendix 5's weighted attraction/repulsion, broken down by term rather
-/// than pre-summed: `1`/`3` pixels attract, any contour pixel repels,
-/// blended with the contour's own previous heading. Once a Flying End has
-/// moved on to `MatchingEnds` (see [`GrowingPhase`]), the out-of-bound term
-/// is dropped entirely -- it's already had its dedicated, matching-free
-/// budget to reach the border on its own and didn't, so no longer being
-/// pulled toward one lets it settle into matching another nearby Flying End
-/// instead. The breakdown itself (rather than just [`GrowingStepForces::total`])
+/// The contour-pixel potential-well force's own scalar magnitude at
+/// Euclidean distance `x` (ground meters) from a single contour/
+/// `TEMPORARY_CONTOUR` pixel (Appendix 5): positive (repulsive) for `x`
+/// between `0` and `contour_force_equilibrium` (cfe), a cubic curve from
+/// `contour_force_max_repulsion` (cfmr) at `x = 0` fading to zero at `x =
+/// cfe`; negative (attractive) for `x` between `cfe` and
+/// `contour_force_second_equilibrium` (cfse), a smoothstep from zero at
+/// `cfe` to `contour_force_max_attraction` (cfma, negative) at `cfse`; held
+/// constant at `cfma` for `x > cfse`. The magnitude alone carries the sign:
+/// a positive value pushes away from the pixel, a negative one pulls toward
+/// it, so callers apply it along the same "away from the pixel" unit vector
+/// throughout, with no separate sign branch needed.
+pub(crate) fn contour_force_magnitude(x: f64, config: &Config) -> f64 {
+    let cfmr = config.contour_force_max_repulsion;
+    let cfe = config.contour_force_equilibrium;
+    let cfma = config.contour_force_max_attraction;
+    let cfse = config.contour_force_second_equilibrium;
+    if x <= cfe {
+        (2.0 * cfmr / cfe.powi(3)) * x.powi(3) - (3.0 * cfmr / cfe.powi(2)) * x.powi(2) + cfmr
+    } else if x <= cfse {
+        let t = (x - cfe) / (cfse - cfe);
+        cfma * (3.0 * t * t - 2.0 * t * t * t)
+    } else {
+        cfma
+    }
+}
+
+/// Appendix 5's real, Newton-valued forces, broken down by term rather than
+/// pre-summed: the contour-pixel potential well
+/// (`contour_force_magnitude`, summed over every hit within
+/// `contour_force_window`, unit vector away from the pixel), and the three
+/// constant-magnitude attractions (`out_of_bound_force`/
+/// `density_region_force`/`flying_end_force`, each summed over every hit
+/// within `attraction_force_window`, unit vector toward it). Once a Flying
+/// End has moved on to `MatchingEnds` (see [`GrowingPhase`]), the
+/// out-of-bound term is dropped entirely -- it's already had its dedicated,
+/// matching-free budget to reach the border on its own and didn't, so no
+/// longer being pulled toward one lets it settle into matching another
+/// nearby Flying End instead; conversely the flying-end term is dropped
+/// entirely during `SeekingOutOfBound`, since matching itself is disabled
+/// then. The breakdown itself (rather than just [`GrowingStepForces::total`])
 /// is kept only so `grow_one_step` can record it into
 /// `Step1Result::growing_push_pull_vectors` for `--create_svg`'s benefit --
-/// the Growing Process itself only ever needs the summed direction.
+/// the Growing Process itself only ever needs the summed net force.
 fn growing_forces(
     flying_end: Coord<f64>,
-    previous_direction: (f64, f64),
     hits: &[(WindowPixelKind, Coord<f64>)],
+    other_ends: &[Coord<f64>],
     config: &Config,
     phase: GrowingPhase,
 ) -> GrowingStepForces {
     let mut forces = GrowingStepForces {
         flying_end,
-        previous_direction: (
-            config.growing_previous_distance_direction_weight * previous_direction.0,
-            config.growing_previous_distance_direction_weight * previous_direction.1,
-        ),
+        contour: (0.0, 0.0),
         out_of_bound: (0.0, 0.0),
         density: (0.0, 0.0),
-        other_contours: (0.0, 0.0),
+        flying_end_force: (0.0, 0.0),
     };
     for (kind, center) in hits {
-        if phase == GrowingPhase::MatchingEnds && matches!(kind, WindowPixelKind::OutOfBound) {
+        // Each of the raster-derived terms now belongs to exactly one
+        // phase: `Contour`/`OutOfBound` to `SeekingOutOfBound` alone,
+        // `HighDensity` to `MatchingEnds` alone (`flying_end_force`, the
+        // fourth term, is computed separately below and is `MatchingEnds`
+        // -only too).
+        let dropped = match phase {
+            GrowingPhase::SeekingOutOfBound => matches!(kind, WindowPixelKind::HighDensity),
+            GrowingPhase::MatchingEnds => {
+                matches!(kind, WindowPixelKind::OutOfBound | WindowPixelKind::Contour)
+            }
+        };
+        if dropped {
             continue;
         }
         let (bx, by) = (center.x - flying_end.x, center.y - flying_end.y);
@@ -1021,41 +1054,55 @@ fn growing_forces(
         if d < 1e-12 {
             continue; // the pixel sits exactly on the Flying End
         }
-        let w = match kind {
-            WindowPixelKind::OutOfBound => config.growing_out_of_bound_direction_weight,
-            WindowPixelKind::HighDensity => config.growing_density_direction_weight,
-            WindowPixelKind::Contour => config.growing_other_contours_direction_weight,
-        };
-        let term = match kind {
-            WindowPixelKind::OutOfBound => &mut forces.out_of_bound,
-            WindowPixelKind::HighDensity => &mut forces.density,
-            WindowPixelKind::Contour => &mut forces.other_contours,
-        };
-        term.0 += w * bx / (d * d);
-        term.1 += w * by / (d * d);
+        let (ux, uy) = (bx / d, by / d);
+        match kind {
+            WindowPixelKind::OutOfBound => {
+                forces.out_of_bound.0 += config.out_of_bound_force * ux;
+                forces.out_of_bound.1 += config.out_of_bound_force * uy;
+            }
+            WindowPixelKind::HighDensity => {
+                forces.density.0 += config.density_region_force * ux;
+                forces.density.1 += config.density_region_force * uy;
+            }
+            WindowPixelKind::Contour => {
+                let mag = contour_force_magnitude(d, config);
+                // Away from the pixel, not toward it (unlike `ux`/`uy`
+                // above): a positive `mag` (repulsion, close range) must
+                // push the Flying End away from the contour pixel, and a
+                // negative one (attraction, far range) must pull it back.
+                forces.contour.0 -= mag * ux;
+                forces.contour.1 -= mag * uy;
+            }
+        }
+    }
+    if phase == GrowingPhase::MatchingEnds {
+        for other in other_ends {
+            let (bx, by) = (other.x - flying_end.x, other.y - flying_end.y);
+            let d = bx.hypot(by);
+            if d < 1e-12 || d > config.attraction_force_window {
+                continue;
+            }
+            // Linear falloff from `flying_end_force` at zero distance to
+            // zero at `attraction_force_window` -- unlike `out_of_bound_force`/
+            // `density_region_force`, which stay full-strength across their
+            // own window. Without this, every pending Flying End within
+            // range pulled with the same full, undamped magnitude regardless
+            // of distance, so in a crowded cluster (several ends converging
+            // at once) the *nearest* end's own pull was easily swamped by
+            // the combined pull of several more distant ones, and that
+            // combined pull's own direction could swing sharply from one
+            // integration step to the next as other ends resolved out of
+            // range -- producing a sharp, physically implausible kink right
+            // where two contours finally merge (see `merge_contours`), which
+            // then reads as a genuine gravity conflict in Step 2 even though
+            // the two readings around it agree about which side is downhill.
+            let falloff = 1.0 - d / config.attraction_force_window;
+            let mag = config.flying_end_force * falloff;
+            forces.flying_end_force.0 += mag * bx / d;
+            forces.flying_end_force.1 += mag * by / d;
+        }
     }
     forces
-}
-
-/// The next grown node, `step` away from `flying_end` along `direction`, or
-/// straight ahead along `previous_direction` if `direction` came out zero
-/// (the window held nothing to react to).
-fn next_grown_node(
-    flying_end: Coord<f64>,
-    previous_direction: (f64, f64),
-    direction: (f64, f64),
-    step: f64,
-) -> Coord<f64> {
-    let len = direction.0.hypot(direction.1);
-    let (ux, uy) = if len < 1e-12 {
-        previous_direction
-    } else {
-        (direction.0 / len, direction.1 / len)
-    };
-    Coord {
-        x: flying_end.x + ux * step,
-        y: flying_end.y + uy * step,
-    }
 }
 
 fn append_node(contours: &mut [Contour], contour_idx: usize, is_start: bool, node: Coord<f64>) {
@@ -1195,13 +1242,66 @@ fn merge_contours(
     grown.remove(remove_idx);
 }
 
-/// A generous cap on the *total* number of growth steps taken across every
-/// Flying End combined, scaled by how many there were to start with --
+/// Undoes every step a Flying End took during `SeekingOutOfBound` (Phase 1)
+/// once it hits its own `growing_oob_seeking_max_steps` budget without
+/// resolving, so `MatchingEnds` (Phase 2, [`run_growing_matching`]) reacts to
+/// the Flying End's own pre-Seeking position, not wherever the
+/// (matching-blind) Seeking search happened to wander off to -- Seeking
+/// exists to give a Flying End near its own border a fair, matching-free
+/// shot at reaching it, not to permanently commit an unsuccessful search's
+/// own path once that hasn't panned out. `original` is this end's own
+/// position exactly as it was before Seeking ever touched it.
+///
+/// Deliberately *not* found by counting back the number of nodes
+/// `grow_one_step` appended (one per `StillFlying` outcome) -- a plain count
+/// would be simple, but this same contour's *other* end resolving somewhere
+/// in the middle of this end's own Seeking run resamples the *whole* `ls`
+/// (`resample_equal_chords`, on `grow_one_step`'s own `Landed` branch, case
+/// (a)/(b) of the Growing Process), which can both change every node's own
+/// position *and* the total node count -- silently invalidating a plain
+/// count kept across that event. Instead, `ls`'s own node closest to
+/// `original` is found by scanning it (exact if no resample intervened
+/// since Seeking started for this end; otherwise the closest survivor after
+/// `resample_equal_chords` redistributed points along the same curve) and
+/// treated as the boundary between this end's own now-abandoned growth
+/// (this end's own side of it) and everything before that (left alone). The
+/// path from this end's own current position back to that boundary is
+/// handed to [`ContourRaster::revert_temporary_trail`] so the
+/// `TEMPORARY_CONTOUR` pixels this now-abandoned attempt marked along the
+/// way don't linger to attract/repel this same Flying End as though its own
+/// discarded trail were some other, separate object once it restarts
+/// `MatchingEnds` from this same, now-restored position.
+fn revert_seeking_growth(
+    contour_idx: usize,
+    is_start: bool,
+    original: Coord<f64>,
+    contours: &mut [Contour],
+    raster: &mut ContourRaster,
+    temp_owner: &std::collections::HashMap<(i64, i64), usize>,
+) {
+    let ls = &mut contours[contour_idx].lwg.ls;
+    let boundary = nearest_index(ls, original);
+    if is_start {
+        let path = ls.0[..=boundary].to_vec();
+        raster.revert_temporary_trail(contour_idx, &path, temp_owner);
+        ls.0.drain(..boundary);
+        ls.0[0] = original;
+    } else {
+        let path = ls.0[boundary..].to_vec();
+        raster.revert_temporary_trail(contour_idx, &path, temp_owner);
+        ls.0.truncate(boundary + 1);
+        let last = ls.0.len() - 1;
+        ls.0[last] = original;
+    }
+}
+
+/// A generous cap on the *total* number of integration steps taken across
+/// every Flying End combined, scaled by how many there were to start with --
 /// purely a safety valve against an unbounded loop (e.g. an oscillating
 /// limit cycle between two density clusters), not part of the doc's own
 /// algorithm, which assumes every path eventually reaches the out-of-bound
 /// ring.
-const MAX_GROWING_STEPS_PER_END: u64 = 100_000;
+const MAX_GROWING_STEPS_PER_END: u64 = 100;
 
 /// What one call to [`grow_one_step`] did to the Flying End it was given.
 enum GrowStepOutcome {
@@ -1212,11 +1312,15 @@ enum GrowStepOutcome {
     StillFlying(FlyingEnd),
 }
 
-/// Advances one Flying End by exactly one step of the Growing Process (case
-/// (a), (b), or (c) -- see the doc). `pending` is every *other* Flying End
-/// still waiting on its own next step (`end` itself is not in it -- the
-/// caller already popped it off before calling this); ignored entirely
-/// while `phase` is `SeekingOutOfBound`, since case (a) is skipped then.
+/// Advances one Flying End by exactly one integration step of the Growing
+/// Process (see the doc). `pending` is every *other* Flying End still
+/// waiting on its own next step (`end` itself is not in it -- the caller
+/// already popped it off before calling this); ignored entirely while
+/// `phase` is `SeekingOutOfBound`, since merging is disabled then.
+/// `temp_owner` maps a `TEMPORARY_CONTOUR` pixel to the contour that placed
+/// it, spanning the whole `run_growing` call (both phases, every Flying
+/// End), so a step revisiting its own earlier trail can be told apart from
+/// a genuine conflict with a different contour.
 #[allow(clippy::too_many_arguments)]
 fn grow_one_step(
     end: FlyingEnd,
@@ -1228,32 +1332,29 @@ fn grow_one_step(
     config: &Config,
     phase: GrowingPhase,
     push_pull_vectors: &mut Vec<GrowingStepForces>,
+    dots: &mut Vec<Coord<f64>>,
+    temp_owner: &mut std::collections::HashMap<(i64, i64), usize>,
+    warnings: &mut Vec<String>,
 ) -> GrowStepOutcome {
     let (contour_idx, is_start) = (end.contour_idx, end.is_start);
-    let half_contours = ((config.growing_window_size_px_contours / 2) as i64).max(1);
-    let half_attractions = ((config.growing_window_size_px_attractions / 2) as i64).max(1);
 
     let pos = flying_end_position(&contours[contour_idx].lwg.ls, is_start);
     if !is_flying(raster, pos) {
         return GrowStepOutcome::Resolved;
     }
-    let (px, py) = raster.to_px(pos);
 
-    // (a) another pending Flying End inside the window? Skipped outright
-    // while still seeking the out-of-bound area on its own (see
-    // `GrowingPhase`) -- two contours running close and parallel near the
-    // border must each reach it independently, not snap onto each other
-    // just because they happen to sit in each other's window. Uses the
-    // attraction window (`half_attractions`), grouped with the
-    // out-of-bound/high-density pull terms as another thing the Growing
-    // Process can move toward, rather than the contour-repulsion window.
+    // Merge check (Matching phase only): skipped outright while still
+    // seeking the out-of-bound area on its own (see `GrowingPhase`) -- two
+    // contours running close and parallel near the border must each reach
+    // it independently, not snap onto each other just because they happen
+    // to be close. Two pending Flying Ends merge the moment their real,
+    // continuous Euclidean distance drops below `flying_end_merge_distance`
+    // -- `flying_end_force` only pulls them together; this distance check
+    // is what actually finalizes the merge.
     if phase == GrowingPhase::MatchingEnds {
-        let x_range = (px - half_attractions)..=(px + half_attractions);
-        let y_range = (py - half_attractions)..=(py + half_attractions);
         let other = pending.iter().position(|o| {
             let other_pos = flying_end_position(&contours[o.contour_idx].lwg.ls, o.is_start);
-            let (ox, oy) = raster.to_px(other_pos);
-            x_range.contains(&ox) && y_range.contains(&oy)
+            (other_pos.x - pos.x).hypot(other_pos.y - pos.y) < config.flying_end_merge_distance
         });
         if let Some(i) = other {
             let other_end = pending.remove(i).expect("index just found by position()");
@@ -1284,104 +1385,177 @@ fn grow_one_step(
         }
     }
 
-    let hits = growing_window_hits(raster, (px, py), half_contours, half_attractions);
+    // Force computation (Appendix 5): contour potential well plus, phase
+    // permitting, the three constant-magnitude attractions.
+    let (px, py) = raster.to_px(pos);
+    let hits = growing_window_hits(raster, pos, (px, py), config);
+    let other_ends: Vec<Coord<f64>> = if phase == GrowingPhase::MatchingEnds {
+        pending
+            .iter()
+            .map(|o| flying_end_position(&contours[o.contour_idx].lwg.ls, o.is_start))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let forces = growing_forces(pos, &hits, &other_ends, config, phase);
+    let total = forces.total();
+    push_pull_vectors.push(forces);
 
-    // (b) nearest out-of-bound/high-density pixel closer than this step's
-    // own length (contours_step * growing_step_length) -- the same
-    // distance case (c) would otherwise move by, so a pixel case (c) would
-    // already land on or past is settled on directly here instead.
-    let step_length = config.contours_step * config.growing_step_length;
-    let mut nearest: Option<(f64, Coord<f64>)> = None;
-    for (kind, center) in &hits {
-        if matches!(
-            kind,
-            WindowPixelKind::OutOfBound | WindowPixelKind::HighDensity
-        ) {
-            let d = (center.x - pos.x).hypot(center.y - pos.y);
-            if d < step_length && nearest.as_ref().is_none_or(|&(bd, _)| d < bd) {
-                nearest = Some((d, *center));
+    // Overdamped integration: the net force *is* the velocity (no mass, no
+    // inertia, nothing persisted between steps) -- displacement this step
+    // is that force times `grow_time_step`. A zero net force means the
+    // Flying End simply doesn't move this step (still counts toward
+    // Seeking's own budget, so a Flying End with nothing pulling on it
+    // doesn't loop forever without ever falling through to Matching).
+    if total.0 == 0.0 && total.1 == 0.0 {
+        return GrowStepOutcome::StillFlying(FlyingEnd {
+            contour_idx,
+            is_start,
+        });
+    }
+    let raw_next = Coord {
+        x: pos.x + total.0 * config.grow_time_step,
+        y: pos.y + total.1 * config.grow_time_step,
+    };
+
+    // Tunneling-safe path walk (Appendix 5): a single integration step's
+    // displacement is no longer bounded to a fixed, short length, so the
+    // real continuous path from `pos` to `raw_next` is walked pixel by
+    // pixel rather than only checking `raw_next` itself, catching the first
+    // out-of-bound/high-density pixel crossed -- which becomes the Flying
+    // End's actual landing spot -- and reporting every other pixel walked
+    // along the way as newly claimed (`TEMPORARY_CONTOUR`) or already
+    // claimed by something else.
+    let outcome = raster.walk_growing_integration_step(pos, raw_next);
+    let (steps, landing) = match outcome {
+        StepWalkOutcome::Clear(steps) => (steps, None),
+        StepWalkOutcome::Landed {
+            hit: _,
+            center,
+            before,
+        } => (before, Some(center)),
+    };
+    // The walk's own first reported pixel is always `pos`'s own pixel --
+    // the Flying End's current position, already part of its own body
+    // (either a real contour value from the original full-map fill, or
+    // `TEMPORARY_CONTOUR` from this same contour's own previous step) --
+    // so it always reads back as a `Conflict` against itself. Skipped
+    // entirely: it needs no (re)claiming, and would otherwise trigger a
+    // false "already claimed" warning every single step.
+    let mut steps = steps.into_iter();
+    steps.next();
+    for (x, y, step) in steps {
+        match step {
+            PixelWalkStep::Marked => {
+                temp_owner.insert((x, y), contour_idx);
+            }
+            PixelWalkStep::Conflict(val) => {
+                // A contour revisiting its own earlier trail is expected
+                // and silent (exactly today's behavior); anything else --
+                // owned by a different contour, or a real, already-final
+                // contour's own value -- is a genuine conflict worth
+                // warning about. Left exactly as it is either way (never
+                // turned into `HIGH_DENSITY`, unlike `write_contour`'s own
+                // conflict rule).
+                if temp_owner.get(&(x, y)) != Some(&contour_idx) {
+                    warnings.push(format!(
+                        "Growing Process: contour {contour_idx}'s integration step at pixel \
+                         ({x},{y}) found it already claimed ({val}); left it as-is"
+                    ));
+                }
             }
         }
     }
-    if let Some((_, target)) = nearest {
-        append_node(contours, contour_idx, is_start, target);
-        let resampled = resample_equal_chords(&contours[contour_idx].lwg.ls, config.contours_step);
-        contours[contour_idx].lwg.ls = resampled.clone();
-        // As in `close_contour`: resampling can in principle shift nodes
-        // other than the newly snapped one, so the contour's previous
-        // footprint is cleared before redrawing it fresh, rather than
-        // drawn additively on top of whatever was there before.
-        raster.clear_contour(contour_idx as u64);
-        raster.write_contour(contour_idx as u64, &resampled);
-        grown[contour_idx] = true;
-        return GrowStepOutcome::Resolved;
-    }
 
-    // (c) attraction/repulsion direction. Not written under this contour's
-    // own real index yet while still flying (see `close_contour`'s own doc
-    // comment for why: only once this contour's `ls` reaches its actual
-    // final shape -- here, or in case (a)/(b) above -- is it drawn under
-    // that index, in one shot, so the raster never ends up holding pixels
-    // from an intermediate, not-yet-final position under a real contour's
-    // value). The step just taken is, however, marked `TEMPORARY_CONTOUR`
-    // right away, so a different Flying End growing in parallel repels off
-    // of it instead of being blind to it -- otherwise two contours each
-    // independently seeking the border, close and parallel, can cross one
-    // another unnoticed (neither has written anything real yet for the
-    // other to react to).
-    let prev_dir = previous_direction(&contours[contour_idx].lwg.ls, is_start);
-    let forces = growing_forces(pos, prev_dir, &hits, config, phase);
-    let dir = forces.total();
-    push_pull_vectors.push(forces);
-    let next = next_grown_node(pos, prev_dir, dir, step_length);
-    raster.mark_temporary_step(pos, next);
-    append_node(contours, contour_idx, is_start, next);
-    grown[contour_idx] = true;
-    if is_flying(raster, next) {
-        GrowStepOutcome::StillFlying(FlyingEnd {
-            contour_idx,
-            is_start,
-        })
-    } else {
-        // Landed directly on an out-of-bound/high-density pixel by chance,
-        // rather than being snapped there by case (b): this `ls` is now
-        // final too, so it gets its one, whole-`ls` write here.
-        raster.write_contour(contour_idx as u64, &contours[contour_idx].lwg.ls);
-        GrowStepOutcome::Resolved
+    match landing {
+        Some(center) => {
+            // This subsumes the old fixed-step algorithm's proximity snap
+            // and its "landed directly on a border pixel" case into one
+            // mechanism: the landing distance is no longer a fixed step
+            // length, so the newly-final segment needs resampling either
+            // way.
+            append_node(contours, contour_idx, is_start, center);
+            let resampled =
+                resample_equal_chords(&contours[contour_idx].lwg.ls, config.contours_step);
+            contours[contour_idx].lwg.ls = resampled.clone();
+            raster.clear_contour(contour_idx as u64);
+            raster.write_contour(contour_idx as u64, &resampled);
+            grown[contour_idx] = true;
+            dots.push(center);
+            GrowStepOutcome::Resolved
+        }
+        None => {
+            append_node(contours, contour_idx, is_start, raw_next);
+            grown[contour_idx] = true;
+            dots.push(raw_next);
+            GrowStepOutcome::StillFlying(FlyingEnd {
+                contour_idx,
+                is_start,
+            })
+        }
     }
 }
 
-/// Step 1's final sub-step (see the doc): extends every open contour's
-/// Flying End until it resolves to an out-of-bound or high-density pixel,
-/// in two passes -- see [`GrowingPhase`]. Within each pass, Flying Ends are
-/// never advanced in parallel, but round-robin rather than one at a time to
-/// completion: every still-pending Flying End gets exactly one growth step,
-/// then the whole list is cycled through again, and so on until none are
-/// left (resolving one, by merging two contours together, can also resolve
-/// another already in the list -- `MatchingEnds` only).
+/// Whatever [`run_growing_seeking`] (Phase 1) left unresolved, carried over
+/// to [`run_growing_matching`] (Phase 2).
+pub struct GrowingMatchState {
+    pending: std::collections::VecDeque<FlyingEnd>,
+    /// Maps a `TEMPORARY_CONTOUR` pixel to the contour that placed it,
+    /// spanning both phases and every Flying End -- lets `grow_one_step`
+    /// tell its own earlier trail apart from a genuine conflict with a
+    /// different contour.
+    temp_owner: std::collections::HashMap<(i64, i64), usize>,
+}
+
+/// Step 1's Growing Process (see the doc), Phase 1 (`SeekingOutOfBound` --
+/// see [`GrowingPhase`]): every Flying End gets up to
+/// `growing_oob_seeking_max_steps` steps entirely on its own -- no merging,
+/// no closing, `contours`/`grown` never change length here, so tracking each
+/// end's own step count by its (stable) `(contour_idx, is_start)` is safe
+/// for the whole pass. Flying Ends are never advanced in parallel, but
+/// round-robin rather than one at a time to completion: every still-pending
+/// one gets exactly one integration step, then the whole list is cycled
+/// through again, and so on until every one has either resolved or spent its
+/// own budget. A budget of `0` turns this phase off outright: every Flying
+/// End starts straight in `MatchingEnds`.
 ///
 /// Deliberately not run as part of `extract` itself: `--create_svg` needs to
 /// write `00_..._step1.svg` (the pre-growing state, with `result`'s own
 /// `pre_growing_flying_ends` as red rings) before this runs, then
-/// `01_..._step1_growing.svg` (this function's own result) after -- see the
-/// doc's Visualization section. Sets `result.grown_by_growing_process` (used
-/// by `01_..._step1_growing.svg` to draw a touched contour in blue instead
-/// of green) and returns any new warnings raised along the way (`MatchingEnds`'
-/// own step budget, `MAX_GROWING_STEPS_PER_END` times however many Flying
-/// Ends entered that pass, running out before every one resolved).
-pub fn run_growing(result: &mut Step1Result, config: &Config) -> Vec<String> {
+/// `01_..._step1_growing_seeking.svg` (this function's own result) after --
+/// see the doc's Visualization section. Sets `result.grown_by_growing_process`
+/// (used by that file to draw a touched contour in blue instead of green)
+/// and returns any new warnings raised along the way (a
+/// `walk_growing_integration_step` conflict against a different contour's
+/// own pixel, see `grow_one_step`), plus the [`GrowingMatchState`]
+/// [`run_growing_matching`] needs to run Phase 2.
+pub fn run_growing_seeking(
+    result: &mut Step1Result,
+    config: &Config,
+) -> (GrowingMatchState, Vec<String>) {
     let mut grown = vec![false; result.contours.len()];
     let mut warnings = Vec::new();
     let mut push_pull_vectors = Vec::new();
+    let mut dots = Vec::new();
+    let mut temp_owner: std::collections::HashMap<(i64, i64), usize> =
+        std::collections::HashMap::new();
 
-    // Phase 1 (`SeekingOutOfBound`): every Flying End gets up to
-    // `growing_oob_seeking_max_steps` steps entirely on its own -- no
-    // merging, no closing, `contours`/`grown` never change length here, so
-    // tracking each end's own step count by its (stable) `(contour_idx,
-    // is_start)` is safe for the whole pass. A budget of `0` turns this
-    // phase off outright: every Flying End starts straight in `MatchingEnds`.
     let initial_ends: std::collections::VecDeque<FlyingEnd> =
         collect_flying_ends(&result.contours, &result.raster).into();
+    // Every end's own position right now, before Seeking touches any of
+    // them -- `revert_seeking_growth` needs this (not a step count, which a
+    // sibling end's own mid-Seeking resolve can silently invalidate, see its
+    // own doc comment) for whichever ends still haven't resolved once their
+    // own budget runs out.
+    let originals: std::collections::HashMap<(usize, bool), Coord<f64>> = initial_ends
+        .iter()
+        .map(|e| {
+            (
+                (e.contour_idx, e.is_start),
+                flying_end_position(&result.contours[e.contour_idx].lwg.ls, e.is_start),
+            )
+        })
+        .collect();
     let seek_phase_enabled = config.growing_oob_seeking_max_steps > 0;
     let mut seeking = if seek_phase_enabled {
         initial_ends.clone()
@@ -1408,6 +1582,9 @@ pub fn run_growing(result: &mut Step1Result, config: &Config) -> Vec<String> {
             config,
             GrowingPhase::SeekingOutOfBound,
             &mut push_pull_vectors,
+            &mut dots,
+            &mut temp_owner,
+            &mut warnings,
         ) {
             GrowStepOutcome::Resolved => {}
             GrowStepOutcome::StillFlying(new_end) => {
@@ -1416,6 +1593,15 @@ pub fn run_growing(result: &mut Step1Result, config: &Config) -> Vec<String> {
                     .or_insert(0);
                 *count += 1;
                 if *count >= config.growing_oob_seeking_max_steps {
+                    let original = originals[&(new_end.contour_idx, new_end.is_start)];
+                    revert_seeking_growth(
+                        new_end.contour_idx,
+                        new_end.is_start,
+                        original,
+                        &mut result.contours,
+                        &mut result.raster,
+                        &temp_owner,
+                    );
                     matching.push_back(new_end);
                 } else {
                     seeking.push_back(new_end);
@@ -1424,9 +1610,57 @@ pub fn run_growing(result: &mut Step1Result, config: &Config) -> Vec<String> {
         }
     }
 
-    // Phase 2 (`MatchingEnds`): the full process for whatever didn't reach
-    // the border on its own within phase 1's budget.
-    let mut pending = matching;
+    result.grown_by_growing_process = grown;
+    result.growing_push_pull_vectors = push_pull_vectors;
+    result.growing_integration_step_dots = dots;
+
+    (
+        GrowingMatchState {
+            pending: matching,
+            temp_owner,
+        },
+        warnings,
+    )
+}
+
+/// Step 1's Growing Process (see the doc), Phase 2 (`MatchingEnds` -- see
+/// [`GrowingPhase`]): the full process for whatever [`run_growing_seeking`]
+/// (Phase 1) didn't resolve on its own within its own budget. Flying Ends
+/// are still round-robin, never in parallel: every still-pending one gets
+/// exactly one integration step, then the whole list is cycled through
+/// again, and so on until none are left (resolving one, by merging two
+/// contours together, can also resolve another already in the list --
+/// `MatchingEnds` only). A generous, purely defensive step budget
+/// (`MAX_GROWING_STEPS_PER_END` times however many Flying Ends entered this
+/// phase) guards against an unbounded loop (e.g. an oscillating limit cycle
+/// between two density clusters) -- not part of the doc's own algorithm,
+/// which assumes every path eventually resolves; hitting it is reported as
+/// a warning, with however many Flying Ends were still unresolved left
+/// exactly where they were.
+///
+/// Extends `result.grown_by_growing_process` (reclaimed from wherever Phase
+/// 1 left it) rather than starting it over, so a contour Phase 1 already
+/// touched still draws blue there even if Phase 2 never touches it again;
+/// `growing_push_pull_vectors`/`growing_integration_step_dots` instead start
+/// fresh, empty, so that file's own push/pull-vector and
+/// integration-step-dot layers show only this phase's own steps, not Phase
+/// 1's already covered by its own file. Returns any new warnings raised
+/// along the way, on top of whatever `run_growing_seeking` already returned
+/// of its own.
+pub fn run_growing_matching(
+    result: &mut Step1Result,
+    config: &Config,
+    state: GrowingMatchState,
+) -> Vec<String> {
+    let GrowingMatchState {
+        mut pending,
+        mut temp_owner,
+    } = state;
+    let mut grown = std::mem::take(&mut result.grown_by_growing_process);
+    let mut push_pull_vectors = Vec::new();
+    let mut dots = Vec::new();
+    let mut warnings = Vec::new();
+
     let max_steps = MAX_GROWING_STEPS_PER_END * pending.len().max(1) as u64;
     let mut steps_taken = 0u64;
     while let Some(end) = pending.pop_front() {
@@ -1440,6 +1674,9 @@ pub fn run_growing(result: &mut Step1Result, config: &Config) -> Vec<String> {
             config,
             GrowingPhase::MatchingEnds,
             &mut push_pull_vectors,
+            &mut dots,
+            &mut temp_owner,
+            &mut warnings,
         ) {
             GrowStepOutcome::Resolved => {}
             GrowStepOutcome::StillFlying(new_end) => pending.push_back(new_end),
@@ -1462,6 +1699,17 @@ pub fn run_growing(result: &mut Step1Result, config: &Config) -> Vec<String> {
     result.raster.clear_temporary_contours();
     result.grown_by_growing_process = grown;
     result.growing_push_pull_vectors = push_pull_vectors;
+    result.growing_integration_step_dots = dots;
+    warnings
+}
+
+/// Runs both of Step 1's Growing Process phases back to back, exactly as
+/// [`run_growing_seeking`] followed by [`run_growing_matching`] would --
+/// kept for callers that don't need `--create_svg`'s own separate per-phase
+/// snapshots (this module's own tests among them).
+pub fn run_growing(result: &mut Step1Result, config: &Config) -> Vec<String> {
+    let (state, mut warnings) = run_growing_seeking(result, config);
+    warnings.extend(run_growing_matching(result, config, state));
     warnings
 }
 
@@ -1575,13 +1823,17 @@ mod tests {
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
             growing_oob_seeking_max_steps: 0,
-            growing_window_size_px_contours: 4,
-            growing_window_size_px_attractions: 4,
-            growing_step_length: 1.0,
-            growing_previous_distance_direction_weight: 1.0,
-            growing_out_of_bound_direction_weight: 1.0,
-            growing_density_direction_weight: 1.0,
-            growing_other_contours_direction_weight: -1.0,
+            contour_force_window: 4.0,
+            attraction_force_window: 4.0,
+            contour_force_max_repulsion: 2.0,
+            contour_force_equilibrium: 1.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 3.0,
+            out_of_bound_force: 0.5,
+            density_region_force: 1.0,
+            flying_end_force: 1.0,
+            flying_end_merge_distance: 0.5,
+            grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
 
@@ -1703,13 +1955,17 @@ mod tests {
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
             growing_oob_seeking_max_steps: 0,
-            growing_window_size_px_contours: 4,
-            growing_window_size_px_attractions: 4,
-            growing_step_length: 1.0,
-            growing_previous_distance_direction_weight: 1.0,
-            growing_out_of_bound_direction_weight: 1.0,
-            growing_density_direction_weight: 1.0,
-            growing_other_contours_direction_weight: -1.0,
+            contour_force_window: 4.0,
+            attraction_force_window: 4.0,
+            contour_force_max_repulsion: 2.0,
+            contour_force_equilibrium: 1.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 3.0,
+            out_of_bound_force: 0.5,
+            density_region_force: 1.0,
+            flying_end_force: 1.0,
+            flying_end_merge_distance: 0.5,
+            grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
 
@@ -1781,12 +2037,12 @@ mod tests {
     #[test]
     fn growing_closes_a_contour_whose_own_two_flying_ends_meet_each_other() {
         // A wide, shallow "V": both ends sit at y=10, only 4m apart --
-        // comfortably inside each other's growing window -- and they belong
-        // to the very same (single) contour. Case (a) should close it into
-        // a ring (not corrupt it by feeding both into `merge_contours` as
-        // if they were two different contours, and not silently ignore the
-        // match either -- a contour's own other end is a valid, and good,
-        // case-(a) partner).
+        // comfortably inside `flying_end_merge_distance` -- and they belong
+        // to the very same (single) contour. The merge check should close
+        // it into a ring (not corrupt it by feeding both into
+        // `merge_contours` as if they were two different contours, and not
+        // silently ignore the match either -- a contour's own other end is
+        // a valid, and good, merge partner).
         let ls = LineString::new(vec![c(15.0, 10.0), c(17.0, 15.0), c(19.0, 10.0)]);
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
         raster.write_contour(0, &ls);
@@ -1808,6 +2064,7 @@ mod tests {
             pre_growing_flying_ends: Vec::new(),
             grown_by_growing_process: vec![false],
             growing_push_pull_vectors: Vec::new(),
+            growing_integration_step_dots: Vec::new(),
             warnings: Vec::new(),
         };
         let config = Config {
@@ -1823,13 +2080,17 @@ mod tests {
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
             growing_oob_seeking_max_steps: 0,
-            growing_window_size_px_contours: 10,
-            growing_window_size_px_attractions: 10,
-            growing_step_length: 1.0,
-            growing_previous_distance_direction_weight: 1.0,
-            growing_out_of_bound_direction_weight: 1.0,
-            growing_density_direction_weight: 1.0,
-            growing_other_contours_direction_weight: -1.0,
+            contour_force_window: 10.0,
+            attraction_force_window: 15.0,
+            contour_force_max_repulsion: 4.0,
+            contour_force_equilibrium: 2.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 6.0,
+            out_of_bound_force: 2.0,
+            density_region_force: 2.0,
+            flying_end_force: 2.0,
+            flying_end_merge_distance: 5.0,
+            grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
 
@@ -1851,11 +2112,13 @@ mod tests {
     #[test]
     fn growing_merge_keeps_the_two_contours_raw_polylines_separate() {
         // Two short, separate open contours whose near ends (A's end, B's
-        // start) are only 2m apart -- well inside each other's growing
-        // window -- while each contour's own two ends stay 10m apart, safely
+        // start) are only 2m apart -- well inside `flying_end_merge_distance`
+        // -- while each contour's own two ends stay 10m apart, safely
         // outside it, so this merges A with B rather than either closing on
-        // itself. A's own far end and B's own far end each just grow
-        // straight toward the raster's border and resolve there.
+        // itself. A's own far end is already out of bound at x=0 (never a
+        // Flying End to begin with); B's own far end grows on its own,
+        // repelled forward by its own already-drawn trailing body (contour
+        // force), until it resolves at the raster's border.
         let ls_a = LineString::new(vec![c(0.0, 10.0), c(10.0, 10.0)]);
         let ls_b = LineString::new(vec![c(12.0, 10.0), c(22.0, 10.0)]);
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
@@ -1905,6 +2168,7 @@ mod tests {
             pre_growing_flying_ends: Vec::new(),
             grown_by_growing_process: vec![false, false],
             growing_push_pull_vectors: Vec::new(),
+            growing_integration_step_dots: Vec::new(),
             warnings: Vec::new(),
         };
         let config = Config {
@@ -1920,13 +2184,17 @@ mod tests {
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
             growing_oob_seeking_max_steps: 0,
-            growing_window_size_px_contours: 10,
-            growing_window_size_px_attractions: 10,
-            growing_step_length: 1.0,
-            growing_previous_distance_direction_weight: 1.0,
-            growing_out_of_bound_direction_weight: 1.0,
-            growing_density_direction_weight: 1.0,
-            growing_other_contours_direction_weight: -1.0,
+            contour_force_window: 10.0,
+            attraction_force_window: 15.0,
+            contour_force_max_repulsion: 4.0,
+            contour_force_equilibrium: 2.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 6.0,
+            out_of_bound_force: 2.0,
+            density_region_force: 2.0,
+            flying_end_force: 2.0,
+            flying_end_merge_distance: 5.0,
+            grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
 
@@ -1985,6 +2253,7 @@ mod tests {
             pre_growing_flying_ends: Vec::new(),
             grown_by_growing_process: vec![false, false],
             growing_push_pull_vectors: Vec::new(),
+            growing_integration_step_dots: Vec::new(),
             warnings: Vec::new(),
         };
         let config = Config {
@@ -2000,13 +2269,17 @@ mod tests {
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
             growing_oob_seeking_max_steps: 5,
-            growing_window_size_px_contours: 6,
-            growing_window_size_px_attractions: 6,
-            growing_step_length: 1.0,
-            growing_previous_distance_direction_weight: 1.0,
-            growing_out_of_bound_direction_weight: 1.0,
-            growing_density_direction_weight: 1.0,
-            growing_other_contours_direction_weight: -1.0,
+            contour_force_window: 6.0,
+            attraction_force_window: 6.0,
+            contour_force_max_repulsion: 4.0,
+            contour_force_equilibrium: 2.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 4.0,
+            out_of_bound_force: 2.0,
+            density_region_force: 2.0,
+            flying_end_force: 2.0,
+            flying_end_merge_distance: 1.0,
+            grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
 
@@ -2022,22 +2295,23 @@ mod tests {
 
     #[test]
     fn growing_step_is_deflected_by_another_flying_ends_temporary_tail() {
-        // Case (c) during `SeekingOutOfBound`: a Flying End heading due
-        // east, with no permanent contour or out-of-bound/high-density
-        // pixel anywhere nearby -- so, absent any other hit, it just
-        // continues dead straight (unaffected by `previous_direction`'s own
-        // weight, since it's the only term). Two otherwise-identical runs,
-        // the only difference being whether some *other* Flying End's own
-        // not-yet-final tail happens to sit just ahead and to one side,
-        // marked `TEMPORARY_CONTOUR` by `mark_temporary_step` exactly as
-        // Step 1's Growing Process itself does for every step it takes
-        // while still flying (see `grow_one_step`, case (c)). Before this
-        // was wired up, a Flying End's own tail was invisible to any other
-        // Flying End growing alongside it until it finally resolved -- two
-        // contours seeking the border independently, close and parallel,
-        // could fly right through each other. With it, the second run's new
-        // node must swing measurably away from that pixel instead of
-        // continuing on the same straight line as the first.
+        // An integration step during `SeekingOutOfBound`: a Flying End
+        // heading due east, with no out-of-bound/high-density pixel nearby
+        // and nothing to react to but its own already-drawn, perfectly
+        // collinear trailing body -- so the contour force it feels pushes
+        // straight away from that body, continuing dead straight. Two
+        // otherwise-identical runs, the only difference being whether some
+        // *other* Flying End's own not-yet-final tail happens to sit just
+        // ahead and to one side, marked `TEMPORARY_CONTOUR` by
+        // `walk_growing_integration_step` exactly as Step 1's Growing
+        // Process itself does for every step it takes while still flying
+        // (see `grow_one_step`). Before this was wired up, a Flying End's
+        // own tail was invisible to any other Flying End growing alongside
+        // it until it finally resolved -- two contours seeking the border
+        // independently, close and parallel, could fly right through each
+        // other. With it, the second run's new node must swing measurably
+        // away from that pixel instead of continuing on the same straight
+        // line as the first.
         fn grow_east_once(mark_temporary_pixel: bool) -> Coord<f64> {
             // Pixel-center coordinates throughout (as the rest of the
             // codebase's own tests do, e.g. `contour_raster.rs`'s): a Flying
@@ -2063,7 +2337,7 @@ mod tests {
                 // Simulates some other Flying End's own last grow step,
                 // landing just ahead of this one and one pixel above its
                 // straight-line path.
-                raster.mark_temporary_step(c(19.5, 51.5), c(20.0, 51.9));
+                raster.walk_growing_integration_step(c(19.5, 51.5), c(20.0, 51.9));
             }
 
             let mut contours = vec![Contour {
@@ -2086,13 +2360,17 @@ mod tests {
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
                 growing_oob_seeking_max_steps: 10,
-                growing_window_size_px_contours: 6,
-                growing_window_size_px_attractions: 6,
-                growing_step_length: 1.0,
-                growing_previous_distance_direction_weight: 1.0,
-                growing_out_of_bound_direction_weight: 1.0,
-                growing_density_direction_weight: 1.0,
-                growing_other_contours_direction_weight: -1.0,
+                contour_force_window: 6.0,
+                attraction_force_window: 6.0,
+                contour_force_max_repulsion: 4.0,
+                contour_force_equilibrium: 2.0,
+                contour_force_max_attraction: -0.5,
+                contour_force_second_equilibrium: 4.0,
+                out_of_bound_force: 2.0,
+                density_region_force: 2.0,
+                flying_end_force: 2.0,
+                flying_end_merge_distance: 1.0,
+                grow_time_step: 1.0,
                 growing_visualization_push_pull_vectors_scale: 1.0,
             };
             let outcome = grow_one_step(
@@ -2107,6 +2385,9 @@ mod tests {
                 &mut raster,
                 &config,
                 GrowingPhase::SeekingOutOfBound,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut std::collections::HashMap::new(),
                 &mut Vec::new(),
             );
             match outcome {
@@ -2130,12 +2411,12 @@ mod tests {
 
     #[test]
     fn growing_step_marks_its_own_new_segment_temporary_while_still_flying() {
-        // Case (c) itself, on the raster it actually runs against (not the
-        // hand-simulated stand-in the previous test uses): once a step
-        // leaves a Flying End still flying, the segment it just grew must
-        // already read back as `TEMPORARY_CONTOUR`, or a second Flying End
-        // scanning its own window a moment later would find nothing there
-        // to repel from at all.
+        // An integration step itself, on the raster it actually runs
+        // against (not the hand-simulated stand-in the previous test
+        // uses): once a step leaves a Flying End still flying, the segment
+        // it just grew must already read back as `TEMPORARY_CONTOUR`, or a
+        // second Flying End scanning its own window a moment later would
+        // find nothing there to repel from at all.
         let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
         raster.write_contour(0, &ls);
@@ -2168,13 +2449,17 @@ mod tests {
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
             growing_oob_seeking_max_steps: 10,
-            growing_window_size_px_contours: 6,
-            growing_window_size_px_attractions: 6,
-            growing_step_length: 1.0,
-            growing_previous_distance_direction_weight: 1.0,
-            growing_out_of_bound_direction_weight: 1.0,
-            growing_density_direction_weight: 1.0,
-            growing_other_contours_direction_weight: -1.0,
+            contour_force_window: 6.0,
+            attraction_force_window: 6.0,
+            contour_force_max_repulsion: 4.0,
+            contour_force_equilibrium: 2.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 4.0,
+            out_of_bound_force: 2.0,
+            density_region_force: 2.0,
+            flying_end_force: 2.0,
+            flying_end_merge_distance: 1.0,
+            grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
         let outcome = grow_one_step(
@@ -2190,6 +2475,9 @@ mod tests {
             &config,
             GrowingPhase::SeekingOutOfBound,
             &mut Vec::new(),
+            &mut Vec::new(),
+            &mut std::collections::HashMap::new(),
+            &mut Vec::new(),
         );
         assert!(matches!(outcome, GrowStepOutcome::StillFlying(_)));
         let next = *contours[0].lwg.ls.0.last().unwrap();
@@ -2202,14 +2490,14 @@ mod tests {
     }
 
     #[test]
-    fn grow_one_step_records_the_four_push_pull_contributions_separately() {
+    fn grow_one_step_records_the_four_force_contributions_separately() {
         // Same east-heading setup as
         // `growing_step_is_deflected_by_another_flying_ends_temporary_tail`,
         // run twice, with and without one other Flying End's own temporary
         // tail nearby (repulsion, above and ahead of the straight path) --
-        // isolates that one extra hit's own effect on `other_contours`
-        // (it must not leak into any other term), and, unlike that other
-        // test, checks the recorded breakdown itself rather than just the
+        // isolates that one extra hit's own effect on `contour` (it must
+        // not leak into any other term), and, unlike that other test,
+        // checks the recorded breakdown itself rather than just the
         // resulting node.
         fn forces_for(mark_temporary_pixel: bool) -> GrowingStepForces {
             let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
@@ -2226,7 +2514,7 @@ mod tests {
             if mark_temporary_pixel {
                 // Some other Flying End's own last grow step, landing just
                 // ahead and one pixel above this one's straight-line path.
-                raster.mark_temporary_step(c(19.5, 51.5), c(20.0, 51.9));
+                raster.walk_growing_integration_step(c(19.5, 51.5), c(20.0, 51.9));
             }
 
             let mut contours = vec![Contour {
@@ -2249,13 +2537,17 @@ mod tests {
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
                 growing_oob_seeking_max_steps: 10,
-                growing_window_size_px_contours: 6,
-                growing_window_size_px_attractions: 6,
-                growing_step_length: 1.0,
-                growing_previous_distance_direction_weight: 2.0,
-                growing_out_of_bound_direction_weight: 1.0,
-                growing_density_direction_weight: 1.0,
-                growing_other_contours_direction_weight: -3.0,
+                contour_force_window: 6.0,
+                attraction_force_window: 6.0,
+                contour_force_max_repulsion: 4.0,
+                contour_force_equilibrium: 2.0,
+                contour_force_max_attraction: -0.5,
+                contour_force_second_equilibrium: 4.0,
+                out_of_bound_force: 2.0,
+                density_region_force: 2.0,
+                flying_end_force: 2.0,
+                flying_end_merge_distance: 1.0,
+                grow_time_step: 1.0,
                 growing_visualization_push_pull_vectors_scale: 1.0,
             };
             let mut push_pull_vectors = Vec::new();
@@ -2272,12 +2564,15 @@ mod tests {
                 &config,
                 GrowingPhase::SeekingOutOfBound,
                 &mut push_pull_vectors,
+                &mut Vec::new(),
+                &mut std::collections::HashMap::new(),
+                &mut Vec::new(),
             );
             assert!(matches!(outcome, GrowStepOutcome::StillFlying(_)));
             assert_eq!(
                 push_pull_vectors.len(),
                 1,
-                "exactly one case-(c) step was taken"
+                "exactly one integration step was taken"
             );
             push_pull_vectors[0]
         }
@@ -2286,11 +2581,6 @@ mod tests {
         let with_temp = forces_for(true);
 
         assert_eq!(without_temp.flying_end, c(16.5, 50.5));
-        assert_eq!(
-            without_temp.previous_direction,
-            (2.0, 0.0),
-            "heading due east, weighted by growing_previous_distance_direction_weight"
-        );
         assert_eq!(
             without_temp.out_of_bound,
             (0.0, 0.0),
@@ -2301,44 +2591,81 @@ mod tests {
             (0.0, 0.0),
             "no high-density pixel anywhere in this window"
         );
+        assert_eq!(
+            without_temp.flying_end_force,
+            (0.0, 0.0),
+            "flying_end_force never applies during SeekingOutOfBound"
+        );
         assert_ne!(
-            without_temp.other_contours,
+            without_temp.contour,
             (0.0, 0.0),
             "the growing contour's own trailing pixels, directly behind the Flying End, \
              must already contribute a (forward-pushing) repulsion term on their own"
         );
-
-        // Adding the one extra temporary pixel must only move
-        // `other_contours` -- the other three terms have nothing to do with
-        // it and must come out exactly the same.
-        assert_eq!(
-            with_temp.previous_direction,
-            without_temp.previous_direction
+        assert!(
+            without_temp.contour.0 > 0.0 && without_temp.contour.1.abs() < 1e-9,
+            "the trailing body is perfectly collinear (due west), so the repulsion it \
+             contributes must point straight east with no y component: {:?}",
+            without_temp.contour
         );
+
+        // Adding the one extra temporary pixel must only move `contour` --
+        // the other three terms have nothing to do with it and must come
+        // out exactly the same.
         assert_eq!(with_temp.out_of_bound, without_temp.out_of_bound);
         assert_eq!(with_temp.density, without_temp.density);
+        assert_eq!(with_temp.flying_end_force, without_temp.flying_end_force);
         assert!(
-            with_temp.other_contours.1 < without_temp.other_contours.1 - 0.05,
+            with_temp.contour.1 < without_temp.contour.1 - 0.05,
             "a temporary pixel sitting above the straight path must push the y component \
              further negative than the contour's own (symmetric, y=0) trailing pixels alone \
              do: without={:?} with={:?}",
-            without_temp.other_contours,
-            with_temp.other_contours
+            without_temp.contour,
+            with_temp.contour
         );
 
         assert_eq!(
             with_temp.total(),
             (
-                with_temp.previous_direction.0
+                with_temp.contour.0
                     + with_temp.out_of_bound.0
                     + with_temp.density.0
-                    + with_temp.other_contours.0,
-                with_temp.previous_direction.1
+                    + with_temp.flying_end_force.0,
+                with_temp.contour.1
                     + with_temp.out_of_bound.1
                     + with_temp.density.1
-                    + with_temp.other_contours.1
+                    + with_temp.flying_end_force.1
             )
         );
+    }
+
+    fn window_test_config(contour_force_window: f64, attraction_force_window: f64) -> Config {
+        Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 3.0,
+            rasterization_px_size: 1.0,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 4,
+            slope_lines_contours_search_radius: 3.0,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            growing_oob_seeking_max_steps: 10,
+            contour_force_window,
+            attraction_force_window,
+            contour_force_max_repulsion: 4.0,
+            contour_force_equilibrium: 2.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 4.0,
+            out_of_bound_force: 2.0,
+            density_region_force: 2.0,
+            flying_end_force: 2.0,
+            flying_end_merge_distance: 1.0,
+            grow_time_step: 1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
+        }
     }
 
     #[test]
@@ -2347,17 +2674,17 @@ mod tests {
         // three TEMPORARY_CONTOUR pixels at Chebyshev distance 0 (the
         // center itself), 1 (an immediate neighbor), and 2 from
         // `center_px` -- only the one at distance 2 should come back, even
-        // with a contour window generous enough (`half_contours = 5`) to
-        // reach all three.
+        // with a contour window generous enough (5m) to reach all three.
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 20, 20);
         let center = raster.pixel_center(10, 10);
         let neighbor = raster.pixel_center(11, 10);
         let farther = raster.pixel_center(12, 10);
-        raster.mark_temporary_step(center, center);
-        raster.mark_temporary_step(neighbor, neighbor);
-        raster.mark_temporary_step(farther, farther);
+        raster.walk_growing_integration_step(center, center);
+        raster.walk_growing_integration_step(neighbor, neighbor);
+        raster.walk_growing_integration_step(farther, farther);
 
-        let hits = growing_window_hits(&raster, (10, 10), 5, 0);
+        let config = window_test_config(5.0, 5.0);
+        let hits = growing_window_hits(&raster, center, (10, 10), &config);
         let contour_hits: Vec<Coord<f64>> = hits
             .iter()
             .filter(|(kind, _)| matches!(kind, WindowPixelKind::Contour))
@@ -2373,16 +2700,15 @@ mod tests {
     }
 
     #[test]
-    fn growing_window_size_px_contours_controls_how_far_the_repulsion_window_reaches() {
+    fn contour_force_window_controls_how_far_the_repulsion_reaches() {
         // Same east-heading fixture again, this time with the one extra
         // temporary pixel placed 7m straight ahead (well past
-        // contours_step's own 3m) -- a `growing_window_size_px_contours` of
-        // 4 (half = 2px at this raster's 1m pixels) must miss it entirely,
-        // while a wider one of 20 (half = 10px) must not, even though
+        // contours_step's own 3m) -- a `contour_force_window` of 4m must
+        // miss it entirely, while a wider one of 20m must not, even though
         // `contours_step`, `rasterization_px_size`, and
-        // `growing_window_size_px_attractions` are all unchanged between the
-        // two: only the contour-repulsion window is under test here.
-        fn other_contours_for(window_px_contours: u64, mark_far_pixel: bool) -> (f64, f64) {
+        // `attraction_force_window` are all unchanged between the two: only
+        // the contour-repulsion window is under test here.
+        fn contour_force_for(contour_force_window: f64, mark_far_pixel: bool) -> (f64, f64) {
             let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
             let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
             raster.write_contour(0, &ls);
@@ -2396,7 +2722,7 @@ mod tests {
             raster.compute_out_of_bound();
             if mark_far_pixel {
                 // 7m straight ahead of the Flying End at (16.5, 50.5).
-                raster.mark_temporary_step(c(23.0, 50.5), c(23.5, 50.5));
+                raster.walk_growing_integration_step(c(23.0, 50.5), c(23.5, 50.5));
             }
 
             let mut contours = vec![Contour {
@@ -2406,28 +2732,7 @@ mod tests {
             let mut point_definers = Vec::new();
             let mut grown = vec![false];
             let mut pending = std::collections::VecDeque::new();
-            let config = Config {
-                bezier_linearization_step: 0.1,
-                contours_step: 3.0,
-                rasterization_px_size: 1.0,
-                heavy_object_width: 1.0,
-                heavy_object_growing: 0.2,
-                circumference_fitting_points_number: 4,
-                slope_lines_contours_search_radius: 3.0,
-                rain_drop_step: 0.25,
-                sources_per_contour_segment: 3,
-                rain_drop_starting_voting_hysteresis: 3,
-                undefined_gravity_vote_threshold: 0.8,
-                growing_oob_seeking_max_steps: 10,
-                growing_window_size_px_contours: window_px_contours,
-                growing_window_size_px_attractions: 4,
-                growing_step_length: 1.0,
-                growing_previous_distance_direction_weight: 2.0,
-                growing_out_of_bound_direction_weight: 1.0,
-                growing_density_direction_weight: 1.0,
-                growing_other_contours_direction_weight: -3.0,
-                growing_visualization_push_pull_vectors_scale: 1.0,
-            };
+            let config = window_test_config(contour_force_window, 4.0);
             let mut push_pull_vectors = Vec::new();
             let outcome = grow_one_step(
                 FlyingEnd {
@@ -2442,9 +2747,12 @@ mod tests {
                 &config,
                 GrowingPhase::SeekingOutOfBound,
                 &mut push_pull_vectors,
+                &mut Vec::new(),
+                &mut std::collections::HashMap::new(),
+                &mut Vec::new(),
             );
             assert!(matches!(outcome, GrowStepOutcome::StillFlying(_)));
-            push_pull_vectors[0].other_contours
+            push_pull_vectors[0].contour
         }
 
         // At each window size, compare with vs without the far pixel, so
@@ -2453,28 +2761,26 @@ mod tests {
         // also mix in how much of the contour's own (always-visible)
         // trailing pixels each window happens to see.
         assert_eq!(
-            other_contours_for(4, true),
-            other_contours_for(4, false),
-            "a pixel 7m away must be invisible to a growing_window_size_px_contours of 4 \
-             (half = 2px)"
+            contour_force_for(4.0, true),
+            contour_force_for(4.0, false),
+            "a pixel 7m away must be invisible to a contour_force_window of 4m"
         );
         assert_ne!(
-            other_contours_for(20, true),
-            other_contours_for(20, false),
-            "the same pixel must be seen once growing_window_size_px_contours is widened to 20 \
-             (half = 10px)"
+            contour_force_for(20.0, true),
+            contour_force_for(20.0, false),
+            "the same pixel must be seen once contour_force_window is widened to 20m"
         );
     }
 
     #[test]
-    fn growing_window_size_px_attractions_controls_how_far_the_matching_window_reaches() {
+    fn flying_end_merge_distance_controls_whether_two_flying_ends_merge() {
         // Two Flying Ends (each its own contour) 7m apart -- far past
-        // contours_step's own 3m -- during the Matching phase, where case
-        // (a) checks for another pending Flying End inside the attraction
-        // window. A `growing_window_size_px_attractions` of 4 (half = 2px)
-        // must not match them; one of 20 (half = 10px) must, even with
-        // `growing_window_size_px_contours` held fixed throughout.
-        fn resolves_by_matching(window_px_attractions: u64) -> bool {
+        // contours_step's own 3m -- during the Matching phase, where the
+        // merge check compares their real Euclidean distance against
+        // `flying_end_merge_distance`. A merge distance of 4m must not
+        // match them; one of 20m must, even with `contour_force_window`
+        // held fixed throughout.
+        fn resolves_by_matching(flying_end_merge_distance: f64) -> bool {
             let ls_a = LineString::new(vec![c(0.5, 50.5), c(6.5, 50.5)]);
             let ls_b = LineString::new(vec![c(20.5, 50.5), c(13.5, 50.5)]);
             let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
@@ -2510,28 +2816,8 @@ mod tests {
                 is_start: false,
             };
             let mut pending = std::collections::VecDeque::from([end_b]);
-            let config = Config {
-                bezier_linearization_step: 0.1,
-                contours_step: 3.0,
-                rasterization_px_size: 1.0,
-                heavy_object_width: 1.0,
-                heavy_object_growing: 0.2,
-                circumference_fitting_points_number: 4,
-                slope_lines_contours_search_radius: 3.0,
-                rain_drop_step: 0.25,
-                sources_per_contour_segment: 3,
-                rain_drop_starting_voting_hysteresis: 3,
-                undefined_gravity_vote_threshold: 0.8,
-                growing_oob_seeking_max_steps: 0,
-                growing_window_size_px_contours: 4,
-                growing_window_size_px_attractions: window_px_attractions,
-                growing_step_length: 1.0,
-                growing_previous_distance_direction_weight: 1.0,
-                growing_out_of_bound_direction_weight: 1.0,
-                growing_density_direction_weight: 1.0,
-                growing_other_contours_direction_weight: -1.0,
-                growing_visualization_push_pull_vectors_scale: 1.0,
-            };
+            let mut config = window_test_config(4.0, 4.0);
+            config.flying_end_merge_distance = flying_end_merge_distance;
             let mut push_pull_vectors = Vec::new();
             let outcome = grow_one_step(
                 end_a,
@@ -2543,29 +2829,34 @@ mod tests {
                 &config,
                 GrowingPhase::MatchingEnds,
                 &mut push_pull_vectors,
+                &mut Vec::new(),
+                &mut std::collections::HashMap::new(),
+                &mut Vec::new(),
             );
             matches!(outcome, GrowStepOutcome::Resolved)
         }
 
         assert!(
-            !resolves_by_matching(4),
-            "two Flying Ends 7m apart must not match through a growing_window_size_px_attractions \
-             of 4 (half = 2px)"
+            !resolves_by_matching(4.0),
+            "two Flying Ends 7m apart must not match through a flying_end_merge_distance of 4m"
         );
         assert!(
-            resolves_by_matching(20),
-            "the same two Flying Ends must match once growing_window_size_px_attractions is \
-             widened to 20 (half = 10px)"
+            resolves_by_matching(20.0),
+            "the same two Flying Ends must match once flying_end_merge_distance is widened to 20m"
         );
     }
 
     #[test]
-    fn growing_step_length_scales_the_case_c_step_distance() {
-        // Straight, empty stretch (no out-of-bound/high-density/other-contour
-        // pixel anywhere in the window) -- the Flying End just continues
-        // along `previous_direction`, `growing_step_length * contours_step`
-        // at a time.
-        fn step_distance(growing_step_length: f64) -> f64 {
+    fn grow_time_step_scales_the_integration_step_distance() {
+        // A single high-density pixel 5m straight ahead (a small polygon
+        // stamped via `mark_high_density_polygon`, independent of the
+        // border-flood machinery), well outside the distance either run's
+        // own displacement will cover, and a tiny `contour_force_window`
+        // (so the Flying End's own trailing body never contributes): the
+        // whole net force is `density_region_force` due east, so
+        // displacement is exactly `density_region_force * grow_time_step`,
+        // in a straight line.
+        fn step_distance(grow_time_step: f64) -> f64 {
             let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
             let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
             raster.write_contour(0, &ls);
@@ -2577,6 +2868,18 @@ mod tests {
             }
             raster.commit_flood_pixels(&interior);
             raster.compute_out_of_bound();
+            // Pixel (21, 50)'s own center, (21.5, 50.5), sits exactly 5m
+            // from the Flying End at (16.5, 50.5).
+            raster.mark_high_density_polygon(&Polygon::new(
+                LineString::new(vec![
+                    c(21.0, 50.0),
+                    c(22.0, 50.0),
+                    c(22.0, 51.0),
+                    c(21.0, 51.0),
+                    c(21.0, 50.0),
+                ]),
+                vec![],
+            ));
 
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
@@ -2585,28 +2888,9 @@ mod tests {
             let mut point_definers = Vec::new();
             let mut grown = vec![false];
             let mut pending = std::collections::VecDeque::new();
-            let config = Config {
-                bezier_linearization_step: 0.1,
-                contours_step: 3.0,
-                rasterization_px_size: 1.0,
-                heavy_object_width: 1.0,
-                heavy_object_growing: 0.2,
-                circumference_fitting_points_number: 4,
-                slope_lines_contours_search_radius: 3.0,
-                rain_drop_step: 0.25,
-                sources_per_contour_segment: 3,
-                rain_drop_starting_voting_hysteresis: 3,
-                undefined_gravity_vote_threshold: 0.8,
-                growing_oob_seeking_max_steps: 10,
-                growing_window_size_px_contours: 1,
-                growing_window_size_px_attractions: 1,
-                growing_step_length,
-                growing_previous_distance_direction_weight: 1.0,
-                growing_out_of_bound_direction_weight: 1.0,
-                growing_density_direction_weight: 1.0,
-                growing_other_contours_direction_weight: -1.0,
-                growing_visualization_push_pull_vectors_scale: 1.0,
-            };
+            let mut config = window_test_config(0.5, 8.0);
+            config.density_region_force = 1.0;
+            config.grow_time_step = grow_time_step;
             let mut push_pull_vectors = Vec::new();
             let outcome = grow_one_step(
                 FlyingEnd {
@@ -2621,6 +2905,9 @@ mod tests {
                 &config,
                 GrowingPhase::SeekingOutOfBound,
                 &mut push_pull_vectors,
+                &mut Vec::new(),
+                &mut std::collections::HashMap::new(),
+                &mut Vec::new(),
             );
             let next = match outcome {
                 GrowStepOutcome::StillFlying(_) => *contours[0].lwg.ls.0.last().unwrap(),
@@ -2630,29 +2917,32 @@ mod tests {
         }
 
         assert!(
-            (step_distance(1.0) - 3.0).abs() < 1e-9,
-            "growing_step_length of 1.0 must move the full contours_step"
+            (step_distance(1.0) - 1.0).abs() < 1e-9,
+            "grow_time_step of 1.0 must move density_region_force(1.0) * 1.0 = 1.0m"
         );
         assert!(
-            (step_distance(0.5) - 1.5).abs() < 1e-9,
-            "growing_step_length of 0.5 must move half of contours_step"
+            (step_distance(2.0) - 2.0).abs() < 1e-9,
+            "grow_time_step of 2.0 must move density_region_force(1.0) * 2.0 = 2.0m"
         );
     }
 
     #[test]
-    fn growing_step_length_scales_the_case_b_snap_distance_too() {
+    fn walk_growing_integration_step_lands_exactly_on_a_border_it_would_otherwise_overshoot() {
         // An out-of-bound border pixel sitting exactly 3m ahead of the
-        // Flying End, with contours_step = 4.0: closer than
-        // growing_step_length(1.0) * contours_step = 4.0, so case (b) snaps
-        // onto it directly, but *not* closer than
-        // growing_step_length(0.5) * contours_step = 2.0, so with the
-        // smaller step length it must fall through to case (c) instead and
-        // still be flying afterward -- landing at (18.5, 50.5) (a pixel
-        // *center*, comfortably short of the border column, rather than
-        // exactly on a pixel edge as a step of 1.5 from x = 16.5 would,
-        // which is why 4.0/0.5 rather than the more obvious 3.0/0.5 is used
-        // here).
-        fn outcome_for(growing_step_length: f64) -> GrowStepOutcome {
+        // Flying End (the raster's own right border, width 20): a large
+        // enough `out_of_bound_force` * `grow_time_step` would, left
+        // unchecked, place the raw next position well past it -- the
+        // tunneling-safe path walk must instead land exactly on that
+        // border pixel's own center, not overshoot past it. A smaller
+        // `grow_time_step` that doesn't reach the border at all must
+        // instead leave it still flying, at exactly the raw displacement.
+        // `attraction_force_window` is kept just past 3.0m (the target's
+        // own distance) but short of 3.162m (the distance to that same
+        // border column's own next-door pixels, one row up or down) --
+        // since the right border is an entire out-of-bound *column*, not a
+        // single pixel, a wider window would pull in several of its
+        // pixels at once and break the exact math this test relies on.
+        fn outcome_for(grow_time_step: f64) -> GrowStepOutcome {
             let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
             // Right border at pixel column 19 (width 20): its own pixel
             // center, (19.5, 50.5), sits exactly 3m from the Flying End at
@@ -2675,28 +2965,9 @@ mod tests {
             let mut point_definers = Vec::new();
             let mut grown = vec![false];
             let mut pending = std::collections::VecDeque::new();
-            let config = Config {
-                bezier_linearization_step: 0.1,
-                contours_step: 4.0,
-                rasterization_px_size: 1.0,
-                heavy_object_width: 1.0,
-                heavy_object_growing: 0.2,
-                circumference_fitting_points_number: 4,
-                slope_lines_contours_search_radius: 3.0,
-                rain_drop_step: 0.25,
-                sources_per_contour_segment: 3,
-                rain_drop_starting_voting_hysteresis: 3,
-                undefined_gravity_vote_threshold: 0.8,
-                growing_oob_seeking_max_steps: 10,
-                growing_window_size_px_contours: 6,
-                growing_window_size_px_attractions: 8,
-                growing_step_length,
-                growing_previous_distance_direction_weight: 1.0,
-                growing_out_of_bound_direction_weight: 1.0,
-                growing_density_direction_weight: 1.0,
-                growing_other_contours_direction_weight: -1.0,
-                growing_visualization_push_pull_vectors_scale: 1.0,
-            };
+            let mut config = window_test_config(0.5, 3.1);
+            config.out_of_bound_force = 4.0;
+            config.grow_time_step = grow_time_step;
             let mut push_pull_vectors = Vec::new();
             grow_one_step(
                 FlyingEnd {
@@ -2711,41 +2982,55 @@ mod tests {
                 &config,
                 GrowingPhase::SeekingOutOfBound,
                 &mut push_pull_vectors,
+                &mut Vec::new(),
+                &mut std::collections::HashMap::new(),
+                &mut Vec::new(),
             )
         }
 
         assert!(
             matches!(outcome_for(1.0), GrowStepOutcome::Resolved),
-            "3m is closer than 1.0 * 4.0 = 4.0m: case (b) should snap onto the border directly"
+            "out_of_bound_force(4.0) * grow_time_step(1.0) = 4.0m overshoots the 3m border -- \
+             the walk must still land exactly on it"
         );
         assert!(
-            matches!(outcome_for(0.5), GrowStepOutcome::StillFlying(_)),
-            "3m is not closer than 0.5 * 4.0 = 2.0m: case (b) should not trigger, leaving it to \
-             case (c) instead"
+            matches!(outcome_for(0.4), GrowStepOutcome::StillFlying(_)),
+            "out_of_bound_force(4.0) * grow_time_step(0.4) = 1.6m falls short of the 3m border -- \
+             it must still be flying"
         );
     }
 
     #[test]
     fn growing_raster_matches_the_final_ls_even_after_several_steps_then_closing() {
-        // A tilted "C": both ends start well outside each other's growing
-        // window, angled slightly inward, so each takes several case-(c)
-        // steps (moving in a straight line -- nothing else is on this map
-        // to react to) before finally entering the other's window and
-        // closing. Closing re-samples the *whole* ring against a
-        // perimeter-adjusted step (Appendix 1), which does not, in general,
-        // land back on the exact intermediate points each step produced --
-        // so if those intermediate steps had each written themselves into
-        // the Contour Raster as they were grown, stale pixels from before
-        // that final shift would be left behind. They must not be: nothing
-        // gets written until each end's own final shape is known.
-        let ls = LineString::new(vec![
-            c(12.0, 10.0),
-            c(10.0, 20.0),
-            c(20.0, 20.0),
-            c(18.0, 10.0),
-        ]);
+        // A downward-opening "staple": both ends start 20m apart along
+        // y=10, well outside `flying_end_merge_distance`, with the rest of
+        // the contour's own body (both vertical legs and the top) staying
+        // well clear of the straight path directly between them -- so as
+        // `flying_end_force` alone pulls the two ends straight toward each
+        // other's latest position, one integration step at a time, over
+        // several rounds, neither ever runs into the other's, or its own,
+        // already-drawn body along the way. Closing re-samples the *whole*
+        // ring against a perimeter-adjusted step (Appendix 1), which does
+        // not, in general, land back on the exact intermediate points each
+        // step produced -- so if those intermediate steps had each written
+        // themselves into the Contour Raster as they were grown, stale
+        // pixels from before that final shift would be left behind. They
+        // must not be: nothing gets written until each end's own final
+        // shape is known.
+        let ls = LineString::new(vec![c(5.0, 10.0), c(5.0, 30.0), c(25.0, 30.0), c(25.0, 10.0)]);
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
         raster.write_contour(0, &ls);
+        // Seal the interior first: the "staple" is open at the bottom, so
+        // without this, `compute_out_of_bound`'s own flood would sneak in
+        // through that gap and mark the space between the two legs (where
+        // the pursuit actually happens) out of bound too.
+        let mut interior = Vec::new();
+        for y in 1..(raster.height as i64 - 1) {
+            for x in 1..(raster.width as i64 - 1) {
+                interior.push((x, y));
+            }
+        }
+        raster.commit_flood_pixels(&interior);
         raster.compute_out_of_bound();
         let contour = Contour {
             lwg: LineWithGravity::new(ls),
@@ -2764,6 +3049,7 @@ mod tests {
             pre_growing_flying_ends: Vec::new(),
             grown_by_growing_process: vec![false],
             growing_push_pull_vectors: Vec::new(),
+            growing_integration_step_dots: Vec::new(),
             warnings: Vec::new(),
         };
         let config = Config {
@@ -2779,13 +3065,17 @@ mod tests {
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
             growing_oob_seeking_max_steps: 0,
-            growing_window_size_px_contours: 10,
-            growing_window_size_px_attractions: 10,
-            growing_step_length: 1.0,
-            growing_previous_distance_direction_weight: 1.0,
-            growing_out_of_bound_direction_weight: 1.0,
-            growing_density_direction_weight: 1.0,
-            growing_other_contours_direction_weight: -1.0,
+            contour_force_window: 0.1,
+            attraction_force_window: 30.0,
+            contour_force_max_repulsion: 2.0,
+            contour_force_equilibrium: 1.0,
+            contour_force_max_attraction: -0.3,
+            contour_force_second_equilibrium: 2.5,
+            out_of_bound_force: 2.0,
+            density_region_force: 2.0,
+            flying_end_force: 1.0,
+            flying_end_merge_distance: 2.0,
+            grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
         };
 

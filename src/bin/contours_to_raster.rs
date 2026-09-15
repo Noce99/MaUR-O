@@ -36,8 +36,8 @@ use clap::Parser;
 
 use maur_o::contours_to_raster_config::{Config, DEFAULT_CONFIG_PATH};
 use maur_o::contours_to_raster_svg::{
-    write_final_svg, write_step1_growing_svg, write_step1_svg, write_step2_svg,
-    write_step3_anti_rain_svg, write_step3_rain_svg,
+    write_contours_function_svg, write_final_svg, write_step1_growing_svg, write_step1_svg,
+    write_step2_svg, write_step3_anti_rain_svg, write_step3_rain_svg,
 };
 use maur_o::step1_extract;
 use maur_o::step2_obvious_gravity;
@@ -70,14 +70,17 @@ struct Args {
     #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
     config: PathBuf,
 
-    /// Write the five per-step validation SVGs Contours-to-Raster.md's
-    /// "Visualization" section describes (Step 1 before and after its own
-    /// Growing Process sub-step, Step 2, and Step 3's Rain and Anti Rain Drop
+    /// Write the six per-step validation SVGs Contours-to-Raster.md's
+    /// "Visualization" section describes (Step 1 before its own Growing
+    /// Process sub-step, after that sub-step's own Seeking phase, after its
+    /// Matching phase, Step 2, and Step 3's Rain and Anti Rain Drop
     /// Productions each in their own file), an unnumbered "final" SVG with
-    /// just the algorithm's actual answer once every contour is resolved,
-    /// and a full-raster, every-pixel-colored PNG (the vector SVGs only
-    /// square a contour or high-density pixel, to keep their file size
-    /// sane), all inside this run's own folder.
+    /// just the algorithm's actual answer once every contour is resolved, an
+    /// unnumbered "contours_function" SVG plotting the contour-pixel force
+    /// curve itself (a function of --config alone, not of the map), and a
+    /// full-raster, every-pixel-colored PNG (the vector SVGs only square a
+    /// contour or high-density pixel, to keep their file size sane), all
+    /// inside this run's own folder.
     #[arg(long = "create_svg")]
     create_svg: bool,
 }
@@ -88,8 +91,8 @@ fn default_output_name(map_path: &Path) -> PathBuf {
     Path::new(map_path.file_stem().unwrap_or_default()).with_extension("tif")
 }
 
-/// `<prefix>_<output>_<step>.svg`, next to `output_path` -- the five numbered
-/// `--create_svg` files (`00`.."04", see the doc's Visualization section).
+/// `<prefix>_<output>_<step>.svg`, next to `output_path` -- the six numbered
+/// `--create_svg` files (`00`.."05", see the doc's Visualization section).
 fn numbered_svg_path(output_path: &Path, prefix: &str, step: &str) -> PathBuf {
     let stem = output_path
         .file_stem()
@@ -99,7 +102,7 @@ fn numbered_svg_path(output_path: &Path, prefix: &str, step: &str) -> PathBuf {
 }
 
 /// `<output>_<step>.svg`, next to `output_path` -- for the unnumbered "final"
-/// file, which the rename to `00`.."04" doesn't touch.
+/// file, which the rename to `00`.."05" doesn't touch.
 fn step_svg_path(output_path: &Path, step: &str) -> PathBuf {
     let stem = output_path
         .file_stem()
@@ -128,13 +131,13 @@ fn write_step3_svgs(
     step3: &step3_rain_drop::Step3Result,
 ) -> Result<(), (ExitCode, String)> {
     write_step3_rain_svg(
-        &numbered_svg_path(output_path, "03", "step3_rain"),
+        &numbered_svg_path(output_path, "04", "step3_rain"),
         step1,
         step3,
     )
     .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     write_step3_anti_rain_svg(
-        &numbered_svg_path(output_path, "04", "step3_anti_rain"),
+        &numbered_svg_path(output_path, "05", "step3_anti_rain"),
         step1,
         step3,
     )
@@ -188,6 +191,15 @@ fn run() -> Result<(), (ExitCode, String)> {
                 format!("cannot make {}: {e}", run_dir.display()),
             )
         })?;
+        // A plot of the contour-pixel force curve itself, depending only on
+        // `config` -- unlike every other --create_svg file, so it is written
+        // here rather than alongside the map-derived step it would
+        // otherwise belong to.
+        write_contours_function_svg(
+            &step_svg_path(&output_path, "contours_function"),
+            &config,
+        )
+        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     }
 
     let mut step1 = step1_extract::extract(&map, &config)
@@ -196,7 +208,7 @@ fn run() -> Result<(), (ExitCode, String)> {
         eprintln!("Warning: {warning}");
     }
 
-    // Written before `step1_extract::run_growing` mutates `step1.contours`
+    // Written before Step 1's own Growing Process mutates `step1.contours`
     // and `step1.raster` further, so `00_..._step1.svg` shows the pre-growing
     // state -- Flying-End rings on contours that haven't grown yet.
     if args.create_svg {
@@ -204,15 +216,38 @@ fn run() -> Result<(), (ExitCode, String)> {
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     }
 
-    let growing_warnings = step1_extract::run_growing(&mut step1, &config);
-    for warning in &growing_warnings {
+    // The Growing Process's own two phases (Seeking then Matching -- see
+    // `Contours-to-Raster.md`'s Growing Process section), each with its own
+    // `--create_svg` file: `01_..._step1_growing_seeking.svg` shows what
+    // Phase 1 (matching-free, chasing the out-of-bound area on its own)
+    // managed alone, `02_..._step1_growing_matching.svg` what Phase 2 (the
+    // full process, restored merging) went on to do with whatever Phase 1
+    // didn't resolve.
+    let (growing_state, seeking_warnings) = step1_extract::run_growing_seeking(&mut step1, &config);
+    for warning in &seeking_warnings {
         eprintln!("Warning: {warning}");
     }
-    step1.warnings.extend(growing_warnings);
+    step1.warnings.extend(seeking_warnings);
 
     if args.create_svg {
         write_step1_growing_svg(
-            &numbered_svg_path(&output_path, "01", "step1_growing"),
+            &numbered_svg_path(&output_path, "01", "step1_growing_seeking"),
+            &step1,
+            &config,
+        )
+        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+    }
+
+    let matching_warnings =
+        step1_extract::run_growing_matching(&mut step1, &config, growing_state);
+    for warning in &matching_warnings {
+        eprintln!("Warning: {warning}");
+    }
+    step1.warnings.extend(matching_warnings);
+
+    if args.create_svg {
+        write_step1_growing_svg(
+            &numbered_svg_path(&output_path, "02", "step1_growing_matching"),
             &step1,
             &config,
         )
@@ -238,7 +273,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     }
 
     if args.create_svg {
-        write_step2_svg(&numbered_svg_path(&output_path, "02", "step2"), &step1)
+        write_step2_svg(&numbered_svg_path(&output_path, "03", "step2"), &step1)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     }
 
@@ -259,8 +294,8 @@ fn run() -> Result<(), (ExitCode, String)> {
             if outcome.is_err() {
                 eprintln!(
                     "Note: wrote {} and {} for inspection despite the failure below.",
-                    numbered_svg_path(&output_path, "03", "step3_rain").display(),
-                    numbered_svg_path(&output_path, "04", "step3_anti_rain").display(),
+                    numbered_svg_path(&output_path, "04", "step3_rain").display(),
+                    numbered_svg_path(&output_path, "05", "step3_anti_rain").display(),
                 );
             }
         }
@@ -271,7 +306,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     if args.create_svg {
         if step3.is_none() {
             // Every contour was already resolved before Step 3 ran: write
-            // the same picture Step 2 saw, so all five numbered files always
+            // the same picture Step 2 saw, so all six numbered files always
             // exist together under --create_svg.
             let empty_step3 = step3_rain_drop::Step3Result {
                 resolved_by_rain: 0,
@@ -294,13 +329,15 @@ fn run() -> Result<(), (ExitCode, String)> {
         write_final_svg(&step_svg_path(&output_path, "final"), &step1)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
         println!(
-            "wrote {}, {}, {}, {}, {}, {} and {}",
+            "wrote {}, {}, {}, {}, {}, {}, {}, {} and {}",
+            step_svg_path(&output_path, "contours_function").display(),
             numbered_svg_path(&output_path, "00", "step1").display(),
-            numbered_svg_path(&output_path, "01", "step1_growing").display(),
+            numbered_svg_path(&output_path, "01", "step1_growing_seeking").display(),
+            numbered_svg_path(&output_path, "02", "step1_growing_matching").display(),
             raster_png_path(&output_path).display(),
-            numbered_svg_path(&output_path, "02", "step2").display(),
-            numbered_svg_path(&output_path, "03", "step3_rain").display(),
-            numbered_svg_path(&output_path, "04", "step3_anti_rain").display(),
+            numbered_svg_path(&output_path, "03", "step2").display(),
+            numbered_svg_path(&output_path, "04", "step3_rain").display(),
+            numbered_svg_path(&output_path, "05", "step3_anti_rain").display(),
             step_svg_path(&output_path, "final").display(),
         );
     }
