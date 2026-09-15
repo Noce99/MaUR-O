@@ -1197,10 +1197,27 @@ fn merge_contours(
     if !remove_is_start {
         tail_pts.reverse();
     }
-    // The Growing Process placed both Flying Ends at (effectively) the same
-    // position -- drop the duplicate rather than keep a zero-length segment.
-    if !tail_pts.is_empty() {
-        tail_pts.remove(0);
+    // Two Flying Ends merge as soon as they come within
+    // `flying_end_merge_distance` of each other (the Matching phase's own
+    // trigger), not only once they actually coincide -- so `merged_pts`'s
+    // own last point (keep's join) and `tail_pts`'s own first point (tail's
+    // join) can still be genuinely meters apart here, up to that same
+    // distance. Dropping tail's join point unconditionally, on the
+    // assumption the two are always (effectively) the same position, skips
+    // that real waypoint whenever they are not: the merged path then runs
+    // straight from keep's join to wherever tail's *next* point already
+    // was -- heading off in tail's own, unrelated pre-merge direction --
+    // putting a sharp, physically implausible kink in the merged contour
+    // right there, which Step 2 then reads as a genuine gravity conflict
+    // between readings on either side of it even when they agree about
+    // which side is downhill. Only drop it when the two really are
+    // (near-)duplicates of the same position, the case this was meant to
+    // handle; otherwise keep both, so the merged path actually bridges the
+    // gap between them instead of jumping over it.
+    if let (Some(&keep_last), Some(&tail_first)) = (merged_pts.last(), tail_pts.first()) {
+        if (keep_last.x - tail_first.x).hypot(keep_last.y - tail_first.y) < 1e-6 {
+            tail_pts.remove(0);
+        }
     }
     merged_pts.extend(tail_pts);
     let merged_ls = resample_equal_chords(&LineString::new(merged_pts), config.contours_step);
@@ -1485,13 +1502,21 @@ fn grow_one_step(
             }
             PixelWalkStep::Conflict(val) => {
                 // A contour revisiting its own earlier trail is expected
-                // and silent (exactly today's behavior); anything else --
-                // owned by a different contour, or a real, already-final
-                // contour's own value -- is a genuine conflict worth
-                // warning about. Left exactly as it is either way (never
-                // turned into `HIGH_DENSITY`, unlike `write_contour`'s own
-                // conflict rule).
-                if temp_owner.get(&(x, y)) != Some(&contour_idx) {
+                // and silent (exactly today's behavior) -- whether that
+                // trail is still this contour's own open `TEMPORARY_CONTOUR`
+                // tail (per `temp_owner`) or, since a contour's two Flying
+                // Ends resolve independently, its *other* end's already-
+                // final, already-drawn real value (this same contour's own
+                // `CONTOUR_0_MATRIX_VALUE + contour_idx`, written the moment
+                // that end landed/closed/merged while this end was still
+                // flying). Anything else -- a *different* contour's real
+                // value, or another Flying End's own `TEMPORARY_CONTOUR`
+                // tail -- is a genuine conflict worth warning about. Left
+                // exactly as it is either way (never turned into
+                // `HIGH_DENSITY`, unlike `write_contour`'s own conflict
+                // rule).
+                let is_own_final_value = val == CONTOUR_0_MATRIX_VALUE + contour_idx as u32;
+                if !is_own_final_value && temp_owner.get(&(x, y)) != Some(&contour_idx) {
                     warnings.push(format!(
                         "Growing Process: contour {contour_idx}'s integration step at pixel \
                          ({x},{y}) found it already claimed ({val}); left it as-is"
