@@ -545,7 +545,6 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
-            out_of_bound_extra_dilation: 0,
             growing_oob_seeking_max_steps: 0,
             growing_window_size_px_contours: 4,
             growing_window_size_px_attractions: 4,

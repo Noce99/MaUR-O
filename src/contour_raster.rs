@@ -275,10 +275,8 @@ impl ContourRaster {
     /// starts `OUT_OF_BOUND`; that's flooded 8-connectedly through every
     /// `UNDEFINED` pixel reachable from it (a contour/high-density/
     /// no-contour-in-bound pixel blocks the flood, which is exactly how a
-    /// fully enclosed `UNDEFINED` pocket can legitimately survive); then
-    /// `extra_dilation` further 8-connected rounds grow `OUT_OF_BOUND` over
-    /// *any* value, not just `UNDEFINED`.
-    pub fn compute_out_of_bound(&mut self, extra_dilation: usize) {
+    /// fully enclosed `UNDEFINED` pocket can legitimately survive).
+    pub fn compute_out_of_bound(&mut self) {
         let (w, h) = (self.width, self.height);
         if w == 0 || h == 0 {
             return;
@@ -304,21 +302,6 @@ impl ContourRaster {
             }
             if next_active.is_empty() {
                 break;
-            }
-            active = next_active;
-        }
-        for _ in 0..extra_dilation {
-            if active.is_empty() {
-                break;
-            }
-            let mut next_active = Vec::new();
-            for &(x, y) in &active {
-                for (nx, ny) in Self::neighbors8(x, y, w, h) {
-                    if self.grid[ny][nx] != OUT_OF_BOUND {
-                        self.grid[ny][nx] = OUT_OF_BOUND;
-                        next_active.push((nx, ny));
-                    }
-                }
             }
             active = next_active;
         }
@@ -965,7 +948,7 @@ mod tests {
     #[test]
     fn compute_out_of_bound_marks_the_border_and_floods_inward() {
         let mut r = raster();
-        r.compute_out_of_bound(0);
+        r.compute_out_of_bound();
         assert_eq!(r.get(0, 0), OUT_OF_BOUND);
         assert_eq!(r.get(19, 19), OUT_OF_BOUND);
         // Nothing blocks the flood on an otherwise-empty raster: every
@@ -981,19 +964,9 @@ mod tests {
             0,
             &ls(&[(2.5, 2.5), (8.5, 2.5), (8.5, 8.5), (2.5, 8.5), (2.5, 2.5)]),
         );
-        r.compute_out_of_bound(0);
+        r.compute_out_of_bound();
         assert_eq!(r.get(0, 0), OUT_OF_BOUND);
         // Enclosed and never reached: stays undefined.
         assert_eq!(r.get(5, 5), UNDEFINED);
-    }
-
-    #[test]
-    fn compute_out_of_bound_extra_dilation_eats_into_other_values() {
-        let mut r = ContourRaster::new(Coord { x: 0.0, y: 0.0 }, 1.0, 11, 11);
-        r.write_contour(0, &ls(&[(0.5, 5.5), (1.5, 5.5)])); // right on the border
-        r.compute_out_of_bound(2);
-        // The extra dilation rounds should have overwritten that contour
-        // pixel too, since it sits within 2 pixels of the border.
-        assert_eq!(r.get(0, 5), OUT_OF_BOUND);
     }
 }

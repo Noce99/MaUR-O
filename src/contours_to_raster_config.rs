@@ -1,7 +1,7 @@
-//! The `contours_to_raster` config file: the twenty-one parameters
+//! The `contours_to_raster` config file: the twenty parameters
 //! `Contours-to-Raster.md` names, read from a small hand-rolled `key =
 //! value` format (no `serde`/`toml` dependency exists anywhere else in this
-//! crate, and one file with twenty-one numbers does not need one).
+//! crate, and one file with twenty numbers does not need one).
 
 use std::path::Path;
 
@@ -53,11 +53,6 @@ pub struct Config {
     /// How close left and right vote counts must be, as a ratio in (0, 1),
     /// before being flagged as ambiguous (Step 3, Cold-only).
     pub undefined_gravity_vote_threshold: f64,
-    /// How many extra rounds of 8-connected dilation are run, after the
-    /// out-of-bound flood-fill reaches its own fixed point, growing the
-    /// out-of-bound area inward over *any* pixel value rather than only
-    /// undefined ones (Step 1).
-    pub out_of_bound_extra_dilation: usize,
     /// How many steps a Flying End spends seeking the out-of-bound area on
     /// its own -- no matching against another Flying End at all, only the
     /// raster's own out-of-bound/high-density/other-contour pixels (Step
@@ -127,7 +122,6 @@ const KEYS: &[&str] = &[
     "sources_per_contour_segment",
     "rain_drop_starting_voting_hysteresis",
     "undefined_gravity_vote_threshold",
-    "out_of_bound_extra_dilation",
     "growing_oob_seeking_max_steps",
     "growing_window_size_px_contours",
     "growing_window_size_px_attractions",
@@ -141,7 +135,7 @@ const KEYS: &[&str] = &[
 
 impl Config {
     /// Parses a config file: one `key = value` per line, blank lines and
-    /// lines starting with `#` ignored. All twenty-one keys are required -- a
+    /// lines starting with `#` ignored. All twenty keys are required -- a
     /// config file missing one is far more likely a mistake than an
     /// intentional partial override -- and an unknown key or an unparseable
     /// value is an error naming the offending line.
@@ -201,7 +195,6 @@ impl Config {
             rain_drop_starting_voting_hysteresis: values[&"rain_drop_starting_voting_hysteresis"]
                 as u64,
             undefined_gravity_vote_threshold: values[&"undefined_gravity_vote_threshold"],
-            out_of_bound_extra_dilation: values[&"out_of_bound_extra_dilation"] as usize,
             growing_oob_seeking_max_steps: values[&"growing_oob_seeking_max_steps"] as u64,
             growing_window_size_px_contours: values[&"growing_window_size_px_contours"] as u64,
             growing_window_size_px_attractions: values[&"growing_window_size_px_attractions"]
@@ -236,7 +229,6 @@ rain_drop_step = 1.0
 sources_per_contour_segment = 3
 rain_drop_starting_voting_hysteresis = 5
 undefined_gravity_vote_threshold = 0.8
-out_of_bound_extra_dilation = 2
 growing_oob_seeking_max_steps = 10
 growing_window_size_px_contours = 10
 growing_window_size_px_attractions = 10
@@ -254,7 +246,6 @@ growing_visualization_push_pull_vectors_scale = 1.0
         assert_eq!(config.contours_step, 5.0);
         assert_eq!(config.circumference_fitting_points_number, 4);
         assert_eq!(config.sources_per_contour_segment, 3);
-        assert_eq!(config.out_of_bound_extra_dilation, 2);
         assert_eq!(config.growing_oob_seeking_max_steps, 10);
         assert_eq!(config.growing_window_size_px_contours, 10);
         assert_eq!(config.growing_window_size_px_attractions, 10);

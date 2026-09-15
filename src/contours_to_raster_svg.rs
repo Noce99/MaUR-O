@@ -258,7 +258,7 @@ fn simplify_rectilinear_ring(points: &[(i64, i64)]) -> Vec<(i64, i64)> {
 ///
 /// Every out-of-bound pixel is connected to the raster's own outer border
 /// (`ContourRaster::compute_out_of_bound` starts there and only ever floods
-/// or dilates outward from an already-out-of-bound pixel), so the
+/// outward from an already-out-of-bound pixel), so the
 /// out-of-bound area is always exactly the raster's own full bounding
 /// rectangle *minus* every "in bound" region found inside it. Rather than
 /// work out which traced ring is a hole in which (arbitrarily nested, for a
@@ -1233,7 +1233,7 @@ mod tests {
                 c(2.5, 2.5),
             ]),
         );
-        raster.compute_out_of_bound(0);
+        raster.compute_out_of_bound();
 
         let area = oob_area(&raster);
         assert_eq!(
@@ -1276,7 +1276,7 @@ mod tests {
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 4, 4);
         raster.write_contour(0, &LineString::new(vec![c(1.5, 1.5), c(1.9, 1.5)]));
         raster.write_contour(1, &LineString::new(vec![c(2.5, 2.5), c(2.9, 2.5)]));
-        raster.compute_out_of_bound(0);
+        raster.compute_out_of_bound();
 
         assert_eq!(raster.get(1, 1), CONTOUR_0_MATRIX_VALUE);
         assert_eq!(raster.get(2, 2), CONTOUR_0_MATRIX_VALUE + 1);
@@ -1303,7 +1303,6 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
-            out_of_bound_extra_dilation: 0,
             growing_oob_seeking_max_steps: 0,
             growing_window_size_px_contours: 4,
             growing_window_size_px_attractions: 4,

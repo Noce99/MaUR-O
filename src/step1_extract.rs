@@ -708,7 +708,6 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
             config,
         );
     }
-    raster.compute_out_of_bound(config.out_of_bound_extra_dilation);
 
     let mut point_definers = Vec::new();
     let mut line_definers = Vec::new();
@@ -812,6 +811,13 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
             Classified::Contour { .. } => {}
         }
     }
+
+    // Computed only now, after every Jump's own area has already been
+    // stamped `HIGH_DENSITY` above: a Jump close to the map border must
+    // already act as a firebreak here, or the border flood below would
+    // leak straight through its (still-undefined) pixels into the map's
+    // interior before the Jump ever got a chance to block it.
+    raster.compute_out_of_bound();
 
     // Captured now, before the Growing Process runs (see `run_growing`,
     // called separately so `--create_svg` can write a "before" picture in
@@ -1568,7 +1574,6 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
-            out_of_bound_extra_dilation: 0,
             growing_oob_seeking_max_steps: 0,
             growing_window_size_px_contours: 4,
             growing_window_size_px_attractions: 4,
@@ -1697,7 +1702,6 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
-            out_of_bound_extra_dilation: 0,
             growing_oob_seeking_max_steps: 0,
             growing_window_size_px_contours: 4,
             growing_window_size_px_attractions: 4,
@@ -1786,7 +1790,7 @@ mod tests {
         let ls = LineString::new(vec![c(15.0, 10.0), c(17.0, 15.0), c(19.0, 10.0)]);
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
         raster.write_contour(0, &ls);
-        raster.compute_out_of_bound(0);
+        raster.compute_out_of_bound();
         let contour = Contour {
             lwg: LineWithGravity::new(ls),
             elevation_height: None,
@@ -1818,7 +1822,6 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
-            out_of_bound_extra_dilation: 0,
             growing_oob_seeking_max_steps: 0,
             growing_window_size_px_contours: 10,
             growing_window_size_px_attractions: 10,
@@ -1858,7 +1861,7 @@ mod tests {
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
         raster.write_contour(0, &ls_a);
         raster.write_contour(1, &ls_b);
-        raster.compute_out_of_bound(0);
+        raster.compute_out_of_bound();
 
         let raw_a = vec![
             contour_geometry::RawVertex {
@@ -1916,7 +1919,6 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
-            out_of_bound_extra_dilation: 0,
             growing_oob_seeking_max_steps: 0,
             growing_window_size_px_contours: 10,
             growing_window_size_px_attractions: 10,
@@ -1960,7 +1962,7 @@ mod tests {
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
         raster.write_contour(0, &ls_a);
         raster.write_contour(1, &ls_b);
-        raster.compute_out_of_bound(0);
+        raster.compute_out_of_bound();
 
         let mut result = Step1Result {
             contours: vec![
@@ -1997,7 +1999,6 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
-            out_of_bound_extra_dilation: 0,
             growing_oob_seeking_max_steps: 5,
             growing_window_size_px_contours: 6,
             growing_window_size_px_attractions: 6,
@@ -2057,7 +2058,7 @@ mod tests {
                 }
             }
             raster.commit_flood_pixels(&interior);
-            raster.compute_out_of_bound(0);
+            raster.compute_out_of_bound();
             if mark_temporary_pixel {
                 // Simulates some other Flying End's own last grow step,
                 // landing just ahead of this one and one pixel above its
@@ -2084,7 +2085,6 @@ mod tests {
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
-                out_of_bound_extra_dilation: 0,
                 growing_oob_seeking_max_steps: 10,
                 growing_window_size_px_contours: 6,
                 growing_window_size_px_attractions: 6,
@@ -2146,7 +2146,7 @@ mod tests {
             }
         }
         raster.commit_flood_pixels(&interior);
-        raster.compute_out_of_bound(0);
+        raster.compute_out_of_bound();
 
         let mut contours = vec![Contour {
             lwg: LineWithGravity::new(ls),
@@ -2167,7 +2167,6 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
-            out_of_bound_extra_dilation: 0,
             growing_oob_seeking_max_steps: 10,
             growing_window_size_px_contours: 6,
             growing_window_size_px_attractions: 6,
@@ -2223,7 +2222,7 @@ mod tests {
                 }
             }
             raster.commit_flood_pixels(&interior);
-            raster.compute_out_of_bound(0);
+            raster.compute_out_of_bound();
             if mark_temporary_pixel {
                 // Some other Flying End's own last grow step, landing just
                 // ahead and one pixel above this one's straight-line path.
@@ -2249,7 +2248,6 @@ mod tests {
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
-                out_of_bound_extra_dilation: 0,
                 growing_oob_seeking_max_steps: 10,
                 growing_window_size_px_contours: 6,
                 growing_window_size_px_attractions: 6,
@@ -2395,7 +2393,7 @@ mod tests {
                 }
             }
             raster.commit_flood_pixels(&interior);
-            raster.compute_out_of_bound(0);
+            raster.compute_out_of_bound();
             if mark_far_pixel {
                 // 7m straight ahead of the Flying End at (16.5, 50.5).
                 raster.mark_temporary_step(c(23.0, 50.5), c(23.5, 50.5));
@@ -2420,7 +2418,6 @@ mod tests {
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
-                out_of_bound_extra_dilation: 0,
                 growing_oob_seeking_max_steps: 10,
                 growing_window_size_px_contours: window_px_contours,
                 growing_window_size_px_attractions: 4,
@@ -2490,7 +2487,7 @@ mod tests {
                 }
             }
             raster.commit_flood_pixels(&interior);
-            raster.compute_out_of_bound(0);
+            raster.compute_out_of_bound();
 
             let mut contours = vec![
                 Contour {
@@ -2525,7 +2522,6 @@ mod tests {
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
-                out_of_bound_extra_dilation: 0,
                 growing_oob_seeking_max_steps: 0,
                 growing_window_size_px_contours: 4,
                 growing_window_size_px_attractions: window_px_attractions,
@@ -2580,7 +2576,7 @@ mod tests {
                 }
             }
             raster.commit_flood_pixels(&interior);
-            raster.compute_out_of_bound(0);
+            raster.compute_out_of_bound();
 
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
@@ -2601,7 +2597,6 @@ mod tests {
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
-                out_of_bound_extra_dilation: 0,
                 growing_oob_seeking_max_steps: 10,
                 growing_window_size_px_contours: 1,
                 growing_window_size_px_attractions: 1,
@@ -2671,7 +2666,7 @@ mod tests {
                 }
             }
             raster.commit_flood_pixels(&interior);
-            raster.compute_out_of_bound(0);
+            raster.compute_out_of_bound();
 
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
@@ -2692,7 +2687,6 @@ mod tests {
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
-                out_of_bound_extra_dilation: 0,
                 growing_oob_seeking_max_steps: 10,
                 growing_window_size_px_contours: 6,
                 growing_window_size_px_attractions: 8,
@@ -2752,7 +2746,7 @@ mod tests {
         ]);
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
         raster.write_contour(0, &ls);
-        raster.compute_out_of_bound(0);
+        raster.compute_out_of_bound();
         let contour = Contour {
             lwg: LineWithGravity::new(ls),
             elevation_height: None,
@@ -2784,7 +2778,6 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
-            out_of_bound_extra_dilation: 0,
             growing_oob_seeking_max_steps: 0,
             growing_window_size_px_contours: 10,
             growing_window_size_px_attractions: 10,
