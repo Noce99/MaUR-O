@@ -541,6 +541,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,

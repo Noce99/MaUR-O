@@ -24,6 +24,49 @@ pub struct GravityVotes {
     pub right: u64,
 }
 
+/// How much confidence-weighted evidence a contour has accumulated for each
+/// side, from Heavy Object and Jump readings, while its gravity is still
+/// undefined. Unlike [`GravityVotes`] (a plain count of Step 3 rain-drop
+/// hits), each reading here contributes a `[0.0, 1.0]` weight from
+/// [`tangent_alignment_confidence`] instead of a flat `1`, since a reading
+/// nearly tangential to the contour is far less trustworthy than one nearly
+/// perpendicular to it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WeightedGravityVote {
+    /// Weighted evidence for the side [`side_of_tangent`] calls left.
+    pub left: f64,
+    /// Weighted evidence for the opposite (right) side.
+    pub right: f64,
+}
+
+impl WeightedGravityVote {
+    /// Adds one reading's evidence: `side > 0.0` votes left, otherwise right.
+    pub fn add(&mut self, side: f64, weight: f64) {
+        if side > 0.0 {
+            self.left += weight;
+        } else {
+            self.right += weight;
+        }
+    }
+
+    /// The side this contour's evidence points to (`1.0` left, `-1.0`
+    /// right), or `None` if the evidence is too weak to trust: either the
+    /// total weight on both sides combined hasn't cleared
+    /// `min_total_weight` (not enough evidence at all), or the winning
+    /// side's margin over the losing one hasn't cleared `min_margin` (too
+    /// close to call). `None` here is not a failure -- it means this
+    /// contour should be left undefined for Step 3 to resolve instead.
+    pub fn resolve(&self, min_total_weight: f64, min_margin: f64) -> Option<f64> {
+        if self.left + self.right < min_total_weight {
+            return None;
+        }
+        if (self.left - self.right).abs() < min_margin {
+            return None;
+        }
+        Some(if self.left > self.right { 1.0 } else { -1.0 })
+    }
+}
+
 /// A line that is always perpendicular to gravity (a contour), or always
 /// parallel to it (a Jump's buffered polygon): the `LineString` defines its
 /// nodes, and its gravity direction -- one of the two possible ones -- is
@@ -61,6 +104,19 @@ pub struct Contour {
     pub elevation_height: Option<f64>,
 }
 
+/// Which symbol produced a [`PointGravityDefiners`] reading: a Slope Line's
+/// explicit, mapper-placed direction, or a Heavy Object's inferred,
+/// circle-fitted one. Step 2 uses this to give Slope Lines priority over
+/// Heavy Objects (and Jumps) instead of treating every reading as equally
+/// authoritative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GravityReadingSource {
+    /// An explicit, mapper-placed Slope Line symbol.
+    SlopeLine,
+    /// An inferred, circle-fitted Heavy Object/contour intersection.
+    HeavyObject,
+}
+
 /// A single directional reading taken at a known position on a known
 /// contour: a Slope Line, or a contour/Heavy-Object intersection with a
 /// circle-fitted gravity direction.
@@ -75,6 +131,8 @@ pub struct PointGravityDefiners {
     pub gravity_dx: Option<f64>,
     /// Gravity's y component, `None` if it could not be derived.
     pub gravity_dy: Option<f64>,
+    /// Which symbol this reading came from.
+    pub source: GravityReadingSource,
 }
 
 /// A Jump, whose gravity direction Mapper's own symbol definition gives
@@ -104,6 +162,31 @@ pub struct LineGravityDefiners {
 pub fn side_of_tangent(tangent_from: Coord<f64>, tangent_to: Coord<f64>, dx: f64, dy: f64) -> f64 {
     let (tx, ty) = (tangent_to.x - tangent_from.x, tangent_to.y - tangent_from.y);
     tx * dy - ty * dx
+}
+
+/// How perpendicular a directional reading `(dx, dy)` is to the tangent
+/// `tangent_from -> tangent_to`, as `|sin(theta)|` in `[0.0, 1.0]`: `1.0` when
+/// the reading is exactly perpendicular to the contour at that point (an
+/// unambiguous "side" reading), `0.0` when it is exactly parallel to it (the
+/// degenerate case [`set_or_check_gravity`] rejects outright, since a
+/// tangential reading does not pick out either side). Reuses
+/// [`side_of_tangent`]'s own cross-product numerator, just normalized by both
+/// vectors' lengths so the result no longer depends on either one's
+/// magnitude -- used to turn that same degenerate check into a continuous
+/// confidence weight for a vote instead of a hard reject.
+pub fn tangent_alignment_confidence(
+    tangent_from: Coord<f64>,
+    tangent_to: Coord<f64>,
+    dx: f64,
+    dy: f64,
+) -> f64 {
+    let (tx, ty) = (tangent_to.x - tangent_from.x, tangent_to.y - tangent_from.y);
+    let t_len = tx.hypot(ty);
+    let g_len = dx.hypot(dy);
+    if t_len < 1e-12 || g_len < 1e-12 {
+        return 0.0;
+    }
+    ((tx * dy - ty * dx) / (t_len * g_len)).abs()
 }
 
 /// The unit vector perpendicular to the tangent `tangent_from -> tangent_to`,

@@ -27,12 +27,13 @@
 //! | contour (linearized) | a post-Appendix-1 contour | green |
 //! | line definer polygon | a Jump's own buffered polygon (its `LineGravityDefiners::poly`) | light blue fill |
 //! | line definer arrow | one arrow at a Jump's own definition point | blue |
-//! | line definer span arrows | arrows spanning a Jump's buffered polygon | yellow |
+//! | line definer span arrows | arrows spanning a Jump's buffered polygon, its own gravity vector | purple |
 //! | heavy object polygon | a Heavy Object's own buffered polygon (`Step1Result::heavy_object_polygons`) | light pink fill |
 //! | point definer arrows | one arrow at a Slope Line/Heavy Object reading's own point | red |
 //! | unresolved slope line arrows | the same, for a Slope Line that found no contour to read | orange |
 //! | slope line search circles | a Slope Line's own `slope_lines_contours_search_radius` ring | red if resolved, orange if not |
 //! | contour gravity arrows | gravity direction along a gravity-defined contour | yellow |
+//! | vote reading circles | Step 2 only -- a ring around every position that cast a Heavy Object/Jump vote (see [`vote_reading_points`]) | dark green |
 //! | rain drop points | one recorded rain drop step | blue |
 //! | anti rain drop points | one recorded anti rain drop step | red |
 //! | drop trails | a drop's full path, source to evaporation, thin | gray |
@@ -56,10 +57,17 @@
 //! fresh rather than continuing Seeking's own, so each file shows only its
 //! own phase's own steps. After Step 2: the same as Matching's own file, plus
 //! a gravity arrow along every
-//! contour already resolved. After Step 3 (covering every contour, per the
+//! contour already resolved, plus a dark green ring around every position
+//! that contributed a Heavy Object or Jump reading to Step 2's
+//! confidence-weighted vote -- whether or not that reading's own contour
+//! ended up resolved by the vote, a Slope Line, or the closed-hill
+//! heuristic, so the evidence behind a warning (or a vote's own win) stays
+//! visible -- this one ring layer is Step 2's own file only, not repeated in
+//! either Step 3 file below. After Step 3 (covering every contour, per the
 //! doc's "it
 //! should be impossible to have contours with undefined gravity"): the same
-//! as Step 2, plus -- in one file -- every rain drop's path, and -- in a
+//! as Step 2 minus that ring layer, plus -- in one file -- every rain drop's
+//! path, and -- in a
 //! second file -- every anti rain drop's path. In both: a thin gray line
 //! traces each drop's whole trail first, so the path itself reads as a line
 //! rather than a scatter of dots; over that, a slightly larger black circle
@@ -87,7 +95,9 @@ use geo_svg::{Color, Style, Svg, ToSvg, ToSvgStr, ViewBox};
 use crate::contour_geometry::RawVertex;
 use crate::contour_raster::{ContourRaster, CONTOUR_0_MATRIX_VALUE, HIGH_DENSITY, OUT_OF_BOUND};
 use crate::contours_to_raster_config::Config;
-use crate::gravity_model::{contour_gravity_side, lwg_gravity_side, node_direction};
+use crate::gravity_model::{
+    contour_gravity_side, lwg_gravity_side, node_direction, GravityReadingSource,
+};
 use crate::step1_extract::{contour_force_magnitude, Step1Result};
 use crate::step3_rain_drop::Step3Result;
 
@@ -102,6 +112,10 @@ const PURPLE: Color = Color::Rgb(148, 0, 211);
 const ORANGE: Color = Color::Rgb(255, 140, 0);
 const LIGHT_BLUE: Color = Color::Rgb(173, 216, 230);
 const LIGHT_PINK: Color = Color::Rgb(255, 182, 193);
+/// `04_..._step2.svg`'s own ring around every position that contributed a
+/// Heavy Object or Jump reading to Step 2's confidence-weighted vote -- see
+/// [`vote_reading_points`].
+const DARK_GREEN: Color = Color::Rgb(0, 100, 0);
 /// `02_..._step1_growing_seeking.svg`/`03_..._step1_growing_matching.svg`'s
 /// own contour-pixel potential-well force vector layer (Appendix 5) -- see
 /// [`push_pull_vector_layers`].
@@ -149,6 +163,11 @@ const SEARCH_CIRCLE_STROKE_WIDTH: f32 = 0.15;
 /// Close Search's own search-cone outline's stroke width, in ground meters
 /// -- see [`write_step1_close_search_svg`].
 const SEARCH_CONE_STROKE_WIDTH: f32 = 0.15;
+/// A vote-reading ring's radius, in ground meters -- see
+/// [`vote_reading_points`]. Small enough to mark a single point precisely
+/// rather than dominate the picture, the same role
+/// [`SEARCH_CIRCLE_STROKE_WIDTH`] plays for its own stroke.
+const VOTE_CIRCLE_RADIUS: f32 = 1.0;
 /// A Flying End's own pre-growing marker ring's radius, in ground meters.
 const FLYING_END_RING_RADIUS: f32 = 1.5;
 /// A Flying End marker ring's stroke width.
@@ -717,6 +736,40 @@ fn slope_line_circle_points(result: &Step1Result, resolved: bool) -> MultiPoint<
     )
 }
 
+/// Every position that contributed a Heavy Object or Jump reading to Step
+/// 2's confidence-weighted vote (`step2_obvious_gravity::resolve`'s own
+/// evidence-accumulation pass, over the exact same `point_definers`/
+/// `line_definers` this function reads): a Heavy Object reading's own
+/// `(x, y)`, or one of a Jump's own `touched_contours` centroids -- kept
+/// regardless of whether the contour it touched ended up resolved by that
+/// vote, a Slope Line, or the closed-hill heuristic, so every piece of
+/// evidence the vote actually weighed stays visible, not just the evidence
+/// that won.
+fn vote_reading_points(result: &Step1Result) -> MultiPoint<f64> {
+    let mut points = Vec::new();
+    for definer in &result.point_definers {
+        if definer.source != GravityReadingSource::HeavyObject {
+            continue;
+        }
+        if definer.gravity_dx.is_none() || definer.gravity_dy.is_none() {
+            continue;
+        }
+        points.push(Point::from(Coord {
+            x: definer.x,
+            y: definer.y,
+        }));
+    }
+    for definer in &result.line_definers {
+        if lwg_gravity_side(&definer.lwg).is_none() {
+            continue;
+        }
+        for &(_, center) in &definer.touched_contours {
+            points.push(Point::from(center));
+        }
+    }
+    MultiPoint::new(points)
+}
+
 /// An arrow (same shape as [`point_definer_arrows`]'s, which already draws
 /// one for every *resolved* Slope Line/Heavy Object reading) for every Slope
 /// Line that did *not* resolve into a `PointGravityDefiners` reading,
@@ -945,7 +998,7 @@ fn base_layers(data: &BaseLayerData) -> Svg<'_> {
             LINEARIZED_CONTOUR_STROKE_WIDTH,
         ))
         .and(line_layer(&data.line_arrows, BLUE, 0.2))
-        .and(line_layer(&data.line_span_arrows, YELLOW, 0.15))
+        .and(line_layer(&data.line_span_arrows, PURPLE, 0.15))
         .and(line_layer(&data.point_arrows, RED, 0.2))
         .and(line_layer(&data.unresolved_arrows, ORANGE, 0.2))
         .and(circle_layer(
@@ -1070,21 +1123,34 @@ fn resolved_layers<'a>(
 }
 
 /// The same as [`write_step1_growing_svg`], plus a gravity arrow along every
-/// contour Step 2 (or Step 1's direct evidence) has already resolved.
-/// `04_<map_name>_step2.svg`.
+/// contour Step 2 (or Step 1's direct evidence) has already resolved, plus
+/// (this file only, not [`write_step3_rain_svg`]/[`write_step3_anti_rain_svg`]
+/// even though both also call [`resolved_layers`]) a dark green ring around
+/// every position that contributed a Heavy Object or Jump reading to Step 2's
+/// vote (see [`vote_reading_points`]), so the evidence behind a
+/// vote-resolved contour -- or a warning about evidence Step 2 overruled --
+/// can be judged by eye. `04_<map_name>_step2.svg`.
 pub fn write_step2_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
     let data = BaseLayerData::new(result);
     let gravity_arrows = contour_gravity_arrows(result);
-    write(path, resolved_layers(&data, &gravity_arrows))
+    let vote_points = vote_reading_points(result);
+    write(
+        path,
+        resolved_layers(&data, &gravity_arrows).and(circle_layer(
+            &vote_points,
+            VOTE_CIRCLE_RADIUS,
+            DARK_GREEN,
+        )),
+    )
 }
 
 /// The algorithm's actual answer, once every contour's gravity is settled:
 /// pixels, both contour layers (raw red under linearized green/blue), and
 /// one gravity arrow per node (yellow) -- no raster grid, no Jump-only
-/// definer arrows (also yellow -- leaving them out keeps the gravity arrows
-/// the only thing that color), and none of Step 3's own rain-drop-path
-/// layers, since those are per-step working detail rather than the final
-/// picture. Call this only after every contour is resolved (Step 2 alone, or
+/// definer arrows, no vote-reading rings, and none of Step 3's own
+/// rain-drop-path layers, since those are per-step working detail rather
+/// than the final picture. Call this only after every contour is resolved
+/// (Step 2 alone, or
 /// Step 2 and Step 3 together) -- an earlier call would just draw whatever
 /// gravity happens to be set so far, silently mislabeled as final.
 pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
@@ -1266,8 +1332,8 @@ mod tests {
     use super::*;
     use crate::contour_raster::ContourRaster;
     use crate::gravity_model::{
-        gravity_vector_for_side, Contour, LineGravityDefiners, LineWithGravity,
-        PointGravityDefiners,
+        gravity_vector_for_side, Contour, GravityReadingSource, LineGravityDefiners,
+        LineWithGravity, PointGravityDefiners,
     };
     use crate::step1_extract::{GrowingStepForces, SlopeLineMark};
     use geo::Contains;
@@ -1439,6 +1505,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
@@ -1581,6 +1649,58 @@ mod tests {
     }
 
     #[test]
+    fn step2_svg_draws_a_dark_green_ring_at_each_vote_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("step2.svg");
+        let mut result = sample_result();
+        result.point_definers = vec![
+            // A Heavy Object reading: counts as one vote-reading position.
+            PointGravityDefiners {
+                x: 3.0,
+                y: 7.0,
+                reference_contour: 0,
+                gravity_dx: Some(1.0),
+                gravity_dy: Some(0.0),
+                source: GravityReadingSource::HeavyObject,
+            },
+            // A Slope Line reading never feeds the vote, so it draws no ring.
+            PointGravityDefiners {
+                x: -3.0,
+                y: -7.0,
+                reference_contour: 0,
+                gravity_dx: Some(1.0),
+                gravity_dy: Some(0.0),
+                source: GravityReadingSource::SlopeLine,
+            },
+        ];
+        let jump_ls = LineString::new(vec![c(0.0, 0.0), c(5.0, 0.0)]);
+        let mut lwg = LineWithGravity::new(jump_ls);
+        lwg.gravity_dx = Some(0.0);
+        lwg.gravity_dy = Some(1.0);
+        let poly = Polygon::new(
+            LineString::new(vec![
+                c(0.0, -1.0),
+                c(5.0, -1.0),
+                c(5.0, 1.0),
+                c(0.0, 1.0),
+                c(0.0, -1.0),
+            ]),
+            vec![],
+        );
+        result.line_definers = vec![LineGravityDefiners {
+            lwg,
+            poly,
+            // Two touched contours: counts as two more vote-reading positions.
+            touched_contours: vec![(0, c(1.0, 0.0)), (0, c(4.0, 0.0))],
+        }];
+        write_step2_svg(&path, &result).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // One Heavy Object reading plus two Jump touched-contour centroids;
+        // the Slope Line reading above draws no ring of its own.
+        assert_eq!(count(&text, "rgb(0,100,0)"), 3);
+    }
+
+    #[test]
     fn point_definer_arrows_skip_undefined_gravity_and_use_own_position() {
         let mut result = sample_result();
         result.point_definers = vec![
@@ -1590,6 +1710,7 @@ mod tests {
                 reference_contour: 0,
                 gravity_dx: Some(1.0),
                 gravity_dy: Some(0.0),
+                source: GravityReadingSource::SlopeLine,
             },
             // No gravity reading was derived for this one -- it draws no arrow.
             PointGravityDefiners {
@@ -1598,6 +1719,7 @@ mod tests {
                 reference_contour: 0,
                 gravity_dx: None,
                 gravity_dy: None,
+                source: GravityReadingSource::SlopeLine,
             },
         ];
         let arrows = point_definer_arrows(&result);
@@ -1625,6 +1747,7 @@ mod tests {
             reference_contour: 0,
             gravity_dx: Some(1.0),
             gravity_dy: Some(0.0),
+            source: GravityReadingSource::SlopeLine,
         }];
         write_step1_svg(&path, &result).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1693,6 +1816,7 @@ mod tests {
             reference_contour: 0,
             gravity_dx: Some(0.0),
             gravity_dy: Some(-1.0),
+            source: GravityReadingSource::SlopeLine,
         }];
         result.slope_lines = vec![
             SlopeLineMark {
@@ -1764,6 +1888,38 @@ mod tests {
             tag.contains(r#"fill-opacity="0.4""#),
             "expected the light blue polygon to not be fully opaque; got: {tag}"
         );
+    }
+
+    #[test]
+    fn line_definer_span_arrows_are_purple_not_yellow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("step1.svg");
+        let mut result = sample_result();
+        let ls = LineString::new(vec![c(0.0, 0.0), c(5.0, 0.0)]);
+        let mut lwg = LineWithGravity::new(ls);
+        lwg.gravity_dx = Some(0.0);
+        lwg.gravity_dy = Some(1.0);
+        let poly = Polygon::new(
+            LineString::new(vec![
+                c(0.0, -1.0),
+                c(5.0, -1.0),
+                c(5.0, 1.0),
+                c(0.0, 1.0),
+                c(0.0, -1.0),
+            ]),
+            vec![],
+        );
+        result.line_definers = vec![LineGravityDefiners {
+            lwg,
+            poly,
+            touched_contours: Vec::new(),
+        }];
+        write_step1_svg(&path, &result).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(count(&text, "rgb(148,0,211)") >= 1, "{text}");
+        // No gravity-resolved contour is drawn in write_step1_svg, so this
+        // Jump's own span arrows are the only thing that could draw yellow.
+        assert_eq!(count(&text, "rgb(230,200,20)"), 0);
     }
 
     #[test]

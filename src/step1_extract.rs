@@ -12,7 +12,8 @@ use crate::contour_raster::{
 use crate::contour_symbols::{classify_symbol, jump_gravity_side, SymbolFamily};
 use crate::contours_to_raster_config::Config;
 use crate::gravity_model::{
-    gravity_vector_for_side, Contour, LineGravityDefiners, LineWithGravity, PointGravityDefiners,
+    gravity_vector_for_side, Contour, GravityReadingSource, LineGravityDefiners, LineWithGravity,
+    PointGravityDefiners,
 };
 use crate::map::{Map, ObjectKind, Symbol};
 
@@ -622,6 +623,7 @@ fn push_heavy_object_reading(
                     reference_contour: contour_idx,
                     gravity_dx: Some(dx / len),
                     gravity_dy: Some(dy / len),
+                    source: GravityReadingSource::HeavyObject,
                 });
             }
         }
@@ -767,6 +769,7 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
                     reference_contour,
                     gravity_dx: Some(-rotation.sin()),
                     gravity_dy: Some(-rotation.cos()),
+                    source: GravityReadingSource::SlopeLine,
                 });
             }
             Classified::Jump { linestrings, side } => {
@@ -1467,6 +1470,7 @@ pub fn run_growing_close_search(result: &mut Step1Result, config: &Config) {
                         b.is_start,
                         &mut result.contours,
                         &mut result.point_definers,
+                        &mut result.line_definers,
                         &mut std::collections::VecDeque::new(),
                         &mut grown,
                         &mut result.raster,
@@ -1773,8 +1777,9 @@ fn finalize_contour_ls(
 /// smaller of the two indices (an arbitrary but deterministic pick -- either
 /// choice satisfies the doc's own "choose randomly one of the two"), and
 /// re-numbers every reference to the discarded index -- the Contours vector,
-/// every already-written Contour Raster pixel, every pending Flying End, and
-/// every already-collected `PointGravityDefiners.reference_contour`.
+/// every already-written Contour Raster pixel, every pending Flying End,
+/// every already-collected `PointGravityDefiners.reference_contour`, and
+/// every already-collected `LineGravityDefiners::touched_contours` entry.
 #[allow(clippy::too_many_arguments)]
 fn merge_contours(
     a_idx: usize,
@@ -1783,6 +1788,7 @@ fn merge_contours(
     b_is_start: bool,
     contours: &mut Vec<Contour>,
     point_definers: &mut [PointGravityDefiners],
+    line_definers: &mut [LineGravityDefiners],
     pending: &mut std::collections::VecDeque<FlyingEnd>,
     grown: &mut Vec<bool>,
     raster: &mut ContourRaster,
@@ -1851,6 +1857,22 @@ fn merge_contours(
             pd.reference_contour = keep_idx as u64;
         } else if pd.reference_contour > remove_idx as u64 {
             pd.reference_contour -= 1;
+        }
+    }
+    // A Jump's own `touched_contours` indices are just as stale after this
+    // as a `PointGravityDefiners.reference_contour` would be -- `remove_idx`
+    // no longer exists past this point, and every later index shifted down
+    // by one, exactly as `Vec::remove` above just did to `contours` itself.
+    // Left unremapped, Step 2 would read a Jump's own vote against whatever
+    // contour happens to have shifted into that stale slot, an unrelated one
+    // by then.
+    for ld in line_definers.iter_mut() {
+        for (contour_idx, _) in ld.touched_contours.iter_mut() {
+            if *contour_idx == remove_idx as u64 {
+                *contour_idx = keep_idx as u64;
+            } else if *contour_idx > remove_idx as u64 {
+                *contour_idx -= 1;
+            }
         }
     }
     // `merged_pts` is always built as [keep's surviving end ... join ...
@@ -1981,6 +2003,7 @@ fn grow_one_step(
     pending: &mut std::collections::VecDeque<FlyingEnd>,
     contours: &mut Vec<Contour>,
     point_definers: &mut [PointGravityDefiners],
+    line_definers: &mut [LineGravityDefiners],
     grown: &mut Vec<bool>,
     raster: &mut ContourRaster,
     config: &Config,
@@ -2029,6 +2052,7 @@ fn grow_one_step(
                     other_end.is_start,
                     contours,
                     point_definers,
+                    line_definers,
                     pending,
                     grown,
                     raster,
@@ -2284,6 +2308,7 @@ pub fn run_growing_seeking(
             &mut unused_pending,
             &mut result.contours,
             &mut result.point_definers,
+            &mut result.line_definers,
             &mut grown,
             &mut result.raster,
             config,
@@ -2376,6 +2401,7 @@ pub fn run_growing_matching(
             &mut pending,
             &mut result.contours,
             &mut result.point_definers,
+            &mut result.line_definers,
             &mut grown,
             &mut result.raster,
             config,
@@ -2576,6 +2602,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
@@ -2718,6 +2746,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
@@ -2848,6 +2878,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
@@ -2963,6 +2995,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
@@ -3131,6 +3165,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 3,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
@@ -3173,6 +3209,7 @@ mod tests {
             &mut result.contours,
             &result.point_definers,
             &result.line_definers,
+            &config,
         );
         assert!(
             step2.is_ok(),
@@ -3198,6 +3235,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
@@ -3750,6 +3789,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
@@ -3845,6 +3886,8 @@ mod tests {
                 heavy_object_growing: 0.2,
                 circumference_fitting_points_number: 4,
                 slope_lines_contours_search_radius: 3.0,
+                step2_vote_min_total_weight: 0.3,
+                step2_vote_min_margin: 0.15,
                 rain_drop_step: 0.25,
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
@@ -3875,6 +3918,7 @@ mod tests {
                 &mut pending,
                 &mut contours,
                 &mut point_definers,
+                &mut Vec::new(),
                 &mut grown,
                 &mut raster,
                 &config,
@@ -3938,6 +3982,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
@@ -3968,6 +4014,7 @@ mod tests {
             &mut pending,
             &mut contours,
             &mut point_definers,
+            &mut Vec::new(),
             &mut grown,
             &mut raster,
             &config,
@@ -4030,6 +4077,8 @@ mod tests {
                 heavy_object_growing: 0.2,
                 circumference_fitting_points_number: 4,
                 slope_lines_contours_search_radius: 3.0,
+                step2_vote_min_total_weight: 0.3,
+                step2_vote_min_margin: 0.15,
                 rain_drop_step: 0.25,
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
@@ -4061,6 +4110,7 @@ mod tests {
                 &mut pending,
                 &mut contours,
                 &mut point_definers,
+                &mut Vec::new(),
                 &mut grown,
                 &mut raster,
                 &config,
@@ -4150,6 +4200,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
@@ -4248,6 +4300,7 @@ mod tests {
                 &mut pending,
                 &mut contours,
                 &mut point_definers,
+                &mut Vec::new(),
                 &mut grown,
                 &mut raster,
                 &config,
@@ -4330,6 +4383,7 @@ mod tests {
                 &mut pending,
                 &mut contours,
                 &mut point_definers,
+                &mut Vec::new(),
                 &mut grown,
                 &mut raster,
                 &config,
@@ -4399,6 +4453,7 @@ mod tests {
                 &mut pending,
                 &mut contours,
                 &mut point_definers,
+                &mut Vec::new(),
                 &mut grown,
                 &mut raster,
                 &config,
@@ -4486,6 +4541,7 @@ mod tests {
                 &mut pending,
                 &mut contours,
                 &mut point_definers,
+                &mut Vec::new(),
                 &mut grown,
                 &mut raster,
                 &config,
@@ -4586,6 +4642,7 @@ mod tests {
             &mut pending,
             &mut contours,
             &mut point_definers,
+            &mut Vec::new(),
             &mut grown,
             &mut raster,
             &config,
@@ -4675,6 +4732,7 @@ mod tests {
                 &mut pending,
                 &mut contours,
                 &mut point_definers,
+                &mut Vec::new(),
                 &mut grown,
                 &mut raster,
                 &config,
@@ -4759,6 +4817,8 @@ mod tests {
             heavy_object_growing: 0.2,
             circumference_fitting_points_number: 4,
             slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
             rain_drop_step: 0.25,
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,

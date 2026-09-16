@@ -1,7 +1,7 @@
-//! The `contours_to_raster` config file: the twenty-eight parameters
+//! The `contours_to_raster` config file: the thirty parameters
 //! `Contours-to-Raster.md` names, read from a small hand-rolled `key =
 //! value` format (no `serde`/`toml` dependency exists anywhere else in this
-//! crate, and one file with twenty-eight numbers does not need one).
+//! crate, and one file with thirty numbers does not need one).
 
 use std::path::Path;
 
@@ -38,6 +38,20 @@ pub struct Config {
     /// gravity reading to, since that position is not always pixel-exact on
     /// top of its contour (Step 1).
     pub slope_lines_contours_search_radius: f64,
+    /// Minimum combined confidence weight (Heavy Object and Jump readings
+    /// on a contour, each weighted by how perpendicular it is to the
+    /// contour at its own contact point -- see
+    /// `gravity_model::tangent_alignment_confidence`) a contour needs before
+    /// Step 2's vote will resolve it at all. Below this, there simply isn't
+    /// enough evidence to trust either side, and the contour is left
+    /// undefined for Step 3 to resolve instead (Step 2).
+    pub step2_vote_min_total_weight: f64,
+    /// Minimum margin, in the same confidence-weight units as
+    /// `step2_vote_min_total_weight`, the winning side of Step 2's vote must
+    /// lead the losing side by. Below this the vote is too close to call,
+    /// and the contour is left undefined for Step 3 to resolve instead
+    /// (Step 2).
+    pub step2_vote_min_margin: f64,
     /// Distance a rain drop advances per simulation step, in ground meters
     /// (Rain Drop Production Definition).
     pub rain_drop_step: f64,
@@ -206,6 +220,8 @@ const KEYS: &[&str] = &[
     "heavy_object_growing",
     "circumference_fitting_points_number",
     "slope_lines_contours_search_radius",
+    "step2_vote_min_total_weight",
+    "step2_vote_min_margin",
     "rain_drop_step",
     "sources_per_contour_segment",
     "rain_drop_starting_voting_hysteresis",
@@ -231,8 +247,8 @@ const KEYS: &[&str] = &[
 
 impl Config {
     /// Parses a config file: one `key = value` per line, blank lines and
-    /// lines starting with `#` ignored. All twenty-five keys are required --
-    /// a config file missing one is far more likely a mistake than an
+    /// lines starting with `#` ignored. All thirty keys are required -- a
+    /// config file missing one is far more likely a mistake than an
     /// intentional partial override -- and an unknown key or an unparseable
     /// value is an error naming the offending line.
     pub fn load(path: &Path) -> Result<Config, String> {
@@ -286,6 +302,8 @@ impl Config {
             circumference_fitting_points_number: values[&"circumference_fitting_points_number"]
                 as usize,
             slope_lines_contours_search_radius: values[&"slope_lines_contours_search_radius"],
+            step2_vote_min_total_weight: values[&"step2_vote_min_total_weight"],
+            step2_vote_min_margin: values[&"step2_vote_min_margin"],
             rain_drop_step: values[&"rain_drop_step"],
             sources_per_contour_segment: values[&"sources_per_contour_segment"] as usize,
             rain_drop_starting_voting_hysteresis: values[&"rain_drop_starting_voting_hysteresis"]
@@ -326,6 +344,8 @@ heavy_object_width = 3.0
 heavy_object_growing = 0.5
 circumference_fitting_points_number = 4
 slope_lines_contours_search_radius = 3.0
+step2_vote_min_total_weight = 0.5
+step2_vote_min_margin = 0.2
 rain_drop_step = 1.0
 sources_per_contour_segment = 3
 rain_drop_starting_voting_hysteresis = 5
@@ -354,6 +374,8 @@ growing_visualization_push_pull_vectors_scale = 1.0
         let config = Config::parse(FULL, "test").unwrap();
         assert_eq!(config.contours_step, 5.0);
         assert_eq!(config.circumference_fitting_points_number, 4);
+        assert_eq!(config.step2_vote_min_total_weight, 0.5);
+        assert_eq!(config.step2_vote_min_margin, 0.2);
         assert_eq!(config.sources_per_contour_segment, 3);
         assert_eq!(config.obvious_to_close_contour_distance, 2.0);
         assert_eq!(config.searching_fov, 90.0);

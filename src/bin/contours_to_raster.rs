@@ -296,6 +296,7 @@ fn run() -> Result<(), (ExitCode, String)> {
         &mut step1.contours,
         &step1.point_definers,
         &step1.line_definers,
+        &config,
     )
     .map_err(|e| (ExitCode::from(5), format!("Error: {e}")))?;
     for warning in &step2.warnings {
@@ -374,18 +375,18 @@ fn run() -> Result<(), (ExitCode, String)> {
     }
 
     let contour_count = step1.contours.len();
-    let resolved_by_points = step2.resolved_by_points;
-    let resolved_by_lines = step2.resolved_by_lines;
+    let resolved_by_slope_line = step2.resolved_by_slope_line;
     let resolved_by_hill = step2.resolved_by_hill;
+    let resolved_by_vote = step2.resolved_by_vote;
     let (resolved_by_rain, resolved_by_anti_rain) = step3
         .as_ref()
         .map(|s| (s.resolved_by_rain, s.resolved_by_anti_rain))
         .unwrap_or((0, 0));
 
     println!(
-        "{}: {contour_count} contours; gravity resolved by {resolved_by_points} slope \
-         line/heavy-object reading(s), {resolved_by_lines} jump(s), {resolved_by_hill} closed \
-         hill(s), {resolved_by_rain} rain drop(s), {resolved_by_anti_rain} anti rain drop(s)",
+        "{}: {contour_count} contours; gravity resolved by {resolved_by_slope_line} slope \
+         line(s), {resolved_by_hill} closed hill(s), {resolved_by_vote} heavy-object/jump \
+         vote(s), {resolved_by_rain} rain drop(s), {resolved_by_anti_rain} anti rain drop(s)",
         args.map_file.display(),
     );
 

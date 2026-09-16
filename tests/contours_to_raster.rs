@@ -23,9 +23,7 @@ fn contours() {
         .assert()
         .success()
         .stdout(predicates::str::contains("2 contours"))
-        .stdout(predicates::str::contains(
-            "1 slope line/heavy-object reading(s)",
-        ))
+        .stdout(predicates::str::contains("1 slope line(s)"))
         .stdout(predicates::str::contains("1 closed hill(s)"));
 }
 
