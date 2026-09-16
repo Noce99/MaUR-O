@@ -23,9 +23,10 @@ use crate::gravity_model::{
 /// before this on any sanely-sized map.
 const MAX_DROP_STEPS: u64 = 1_000_000;
 
-/// Cold evaporates on an already-defined contour (or out of bound) and votes
-/// on an undefined one; Hot evaporates on any contour, high density, or out
-/// of bound, and never votes. See the Rain Drop Production Definition.
+/// Cold evaporates on an already-defined contour, high density, or out of
+/// bound, and votes on an undefined contour; Hot evaporates on any contour,
+/// high density, or out of bound, and never votes. See the Rain Drop
+/// Production Definition.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Temperature {
     Cold,
@@ -323,10 +324,10 @@ fn simulate_pass(
 }
 
 /// Steps one rain drop from `source` in the fixed direction `dir` until it
-/// evaporates. A Cold drop evaporates on an out-of-bound pixel or on an
-/// already-defined contour (subject to its own `rain_drop_starting_voting_hysteresis`
-/// exemptions below), and votes-and-continues on an undefined contour,
-/// passing through high density untouched. A Hot drop evaporates on an
+/// evaporates. A Cold drop evaporates on an out-of-bound pixel, a
+/// high-density pixel, or an already-defined contour (subject to its own
+/// `rain_drop_starting_voting_hysteresis` exemptions below), and
+/// votes-and-continues on an undefined contour. A Hot drop evaporates on an
 /// out-of-bound pixel, a high-density pixel, or any contour at all, never
 /// votes, and (unlike Cold, which relies on its own hysteresis window
 /// instead) has its own source contour permanently excluded from counting as
@@ -421,8 +422,7 @@ fn simulate_one_drop(
         let evaporate = match (temperature, hit) {
             (_, None) => false,
             (_, Some(StepHit::OutOfBound)) => true,
-            (Temperature::Hot, Some(StepHit::HighDensity)) => true,
-            (Temperature::Cold, Some(StepHit::HighDensity)) => false, // passes through untouched
+            (_, Some(StepHit::HighDensity)) => true,
             (Temperature::Hot, Some(StepHit::Contour(_))) => true,
             (Temperature::Cold, Some(StepHit::Contour(hit_idx))) => {
                 // Re-crossing the drop's own starting contour is exempt within
@@ -1032,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_drop_passes_through_high_density_untouched() {
+    fn cold_drop_evaporates_on_high_density() {
         let mut raster = ContourRaster::new(c(0.0, 0.0), 0.5, 40, 40);
         raster.write_contour(1, &LineString::new(vec![c(4.9, 5.0), c(5.1, 5.0)]));
         raster.write_contour(2, &LineString::new(vec![c(4.9, 5.0), c(5.1, 5.0)])); // conflict -> high density
@@ -1047,8 +1047,8 @@ mod tests {
             (0.0, 1.0),
             1.0,
         );
-        // Passed straight through the high-density pixel and left the map.
-        assert!(drop.path.last().unwrap().y > 15.0);
+        // Evaporated right at the high-density pixel, well short of the far border.
+        assert!(drop.path.last().unwrap().y < 7.0);
     }
 
     #[test]
