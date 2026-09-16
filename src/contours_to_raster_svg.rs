@@ -102,22 +102,22 @@ const PURPLE: Color = Color::Rgb(148, 0, 211);
 const ORANGE: Color = Color::Rgb(255, 140, 0);
 const LIGHT_BLUE: Color = Color::Rgb(173, 216, 230);
 const LIGHT_PINK: Color = Color::Rgb(255, 182, 193);
-/// `01_..._step1_growing_seeking.svg`/`02_..._step1_growing_matching.svg`'s
+/// `02_..._step1_growing_seeking.svg`/`03_..._step1_growing_matching.svg`'s
 /// own contour-pixel potential-well force vector layer (Appendix 5) -- see
 /// [`push_pull_vector_layers`].
 const PUSH_PULL_CONTOUR_FORCE: Color = Color::Rgb(128, 0, 0);
-/// `01_..._step1_growing_seeking.svg`/`02_..._step1_growing_matching.svg`'s
+/// `02_..._step1_growing_seeking.svg`/`03_..._step1_growing_matching.svg`'s
 /// own `out_of_bound_force` vector layer.
 const PUSH_PULL_OUT_OF_BOUND: Color = Color::Rgb(255, 0, 255);
-/// `01_..._step1_growing_seeking.svg`/`02_..._step1_growing_matching.svg`'s
+/// `02_..._step1_growing_seeking.svg`/`03_..._step1_growing_matching.svg`'s
 /// own `density_region_force` vector layer.
 const PUSH_PULL_DENSITY: Color = Color::Rgb(0, 100, 0);
-/// `01_..._step1_growing_seeking.svg`/`02_..._step1_growing_matching.svg`'s
+/// `02_..._step1_growing_seeking.svg`/`03_..._step1_growing_matching.svg`'s
 /// own `flying_end_force` vector layer.
 const PUSH_PULL_FLYING_END: Color = Color::Rgb(0, 191, 255);
 /// `3` (high density) pixels.
 const LIGHT_GREEN: Color = Color::Rgb(144, 238, 144);
-/// `01_..._step1_growing_seeking.svg`/`02_..._step1_growing_matching.svg`'s
+/// `02_..._step1_growing_seeking.svg`/`03_..._step1_growing_matching.svg`'s
 /// own integration-step dot layer -- a more saturated green than [`GREEN`]
 /// (the un-grown linearized-contour layer) so the two read as distinct even
 /// though both are "green".
@@ -420,8 +420,8 @@ impl ToSvgStr for OobArea {
 
 /// One unfilled ring per Flying End position, in red -- `Step1Result::pre_growing_flying_ends`,
 /// drawn the same on `00_..._step1.svg` and both of the Growing Process's
-/// own files, `01_..._step1_growing_seeking.svg`/
-/// `02_..._step1_growing_matching.svg` (see the doc's Visualization
+/// own files, `02_..._step1_growing_seeking.svg`/
+/// `03_..._step1_growing_matching.svg` (see the doc's Visualization
 /// section).
 fn flying_end_rings(result: &Step1Result) -> MultiPoint<f64> {
     MultiPoint::new(
@@ -435,8 +435,8 @@ fn flying_end_rings(result: &Step1Result) -> MultiPoint<f64> {
 
 /// The post-linearization line of every contour the Growing Process did
 /// *not* touch (green, `linearized_contour_lines`'s usual color) and every
-/// one it did (blue) -- `01_..._step1_growing_seeking.svg`/
-/// `02_..._step1_growing_matching.svg` (and everything built on them) show
+/// one it did (blue) -- `02_..._step1_growing_seeking.svg`/
+/// `03_..._step1_growing_matching.svg` (and everything built on them) show
 /// grown/merged contours in blue instead of green, per the doc.
 fn linearized_contour_lines_split(
     result: &Step1Result,
@@ -538,8 +538,8 @@ fn push_pull_vector(from: Coord<f64>, v: (f64, f64), scale: f64) -> LineString<f
     ])
 }
 
-/// The four force vector layers `01_..._step1_growing_seeking.svg`/
-/// `02_..._step1_growing_matching.svg` draw for every integration step
+/// The four force vector layers `02_..._step1_growing_seeking.svg`/
+/// `03_..._step1_growing_matching.svg` draw for every integration step
 /// recorded in `Step1Result::growing_push_pull_vectors` --
 /// one per force term (contour, out-of-bound, density, flying-end), all
 /// sharing the same tail (that step's own pre-step Flying End position) but
@@ -982,7 +982,14 @@ fn write(path: &Path, svg: Svg) -> Result<(), String> {
 /// value), every contour raw and linearized, the Jump ("LineGravityDefiners")
 /// arrows, the Slope Line/Heavy Object ("PointGravityDefiners") arrows, and
 /// a red ring around every Flying End's own (pre-growing) position.
-/// `00_<map_name>_step1.svg`.
+/// `00_<map_name>_step1.svg`. Reused as-is, at a different path, for
+/// `01_<map_name>_step1_close_search.svg` -- Close Search
+/// (`step1_extract::run_growing_close_search`) is a one-shot geometric pass
+/// with no integration steps of its own, so it has no push/pull vectors or
+/// dots to add on top of `base_layers`, unlike [`write_step1_growing_svg`]
+/// below; any contour it touched still draws blue instead of green there,
+/// the same `result.grown_by_growing_process` flag `base_layers` always
+/// reads.
 pub fn write_step1_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
     write(path, base_layers(&BaseLayerData::new(result)))
 }
@@ -1003,8 +1010,8 @@ pub fn write_step1_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
 /// (`Step1Result::growing_integration_step_dots`) is drawn as a small green
 /// dot on top of everything else -- but only *that one phase's own* steps:
 /// `run_growing_matching` starts both of those two fields fresh rather than
-/// reclaiming Seeking's own, so `01_<map_name>_step1_growing_seeking.svg`
-/// shows Seeking's own steps and `02_<map_name>_step1_growing_matching.svg`
+/// reclaiming Seeking's own, so `02_<map_name>_step1_growing_seeking.svg`
+/// shows Seeking's own steps and `03_<map_name>_step1_growing_matching.svg`
 /// shows only Matching's, never both overlaid on one picture.
 pub fn write_step1_growing_svg(
     path: &Path,
@@ -1037,7 +1044,7 @@ fn resolved_layers<'a>(
 
 /// The same as [`write_step1_growing_svg`], plus a gravity arrow along every
 /// contour Step 2 (or Step 1's direct evidence) has already resolved.
-/// `03_<map_name>_step2.svg`.
+/// `04_<map_name>_step2.svg`.
 pub fn write_step2_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
     let data = BaseLayerData::new(result);
     let gravity_arrows = contour_gravity_arrows(result);
@@ -1097,7 +1104,7 @@ pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
 /// never shows an arrow for a
 /// contour only Anti Rain Drop Production went on to resolve, even though
 /// `result.contours` itself already holds that final state by the time this
-/// runs. `04_<map_name>_step3_rain.svg`.
+/// runs. `05_<map_name>_step3_rain.svg`.
 pub fn write_step3_rain_svg(
     path: &Path,
     result: &Step1Result,
@@ -1134,7 +1141,7 @@ pub fn write_step3_rain_svg(
 /// drop's full trail, path, hysteresis marker and vote segment, the same
 /// way as [`write_step3_rain_svg`] -- see there for why this is a separate
 /// file rather than a second layer on the same one.
-/// `05_<map_name>_step3_anti_rain.svg`.
+/// `06_<map_name>_step3_anti_rain.svg`.
 pub fn write_step3_anti_rain_svg(
     path: &Path,
     result: &Step1Result,
@@ -1194,8 +1201,8 @@ fn contours_function_curve(config: &Config) -> LineString<f64> {
 /// [`contour_force_magnitude`]'s own potential-well curve (Appendix 5) --
 /// not a map, so no grid/pixels/out-of-bound layer, and its axes are the
 /// function's own domain/range rather than ground positions. The curve is
-/// drawn maroon, matching `01_<map_name>_step1_growing_seeking.svg`/
-/// `02_<map_name>_step1_growing_matching.svg`'s own contour-pixel push/pull
+/// drawn maroon, matching `02_<map_name>_step1_growing_seeking.svg`/
+/// `03_<map_name>_step1_growing_matching.svg`'s own contour-pixel push/pull
 /// vector layer, over a gray `y = 0` line (the
 /// x-axis) and a gray `x = 0` line spanning the curve's own min/max (the
 /// y-axis), so the repulsion/attraction crossover at
@@ -1408,6 +1415,8 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
             contour_force_window: 4.0,
             attraction_force_window: 4.0,

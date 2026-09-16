@@ -6,7 +6,7 @@ use geo::{Coord, LineString, Polygon};
 
 use crate::contour_geometry::{self, coords_to_linestrings, nearest_index, resample_equal_chords};
 use crate::contour_raster::{
-    ContourRaster, PixelWalkStep, StepWalkOutcome, CONTOUR_0_MATRIX_VALUE, HIGH_DENSITY,
+    ContourRaster, PixelWalkStep, StepHit, StepWalkOutcome, CONTOUR_0_MATRIX_VALUE, HIGH_DENSITY,
     OUT_OF_BOUND, TEMPORARY_CONTOUR,
 };
 use crate::contour_symbols::{classify_symbol, jump_gravity_side, SymbolFamily};
@@ -100,22 +100,31 @@ pub struct Step1Result {
     /// `run_growing_process`).
     pub pre_growing_flying_ends: Vec<Coord<f64>>,
     /// Parallel to `contours`: whether that contour was touched by the
-    /// Growing Process (grown, merged into, or both) -- kept only for
-    /// `--create_svg`'s `01_..._step1_growing.svg`, which draws these in
+    /// Growing Process (grown, merged into, or both, in any of its three
+    /// passes) -- kept only for `--create_svg`'s numbered files after
+    /// `00_..._step1.svg` (`01_..._step1_close_search.svg`,
+    /// `02_..._step1_growing_seeking.svg`,
+    /// `03_..._step1_growing_matching.svg`), each of which draws these in
     /// blue instead of green.
     pub grown_by_growing_process: Vec<bool>,
     /// One entry per integration step actually taken (see
-    /// `grow_one_step`), empty until `run_growing` runs -- kept only for
-    /// `--create_svg`'s `01_..._step1_growing.svg`, which draws each step's
-    /// own four force contributions as separate colored vectors
+    /// `grow_one_step`), empty until `run_growing_seeking`/
+    /// `run_growing_matching` run -- Close Search takes no integration
+    /// steps, so this is always empty right after it. Kept only for
+    /// `--create_svg`'s `02_..._step1_growing_seeking.svg`/
+    /// `03_..._step1_growing_matching.svg`, which draw each step's own four
+    /// force contributions as separate colored vectors
     /// (`growing_visualization_push_pull_vectors_scale`-scaled).
     pub growing_push_pull_vectors: Vec<GrowingStepForces>,
     /// Every integration step's own resulting position (Step 1's Growing
-    /// Process) -- one entry per step actually taken (an ordinary
-    /// still-flying position, or a tunneling-safe landing position), empty
-    /// until `run_growing` runs. A merge/close produces no integration step
-    /// and so contributes no entry. Kept only for `--create_svg`'s
-    /// `01_..._step1_growing.svg`, which draws each as a small dot.
+    /// Process's Seeking/Matching passes) -- one entry per step actually
+    /// taken (an ordinary still-flying position, or a tunneling-safe
+    /// landing position), empty until `run_growing_seeking`/
+    /// `run_growing_matching` run. A merge/close (in any pass, including
+    /// Close Search) produces no integration step and so contributes no
+    /// entry. Kept only for `--create_svg`'s
+    /// `02_..._step1_growing_seeking.svg`/`03_..._step1_growing_matching.svg`,
+    /// which draw each as a small dot.
     pub growing_integration_step_dots: Vec<Coord<f64>>,
     /// Recoverable problems found along the way.
     pub warnings: Vec<String>,
@@ -126,7 +135,8 @@ pub struct Step1Result {
 /// [`growing_forces`] computes there ([Appendix 5](6aa1e4f7-8b2d-4c6a-9f1e-2d8b4a6c9f3e)),
 /// before they are summed into the step's actual net force
 /// ([`GrowingStepForces::total`]) -- kept only for `--create_svg`'s
-/// `01_..._step1_growing.svg` visualization.
+/// `02_..._step1_growing_seeking.svg`/`03_..._step1_growing_matching.svg`
+/// visualization.
 #[derive(Clone, Copy, Debug)]
 pub struct GrowingStepForces {
     /// The Flying End's own position before this step.
@@ -910,6 +920,286 @@ fn collect_flying_ends(contours: &[Contour], raster: &ContourRaster) -> Vec<Flyi
     ends
 }
 
+/// The unit vector a Flying End points along, continuing past its own tip
+/// (the direction Close Search's cone opens toward, below): `ls[1] ->
+/// ls[0]` for `is_start` (the contour's own first segment, extrapolated
+/// backward past its start), `ls[second-to-last] -> ls[last]` for the other
+/// end. `None` for a degenerate (near-zero-length) last segment -- that end
+/// simply can't run its own two searches (below), though it stays a valid
+/// target for another end's.
+fn flying_end_direction(ls: &LineString<f64>, is_start: bool) -> Option<(f64, f64)> {
+    let (from, to) = if is_start {
+        (ls.0[1], ls.0[0])
+    } else {
+        let n = ls.0.len();
+        (ls.0[n - 2], ls.0[n - 1])
+    };
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let len = dx.hypot(dy);
+    if len < 1e-9 {
+        None
+    } else {
+        Some((dx / len, dy / len))
+    }
+}
+
+/// `Some(distance)` if `to` lies within `max_distance` of `from` and inside
+/// the cone opening along `dir`, half `cos_half_fov`'s own angle to each
+/// side (Step 1's Growing Process, Close Search) -- `None` otherwise, or if
+/// `to` coincides with `from`. `cos_half_fov` is
+/// `(searching_fov.to_radians() / 2.0).cos()`, computed once by the caller.
+fn in_search_cone(
+    from: Coord<f64>,
+    dir: (f64, f64),
+    to: Coord<f64>,
+    max_distance: f64,
+    cos_half_fov: f64,
+) -> Option<f64> {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let distance = dx.hypot(dy);
+    if distance < 1e-9 || distance > max_distance {
+        return None;
+    }
+    let cos_theta = (dir.0 * dx + dir.1 * dy) / distance;
+    if cos_theta < cos_half_fov {
+        return None;
+    }
+    Some(distance)
+}
+
+/// Whether Close Search's straight segment `from -> to` (`from` on
+/// `from_contour`, `to` on `to_contour`) is a valid candidate connection
+/// between two Flying Ends ([`ContourRaster::first_hit_along_step`],
+/// Appendix 4): only a *different* contour in the way blocks it, matching
+/// this search's own job of telling apart "these two ends genuinely belong
+/// together" from "something else is physically between them." An
+/// out-of-bound pixel crossed along the way does not block it -- the empty/
+/// unclaimed area directly between two close Flying Ends is entirely
+/// expected and has nothing to do with another contour being there; reaching
+/// `to_contour`'s own body is exactly what reaching `to` is supposed to do,
+/// not a genuine obstruction either. High-density does block it, since it
+/// represents unresolved contour conflict (two or more contours, or a Jump's
+/// polygon), not open space.
+fn end_connection_clear(
+    raster: &ContourRaster,
+    from: Coord<f64>,
+    to: Coord<f64>,
+    from_contour: usize,
+    to_contour: usize,
+) -> bool {
+    match raster.first_hit_along_step(from, to, from_contour as u64) {
+        None | Some(StepHit::OutOfBound) => true,
+        Some(StepHit::Contour(idx)) => idx as usize == to_contour,
+        Some(StepHit::HighDensity) => false,
+    }
+}
+
+/// Whether Close Search's straight segment `from -> to` (`from` on
+/// `from_contour`) is a valid candidate connection to an out-of-bound pixel:
+/// only once it actually reaches out-of-bound territory without crossing a
+/// contour or high-density pixel first.
+fn end_to_out_of_bound_clear(
+    raster: &ContourRaster,
+    from: Coord<f64>,
+    to: Coord<f64>,
+    from_contour: usize,
+) -> bool {
+    matches!(
+        raster.first_hit_along_step(from, to, from_contour as u64),
+        Some(StepHit::OutOfBound)
+    )
+}
+
+/// Close Search's own first search (Step 1's Growing Process, before Seeking
+/// ever runs): among every *other* still-pending Flying End within `pos`'s
+/// own cone (`dir`/`cos_half_fov`/`max_distance`), the index into `pending`
+/// of the closest one whose straight connection back to `pos` is valid
+/// ([`end_connection_clear`]) -- `None` if none qualify. Candidates are
+/// sorted by distance first and the crossing check tried in that order, so
+/// the first one found valid is also the closest one.
+#[allow(clippy::too_many_arguments)]
+fn nearest_valid_end_candidate(
+    pos: Coord<f64>,
+    dir: (f64, f64),
+    cos_half_fov: f64,
+    max_distance: f64,
+    contour_idx: usize,
+    pending: &std::collections::VecDeque<FlyingEnd>,
+    contours: &[Contour],
+    raster: &ContourRaster,
+) -> Option<usize> {
+    let mut candidates: Vec<(f64, usize)> = pending
+        .iter()
+        .enumerate()
+        .filter_map(|(i, other)| {
+            let other_pos =
+                flying_end_position(&contours[other.contour_idx].lwg.ls, other.is_start);
+            in_search_cone(pos, dir, other_pos, max_distance, cos_half_fov).map(|d| (d, i))
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    candidates
+        .into_iter()
+        .find(|&(_, i)| {
+            let other = pending[i];
+            let other_pos =
+                flying_end_position(&contours[other.contour_idx].lwg.ls, other.is_start);
+            end_connection_clear(raster, pos, other_pos, contour_idx, other.contour_idx)
+        })
+        .map(|(_, i)| i)
+}
+
+/// Close Search's own second search (Step 1's Growing Process), only tried
+/// once [`nearest_valid_end_candidate`] found nothing: among every
+/// `OUT_OF_BOUND` pixel within `pos`'s own cone, the world-space center of
+/// the closest one whose straight connection back to `pos` is valid
+/// ([`end_to_out_of_bound_clear`]) -- `None` if none qualify. Scans the
+/// pixel-space bounding box of `pos ± max_distance`, the same box-then-
+/// filter shape as [`ContourRaster::nearest_contour_within_radius`]/
+/// [`growing_window_hits`], sorting candidates by distance the same way
+/// [`nearest_valid_end_candidate`] does.
+fn nearest_valid_ob_pixel(
+    pos: Coord<f64>,
+    dir: (f64, f64),
+    cos_half_fov: f64,
+    max_distance: f64,
+    contour_idx: usize,
+    raster: &ContourRaster,
+) -> Option<Coord<f64>> {
+    let (px_min_x, px_min_y) = raster.to_px(Coord {
+        x: pos.x - max_distance,
+        y: pos.y - max_distance,
+    });
+    let (px_max_x, px_max_y) = raster.to_px(Coord {
+        x: pos.x + max_distance,
+        y: pos.y + max_distance,
+    });
+    let mut candidates: Vec<(f64, Coord<f64>)> = Vec::new();
+    for y in px_min_y..=px_max_y {
+        for x in px_min_x..=px_max_x {
+            if raster.get(x, y) != OUT_OF_BOUND {
+                continue;
+            }
+            let center = raster.pixel_center(x, y);
+            if let Some(d) = in_search_cone(pos, dir, center, max_distance, cos_half_fov) {
+                candidates.push((d, center));
+            }
+        }
+    }
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    candidates
+        .into_iter()
+        .find(|&(_, center)| end_to_out_of_bound_clear(raster, pos, center, contour_idx))
+        .map(|(_, center)| center)
+}
+
+/// Step 1's Growing Process (see the doc), the preliminary Close Search pass
+/// that runs before Seeking ever takes an integration step: a cheap,
+/// non-iterative geometric check rather than a physics simulation. Builds
+/// the same initial Flying Ends list Seeking itself would
+/// ([`collect_flying_ends`]) and gives each exactly one turn, in order, as
+/// the active searcher -- but every end, tried or not, stays available the
+/// whole time as a candidate for every *other* end's own turn (a still-
+/// untried end can be consumed by an earlier end's own search; a
+/// once-tried, still-unresolved end can likewise still be found and
+/// resolved by a later one's).
+///
+/// Each turn: [`nearest_valid_end_candidate`] first, and if that finds
+/// nothing, [`nearest_valid_ob_pixel`]. A Flying-End match closes this
+/// contour into a ring ([`close_contour`]) if the candidate is this same
+/// contour's own other end, or splices the two contours together
+/// ([`merge_contours`]) otherwise -- resolving both ends at once, exactly
+/// like Matching's own merge check. An out-of-bound match resolves this one
+/// end directly onto it, the same append-resample-redraw tail an ordinary
+/// integration step's own landing uses ([`finalize_contour_ls`]). Either
+/// way that Flying End skips both Seeking and Matching entirely; finding
+/// neither leaves it untouched, to be picked up again by
+/// [`run_growing_seeking`]'s own fresh [`collect_flying_ends`] call.
+///
+/// Unlike Seeking/Matching, nothing here is a partial, still-flying step --
+/// every resolution is atomic, so no `TEMPORARY_CONTOUR` bookkeeping is
+/// needed.
+pub fn run_growing_close_search(result: &mut Step1Result, config: &Config) {
+    let mut grown = std::mem::take(&mut result.grown_by_growing_process);
+    let mut pending: std::collections::VecDeque<FlyingEnd> =
+        collect_flying_ends(&result.contours, &result.raster).into();
+    let cos_half_fov = (config.searching_fov.to_radians() / 2.0).cos();
+    let turns = pending.len();
+
+    for _ in 0..turns {
+        let Some(end) = pending.pop_front() else {
+            break;
+        };
+        let pos = flying_end_position(&result.contours[end.contour_idx].lwg.ls, end.is_start);
+        let Some(dir) =
+            flying_end_direction(&result.contours[end.contour_idx].lwg.ls, end.is_start)
+        else {
+            pending.push_back(end);
+            continue;
+        };
+
+        if let Some(i) = nearest_valid_end_candidate(
+            pos,
+            dir,
+            cos_half_fov,
+            config.searching_distance,
+            end.contour_idx,
+            &pending,
+            &result.contours,
+            &result.raster,
+        ) {
+            let other = pending.remove(i).expect("index just found by search");
+            if other.contour_idx == end.contour_idx {
+                close_contour(
+                    end.contour_idx,
+                    end.is_start,
+                    &mut result.contours,
+                    &mut result.raster,
+                    config,
+                    &mut grown,
+                );
+            } else {
+                merge_contours(
+                    end.contour_idx,
+                    end.is_start,
+                    other.contour_idx,
+                    other.is_start,
+                    &mut result.contours,
+                    &mut result.point_definers,
+                    &mut pending,
+                    &mut grown,
+                    &mut result.raster,
+                    config,
+                );
+            }
+            continue;
+        }
+
+        if let Some(center) = nearest_valid_ob_pixel(
+            pos,
+            dir,
+            cos_half_fov,
+            config.searching_distance,
+            end.contour_idx,
+            &result.raster,
+        ) {
+            append_node(&mut result.contours, end.contour_idx, end.is_start, center);
+            finalize_contour_ls(
+                end.contour_idx,
+                &mut result.contours,
+                &mut result.raster,
+                config,
+                &mut grown,
+            );
+            continue;
+        }
+
+        pending.push_back(end);
+    }
+
+    result.grown_by_growing_process = grown;
+}
+
 enum WindowPixelKind {
     OutOfBound,
     HighDensity,
@@ -1150,10 +1440,30 @@ fn close_contour(
 ) {
     let other_end_pos = flying_end_position(&contours[contour_idx].lwg.ls, !is_start);
     append_node(contours, contour_idx, is_start, other_end_pos);
-    let closed = resample_equal_chords(&contours[contour_idx].lwg.ls, config.contours_step);
-    contours[contour_idx].lwg.ls = closed.clone();
+    finalize_contour_ls(contour_idx, contours, raster, config, grown);
+}
+
+/// The shared tail of every place a Flying End resolves by appending one
+/// final node to its own contour's `ls` (a close, an ordinary integration
+/// step's landing, or Close Search's own out-of-bound landing, below): the
+/// new node's own re-derivation can shift *every* node, not just the new
+/// one -- including ones from the contour's own original body, already
+/// drawn into the Contour Raster long before growing ever started -- so its
+/// whole previous footprint is cleared first (see
+/// [`ContourRaster::clear_contour`]) rather than drawing the new one
+/// additively on top of the old. Callers append their own new node to
+/// `contours[contour_idx].lwg.ls` themselves before calling this.
+fn finalize_contour_ls(
+    contour_idx: usize,
+    contours: &mut [Contour],
+    raster: &mut ContourRaster,
+    config: &Config,
+    grown: &mut [bool],
+) {
+    let resampled = resample_equal_chords(&contours[contour_idx].lwg.ls, config.contours_step);
+    contours[contour_idx].lwg.ls = resampled.clone();
     raster.clear_contour(contour_idx as u64);
-    raster.write_contour(contour_idx as u64, &closed);
+    raster.write_contour(contour_idx as u64, &resampled);
     grown[contour_idx] = true;
 }
 
@@ -1534,12 +1844,7 @@ fn grow_one_step(
             // length, so the newly-final segment needs resampling either
             // way.
             append_node(contours, contour_idx, is_start, center);
-            let resampled =
-                resample_equal_chords(&contours[contour_idx].lwg.ls, config.contours_step);
-            contours[contour_idx].lwg.ls = resampled.clone();
-            raster.clear_contour(contour_idx as u64);
-            raster.write_contour(contour_idx as u64, &resampled);
-            grown[contour_idx] = true;
+            finalize_contour_ls(contour_idx, contours, raster, config, grown);
             dots.push(center);
             GrowStepOutcome::Resolved
         }
@@ -1580,9 +1885,14 @@ pub struct GrowingMatchState {
 ///
 /// Deliberately not run as part of `extract` itself: `--create_svg` needs to
 /// write `00_..._step1.svg` (the pre-growing state, with `result`'s own
-/// `pre_growing_flying_ends` as red rings) before this runs, then
-/// `01_..._step1_growing_seeking.svg` (this function's own result) after --
-/// see the doc's Visualization section. Sets `result.grown_by_growing_process`
+/// `pre_growing_flying_ends` as red rings) and, after
+/// [`run_growing_close_search`], `01_..._step1_close_search.svg`, before this
+/// runs, then `02_..._step1_growing_seeking.svg` (this function's own
+/// result) after -- see the doc's Visualization section. Extends
+/// `result.grown_by_growing_process` (reclaimed from wherever Close Search
+/// left it, the same way [`run_growing_matching`] reclaims this function's
+/// own) rather than starting it over, so a contour Close Search already
+/// touched still draws blue there even if Seeking never touches it again
 /// (used by that file to draw a touched contour in blue instead of green)
 /// and returns any new warnings raised along the way (a
 /// `walk_growing_integration_step` conflict against a different contour's
@@ -1592,7 +1902,7 @@ pub fn run_growing_seeking(
     result: &mut Step1Result,
     config: &Config,
 ) -> (GrowingMatchState, Vec<String>) {
-    let mut grown = vec![false; result.contours.len()];
+    let mut grown = std::mem::take(&mut result.grown_by_growing_process);
     let mut warnings = Vec::new();
     let mut push_pull_vectors = Vec::new();
     let mut dots = Vec::new();
@@ -1762,11 +2072,13 @@ pub fn run_growing_matching(
     warnings
 }
 
-/// Runs both of Step 1's Growing Process phases back to back, exactly as
-/// [`run_growing_seeking`] followed by [`run_growing_matching`] would --
-/// kept for callers that don't need `--create_svg`'s own separate per-phase
-/// snapshots (this module's own tests among them).
+/// Runs all three of Step 1's Growing Process passes back to back, exactly
+/// as [`run_growing_close_search`] followed by [`run_growing_seeking`] then
+/// [`run_growing_matching`] would -- kept for callers that don't need
+/// `--create_svg`'s own separate per-pass snapshots (this module's own tests
+/// among them).
 pub fn run_growing(result: &mut Step1Result, config: &Config) -> Vec<String> {
+    run_growing_close_search(result, config);
     let (state, mut warnings) = run_growing_seeking(result, config);
     warnings.extend(run_growing_matching(result, config, state));
     warnings
@@ -1881,6 +2193,8 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
             contour_force_window: 4.0,
             attraction_force_window: 4.0,
@@ -2014,6 +2328,8 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
             contour_force_window: 4.0,
             attraction_force_window: 4.0,
@@ -2140,6 +2456,8 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
             contour_force_window: 10.0,
             attraction_force_window: 15.0,
@@ -2251,6 +2569,8 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
             contour_force_window: 10.0,
             attraction_force_window: 15.0,
@@ -2278,6 +2598,280 @@ mod tests {
         assert_eq!(result.raw_polylines.len(), 2);
         assert!(result.raw_polylines.contains(&raw_a));
         assert!(result.raw_polylines.contains(&raw_b));
+    }
+
+    /// A `Config` for the Close Search tests below, with only
+    /// `searching_fov`/`searching_distance` varying -- everything else is a
+    /// harmless placeholder, since Close Search itself never reads any of
+    /// the force-curve parameters (those are Seeking/Matching-only).
+    fn close_search_test_config(searching_fov: f64, searching_distance: f64) -> Config {
+        Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 2.0,
+            rasterization_px_size: 1.0,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 4,
+            slope_lines_contours_search_radius: 3.0,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            searching_fov,
+            searching_distance,
+            growing_oob_seeking_max_steps: 0,
+            contour_force_window: 10.0,
+            attraction_force_window: 15.0,
+            contour_force_max_repulsion: 4.0,
+            contour_force_equilibrium: 2.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 6.0,
+            out_of_bound_force: 2.0,
+            density_region_force: 2.0,
+            flying_end_force: 2.0,
+            flying_end_merge_distance: 5.0,
+            matching_min_force: 0.0,
+            grow_time_step: 1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
+        }
+    }
+
+    /// A minimal `Step1Result` for the Close Search tests below: everything
+    /// beyond `contours`/`raster` is either unused by
+    /// [`run_growing_close_search`] or a harmless empty placeholder.
+    fn close_search_test_result(contours: Vec<Contour>, raster: ContourRaster) -> Step1Result {
+        let grown = vec![false; contours.len()];
+        let raw_polylines = vec![Vec::new(); contours.len()];
+        Step1Result {
+            contours,
+            raw_polylines,
+            raster,
+            point_definers: Vec::new(),
+            line_definers: Vec::new(),
+            slope_lines: Vec::new(),
+            slope_lines_contours_search_radius: 3.0,
+            heavy_object_polygons: Vec::new(),
+            pre_growing_flying_ends: Vec::new(),
+            grown_by_growing_process: grown,
+            growing_push_pull_vectors: Vec::new(),
+            growing_integration_step_dots: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn close_search_merges_two_flying_ends_of_different_contours() {
+        // Mirrors `growing_merge_keeps_the_two_contours_raw_polylines_separate`'s
+        // own geometry: A's end and B's start are 2m apart, well inside
+        // `searching_distance`, and aimed directly at each other, while both
+        // far ends already sit on the raster's own border (out of bound from
+        // the start, never Flying Ends at all) -- Close Search alone should
+        // already merge A and B, before Seeking or Matching ever runs.
+        let ls_a = LineString::new(vec![c(0.0, 10.0), c(10.0, 10.0)]);
+        let ls_b = LineString::new(vec![c(12.0, 10.0), c(39.0, 10.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls_a);
+        raster.write_contour(1, &ls_b);
+        raster.compute_out_of_bound();
+
+        let mut result = close_search_test_result(
+            vec![
+                Contour {
+                    lwg: LineWithGravity::new(ls_a),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_b),
+                    elevation_height: None,
+                },
+            ],
+            raster,
+        );
+        let config = close_search_test_config(90.0, 5.0);
+
+        run_growing_close_search(&mut result, &config);
+
+        assert_eq!(result.contours.len(), 1, "A and B should have merged");
+        assert!(result.grown_by_growing_process.iter().all(|&g| g));
+    }
+
+    #[test]
+    fn close_search_closes_a_contours_own_two_ends_that_meet_in_its_cone() {
+        // Same "V" shape as
+        // `growing_closes_a_contour_whose_own_two_flying_ends_meet_each_other`:
+        // both ends sit 4m apart at y=10. A wide `searching_fov` (350
+        // degrees) keeps this test about the closing logic itself, not about
+        // precisely aiming each tip's own forward direction at the other.
+        let ls = LineString::new(vec![c(15.0, 10.0), c(17.0, 15.0), c(19.0, 10.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls);
+        raster.compute_out_of_bound();
+
+        let mut result = close_search_test_result(
+            vec![Contour {
+                lwg: LineWithGravity::new(ls),
+                elevation_height: None,
+            }],
+            raster,
+        );
+        let config = close_search_test_config(350.0, 5.0);
+
+        run_growing_close_search(&mut result, &config);
+
+        assert_eq!(
+            result.contours.len(),
+            1,
+            "closed, not merged away or duplicated"
+        );
+        assert!(
+            result.contours[0].lwg.ls.is_closed(),
+            "expected the contour to have been closed into a ring, got {:?}",
+            result.contours[0].lwg.ls
+        );
+        assert_eq!(result.grown_by_growing_process, vec![true]);
+    }
+
+    #[test]
+    fn close_search_rejects_a_flying_end_blocked_by_a_third_contour() {
+        // Same A/B setup as the merge test above, plus a third contour C
+        // running straight across the gap between them (x=11, from y=5 to
+        // y=17) -- the straight connection from A's end to B's start would
+        // have to cross it, so it must not be accepted as a candidate.
+        let ls_a = LineString::new(vec![c(0.0, 10.0), c(10.0, 10.0)]);
+        let ls_b = LineString::new(vec![c(12.0, 10.0), c(39.0, 10.0)]);
+        let ls_c = LineString::new(vec![c(11.0, 5.0), c(11.0, 17.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls_a);
+        raster.write_contour(1, &ls_b);
+        raster.write_contour(2, &ls_c);
+        raster.compute_out_of_bound();
+
+        let mut result = close_search_test_result(
+            vec![
+                Contour {
+                    lwg: LineWithGravity::new(ls_a),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_b),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_c),
+                    elevation_height: None,
+                },
+            ],
+            raster,
+        );
+        // Reaches comfortably across the 2m A-B gap, but not as far as C's
+        // own tips (just over 5m from either A's end or B's start), so this
+        // is purely about the blocking check, not an incidental distance/fov
+        // exclusion of C's own ends.
+        let config = close_search_test_config(90.0, 3.0);
+
+        run_growing_close_search(&mut result, &config);
+
+        assert_eq!(
+            result.contours.len(),
+            3,
+            "A and B must not merge across C's blocking contour"
+        );
+    }
+
+    #[test]
+    fn close_search_lands_a_flying_end_directly_on_an_out_of_bound_pixel_ahead() {
+        // A single open contour deep inside an otherwise-empty raster, far
+        // from its own other end (5m, well outside `searching_distance`
+        // here) -- nothing for the end-to-end search to find, so the
+        // out-of-bound search takes over: virtually the whole raster besides
+        // the contour's own line is out-of-bound once `compute_out_of_bound`
+        // runs, so one such pixel sits just past this end's own tip.
+        let ls = LineString::new(vec![c(20.0, 20.0), c(25.0, 20.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls);
+        raster.compute_out_of_bound();
+
+        let mut result = close_search_test_result(
+            vec![Contour {
+                lwg: LineWithGravity::new(ls),
+                elevation_height: None,
+            }],
+            raster,
+        );
+        let config = close_search_test_config(90.0, 3.0);
+
+        run_growing_close_search(&mut result, &config);
+
+        assert_eq!(
+            result.contours.len(),
+            1,
+            "landing must not merge or duplicate the contour"
+        );
+        assert!(
+            collect_flying_ends(&result.contours, &result.raster).is_empty(),
+            "both ends should have landed directly onto an out-of-bound pixel"
+        );
+        assert_eq!(result.grown_by_growing_process, vec![true]);
+    }
+
+    #[test]
+    fn close_search_leaves_a_flying_end_with_nothing_in_range_untouched() {
+        let ls = LineString::new(vec![c(10.0, 10.0), c(20.0, 10.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls);
+        raster.compute_out_of_bound();
+
+        let mut result = close_search_test_result(
+            vec![Contour {
+                lwg: LineWithGravity::new(ls.clone()),
+                elevation_height: None,
+            }],
+            raster,
+        );
+        // Smaller than the ~1m gap to the nearest out-of-bound pixel beside
+        // the line, and far smaller than the 10m to this contour's own other
+        // end -- nothing at all should be found.
+        let config = close_search_test_config(90.0, 0.4);
+
+        run_growing_close_search(&mut result, &config);
+
+        assert_eq!(result.contours[0].lwg.ls.0, ls.0, "left exactly as it was");
+        assert_eq!(result.grown_by_growing_process, vec![false]);
+        assert_eq!(
+            collect_flying_ends(&result.contours, &result.raster).len(),
+            2,
+            "both ends should still be flying, ready for Seeking"
+        );
+    }
+
+    #[test]
+    fn close_search_distance_zero_disables_the_pass() {
+        let ls_a = LineString::new(vec![c(0.0, 10.0), c(10.0, 10.0)]);
+        let ls_b = LineString::new(vec![c(12.0, 10.0), c(39.0, 10.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls_a);
+        raster.write_contour(1, &ls_b);
+        raster.compute_out_of_bound();
+
+        let mut result = close_search_test_result(
+            vec![
+                Contour {
+                    lwg: LineWithGravity::new(ls_a),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_b),
+                    elevation_height: None,
+                },
+            ],
+            raster,
+        );
+        let config = close_search_test_config(90.0, 0.0);
+
+        run_growing_close_search(&mut result, &config);
+
+        assert_eq!(result.contours.len(), 2, "0.0 disables Close Search outright");
+        assert_eq!(result.grown_by_growing_process, vec![false, false]);
     }
 
     #[test]
@@ -2337,6 +2931,8 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
             growing_oob_seeking_max_steps: 5,
             contour_force_window: 6.0,
             attraction_force_window: 6.0,
@@ -2429,6 +3025,8 @@ mod tests {
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
+                searching_fov: 0.0,
+                searching_distance: 0.0,
                 growing_oob_seeking_max_steps: 10,
                 contour_force_window: 6.0,
                 attraction_force_window: 6.0,
@@ -2519,6 +3117,8 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
             growing_oob_seeking_max_steps: 10,
             contour_force_window: 6.0,
             attraction_force_window: 6.0,
@@ -2608,6 +3208,8 @@ mod tests {
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
+                searching_fov: 0.0,
+                searching_distance: 0.0,
                 growing_oob_seeking_max_steps: 10,
                 contour_force_window: 6.0,
                 attraction_force_window: 6.0,
@@ -2725,6 +3327,8 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
             growing_oob_seeking_max_steps: 10,
             contour_force_window,
             attraction_force_window,
@@ -3222,6 +3826,8 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
             contour_force_window: 0.1,
             attraction_force_window: 30.0,

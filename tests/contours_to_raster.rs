@@ -1,5 +1,5 @@
 //! CLI-level checks for `contours_to_raster`: it runs Steps 1-3 end to end
-//! on a small fixture, `--create_svg` writes the eight validation files (six
+//! on a small fixture, `--create_svg` writes the nine validation files (seven
 //! numbered, plus the unnumbered "final" and "contours_function" ones), and
 //! the documented exit codes fire on a missing map or config file.
 
@@ -32,7 +32,7 @@ fn contours() {
 /// `--create_svg` writes into this run's own `contours_to_raster_<timestamp>`
 /// folder under `--results`, not next to the map or the output file.
 #[test]
-fn create_svg_writes_eight_non_empty_files_in_a_timestamped_run_folder() {
+fn create_svg_writes_nine_non_empty_files_in_a_timestamped_run_folder() {
     let dir = tempfile::tempdir().unwrap();
     let results = dir.path().join("Results");
     let out = dir.path().join("contours.tif");
@@ -64,11 +64,12 @@ fn create_svg_writes_eight_non_empty_files_in_a_timestamped_run_folder() {
     for name in [
         "contours_contours_function.svg",
         "00_contours_step1.svg",
-        "01_contours_step1_growing_seeking.svg",
-        "02_contours_step1_growing_matching.svg",
-        "03_contours_step2.svg",
-        "04_contours_step3_rain.svg",
-        "05_contours_step3_anti_rain.svg",
+        "01_contours_step1_close_search.svg",
+        "02_contours_step1_growing_seeking.svg",
+        "03_contours_step1_growing_matching.svg",
+        "04_contours_step2.svg",
+        "05_contours_step3_rain.svg",
+        "06_contours_step3_anti_rain.svg",
         "contours_final.svg",
     ] {
         let svg = run_dir.join(name);

@@ -70,11 +70,12 @@ struct Args {
     #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
     config: PathBuf,
 
-    /// Write the six per-step validation SVGs Contours-to-Raster.md's
+    /// Write the seven per-step validation SVGs Contours-to-Raster.md's
     /// "Visualization" section describes (Step 1 before its own Growing
-    /// Process sub-step, after that sub-step's own Seeking phase, after its
-    /// Matching phase, Step 2, and Step 3's Rain and Anti Rain Drop
-    /// Productions each in their own file), an unnumbered "final" SVG with
+    /// Process sub-step, after that sub-step's own Close Search pass, after
+    /// its Seeking phase, after its Matching phase, Step 2, and Step 3's
+    /// Rain and Anti Rain Drop Productions each in their own file), an
+    /// unnumbered "final" SVG with
     /// just the algorithm's actual answer once every contour is resolved, an
     /// unnumbered "contours_function" SVG plotting the contour-pixel force
     /// curve itself (a function of --config alone, not of the map), and a
@@ -91,8 +92,9 @@ fn default_output_name(map_path: &Path) -> PathBuf {
     Path::new(map_path.file_stem().unwrap_or_default()).with_extension("tif")
 }
 
-/// `<prefix>_<output>_<step>.svg`, next to `output_path` -- the six numbered
-/// `--create_svg` files (`00`.."05", see the doc's Visualization section).
+/// `<prefix>_<output>_<step>.svg`, next to `output_path` -- the seven
+/// numbered `--create_svg` files (`00`.."06", see the doc's Visualization
+/// section).
 fn numbered_svg_path(output_path: &Path, prefix: &str, step: &str) -> PathBuf {
     let stem = output_path
         .file_stem()
@@ -102,7 +104,7 @@ fn numbered_svg_path(output_path: &Path, prefix: &str, step: &str) -> PathBuf {
 }
 
 /// `<output>_<step>.svg`, next to `output_path` -- for the unnumbered "final"
-/// file, which the rename to `00`.."05" doesn't touch.
+/// file, which the rename to `00`.."06" doesn't touch.
 fn step_svg_path(output_path: &Path, step: &str) -> PathBuf {
     let stem = output_path
         .file_stem()
@@ -131,13 +133,13 @@ fn write_step3_svgs(
     step3: &step3_rain_drop::Step3Result,
 ) -> Result<(), (ExitCode, String)> {
     write_step3_rain_svg(
-        &numbered_svg_path(output_path, "04", "step3_rain"),
+        &numbered_svg_path(output_path, "05", "step3_rain"),
         step1,
         step3,
     )
     .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     write_step3_anti_rain_svg(
-        &numbered_svg_path(output_path, "05", "step3_anti_rain"),
+        &numbered_svg_path(output_path, "06", "step3_anti_rain"),
         step1,
         step3,
     )
@@ -216,11 +218,28 @@ fn run() -> Result<(), (ExitCode, String)> {
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     }
 
-    // The Growing Process's own two phases (Seeking then Matching -- see
-    // `Contours-to-Raster.md`'s Growing Process section), each with its own
-    // `--create_svg` file: `01_..._step1_growing_seeking.svg` shows what
-    // Phase 1 (matching-free, chasing the out-of-bound area on its own)
-    // managed alone, `02_..._step1_growing_matching.svg` what Phase 2 (the
+    // Close Search: a cheap, non-iterative pass that resolves whatever
+    // Flying Ends are already essentially where they need to be -- another
+    // Flying End or an out-of-bound pixel directly in front of them -- before
+    // Seeking/Matching ever take an integration step. `01_..._step1_close_search.svg`
+    // shows the result; it needs no dedicated writer, since Close Search
+    // takes no integration steps of its own to draw push/pull vectors or
+    // dots for (see `write_step1_svg`'s own doc comment).
+    step1_extract::run_growing_close_search(&mut step1, &config);
+
+    if args.create_svg {
+        write_step1_svg(
+            &numbered_svg_path(&output_path, "01", "step1_close_search"),
+            &step1,
+        )
+        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+    }
+
+    // The Growing Process's own two remaining phases (Seeking then Matching
+    // -- see `Contours-to-Raster.md`'s Growing Process section), each with
+    // its own `--create_svg` file: `02_..._step1_growing_seeking.svg` shows
+    // what Phase 1 (matching-free, chasing the out-of-bound area on its own)
+    // managed alone, `03_..._step1_growing_matching.svg` what Phase 2 (the
     // full process, restored merging) went on to do with whatever Phase 1
     // didn't resolve.
     let (growing_state, seeking_warnings) = step1_extract::run_growing_seeking(&mut step1, &config);
@@ -231,7 +250,7 @@ fn run() -> Result<(), (ExitCode, String)> {
 
     if args.create_svg {
         write_step1_growing_svg(
-            &numbered_svg_path(&output_path, "01", "step1_growing_seeking"),
+            &numbered_svg_path(&output_path, "02", "step1_growing_seeking"),
             &step1,
             &config,
         )
@@ -247,7 +266,7 @@ fn run() -> Result<(), (ExitCode, String)> {
 
     if args.create_svg {
         write_step1_growing_svg(
-            &numbered_svg_path(&output_path, "02", "step1_growing_matching"),
+            &numbered_svg_path(&output_path, "03", "step1_growing_matching"),
             &step1,
             &config,
         )
@@ -273,7 +292,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     }
 
     if args.create_svg {
-        write_step2_svg(&numbered_svg_path(&output_path, "03", "step2"), &step1)
+        write_step2_svg(&numbered_svg_path(&output_path, "04", "step2"), &step1)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     }
 
@@ -294,8 +313,8 @@ fn run() -> Result<(), (ExitCode, String)> {
             if outcome.is_err() {
                 eprintln!(
                     "Note: wrote {} and {} for inspection despite the failure below.",
-                    numbered_svg_path(&output_path, "04", "step3_rain").display(),
-                    numbered_svg_path(&output_path, "05", "step3_anti_rain").display(),
+                    numbered_svg_path(&output_path, "05", "step3_rain").display(),
+                    numbered_svg_path(&output_path, "06", "step3_anti_rain").display(),
                 );
             }
         }
@@ -306,8 +325,8 @@ fn run() -> Result<(), (ExitCode, String)> {
     if args.create_svg {
         if step3.is_none() {
             // Every contour was already resolved before Step 3 ran: write
-            // the same picture Step 2 saw, so all six numbered files always
-            // exist together under --create_svg.
+            // the same picture Step 2 saw, so all seven numbered files
+            // always exist together under --create_svg.
             let empty_step3 = step3_rain_drop::Step3Result {
                 resolved_by_rain: 0,
                 resolved_by_anti_rain: 0,
@@ -329,15 +348,16 @@ fn run() -> Result<(), (ExitCode, String)> {
         write_final_svg(&step_svg_path(&output_path, "final"), &step1)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
         println!(
-            "wrote {}, {}, {}, {}, {}, {}, {}, {} and {}",
+            "wrote {}, {}, {}, {}, {}, {}, {}, {}, {} and {}",
             step_svg_path(&output_path, "contours_function").display(),
             numbered_svg_path(&output_path, "00", "step1").display(),
-            numbered_svg_path(&output_path, "01", "step1_growing_seeking").display(),
-            numbered_svg_path(&output_path, "02", "step1_growing_matching").display(),
+            numbered_svg_path(&output_path, "01", "step1_close_search").display(),
+            numbered_svg_path(&output_path, "02", "step1_growing_seeking").display(),
+            numbered_svg_path(&output_path, "03", "step1_growing_matching").display(),
             raster_png_path(&output_path).display(),
-            numbered_svg_path(&output_path, "03", "step2").display(),
-            numbered_svg_path(&output_path, "04", "step3_rain").display(),
-            numbered_svg_path(&output_path, "05", "step3_anti_rain").display(),
+            numbered_svg_path(&output_path, "04", "step2").display(),
+            numbered_svg_path(&output_path, "05", "step3_rain").display(),
+            numbered_svg_path(&output_path, "06", "step3_anti_rain").display(),
             step_svg_path(&output_path, "final").display(),
         );
     }

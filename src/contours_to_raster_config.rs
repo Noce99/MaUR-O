@@ -1,7 +1,7 @@
-//! The `contours_to_raster` config file: the twenty-five parameters
+//! The `contours_to_raster` config file: the twenty-seven parameters
 //! `Contours-to-Raster.md` names, read from a small hand-rolled `key =
 //! value` format (no `serde`/`toml` dependency exists anywhere else in this
-//! crate, and one file with twenty-five numbers does not need one).
+//! crate, and one file with twenty-seven numbers does not need one).
 
 use std::path::Path;
 
@@ -52,6 +52,23 @@ pub struct Config {
     /// How close left and right vote counts must be, as a ratio in (0, 1),
     /// before being flagged as ambiguous (Step 3, Cold-only).
     pub undefined_gravity_vote_threshold: f64,
+    /// The Growing Process's own preliminary Close Search pass's own cone's
+    /// total angular width, in degrees, centered on a Flying End's own
+    /// forward direction (continuing past its tip, along its last segment):
+    /// half this angle to each side of that direction (Step 1's Growing
+    /// Process). Together with **searching_distance**, bounds the area Close
+    /// Search scans, first for another Flying End then for an out-of-bound
+    /// pixel, before Seeking ever takes a single integration step.
+    pub searching_fov: f64,
+    /// The Growing Process's own preliminary Close Search pass's own max
+    /// search radius, in ground meters, for both of its searches -- another
+    /// Flying End, then an out-of-bound pixel (Step 1's Growing Process).
+    /// `0.0` turns Close Search off outright, the same convention as
+    /// **growing_oob_seeking_max_steps**' own `0`. Should stay small: this
+    /// pass exists to catch Flying Ends that are already essentially where
+    /// they need to be, not to replace Seeking/Matching's own, farther-
+    /// reaching physics.
+    pub searching_distance: f64,
     /// How many steps a Flying End spends seeking the out-of-bound area on
     /// its own -- no matching against another Flying End at all, only the
     /// raster's own out-of-bound/high-density/other-contour pixels (Step
@@ -150,7 +167,8 @@ pub struct Config {
     /// to change it.
     pub grow_time_step: f64,
     /// Scales the four push/pull vectors `--create_svg` draws in
-    /// `01_<map_name>_step1_growing.svg` for every integration step
+    /// `02_<map_name>_step1_growing_seeking.svg`/
+    /// `03_<map_name>_step1_growing_matching.svg` for every integration step
     /// (Appendix 5) -- one per force term (contour, out-of-bound, density,
     /// flying-end), tail on the Flying End's own pre-step position, length
     /// proportional to that term's own (unscaled, now genuinely
@@ -174,6 +192,8 @@ const KEYS: &[&str] = &[
     "sources_per_contour_segment",
     "rain_drop_starting_voting_hysteresis",
     "undefined_gravity_vote_threshold",
+    "searching_fov",
+    "searching_distance",
     "growing_oob_seeking_max_steps",
     "contour_force_window",
     "attraction_force_window",
@@ -252,6 +272,8 @@ impl Config {
             rain_drop_starting_voting_hysteresis: values[&"rain_drop_starting_voting_hysteresis"]
                 as u64,
             undefined_gravity_vote_threshold: values[&"undefined_gravity_vote_threshold"],
+            searching_fov: values[&"searching_fov"],
+            searching_distance: values[&"searching_distance"],
             growing_oob_seeking_max_steps: values[&"growing_oob_seeking_max_steps"] as u64,
             contour_force_window: values[&"contour_force_window"],
             attraction_force_window: values[&"attraction_force_window"],
@@ -288,6 +310,8 @@ rain_drop_step = 1.0
 sources_per_contour_segment = 3
 rain_drop_starting_voting_hysteresis = 5
 undefined_gravity_vote_threshold = 0.8
+searching_fov = 90.0
+searching_distance = 3.0
 growing_oob_seeking_max_steps = 10
 contour_force_window = 15.0
 attraction_force_window = 20.0
@@ -310,6 +334,8 @@ growing_visualization_push_pull_vectors_scale = 1.0
         assert_eq!(config.contours_step, 5.0);
         assert_eq!(config.circumference_fitting_points_number, 4);
         assert_eq!(config.sources_per_contour_segment, 3);
+        assert_eq!(config.searching_fov, 90.0);
+        assert_eq!(config.searching_distance, 3.0);
         assert_eq!(config.growing_oob_seeking_max_steps, 10);
         assert_eq!(config.contour_force_window, 15.0);
         assert_eq!(config.attraction_force_window, 20.0);
