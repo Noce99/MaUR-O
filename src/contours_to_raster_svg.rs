@@ -2066,7 +2066,7 @@ mod tests {
         let result = sample_result();
         let step3 = Step3Result {
             resolved_by_votes: 0,
-            ambiguous_warnings: Vec::new(),
+            warnings: Vec::new(),
             defined_after_rain: vec![true],
             rain_paths: vec![vec![c(0.0, 0.0), c(0.0, 1.0), c(0.0, 2.0)]],
             anti_rain_paths: vec![vec![c(1.0, 0.0)]],
@@ -2129,7 +2129,7 @@ mod tests {
 
         let step3 = Step3Result {
             resolved_by_votes: 0,
-            ambiguous_warnings: Vec::new(),
+            warnings: Vec::new(),
             defined_after_rain: vec![true, false],
             rain_paths: Vec::new(),
             anti_rain_paths: Vec::new(),
@@ -2152,7 +2152,7 @@ mod tests {
         let result = sample_result();
         let step3 = Step3Result {
             resolved_by_votes: 0,
-            ambiguous_warnings: Vec::new(),
+            warnings: Vec::new(),
             defined_after_rain: vec![true],
             rain_paths: vec![vec![c(0.0, 0.0), c(0.0, 1.0), c(0.0, 2.0)]],
             anti_rain_paths: Vec::new(),
@@ -2197,7 +2197,7 @@ mod tests {
         let result = sample_result();
         let step3 = Step3Result {
             resolved_by_votes: 0,
-            ambiguous_warnings: Vec::new(),
+            warnings: Vec::new(),
             defined_after_rain: vec![true],
             rain_paths: vec![vec![c(0.0, 0.0), c(0.0, 1.0), c(0.0, 2.0)]],
             anti_rain_paths: vec![vec![c(1.0, 0.0)]],
@@ -2218,7 +2218,7 @@ mod tests {
         let result = sample_result();
         let step3 = Step3Result {
             resolved_by_votes: 0,
-            ambiguous_warnings: Vec::new(),
+            warnings: Vec::new(),
             defined_after_rain: vec![true],
             rain_paths: vec![vec![c(0.0, 0.0), c(0.0, 1.0), c(0.0, 2.0)]],
             anti_rain_paths: Vec::new(),
@@ -2261,7 +2261,7 @@ mod tests {
         let result = sample_result();
         let step3 = Step3Result {
             resolved_by_votes: 0,
-            ambiguous_warnings: Vec::new(),
+            warnings: Vec::new(),
             defined_after_rain: vec![true],
             rain_paths: vec![vec![c(0.0, 0.0), c(0.0, 1.0), c(0.0, 2.0)]],
             anti_rain_paths: Vec::new(),

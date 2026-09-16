@@ -1,20 +1,24 @@
 //! The Rain Drop Production Definition (`Contours-to-Raster.md`) shared
-//! engine: source placement, stepping, and the Cold/Hot evaporation rule.
-//! Step 3 (this file's original purpose) uses the Cold variants to resolve
-//! every contour Step 2 left without a gravity direction; Step 1's own
-//! flood-fill sub-step uses the Hot variants (see [`flood_fill_from_contour`])
-//! to mark reachable "no contour, in bound" pixels before any contour has a
-//! real gravity direction at all.
+//! engine: source placement, stepping, and the Cold/Hot/Reverse Cold
+//! evaporation rules. Step 3 (this file's original purpose) uses the Cold
+//! variants to resolve every contour Step 2 left without a gravity
+//! direction, then the Reverse Cold variants (see [`simulate_reverse_pass`])
+//! as a fallback for whatever the Cold passes still leave undefined; Step 1's
+//! own flood-fill sub-step uses the Hot variants (see
+//! [`flood_fill_from_contour`]) to mark reachable "no contour, in bound"
+//! pixels before any contour has a real gravity direction at all.
 
 use std::collections::HashMap;
 
-use geo::{Coord, LineString};
+use geo::algorithm::Contains;
+use geo::{Coord, Euclidean, Length, LineString};
 
 use crate::contour_geometry::{local_tangent, nearest_index};
 use crate::contour_raster::{ContourRaster, StepHit};
 use crate::contours_to_raster_config::Config;
 use crate::gravity_model::{
-    contour_gravity_side, gravity_vector_for_side, node_direction, vote_side, Contour,
+    contour_gravity_side, gravity_vector_for_side, lwg_gravity_side, node_direction,
+    vector_on_side, vote_side, Contour, LineGravityDefiners, LineWithGravity,
 };
 
 /// A generous cap on one rain drop's simulated steps, purely as a safety
@@ -25,12 +29,20 @@ const MAX_DROP_STEPS: u64 = 1_000_000;
 
 /// Cold evaporates on an already-defined contour, high density, or out of
 /// bound, and votes on an undefined contour; Hot evaporates on any contour,
-/// high density, or out of bound, and never votes. See the Rain Drop
-/// Production Definition.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Temperature {
+/// high density, or out of bound, and never votes. Reverse Cold evaporates on
+/// exactly what Cold does, but the other way round: a still-undefined contour
+/// is a silent pass (never a vote), while an already-defined contour or a
+/// Jump's own high-density area (`line_definers`) casts one vote onto the
+/// drop's own *source* instead of the hit -- see
+/// [`simulate_reverse_pass`]/[`simulate_one_drop`]'s own handling. See the
+/// Rain Drop Production Definition.
+#[derive(Clone, Copy)]
+enum Temperature<'a> {
     Cold,
     Hot,
+    ReverseCold {
+        line_definers: &'a [LineGravityDefiners],
+    },
 }
 
 /// One rain (or anti rain) drop's simulated path, plus the `--create_svg`
@@ -66,13 +78,17 @@ impl PassTrace {
 /// visualization).
 pub struct Step3Result {
     /// How many contours got their gravity from the combined Cold Rain +
-    /// Cold Anti Rain vote tally. Gravity is no longer assigned right after
-    /// the rain pass alone -- see [`resolve`] -- so there is only one count,
-    /// not one per pass.
+    /// Cold Anti Rain vote tally, plus however many the Reverse Cold
+    /// fallback pass went on to resolve afterward. Gravity is no longer
+    /// assigned right after any single pass alone -- see [`resolve`] -- so
+    /// there is only one combined count.
     pub resolved_by_votes: u64,
     /// One message per contour whose left/right vote counts were close
-    /// enough to flag as ambiguous (`undefined_gravity_vote_threshold`).
-    pub ambiguous_warnings: Vec<String>,
+    /// enough to flag as ambiguous (`undefined_gravity_vote_threshold`), plus
+    /// one more per contour still without a gravity direction once every
+    /// pass has finished -- naming that contour's own length in meters,
+    /// since it is dropped rather than resolved (see [`resolve`]).
+    pub warnings: Vec<String>,
     /// Every rain drop's path, source to evaporation.
     pub rain_paths: Vec<Vec<Coord<f64>>>,
     /// Every anti rain drop's path.
@@ -112,19 +128,34 @@ pub struct Step3Result {
 /// not the possibly-larger set the rain pass's own votes could go on to
 /// resolve -- see [`simulate_pass`]), so a contour crossed by both ends up
 /// judged on their combined tally rather than whichever pass reached it
-/// first. Only then does [`finalize_votes`] turn every contour's
-/// accumulated votes into gravity. Always returns the full [`Step3Result`]
-/// -- including every simulated path, for `--create_svg` to draw even on
-/// failure -- alongside an `Err` naming any contour still undefined after
-/// both passes. The doc calls that "impossible," but doesn't say what to do
-/// if it happens, so this reports it as a hard failure rather than silently
-/// leaving a gap, without discarding the state a caller needs to see why.
+/// first. If anything is still undefined after that, a Reverse Cold Rain and
+/// Reverse Cold Anti Rain Drop Production pass (see
+/// [`simulate_reverse_pass`]) runs from every such contour as a fallback,
+/// using `line_definers` (Jumps) as an extra source of votes alongside
+/// whatever contours have gravity by that point. [`finalize_votes`] turns
+/// accumulated votes into gravity once after the Cold passes and again after
+/// the Reverse Cold ones, so a contour already resolved by the first call is
+/// simply skipped by the second.
+///
+/// Any contour still without a gravity direction after all of the above is
+/// dropped rather than treated as a failure: unlike the doc's earlier
+/// assumption that this "cannot happen," a sparse enough map (too few
+/// sources, or a contour genuinely isolated from everything else by
+/// out-of-bound/high-density) can leave a handful of contours simply
+/// unreachable, and there is no reason the whole run should abort over a
+/// contour or two the source data never gave enough evidence for. Each one
+/// gets a warning naming its own length in meters instead, so whoever
+/// reviews the run's own warnings can judge for themselves whether it was
+/// worth digitizing at all. Always returns the full [`Step3Result`] --
+/// including every simulated path and warning, for `--create_svg` to draw
+/// and the caller to print regardless.
 pub fn resolve(
     contours: &mut [Contour],
     raster: &mut ContourRaster,
+    line_definers: &[LineGravityDefiners],
     config: &Config,
-) -> (Step3Result, Result<(), String>) {
-    let mut ambiguous_warnings = Vec::new();
+) -> Step3Result {
+    let mut warnings = Vec::new();
 
     let mut rain_trace = PassTrace::default();
     simulate_pass(
@@ -151,38 +182,35 @@ pub fn resolve(
         &mut anti_rain_trace,
     );
 
-    let resolved_by_votes = finalize_votes(contours, config, &mut ambiguous_warnings);
+    let mut resolved_by_votes = finalize_votes(contours, config, &mut warnings);
 
-    let still_undefined: Vec<usize> = contours
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.lwg.gravity_dx.is_none())
-        .map(|(i, _)| i)
-        .collect();
-    let outcome = if still_undefined.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} contour(s) still have no defined gravity after both rain-drop passes (indices \
-             {still_undefined:?}); the algorithm assumes this cannot happen",
-            still_undefined.len()
-        ))
-    };
+    if contours.iter().any(|c| c.lwg.gravity_dx.is_none()) {
+        let mut reverse_trace = PassTrace::default();
+        simulate_reverse_pass(contours, raster, line_definers, config, &mut reverse_trace);
+        resolved_by_votes += finalize_votes(contours, config, &mut warnings);
+    }
 
-    (
-        Step3Result {
-            resolved_by_votes,
-            ambiguous_warnings,
-            defined_after_rain,
-            rain_paths: rain_trace.paths,
-            anti_rain_paths: anti_rain_trace.paths,
-            rain_hysteresis_points: rain_trace.hysteresis_points,
-            anti_rain_hysteresis_points: anti_rain_trace.hysteresis_points,
-            rain_vote_segments: rain_trace.vote_segments,
-            anti_rain_vote_segments: anti_rain_trace.vote_segments,
-        },
-        outcome,
-    )
+    for (idx, c) in contours.iter().enumerate() {
+        if c.lwg.gravity_dx.is_none() {
+            let length_m = Euclidean.length(&c.lwg.ls);
+            warnings.push(format!(
+                "contour {idx} ({length_m:.1}m long) still has no gravity direction after \
+                 every Step 3 pass; dropped"
+            ));
+        }
+    }
+
+    Step3Result {
+        resolved_by_votes,
+        warnings,
+        defined_after_rain,
+        rain_paths: rain_trace.paths,
+        anti_rain_paths: anti_rain_trace.paths,
+        rain_hysteresis_points: rain_trace.hysteresis_points,
+        anti_rain_hysteresis_points: anti_rain_trace.hysteresis_points,
+        rain_vote_segments: rain_trace.vote_segments,
+        anti_rain_vote_segments: anti_rain_trace.vote_segments,
+    }
 }
 
 /// Step 1's flood-fill sub-step: runs a Hot Rain Drop Production and a Hot
@@ -201,16 +229,53 @@ pub fn flood_fill_from_contour(
     placeholder_side: f64,
     config: &Config,
 ) {
-    if ls.0.len() < 2 {
-        return;
+    for (source, (dx, dy)) in
+        placed_sources(ls, placeholder_side, config.sources_per_contour_segment)
+    {
+        for &direction_sign in &[1.0, -1.0] {
+            let dir = (dx * direction_sign, dy * direction_sign);
+            simulate_one_drop(
+                &mut [],
+                raster,
+                config,
+                Temperature::Hot,
+                contour_idx,
+                source,
+                dir,
+                direction_sign,
+            );
+        }
     }
-    let source_count = config.sources_per_contour_segment.max(1);
+}
+
+/// Every source [`Coord`] Source Placement puts along `ls`'s segments
+/// (`sources_per_contour_segment` per segment), paired with its own blended
+/// perpendicular unit direction on `side` (Source Direction) -- the two
+/// pieces of the Rain Drop Production Definition every one of its variants
+/// shares, whether `side` is a contour's own real gravity or, for a variant
+/// whose source has none yet, an arbitrary placeholder.
+///
+/// A segment's sources do not all leave in the same, flat direction: the
+/// source at its start node leaves along [`node_direction`] there, the one
+/// at its end node leaves along [`node_direction`] there, and one in between
+/// blends the two by the same fraction used to place it along the segment --
+/// so the direction turns smoothly along the contour instead of jumping at
+/// each node.
+fn placed_sources(
+    ls: &LineString<f64>,
+    side: f64,
+    sources_per_contour_segment: usize,
+) -> Vec<(Coord<f64>, (f64, f64))> {
+    let mut sources = Vec::new();
+    if ls.0.len() < 2 {
+        return sources;
+    }
+    let source_count = sources_per_contour_segment.max(1);
     for w in 0..ls.0.len() - 1 {
         let (a, b) = (ls.0[w], ls.0[w + 1]);
-        let (Some(dir_a), Some(dir_b)) = (
-            node_direction(ls, w, placeholder_side),
-            node_direction(ls, w + 1, placeholder_side),
-        ) else {
+        let (Some(dir_a), Some(dir_b)) =
+            (node_direction(ls, w, side), node_direction(ls, w + 1, side))
+        else {
             continue;
         };
         for k in 0..source_count {
@@ -219,31 +284,26 @@ pub fn flood_fill_from_contour(
                 x: a.x + t * (b.x - a.x),
                 y: a.y + t * (b.y - a.y),
             };
+            // A linear blend of two unit vectors is not itself unit length in
+            // general, and this direction's own length is exactly how far
+            // one rain_drop_step actually moves the drop -- so this
+            // renormalizes rather than using the blend directly.
             let (bx, by) = (
                 (1.0 - t) * dir_a.0 + t * dir_b.0,
                 (1.0 - t) * dir_a.1 + t * dir_b.1,
             );
             let blend_len = bx.hypot(by);
-            let (dx, dy) = if blend_len > 1e-9 {
+            let dir = if blend_len > 1e-9 {
                 (bx / blend_len, by / blend_len)
             } else {
+                // dir_a and dir_b cancel out exactly (a near U-turn): fall
+                // back to the start node's own direction.
                 dir_a
             };
-            for &direction_sign in &[1.0, -1.0] {
-                let dir = (dx * direction_sign, dy * direction_sign);
-                simulate_one_drop(
-                    &mut [],
-                    raster,
-                    config,
-                    Temperature::Hot,
-                    contour_idx,
-                    source,
-                    dir,
-                    direction_sign,
-                );
-            }
+            sources.push((source, dir));
         }
     }
+    sources
 }
 
 /// One Rain Drop Production (`direction_sign = 1.0`) or Anti Rain Drop
@@ -267,7 +327,7 @@ fn simulate_pass(
     contours: &mut [Contour],
     raster: &mut ContourRaster,
     config: &Config,
-    temperature: Temperature,
+    temperature: Temperature<'_>,
     direction_sign: f64,
     trace: &mut PassTrace,
 ) {
@@ -282,44 +342,67 @@ fn simulate_pass(
         let side =
             contour_gravity_side(&contours[src_idx]).expect("a source contour always has gravity");
         let ls = contours[src_idx].lwg.ls.clone();
-        if ls.0.len() < 2 {
-            continue;
+        for (source, (dx, dy)) in placed_sources(&ls, side, config.sources_per_contour_segment) {
+            let dir = (dx * direction_sign, dy * direction_sign);
+            let drop = simulate_one_drop(
+                contours,
+                raster,
+                config,
+                temperature,
+                src_idx as u64,
+                source,
+                dir,
+                direction_sign,
+            );
+            trace.record(drop);
         }
-        let source_count = config.sources_per_contour_segment.max(1);
-        for w in 0..ls.0.len() - 1 {
-            let (a, b) = (ls.0[w], ls.0[w + 1]);
-            let dir_a =
-                node_direction(&ls, w, side).expect("a segment's own start node has a direction");
-            let dir_b =
-                node_direction(&ls, w + 1, side).expect("a segment's own end node has a direction");
-            for k in 0..source_count {
-                let t = k as f64 / source_count as f64;
-                let source = Coord {
-                    x: a.x + t * (b.x - a.x),
-                    y: a.y + t * (b.y - a.y),
-                };
-                // A linear blend of two unit vectors is not itself unit
-                // length in general, and `dir`'s length is exactly how far
-                // one rain_drop_step actually moves the drop -- so this
-                // renormalizes rather than using the blend directly.
-                let (bx, by) = (
-                    (1.0 - t) * dir_a.0 + t * dir_b.0,
-                    (1.0 - t) * dir_a.1 + t * dir_b.1,
-                );
-                let blend_len = bx.hypot(by);
-                let (dx, dy) = if blend_len > 1e-9 {
-                    (bx / blend_len, by / blend_len)
-                } else {
-                    // dir_a and dir_b cancel out exactly (a near U-turn):
-                    // fall back to the start node's own direction.
-                    dir_a
-                };
+    }
+}
+
+/// Reverse Cold Rain + Reverse Cold Anti Rain Drop Production (Step 3's
+/// fallback substep): sourced from every contour still without gravity once
+/// the Cold rain/anti rain votes have been tallied (see [`resolve`]). Since
+/// the source has no gravity of its own, source placement uses an arbitrary
+/// placeholder side, the same trick Step 1's Hot flood-fill already uses --
+/// running both perpendicular directions from every source point stands in
+/// for the Rain/Anti Rain distinction here, regardless of which one got the
+/// placeholder label.
+///
+/// Unlike Cold, a Reverse Cold drop never votes on what it merely crosses --
+/// it passes silently through any still-undefined contour (see
+/// `simulate_one_drop`'s own `Temperature::ReverseCold` handling), so it
+/// never needs its own source's gravity to judge a side the way Cold does;
+/// there is none yet. It only ever casts one vote, for its own source, at
+/// the first already-defined contour or Jump-caused high-density pixel it
+/// reaches (see `accordance_downhill`/`jump_reverse_vote_direction`).
+fn simulate_reverse_pass(
+    contours: &mut [Contour],
+    raster: &mut ContourRaster,
+    line_definers: &[LineGravityDefiners],
+    config: &Config,
+    trace: &mut PassTrace,
+) {
+    const PLACEHOLDER_SIDE: f64 = 1.0;
+
+    let undefined_contours: Vec<usize> = contours
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.lwg.gravity_dx.is_none())
+        .map(|(i, _)| i)
+        .collect();
+
+    for src_idx in undefined_contours {
+        let ls = contours[src_idx].lwg.ls.clone();
+        for (source, (dx, dy)) in
+            placed_sources(&ls, PLACEHOLDER_SIDE, config.sources_per_contour_segment)
+        {
+            for &direction_sign in &[1.0, -1.0] {
                 let dir = (dx * direction_sign, dy * direction_sign);
                 let drop = simulate_one_drop(
                     contours,
                     raster,
                     config,
-                    temperature,
+                    Temperature::ReverseCold { line_definers },
                     src_idx as u64,
                     source,
                     dir,
@@ -340,32 +423,49 @@ fn simulate_pass(
 /// votes, and (unlike Cold, which relies on its own hysteresis window
 /// instead) has its own source contour permanently excluded from counting as
 /// a hit, since it has no grace-period mechanism to survive hitting it
-/// otherwise. `contours` is only read/written for Cold's voting -- a Hot
+/// otherwise. A Reverse Cold drop evaporates on exactly what Cold does, but
+/// with each outcome flipped: crossing a still-undefined contour is a silent
+/// pass (never a vote -- there is no gravity at its own source yet to judge a
+/// side from), while evaporating on an already-defined contour, or a
+/// high-density pixel inside one of `line_definers`' own Jump polygons,
+/// casts one vote onto the drop's own *source* instead of the hit (see
+/// [`accordance_downhill`]/[`jump_reverse_vote_direction`]); a high-density
+/// pixel outside every Jump polygon is a genuine conflict and evaporates the
+/// drop with no vote, same as for the other two temperatures. Since it never
+/// votes on what it merely crosses, a Reverse Cold drop needs no hysteresis
+/// window at all: it casts at most one vote in its whole lifetime, right
+/// before evaporating, so there is never a re-crossing to protect. `contours`
+/// is only read/written for Cold's and Reverse Cold's own voting -- a Hot
 /// drop (used by Step 1's flood-fill, before any contour has votes to cast)
 /// is simulated with an empty slice.
 ///
 /// `direction_sign` is `1.0` for a Rain drop and `-1.0` for an Anti Rain one
-/// (see [`simulate_pass`]); it is irrelevant to a Hot drop, which never
-/// votes. A vote must always be judged against the *source's own* downhill
-/// direction, not the drop's own literal direction of travel -- nearby
-/// contours share the same local downhill sense (Assumption 1), so an Anti
-/// Rain drop, which travels uphill (opposite its source's downhill
-/// direction), must vote as if travelling the other way. Since `dir` already
-/// has `direction_sign` folded in, multiplying it back in undoes exactly
-/// that flip (`direction_sign` squares to `1.0`), recovering the source's own
-/// downhill direction for the vote regardless of which way the drop itself
-/// moved to get there.
+/// (see [`simulate_pass`]); it is irrelevant to a Hot or Reverse Cold drop,
+/// neither of which vote on what they themselves were launched from. A Cold
+/// vote must always be judged against the *source's own* downhill direction,
+/// not the drop's own literal direction of travel -- nearby contours share
+/// the same local downhill sense (Assumption 1), so an Anti Rain drop, which
+/// travels uphill (opposite its source's downhill direction), must vote as
+/// if travelling the other way. Since `dir` already has `direction_sign`
+/// folded in, multiplying it back in undoes exactly that flip
+/// (`direction_sign` squares to `1.0`), recovering the source's own downhill
+/// direction for the vote regardless of which way the drop itself moved to
+/// get there. A Reverse Cold vote has no such source gravity to recover in
+/// the first place -- its whole point is to infer one -- so it instead
+/// compares `dir` directly against the *hit's* own gravity direction (the
+/// doc's accordance/discordance check, reused from Step 4).
 ///
 /// Returns its path, together with every point along that path reached while
 /// some hysteresis window -- the drop's own creation, or a vote it made --
 /// was still open, and the (previous position, current position) step during
-/// which it actually cast each vote (both for the `--create_svg`
-/// visualization, and both always empty for a Hot drop).
+/// which it actually cast each vote (all three always empty for a Hot or
+/// Reverse Cold drop, though a Reverse Cold drop's own final position is
+/// still whatever hit it voted from).
 fn simulate_one_drop(
     contours: &mut [Contour],
     raster: &mut ContourRaster,
     config: &Config,
-    temperature: Temperature,
+    temperature: Temperature<'_>,
     source_contour_idx: u64,
     source: Coord<f64>,
     dir: (f64, f64),
@@ -377,7 +477,8 @@ fn simulate_one_drop(
     // Each voted contour's own step, so a *later* re-crossing of it is
     // judged against *its own* window, not the drop's creation -- otherwise
     // a vote cast long after the drop started would never be able to
-    // protect a re-crossing at all. Unused (stays empty) for a Hot drop.
+    // protect a re-crossing at all. Unused (stays empty) for a Hot or
+    // Reverse Cold drop.
     let mut voted: HashMap<u64, u64> = HashMap::new();
     let mut steps = 0u64;
 
@@ -388,7 +489,7 @@ fn simulate_one_drop(
     let mut covered_until = hysteresis;
     let mut hysteresis_points = Vec::new();
     let mut vote_segments = Vec::new();
-    if temperature == Temperature::Cold && steps < covered_until {
+    if matches!(temperature, Temperature::Cold) && steps < covered_until {
         hysteresis_points.push(pos);
     }
 
@@ -397,9 +498,12 @@ fn simulate_one_drop(
     // nothing is excluded at the raster level. A Hot drop has no such
     // window at all, so its own source contour must be permanently excluded
     // here instead, or it would evaporate against its own origin
-    // immediately (see the Rain Drop Production Definition).
+    // immediately (see the Rain Drop Production Definition). A Reverse Cold
+    // drop needs no exclusion either: its own source contour is, by
+    // construction, always still undefined when this runs, and an undefined
+    // hit never evaporates the drop regardless of which contour it is.
     let exclude = match temperature {
-        Temperature::Cold => u64::MAX,
+        Temperature::Cold | Temperature::ReverseCold { .. } => u64::MAX,
         Temperature::Hot => source_contour_idx,
     };
 
@@ -409,7 +513,8 @@ fn simulate_one_drop(
     // or high density -- never when it instead leaves the map, since that
     // would plant a firebreak blocking the later out-of-bound computation's
     // own flood-fill from ever correctly reaching those same pixels (see
-    // `ContourRaster::commit_flood_pixels`). Unused for a Cold drop.
+    // `ContourRaster::commit_flood_pixels`). Unused for a Cold or Reverse
+    // Cold drop.
     let mut flood_candidates: Vec<(i64, i64)> = Vec::new();
 
     loop {
@@ -419,7 +524,9 @@ fn simulate_one_drop(
         };
 
         let hit = match temperature {
-            Temperature::Cold => raster.first_hit_along_step(pos, next, exclude),
+            Temperature::Cold | Temperature::ReverseCold { .. } => {
+                raster.first_hit_along_step(pos, next, exclude)
+            }
             Temperature::Hot => {
                 let (hit, candidates) = raster.step_flood_candidates(pos, next, exclude);
                 flood_candidates.extend(candidates);
@@ -430,8 +537,35 @@ fn simulate_one_drop(
         let evaporate = match (temperature, hit) {
             (_, None) => false,
             (_, Some(StepHit::OutOfBound)) => true,
+            (Temperature::ReverseCold { line_definers }, Some(StepHit::HighDensity)) => {
+                if let Some(inferred_downhill) =
+                    jump_reverse_vote_direction(line_definers, next, dir)
+                {
+                    vote_segments.push((pos, next));
+                    cast_reverse_vote(
+                        &mut contours[source_contour_idx as usize],
+                        source,
+                        inferred_downhill,
+                    );
+                }
+                true // always evaporates on high density, whether or not it voted
+            }
             (_, Some(StepHit::HighDensity)) => true,
             (Temperature::Hot, Some(StepHit::Contour(_))) => true,
+            (Temperature::ReverseCold { .. }, Some(StepHit::Contour(hit_idx))) => {
+                match accordance_downhill(&contours[hit_idx as usize].lwg, next, dir) {
+                    Some(inferred_downhill) => {
+                        vote_segments.push((pos, next));
+                        cast_reverse_vote(
+                            &mut contours[source_contour_idx as usize],
+                            source,
+                            inferred_downhill,
+                        );
+                        true // evaporates: found a defined neighbor, done
+                    }
+                    None => false, // still undefined: pass straight through, no vote
+                }
+            }
             (Temperature::Cold, Some(StepHit::Contour(hit_idx))) => {
                 // Re-crossing the drop's own starting contour is exempt within
                 // `hysteresis` steps of the drop's own creation (steps 0 ..
@@ -472,7 +606,8 @@ fn simulate_one_drop(
 
         if evaporate {
             path.push(next);
-            if temperature == Temperature::Hot && !matches!(hit, Some(StepHit::OutOfBound)) {
+            if matches!(temperature, Temperature::Hot) && !matches!(hit, Some(StepHit::OutOfBound))
+            {
                 raster.commit_flood_pixels(&flood_candidates);
             }
             break;
@@ -481,7 +616,7 @@ fn simulate_one_drop(
         pos = next;
         path.push(pos);
         steps += 1;
-        if temperature == Temperature::Cold && steps < covered_until {
+        if matches!(temperature, Temperature::Cold) && steps < covered_until {
             hysteresis_points.push(pos);
         }
         if steps >= MAX_DROP_STEPS {
@@ -493,6 +628,70 @@ fn simulate_one_drop(
         path,
         hysteresis_points,
         vote_segments,
+    }
+}
+
+/// The downhill direction a Reverse Cold drop infers for its own *source*
+/// contour, having just reached `hit_lwg` (a contour or a Jump) at the point
+/// `at`, after travelling in direction `dir` (its own literal direction of
+/// travel -- unlike a Cold vote, there is no `direction_sign` to undo here,
+/// since there is no source gravity yet to recover). `None` if `hit_lwg` has
+/// no gravity yet, meaning there is nothing to infer from.
+///
+/// This is the doc's own Step 4 accordance/discordance check (there used to
+/// decide an elevation, here to decide a side): [`vector_on_side`] recovers
+/// `hit_lwg`'s actual gravity vector at `at`'s own local tangent (never a
+/// raw comparison of `(gravity_dx, gravity_dy)`, which is only meaningful
+/// relative to the tangent it was stored against -- see
+/// [`crate::gravity_model::side_of_tangent`]). If `dir` agrees with that
+/// vector (their dot product is non-negative -- accordance), the drop was
+/// travelling generally downhill when it arrived, so its own launch
+/// direction `dir` *is* the source's real downhill side too, by the same
+/// regional downhill-sense reasoning the doc already relies on for an
+/// ordinary Anti Rain vote. In discordance, the source's real downhill is
+/// the opposite of `dir` instead.
+fn accordance_downhill(
+    hit_lwg: &LineWithGravity,
+    at: Coord<f64>,
+    dir: (f64, f64),
+) -> Option<(f64, f64)> {
+    let side = lwg_gravity_side(hit_lwg)?;
+    let idx = nearest_index(&hit_lwg.ls, at);
+    let (tf, tt) = local_tangent(&hit_lwg.ls, idx);
+    let (hit_gx, hit_gy) = vector_on_side(tf, tt, side);
+    let accordance = dir.0 * hit_gx + dir.1 * hit_gy >= 0.0;
+    Some(if accordance { dir } else { (-dir.0, -dir.1) })
+}
+
+/// [`accordance_downhill`] for a high-density hit at `at`, if `at` falls
+/// inside one of `line_definers`' own buffered polygons -- a Jump's own
+/// gravity (unlike a genuine two-contour rasterization conflict, which has
+/// none) is real and reliable, read directly from the .omap tick (Step 1).
+/// `None` if `at` isn't inside any Jump's polygon, meaning this high-density
+/// pixel really is just an unresolvable conflict.
+fn jump_reverse_vote_direction(
+    line_definers: &[LineGravityDefiners],
+    at: Coord<f64>,
+    dir: (f64, f64),
+) -> Option<(f64, f64)> {
+    let jump = line_definers.iter().find(|j| j.poly.contains(&at))?;
+    accordance_downhill(&jump.lwg, at, dir)
+}
+
+/// Casts one Reverse Cold vote onto `source`, at the point `source_point` on
+/// its own `ls` the drop was launched from, for the side `inferred_downhill`
+/// (see [`accordance_downhill`]) points to.
+fn cast_reverse_vote(
+    source: &mut Contour,
+    source_point: Coord<f64>,
+    inferred_downhill: (f64, f64),
+) {
+    let idx = nearest_index(&source.lwg.ls, source_point);
+    let (tf, tt) = local_tangent(&source.lwg.ls, idx);
+    if vote_side(tf, tt, inferred_downhill.0, inferred_downhill.1) > 0.0 {
+        source.lwg.gravity_votes.left += 1;
+    } else {
+        source.lwg.gravity_votes.right += 1;
     }
 }
 
@@ -537,7 +736,7 @@ fn finalize_votes(contours: &mut [Contour], config: &Config, warnings: &mut Vec<
 mod tests {
     use super::*;
     use crate::gravity_model::LineWithGravity;
-    use geo::LineString;
+    use geo::{LineString, Polygon};
 
     fn c(x: f64, y: f64) -> Coord<f64> {
         Coord { x, y }
@@ -675,8 +874,7 @@ mod tests {
         let mut raster = raster_for(&contours);
         let config = default_config();
 
-        let (result, outcome) = resolve(&mut contours, &mut raster, &config);
-        outcome.unwrap();
+        let result = resolve(&mut contours, &mut raster, &[], &config);
         assert!(result.resolved_by_votes >= 1);
         assert!(contours[1].lwg.gravity_dx.is_some());
     }
@@ -706,11 +904,10 @@ mod tests {
         let mut raster = raster_for(&contours);
         let config = default_config();
 
-        let (result, outcome) = resolve(&mut contours, &mut raster, &config);
-        outcome.unwrap();
+        let result = resolve(&mut contours, &mut raster, &[], &config);
         assert!(contours[1].lwg.gravity_dx.is_some());
         assert!(
-            !result.ambiguous_warnings.is_empty(),
+            !result.warnings.is_empty(),
             "expected a near-tied vote warning"
         );
     }
@@ -738,8 +935,7 @@ mod tests {
         let mut raster = raster_for(&contours);
         let config = default_config();
 
-        let (result, outcome) = resolve(&mut contours, &mut raster, &config);
-        outcome.unwrap();
+        let result = resolve(&mut contours, &mut raster, &[], &config);
         assert_eq!(
             result.resolved_by_votes, 1,
             "expected the neighbor to be resolved, by votes only Cold Anti Rain Drop \
@@ -754,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn anti_rain_drop_production_does_not_source_from_a_contour_only_the_rain_pass_voted_for() {
+    fn reverse_cold_recovers_a_contour_anti_rain_could_never_have_sourced_from() {
         // A (defined, downhill +y) spans x in [0, 30]; its rain-drop sources
         // fall at x = 0, 5, 10, 15, 20, 25 (6 evenly spaced sources on its
         // one segment), two of which (20 and 25) fall inside B's own x span
@@ -765,17 +961,16 @@ mod tests {
         // straight down (-y) from x in [0, 25] and so never cross B at all.
         //
         // C (undefined) spans x in [40, 60] at y = -5 -- overlapping B's own
-        // span, but not A's ([0, 30]), so the only drop that could ever
-        // reach it is an anti rain drop sourced from B itself, travelling
-        // -y (B's own uphill, once its gravity matches A's downhill sense).
-        //
-        // If Anti Rain Drop Production only ever sourced from contours
-        // defined *before* the rain pass ran, C can never be reached: B
-        // stays undefined for the whole of both passes (its votes are only
-        // tallied once, after Anti Rain Drop Production has already run),
-        // so it is never itself a source. B should still resolve, from its
-        // rain votes alone, once both passes are done and votes are
-        // finally tallied; C should not.
+        // span, but not A's ([0, 30]). Under the Cold passes alone, the only
+        // drop that could ever reach it is an anti rain drop sourced from B
+        // itself -- and B is never promoted to a source mid-pass (its votes
+        // are only tallied once, after Anti Rain Drop Production has already
+        // run), so the Cold passes alone leave C stranded. This is exactly
+        // the gap the Reverse Cold fallback closes: sourced from C itself
+        // (not from B), it searches straight through B's own still-undefined
+        // status at the time the Cold passes ran, past it, and now finds B
+        // already resolved by the time Reverse Cold gets to run, letting C
+        // resolve too.
         let mut a = Contour {
             lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(30.0, 0.0)])),
             elevation_height: None,
@@ -798,37 +993,118 @@ mod tests {
         let mut config = default_config();
         config.sources_per_contour_segment = 6;
 
-        let (result, outcome) = resolve(&mut contours, &mut raster, &config);
-
-        assert!(
-            contours[1].lwg.gravity_dx.is_some(),
-            "B should still resolve from its rain-pass votes, once both passes finish"
-        );
+        let result = resolve(&mut contours, &mut raster, &[], &config);
         assert_eq!(
             contours[1].lwg.gravity_dy,
             Some(1.0),
-            "B's downhill sense should match A's, same as any other rain-pass vote"
+            "B should resolve from its rain-pass votes, same downhill sense as A"
         );
-        assert!(
-            contours[2].lwg.gravity_dx.is_none(),
-            "C should stay undefined: the only path to it is a drop sourced from B, and B is \
-             never itself a source since its own gravity is not resolved until after Anti Rain \
-             Drop Production has already run"
+        assert_eq!(
+            contours[2].lwg.gravity_dy,
+            Some(1.0),
+            "C should be recovered by the Reverse Cold fallback, searching from C itself past \
+             B (undefined during the Cold passes) to B's own now-resolved gravity -- same \
+             downhill sense as A and B, by the same regional-consistency reasoning as everywhere \
+             else in Step 3"
         );
-        let err = outcome.unwrap_err();
-        assert!(
-            err.contains("indices [2]"),
-            "expected only C (index 2) to be reported as still undefined: {err}"
+        assert_eq!(result.resolved_by_votes, 2);
+    }
+
+    #[test]
+    fn reverse_cold_votes_from_a_jump_high_density_area_but_not_from_a_genuine_conflict() {
+        // C (undefined) spans x in [0, 10] at y = 0, with no other contour
+        // anywhere -- the only thing it could ever learn from is a Jump.
+        let c_contour = Contour {
+            lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(10.0, 0.0)])),
+            elevation_height: None,
+        };
+        let mut contours = vec![c_contour];
+        let mut raster = ContourRaster::new(c(-10.0, -10.0), 0.5, 60, 40);
+        raster.write_contour(0, &contours[0].lwg.ls);
+
+        // A Jump's own buffered polygon, straddling C's whole x span,
+        // reachable by a Reverse Cold drop heading north (+y) from any
+        // source on C. Its gravity (read from the .omap tick in the real
+        // pipeline) points the same way, +y. Its own lower edge (2.9) is
+        // deliberately off the `rain_drop_step` (0.25) grid every source
+        // steps on from y = 0, so a drop's own landing point falls cleanly
+        // inside the polygon rather than exactly on its boundary, where
+        // `geo`'s own point-in-polygon containment is false.
+        let jump_poly = Polygon::new(
+            LineString::new(vec![
+                c(-2.0, 2.9),
+                c(12.0, 2.9),
+                c(12.0, 6.0),
+                c(-2.0, 6.0),
+                c(-2.0, 2.9),
+            ]),
+            vec![],
+        );
+        raster.mark_high_density_polygon(&jump_poly);
+        let mut jump_lwg = LineWithGravity::new(LineString::new(vec![c(0.0, 4.5), c(10.0, 4.5)]));
+        jump_lwg.gravity_dx = Some(0.0);
+        jump_lwg.gravity_dy = Some(1.0);
+        let line_definers = vec![LineGravityDefiners {
+            lwg: jump_lwg,
+            poly: jump_poly,
+            touched_contours: Vec::new(),
+        }];
+
+        let config = default_config();
+        let result = resolve(&mut contours, &mut raster, &line_definers, &config);
+        assert_eq!(
+            contours[0].lwg.gravity_dy,
+            Some(1.0),
+            "C should be recovered from the Jump's own gravity, read from the high-density \
+             pixel a Reverse Cold drop hit inside the Jump's own polygon"
         );
         assert_eq!(result.resolved_by_votes, 1);
     }
 
     #[test]
-    fn a_contour_no_drop_ever_reaches_is_reported_but_its_partial_result_is_still_returned() {
+    fn reverse_cold_does_not_vote_from_a_high_density_pixel_outside_every_jump_polygon() {
+        // Same lone-contour setup, but the high-density pixels it will hit
+        // come from a genuine two-contour rasterization conflict (Step 1),
+        // not any Jump -- `line_definers` is empty, so there is nothing to
+        // read a vote from, and C must stay undefined.
+        let c_contour = Contour {
+            lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(10.0, 0.0)])),
+            elevation_height: None,
+        };
+        let mut contours = vec![c_contour];
+        let mut raster = ContourRaster::new(c(-10.0, -10.0), 0.5, 60, 40);
+        raster.write_contour(0, &contours[0].lwg.ls);
+        // Two overlapping contour writes at the same spot conflict into a
+        // high-density pixel, the same trick `cold_drop_evaporates_on_high_density`
+        // uses.
+        raster.write_contour(1, &LineString::new(vec![c(4.9, 5.0), c(5.1, 5.0)]));
+        raster.write_contour(2, &LineString::new(vec![c(4.9, 5.0), c(5.1, 5.0)]));
+
+        let config = default_config();
+        let result = resolve(&mut contours, &mut raster, &[], &config);
+
+        assert!(
+            contours[0].lwg.gravity_dx.is_none(),
+            "a genuine conflict has no gravity to offer, so C must stay undefined"
+        );
+        assert_eq!(result.resolved_by_votes, 0);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("contour 0") && w.contains("dropped")),
+            "expected a dropped-contour warning naming contour 0: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn a_contour_no_drop_ever_reaches_is_dropped_with_a_length_warning() {
         // A lone undefined contour with no other contour ever giving it
         // gravity: no drop from it (it has none, being undefined) and no
         // drop from elsewhere reaches it, so it can never be resolved --
-        // exercising the "should be impossible" failure path itself.
+        // it should be dropped, with a warning naming its own length,
+        // rather than failing the whole run.
         let mut contours = vec![Contour {
             lwg: LineWithGravity::new(straight_ls(0.0)),
             elevation_height: None,
@@ -836,9 +1112,20 @@ mod tests {
         let mut raster = raster_for(&contours);
         let config = default_config();
 
-        let (result, outcome) = resolve(&mut contours, &mut raster, &config);
-        let err = outcome.unwrap_err();
-        assert!(err.contains("indices [0]"), "unexpected message: {err}");
+        let result = resolve(&mut contours, &mut raster, &[], &config);
+        assert!(
+            contours[0].lwg.gravity_dx.is_none(),
+            "nothing could ever have resolved this lone contour"
+        );
+        // straight_ls(0.0) runs from x=0 to x=20: a 20m long contour.
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("contour 0") && w.contains("20.0m") && w.contains("dropped")),
+            "expected a dropped-contour warning naming contour 0's own 20m length: {:?}",
+            result.warnings
+        );
         // The partial result -- here, simply no rain drops at all, since
         // there was no defined contour to send any from -- is still handed
         // back rather than discarded, so a caller can still inspect it.

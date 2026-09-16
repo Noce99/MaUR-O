@@ -311,26 +311,18 @@ fn run() -> Result<(), (ExitCode, String)> {
     let step3 = if step2.still_undefined.is_empty() {
         None
     } else {
-        let (result, outcome) =
-            step3_rain_drop::resolve(&mut step1.contours, &mut step1.raster, &config);
-        for warning in &result.ambiguous_warnings {
+        let result = step3_rain_drop::resolve(
+            &mut step1.contours,
+            &mut step1.raster,
+            &step1.line_definers,
+            &config,
+        );
+        for warning in &result.warnings {
             eprintln!("Warning: {warning}");
         }
-        // Written from the partial result even on failure below (`result`
-        // holds every simulated path regardless of `outcome`), so a
-        // still-undefined contour can actually be inspected rather than
-        // just reported.
         if args.create_svg {
             write_step3_svgs(&output_path, &step1, &result)?;
-            if outcome.is_err() {
-                eprintln!(
-                    "Note: wrote {} and {} for inspection despite the failure below.",
-                    numbered_svg_path(&output_path, "05", "step3_rain").display(),
-                    numbered_svg_path(&output_path, "06", "step3_anti_rain").display(),
-                );
-            }
         }
-        outcome.map_err(|e| (ExitCode::from(5), format!("Error: {e}")))?;
         Some(result)
     };
 
@@ -341,7 +333,7 @@ fn run() -> Result<(), (ExitCode, String)> {
             // always exist together under --create_svg.
             let empty_step3 = step3_rain_drop::Step3Result {
                 resolved_by_votes: 0,
-                ambiguous_warnings: Vec::new(),
+                warnings: Vec::new(),
                 defined_after_rain: vec![true; step1.contours.len()],
                 rain_paths: Vec::new(),
                 anti_rain_paths: Vec::new(),
@@ -353,8 +345,8 @@ fn run() -> Result<(), (ExitCode, String)> {
             write_step3_svgs(&output_path, &step1, &empty_step3)?;
         }
         // Written last, against `step1` only after every contour's gravity
-        // is fully settled (Step 3 having returned `Ok` above, or having
-        // been skipped because Step 2 already resolved everything) -- the
+        // is fully settled (Step 3 having run above, or having been skipped
+        // because Step 2 already resolved everything) -- the
         // algorithm's actual answer, not a per-step snapshot.
         write_final_svg(&step_svg_path(&output_path, "final"), &step1)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
