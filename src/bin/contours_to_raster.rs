@@ -264,6 +264,18 @@ fn run() -> Result<(), (ExitCode, String)> {
     }
     step1.warnings.extend(matching_warnings);
 
+    // Heavy Object gravity is resolved only now, against each contour's
+    // final, post-Matching geometry (see `resolve_heavy_object_gravity`'s
+    // own doc comment for why) -- so this must run after
+    // `run_growing_matching` returns and before
+    // `03_..._step1_growing_matching.svg` is written, the first file meant
+    // to show a Heavy Object's own arrow.
+    let heavy_object_warnings = step1_extract::resolve_heavy_object_gravity(&mut step1, &config);
+    for warning in &heavy_object_warnings {
+        eprintln!("Warning: {warning}");
+    }
+    step1.warnings.extend(heavy_object_warnings);
+
     if args.create_svg {
         write_step1_growing_svg(
             &numbered_svg_path(&output_path, "03", "step1_growing_matching"),

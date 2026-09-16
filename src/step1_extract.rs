@@ -89,11 +89,14 @@ pub struct Step1Result {
     /// Every Heavy Object's own buffered polygon (Appendix 2, buffered by
     /// `heavy_object_width`/`heavy_object_growing` -- the same two
     /// parameters a Jump's own polygon uses), one per Heavy Object subpath,
-    /// regardless of whether it found any contour inside it -- kept only for
-    /// the `--create_svg` visualization, the same way a Jump's polygon is
-    /// drawn (see `LineGravityDefiners::poly`), so the actual search area a
-    /// `heavy_object_width`/`heavy_object_growing` choice produces can be
-    /// judged by eye against the real pixels.
+    /// regardless of whether it will end up finding any contour inside it --
+    /// kept for the `--create_svg` visualization, the same way a Jump's
+    /// polygon is drawn (see `LineGravityDefiners::poly`), so the actual
+    /// search area a `heavy_object_width`/`heavy_object_growing` choice
+    /// produces can be judged by eye against the real pixels, *and*
+    /// re-scanned by [`resolve_heavy_object_gravity`] once the Growing
+    /// Process has finished, to find each polygon's own intersecting
+    /// contour(s) against their final geometry.
     pub heavy_object_polygons: Vec<Polygon<f64>>,
     /// Every Flying End's own position *before* the Growing Process ran --
     /// kept only for the `--create_svg` visualization's red rings (see
@@ -803,21 +806,18 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
                     // that runs close to a Heavy Object without landing
                     // exactly on it, the same motivation as
                     // slope_lines_contours_search_radius for Slope Lines.
+                    //
+                    // Unlike a Jump, this polygon is not scanned for
+                    // intersecting contours here: a Heavy Object's own
+                    // gravity fit is deferred until
+                    // `resolve_heavy_object_gravity` runs, after the Growing
+                    // Process has finished merging/closing every contour --
+                    // see that function's own doc comment for why.
                     let poly = contour_geometry::ls_to_polygon(
                         ls,
                         config.heavy_object_width,
                         config.heavy_object_growing,
                     );
-                    for (contour_idx, at) in contour_centroids_in_polygon(&raster, &poly) {
-                        push_heavy_object_reading(
-                            &contours,
-                            contour_idx,
-                            at,
-                            config.circumference_fitting_points_number,
-                            &mut point_definers,
-                            &mut warnings,
-                        );
-                    }
                     heavy_object_polygons.push(poly);
                 }
             }
@@ -2084,6 +2084,55 @@ pub fn run_growing(result: &mut Step1Result, config: &Config) -> Vec<String> {
     warnings
 }
 
+/// Resolves every Heavy Object's own gravity reading, deferred until now so
+/// each circle fit runs against a contour's *final* geometry -- must not be
+/// called before [`run_growing_matching`] returns (or, equivalently,
+/// [`run_growing`]).
+///
+/// Fitting a circle right when a Heavy Object's intersection is first found,
+/// in [`extract`], could only ever see that contour's own raw, pre-growing
+/// fragment: right near an open dangling end, [`point_offset`] cannot reach
+/// past it, so the fit runs on a handful of points, noise-sensitive by
+/// construction. If the Growing Process's own Matching phase later stitches
+/// that fragment to another one end to end, the two readings -- each taken
+/// independently, each starved for points near its own original dangling
+/// end -- can disagree about which side is downhill even though the merged,
+/// final contour's own curvature is itself perfectly consistent (see
+/// `flying_end_force`'s own config comment, and `Contours-to-Raster.md`'s
+/// Growing Process section, for the mechanism). Resolving it here instead,
+/// against `result.raster`'s and `result.contours`' now-final state, avoids
+/// that failure mode entirely.
+///
+/// Re-scans every one of `result.heavy_object_polygons` (already computed
+/// and buffered by [`extract`]) against the raster, appending one
+/// `PointGravityDefiners` reading per contour actually touched to
+/// `result.point_definers` -- exactly what [`extract`]'s own `HeavyObject`
+/// handling used to do immediately, just deferred this far. A stale
+/// `(contour_idx, at)` pair captured back in `extract` would not do: a merge
+/// can shift contour indices down and always redraws the merged contour's
+/// entire raster footprint fresh (see `merge_contours`), so only a fresh
+/// scan against the current raster is a correct source of truth. Returns
+/// every warning found along the way (a degenerate circle fit); does not
+/// touch `result.warnings` itself, the same convention
+/// [`run_growing_seeking`]/[`run_growing_matching`] use, so a caller can
+/// log/collect them the same way.
+pub fn resolve_heavy_object_gravity(result: &mut Step1Result, config: &Config) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for poly in &result.heavy_object_polygons {
+        for (contour_idx, at) in contour_centroids_in_polygon(&result.raster, poly) {
+            push_heavy_object_reading(
+                &result.contours,
+                contour_idx,
+                at,
+                config.circumference_fitting_points_number,
+                &mut result.point_definers,
+                &mut warnings,
+            );
+        }
+    }
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2256,13 +2305,19 @@ mod tests {
             symbol_set: None,
         };
 
-        let result = extract(&map, &config).unwrap();
+        let mut result = extract(&map, &config).unwrap();
 
         assert_eq!(
             result.heavy_object_polygons.len(),
             1,
             "one polygon per Heavy Object, drawn regardless of what it intersects"
         );
+        // Heavy Object gravity is no longer resolved inside `extract` itself
+        // (see `resolve_heavy_object_gravity`'s own doc comment) -- this
+        // fixture has nothing to merge/close, so calling it right away,
+        // without running the Growing Process first, is enough.
+        let heavy_object_warnings = resolve_heavy_object_gravity(&mut result, &config);
+        assert!(heavy_object_warnings.is_empty(), "{heavy_object_warnings:?}");
         assert_eq!(
             result.point_definers.len(),
             1,
@@ -2598,6 +2653,186 @@ mod tests {
         assert_eq!(result.raw_polylines.len(), 2);
         assert!(result.raw_polylines.contains(&raw_a));
         assert!(result.raw_polylines.contains(&raw_b));
+    }
+
+    /// Builds two open contours, A and B, whose dangling ends sit ~0.7m
+    /// apart (close enough to merge) but whose own last few nodes, right
+    /// before that dangling end, sit exactly on two *different* circles --
+    /// one centered south of the gap, one centered north of it -- so a
+    /// circle fit taken independently on each raw, un-merged fragment
+    /// recovers opposite-pointing gravity directions, the same conflict
+    /// `resolve_heavy_object_gravity`'s own doc comment describes. `mirrored`
+    /// picks which side (`false` for A, `true` for B, mirrored so their far
+    /// ends sit on opposite raster borders and their near ends approach each
+    /// other), returning the open `LineString` in node order from its own
+    /// far/border end to its own dangling end (the array's last node).
+    fn heavy_object_merge_test_contour(mirrored: bool) -> LineString<f64> {
+        let pt = |center: Coord<f64>, r: f64, deg: f64| {
+            let a = deg.to_radians();
+            c(center.x + r * a.cos(), center.y + r * a.sin())
+        };
+        // Angles run from `off3` (furthest from the tip) to `tip` (the
+        // dangling end itself); B's own angles are the mirror image of A's,
+        // reflected through the horizontal (negated), *and* reversed in
+        // order -- mirroring alone would put B's tip at the wrong end of
+        // its own arc (furthest from A's, not closest).
+        let (center, angles, border_x) = if mirrored {
+            (c(14.0, 16.0), [-65.0_f64, -75.0, -85.0, -95.0], 45.0)
+        } else {
+            (c(10.5, 4.0), [95.0_f64, 85.0, 75.0, 65.0], 0.0)
+        };
+        let r = 6.0;
+        let off3 = pt(center, r, angles[0]);
+        let off2 = pt(center, r, angles[1]);
+        let off1 = pt(center, r, angles[2]);
+        let tip = pt(center, r, angles[3]); // the dangling end itself
+        let border = c(border_x, off3.y); // same y as off3, for a straight run
+        LineString::new(vec![border, off3, off2, off1, tip])
+    }
+
+    #[test]
+    fn heavy_object_circle_fit_on_raw_fragments_disagrees_before_a_merge() {
+        let ls_a = heavy_object_merge_test_contour(false);
+        let ls_b = heavy_object_merge_test_contour(true);
+        let a_tip = *ls_a.0.last().unwrap();
+        let b_tip = *ls_b.0.last().unwrap();
+        assert!(
+            (a_tip.x - b_tip.x).hypot(a_tip.y - b_tip.y) < 3.0,
+            "the two dangling ends must be close enough to merge"
+        );
+
+        let contours_a = vec![Contour {
+            lwg: LineWithGravity::new(ls_a),
+            elevation_height: None,
+        }];
+        let contours_b = vec![Contour {
+            lwg: LineWithGravity::new(ls_b),
+            elevation_height: None,
+        }];
+
+        let mut pd_a = Vec::new();
+        let mut warnings_a = Vec::new();
+        push_heavy_object_reading(&contours_a, 0, a_tip, 3, &mut pd_a, &mut warnings_a);
+        let mut pd_b = Vec::new();
+        let mut warnings_b = Vec::new();
+        push_heavy_object_reading(&contours_b, 0, b_tip, 3, &mut pd_b, &mut warnings_b);
+
+        assert!(warnings_a.is_empty(), "{warnings_a:?}");
+        assert!(warnings_b.is_empty(), "{warnings_b:?}");
+        let (adx, ady) = (pd_a[0].gravity_dx.unwrap(), pd_a[0].gravity_dy.unwrap());
+        let (bdx, bdy) = (pd_b[0].gravity_dx.unwrap(), pd_b[0].gravity_dy.unwrap());
+        assert!(
+            adx * bdx + ady * bdy < 0.0,
+            "the two independently-fit readings should point in opposite directions: \
+             a=({adx},{ady}), b=({bdx},{bdy})"
+        );
+    }
+
+    #[test]
+    fn heavy_object_gravity_resolved_after_matching_agrees_where_a_pre_merge_fit_would_have_conflicted(
+    ) {
+        let ls_a = heavy_object_merge_test_contour(false);
+        let ls_b = heavy_object_merge_test_contour(true);
+
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 46, 20);
+        raster.write_contour(0, &ls_a);
+        raster.write_contour(1, &ls_b);
+        raster.compute_out_of_bound();
+
+        let heavy_object_polygons = vec![
+            // Straddles A's own original bend, well clear of B's.
+            contour_geometry::ls_to_polygon(
+                &LineString::new(vec![c(9.5, 8.5), c(9.5, 11.5)]),
+                1.0,
+                0.2,
+            ),
+            // Straddles B's own original bend, well clear of A's.
+            contour_geometry::ls_to_polygon(
+                &LineString::new(vec![c(16.5, 8.5), c(16.5, 11.5)]),
+                1.0,
+                0.2,
+            ),
+        ];
+
+        let mut result = Step1Result {
+            contours: vec![
+                Contour {
+                    lwg: LineWithGravity::new(ls_a),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_b),
+                    elevation_height: None,
+                },
+            ],
+            raw_polylines: Vec::new(),
+            raster,
+            point_definers: Vec::new(),
+            line_definers: Vec::new(),
+            slope_lines: Vec::new(),
+            slope_lines_contours_search_radius: 3.0,
+            heavy_object_polygons,
+            pre_growing_flying_ends: Vec::new(),
+            grown_by_growing_process: vec![false, false],
+            growing_push_pull_vectors: Vec::new(),
+            growing_integration_step_dots: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let config = Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 1.0,
+            rasterization_px_size: 1.0,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 3,
+            slope_lines_contours_search_radius: 3.0,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
+            growing_oob_seeking_max_steps: 0,
+            contour_force_window: 10.0,
+            attraction_force_window: 15.0,
+            contour_force_max_repulsion: 4.0,
+            contour_force_equilibrium: 2.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 6.0,
+            out_of_bound_force: 2.0,
+            density_region_force: 2.0,
+            flying_end_force: 2.0,
+            flying_end_merge_distance: 5.0,
+            matching_min_force: 0.0,
+            grow_time_step: 1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
+        };
+
+        let growing_warnings = run_growing(&mut result, &config);
+        assert!(growing_warnings.is_empty(), "{growing_warnings:?}");
+        assert_eq!(result.contours.len(), 1, "A and B must merge into one contour");
+
+        let heavy_object_warnings = resolve_heavy_object_gravity(&mut result, &config);
+        assert!(heavy_object_warnings.is_empty(), "{heavy_object_warnings:?}");
+        assert_eq!(
+            result.point_definers.len(),
+            2,
+            "one reading per Heavy Object polygon, both against the merged contour"
+        );
+        for pd in &result.point_definers {
+            assert_eq!(pd.reference_contour, 0);
+        }
+
+        let step2 = crate::step2_obvious_gravity::resolve(
+            &mut result.contours,
+            &result.point_definers,
+            &result.line_definers,
+        );
+        assert!(
+            step2.is_ok(),
+            "readings taken against the final, merged contour must agree: {:?}",
+            step2.err()
+        );
     }
 
     /// A `Config` for the Close Search tests below, with only

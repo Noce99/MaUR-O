@@ -980,9 +980,12 @@ fn write(path: &Path, svg: Svg) -> Result<(), String> {
 /// Jump density stamping, out-of-bound) is complete, but before its Growing
 /// Process sub-step runs: the raster grid and every pixel (colored by
 /// value), every contour raw and linearized, the Jump ("LineGravityDefiners")
-/// arrows, the Slope Line/Heavy Object ("PointGravityDefiners") arrows, and
-/// a red ring around every Flying End's own (pre-growing) position.
-/// `00_<map_name>_step1.svg`. Reused as-is, at a different path, for
+/// arrows, the Slope Line ("PointGravityDefiners") arrows -- not yet a
+/// Heavy Object's own, since `step1_extract::resolve_heavy_object_gravity`
+/// (deferred until after Matching) hasn't run this early, though its own
+/// buffered polygon is already drawn -- and a red ring around every Flying
+/// End's own (pre-growing) position. `00_<map_name>_step1.svg`. Reused
+/// as-is, at a different path, for
 /// `01_<map_name>_step1_close_search.svg` -- Close Search
 /// (`step1_extract::run_growing_close_search`) is a one-shot geometric pass
 /// with no integration steps of its own, so it has no push/pull vectors or
@@ -1012,7 +1015,13 @@ pub fn write_step1_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
 /// `run_growing_matching` starts both of those two fields fresh rather than
 /// reclaiming Seeking's own, so `02_<map_name>_step1_growing_seeking.svg`
 /// shows Seeking's own steps and `03_<map_name>_step1_growing_matching.svg`
-/// shows only Matching's, never both overlaid on one picture.
+/// shows only Matching's, never both overlaid on one picture. Also inherits
+/// [`write_step1_svg`]'s own point-definer-arrow caveat above, but only
+/// halfway through its two call sites: `02_<map_name>_step1_growing_seeking.svg`
+/// (written right after `run_growing_seeking`) still shows no Heavy Object
+/// arrow, but `03_<map_name>_step1_growing_matching.svg` does, since by then
+/// `resolve_heavy_object_gravity` has already run (see
+/// `src/bin/contours_to_raster.rs`'s own call ordering).
 pub fn write_step1_growing_svg(
     path: &Path,
     result: &Step1Result,
