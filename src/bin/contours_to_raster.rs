@@ -36,8 +36,9 @@ use clap::Parser;
 
 use maur_o::contours_to_raster_config::{Config, DEFAULT_CONFIG_PATH};
 use maur_o::contours_to_raster_svg::{
-    write_contours_function_svg, write_final_svg, write_step1_growing_svg, write_step1_svg,
-    write_step2_svg, write_step3_anti_rain_svg, write_step3_rain_svg,
+    write_contours_function_svg, write_final_svg, write_step1_close_search_svg,
+    write_step1_growing_svg, write_step1_svg, write_step2_svg, write_step3_anti_rain_svg,
+    write_step3_rain_svg,
 };
 use maur_o::step1_extract;
 use maur_o::step2_obvious_gravity;
@@ -222,13 +223,11 @@ fn run() -> Result<(), (ExitCode, String)> {
     // Flying Ends are already essentially where they need to be -- another
     // Flying End or an out-of-bound pixel directly in front of them -- before
     // Seeking/Matching ever take an integration step. `01_..._step1_close_search.svg`
-    // shows the result; it needs no dedicated writer, since Close Search
-    // takes no integration steps of its own to draw push/pull vectors or
-    // dots for (see `write_step1_svg`'s own doc comment).
+    // shows the result, plus every search cone it actually used.
     step1_extract::run_growing_close_search(&mut step1, &config);
 
     if args.create_svg {
-        write_step1_svg(
+        write_step1_close_search_svg(
             &numbered_svg_path(&output_path, "01", "step1_close_search"),
             &step1,
         )

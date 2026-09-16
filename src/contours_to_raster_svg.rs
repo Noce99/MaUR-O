@@ -146,6 +146,9 @@ const VOTE_SEGMENT_STROKE_WIDTH: f32 = 0.3;
 /// since it is reference context for `slope_lines_contours_search_radius`
 /// rather than a reading itself.
 const SEARCH_CIRCLE_STROKE_WIDTH: f32 = 0.15;
+/// Close Search's own search-cone outline's stroke width, in ground meters
+/// -- see [`write_step1_close_search_svg`].
+const SEARCH_CONE_STROKE_WIDTH: f32 = 0.15;
 /// A Flying End's own pre-growing marker ring's radius, in ground meters.
 const FLYING_END_RING_RADIUS: f32 = 1.5;
 /// A Flying End marker ring's stroke width.
@@ -984,17 +987,32 @@ fn write(path: &Path, svg: Svg) -> Result<(), String> {
 /// Heavy Object's own, since `step1_extract::resolve_heavy_object_gravity`
 /// (deferred until after Matching) hasn't run this early, though its own
 /// buffered polygon is already drawn -- and a red ring around every Flying
-/// End's own (pre-growing) position. `00_<map_name>_step1.svg`. Reused
-/// as-is, at a different path, for
-/// `01_<map_name>_step1_close_search.svg` -- Close Search
-/// (`step1_extract::run_growing_close_search`) is a one-shot geometric pass
-/// with no integration steps of its own, so it has no push/pull vectors or
-/// dots to add on top of `base_layers`, unlike [`write_step1_growing_svg`]
-/// below; any contour it touched still draws blue instead of green there,
-/// the same `result.grown_by_growing_process` flag `base_layers` always
-/// reads.
+/// End's own (pre-growing) position. `00_<map_name>_step1.svg`.
 pub fn write_step1_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
     write(path, base_layers(&BaseLayerData::new(result)))
+}
+
+/// Identical to [`write_step1_svg`], except called once after Step 1's own
+/// Growing Process's preliminary Close Search pass has run
+/// (`step1_extract::run_growing_close_search`): the Contour Raster and every
+/// contour's `ls` reflect whatever Close Search resolved, and any contour it
+/// touched draws blue instead of green there, the same
+/// `result.grown_by_growing_process` flag `base_layers` always reads. On top
+/// of everything else, its own topmost layer draws every search cone Close
+/// Search actually used (`result.close_search_cones`, one per turn given,
+/// see `search_cone_outline`) as an unfilled purple outline, so the area a
+/// `searching_fov`/`searching_distance` choice actually searches can be
+/// judged by eye against the real Flying Ends and pixels. Close Search takes
+/// no integration steps of its own, so unlike [`write_step1_growing_svg`]
+/// below, it has no push/pull vectors or dots to draw.
+/// `01_<map_name>_step1_close_search.svg`.
+pub fn write_step1_close_search_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
+    let cones = MultiLineString::new(result.close_search_cones.clone());
+    write(
+        path,
+        base_layers(&BaseLayerData::new(result))
+            .and(line_layer(&cones, PURPLE, SEARCH_CONE_STROKE_WIDTH)),
+    )
 }
 
 /// Identical to [`write_step1_svg`] (including the same red Flying-End
@@ -1291,6 +1309,7 @@ mod tests {
             slope_lines_contours_search_radius: 3.0,
             heavy_object_polygons: Vec::new(),
             pre_growing_flying_ends: Vec::new(),
+            close_search_cones: Vec::new(),
             grown_by_growing_process: vec![false],
             growing_push_pull_vectors: Vec::new(),
             growing_integration_step_dots: Vec::new(),
@@ -1794,6 +1813,7 @@ mod tests {
             slope_lines_contours_search_radius: 3.0,
             heavy_object_polygons: Vec::new(),
             pre_growing_flying_ends: Vec::new(),
+            close_search_cones: Vec::new(),
             grown_by_growing_process: vec![false],
             growing_push_pull_vectors: Vec::new(),
             growing_integration_step_dots: Vec::new(),
@@ -1941,6 +1961,7 @@ mod tests {
             slope_lines_contours_search_radius: 3.0,
             heavy_object_polygons: Vec::new(),
             pre_growing_flying_ends: Vec::new(),
+            close_search_cones: Vec::new(),
             grown_by_growing_process: vec![false, false],
             growing_push_pull_vectors: Vec::new(),
             growing_integration_step_dots: Vec::new(),
