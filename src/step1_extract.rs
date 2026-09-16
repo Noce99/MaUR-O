@@ -1249,20 +1249,73 @@ impl CloseSearchCandidate {
     }
 }
 
+/// Close Search's own zeroth search (Step 1's Growing Process), run once
+/// before any of its cone-based ones (see [`run_growing_close_search`]):
+/// every *pair* of Flying Ends in `all_ends` closer to each other than
+/// `max_distance` -- `config.obvious_to_close_contour_distance` -- is
+/// recorded as a match candidate outright, regardless of either one's own
+/// forward direction (too close for which way either happens to be pointing
+/// to matter). Still subject to the same crossing check every other
+/// Flying-End candidate is ([`end_connection_clear`]) -- a third contour
+/// physically between two close Flying Ends still blocks the match. Every
+/// valid pair is recorded, not just each end's own single closest one
+/// (unlike [`best_end_candidate`]): resolution's own global ascending-
+/// distance order already sorts the closest ones to the front on its own.
+/// `max_distance <= 0.0` (the same "off" convention as
+/// `searching_distance`) finds nothing.
+fn collect_obvious_end_matches(
+    all_ends: &[FlyingEnd],
+    contours: &[Contour],
+    raster: &ContourRaster,
+    max_distance: f64,
+) -> Vec<CloseSearchCandidate> {
+    let mut matches = Vec::new();
+    if max_distance <= 0.0 {
+        return matches;
+    }
+    for a_idx in 0..all_ends.len() {
+        let a = all_ends[a_idx];
+        let a_pos = flying_end_position(&contours[a.contour_idx].lwg.ls, a.is_start);
+        for (b_idx, &b) in all_ends.iter().enumerate().skip(a_idx + 1) {
+            let b_pos = flying_end_position(&contours[b.contour_idx].lwg.ls, b.is_start);
+            let distance = (a_pos.x - b_pos.x).hypot(a_pos.y - b_pos.y);
+            if distance > max_distance {
+                continue;
+            }
+            if !end_connection_clear(raster, a_pos, b_pos, a.contour_idx, b.contour_idx) {
+                continue;
+            }
+            matches.push(CloseSearchCandidate::End {
+                a_idx,
+                a,
+                b_idx,
+                b,
+                distance,
+            });
+        }
+    }
+    matches
+}
+
 /// Step 1's Growing Process (see the doc), the preliminary Close Search pass
 /// that runs before Seeking ever takes an integration step: a cheap,
 /// non-iterative geometric check rather than a physics simulation, in two
 /// passes of its own.
 ///
-/// **Discovery**: for every Flying End in [`collect_flying_ends`]'s own
-/// list, its own single best (closest valid) match is found -- another
-/// Flying End first ([`best_end_candidate`]); if that found nothing, an
-/// out-of-bound pixel ([`best_ob_pixel_candidate`]); if that found nothing
-/// either, a high-density pixel ([`best_high_density_pixel_candidate`]) --
-/// and recorded as a [`CloseSearchCandidate`], nothing resolved yet. This is
-/// a snapshot: every Flying End is searched against the *original*, still
+/// **Discovery**: first, every obviously-close pair of Flying Ends is
+/// recorded regardless of direction ([`collect_obvious_end_matches`],
+/// `config.obvious_to_close_contour_distance`). Then, for every Flying End
+/// in [`collect_flying_ends`]'s own list, its own single best (closest
+/// valid) cone-based match is found -- another Flying End first
+/// ([`best_end_candidate`]); if that found nothing, an out-of-bound pixel
+/// ([`best_ob_pixel_candidate`]); if that found nothing either, a
+/// high-density pixel ([`best_high_density_pixel_candidate`]) -- and
+/// recorded as a [`CloseSearchCandidate`], nothing resolved yet. This is a
+/// snapshot: every Flying End is searched against the *original*, still
 /// fully unresolved set, not against whatever an earlier Flying End in the
-/// list may have already claimed.
+/// list may have already claimed. A Flying End can end up with more than
+/// one recorded candidate this way (an obvious one and a cone-based one) --
+/// resolution below sorts across all of them together regardless.
 ///
 /// **Resolution**: every recorded candidate, across all three kinds, is
 /// then applied in ascending distance order -- the globally closest match
@@ -1301,7 +1354,12 @@ pub fn run_growing_close_search(result: &mut Step1Result, config: &Config) {
     let cos_half_fov = (config.searching_fov.to_radians() / 2.0).cos();
     let mut cones = Vec::new();
 
-    let mut candidates: Vec<CloseSearchCandidate> = Vec::new();
+    let mut candidates: Vec<CloseSearchCandidate> = collect_obvious_end_matches(
+        &all_ends,
+        &result.contours,
+        &result.raster,
+        config.obvious_to_close_contour_distance,
+    );
     for (i, &end) in all_ends.iter().enumerate() {
         let pos = flying_end_position(&result.contours[end.contour_idx].lwg.ls, end.is_start);
         let Some(dir) =
@@ -2501,6 +2559,7 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            obvious_to_close_contour_distance: 0.0,
             searching_fov: 0.0,
             searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
@@ -2642,6 +2701,7 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            obvious_to_close_contour_distance: 0.0,
             searching_fov: 0.0,
             searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
@@ -2771,6 +2831,7 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            obvious_to_close_contour_distance: 0.0,
             searching_fov: 0.0,
             searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
@@ -2885,6 +2946,7 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            obvious_to_close_contour_distance: 0.0,
             searching_fov: 0.0,
             searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
@@ -3052,6 +3114,7 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            obvious_to_close_contour_distance: 0.0,
             searching_fov: 0.0,
             searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
@@ -3101,7 +3164,11 @@ mod tests {
     /// `searching_fov`/`searching_distance` varying -- everything else is a
     /// harmless placeholder, since Close Search itself never reads any of
     /// the force-curve parameters (those are Seeking/Matching-only).
-    fn close_search_test_config(searching_fov: f64, searching_distance: f64) -> Config {
+    fn close_search_test_config(
+        searching_fov: f64,
+        searching_distance: f64,
+        obvious_to_close_contour_distance: f64,
+    ) -> Config {
         Config {
             bezier_linearization_step: 0.1,
             contours_step: 2.0,
@@ -3114,6 +3181,7 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            obvious_to_close_contour_distance,
             searching_fov,
             searching_distance,
             growing_oob_seeking_max_steps: 0,
@@ -3185,7 +3253,7 @@ mod tests {
             ],
             raster,
         );
-        let config = close_search_test_config(90.0, 5.0);
+        let config = close_search_test_config(90.0, 5.0, 0.0);
 
         run_growing_close_search(&mut result, &config);
 
@@ -3212,7 +3280,7 @@ mod tests {
             }],
             raster,
         );
-        let config = close_search_test_config(350.0, 5.0);
+        let config = close_search_test_config(350.0, 5.0, 0.0);
 
         run_growing_close_search(&mut result, &config);
 
@@ -3265,7 +3333,7 @@ mod tests {
         // own tips (just over 5m from either A's end or B's start), so this
         // is purely about the blocking check, not an incidental distance/fov
         // exclusion of C's own ends.
-        let config = close_search_test_config(90.0, 3.0);
+        let config = close_search_test_config(90.0, 3.0, 0.0);
 
         run_growing_close_search(&mut result, &config);
 
@@ -3296,7 +3364,7 @@ mod tests {
             }],
             raster,
         );
-        let config = close_search_test_config(90.0, 3.0);
+        let config = close_search_test_config(90.0, 3.0, 0.0);
 
         run_growing_close_search(&mut result, &config);
 
@@ -3345,7 +3413,7 @@ mod tests {
             }],
             raster,
         );
-        let config = close_search_test_config(90.0, 3.0);
+        let config = close_search_test_config(90.0, 3.0, 0.0);
 
         run_growing_close_search(&mut result, &config);
 
@@ -3381,7 +3449,7 @@ mod tests {
         // Smaller than the ~1m gap to the nearest out-of-bound pixel beside
         // the line, and far smaller than the 10m to this contour's own other
         // end -- nothing at all should be found.
-        let config = close_search_test_config(90.0, 0.4);
+        let config = close_search_test_config(90.0, 0.4, 0.0);
 
         run_growing_close_search(&mut result, &config);
 
@@ -3416,12 +3484,134 @@ mod tests {
             ],
             raster,
         );
-        let config = close_search_test_config(90.0, 0.0);
+        let config = close_search_test_config(90.0, 0.0, 0.0);
 
         run_growing_close_search(&mut result, &config);
 
         assert_eq!(result.contours.len(), 2, "0.0 disables Close Search outright");
         assert_eq!(result.grown_by_growing_process, vec![false, false]);
+    }
+
+    #[test]
+    fn close_search_obvious_match_merges_flying_ends_regardless_of_fov() {
+        // Same A/B geometry as `close_search_merges_two_flying_ends_of_different_contours`
+        // (2m gap between A's end and B's start), but `searching_fov`/
+        // `searching_distance` are both 0 here -- the cone-based searches
+        // fully off -- so only `obvious_to_close_contour_distance` (2.5,
+        // comfortably past the 2m gap) can possibly account for the merge,
+        // proving the obvious-match pass runs on its own, independently of
+        // any direction/cone consideration.
+        let ls_a = LineString::new(vec![c(0.0, 10.0), c(10.0, 10.0)]);
+        let ls_b = LineString::new(vec![c(12.0, 10.0), c(39.0, 10.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls_a);
+        raster.write_contour(1, &ls_b);
+        raster.compute_out_of_bound();
+
+        let mut result = close_search_test_result(
+            vec![
+                Contour {
+                    lwg: LineWithGravity::new(ls_a),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_b),
+                    elevation_height: None,
+                },
+            ],
+            raster,
+        );
+        let config = close_search_test_config(0.0, 0.0, 2.5);
+
+        run_growing_close_search(&mut result, &config);
+
+        assert_eq!(
+            result.contours.len(),
+            1,
+            "A and B should have merged via the obvious-match pass alone"
+        );
+        assert!(result.grown_by_growing_process.iter().all(|&g| g));
+    }
+
+    #[test]
+    fn close_search_obvious_match_respects_its_own_distance_threshold() {
+        // Same setup, but `obvious_to_close_contour_distance` (1.0) is now
+        // smaller than the 2m gap, and the cone-based searches are still
+        // off -- nothing at all should match.
+        let ls_a = LineString::new(vec![c(0.0, 10.0), c(10.0, 10.0)]);
+        let ls_b = LineString::new(vec![c(12.0, 10.0), c(39.0, 10.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls_a);
+        raster.write_contour(1, &ls_b);
+        raster.compute_out_of_bound();
+
+        let mut result = close_search_test_result(
+            vec![
+                Contour {
+                    lwg: LineWithGravity::new(ls_a),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_b),
+                    elevation_height: None,
+                },
+            ],
+            raster,
+        );
+        let config = close_search_test_config(0.0, 0.0, 1.0);
+
+        run_growing_close_search(&mut result, &config);
+
+        assert_eq!(
+            result.contours.len(),
+            2,
+            "the 2m gap exceeds a 1m obvious-match threshold, so nothing merges"
+        );
+        assert_eq!(result.grown_by_growing_process, vec![false, false]);
+    }
+
+    #[test]
+    fn close_search_obvious_match_is_still_blocked_by_a_third_contour() {
+        // Same A/B/C setup as `close_search_rejects_a_flying_end_blocked_by_a_third_contour`
+        // (C running straight across the gap between A and B), but with the
+        // cone-based searches off and `obvious_to_close_contour_distance`
+        // (2.5) alone comfortably covering the 2m gap -- A and B must still
+        // not merge across C's blocking contour.
+        let ls_a = LineString::new(vec![c(0.0, 10.0), c(10.0, 10.0)]);
+        let ls_b = LineString::new(vec![c(12.0, 10.0), c(39.0, 10.0)]);
+        let ls_c = LineString::new(vec![c(11.0, 5.0), c(11.0, 17.0)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
+        raster.write_contour(0, &ls_a);
+        raster.write_contour(1, &ls_b);
+        raster.write_contour(2, &ls_c);
+        raster.compute_out_of_bound();
+
+        let mut result = close_search_test_result(
+            vec![
+                Contour {
+                    lwg: LineWithGravity::new(ls_a),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_b),
+                    elevation_height: None,
+                },
+                Contour {
+                    lwg: LineWithGravity::new(ls_c),
+                    elevation_height: None,
+                },
+            ],
+            raster,
+        );
+        let config = close_search_test_config(0.0, 0.0, 2.5);
+
+        run_growing_close_search(&mut result, &config);
+
+        assert_eq!(
+            result.contours.len(),
+            3,
+            "A and B must not merge across C's blocking contour, even obviously-close"
+        );
     }
 
     #[test]
@@ -3464,7 +3654,7 @@ mod tests {
             ],
             raster,
         );
-        let config = close_search_test_config(90.0, 3.5);
+        let config = close_search_test_config(90.0, 3.5, 0.0);
 
         run_growing_close_search(&mut result, &config);
 
@@ -3543,6 +3733,7 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            obvious_to_close_contour_distance: 0.0,
             searching_fov: 0.0,
             searching_distance: 0.0,
             growing_oob_seeking_max_steps: 5,
@@ -3637,6 +3828,7 @@ mod tests {
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
+                obvious_to_close_contour_distance: 0.0,
                 searching_fov: 0.0,
                 searching_distance: 0.0,
                 growing_oob_seeking_max_steps: 10,
@@ -3729,6 +3921,7 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            obvious_to_close_contour_distance: 0.0,
             searching_fov: 0.0,
             searching_distance: 0.0,
             growing_oob_seeking_max_steps: 10,
@@ -3820,6 +4013,7 @@ mod tests {
                 sources_per_contour_segment: 3,
                 rain_drop_starting_voting_hysteresis: 3,
                 undefined_gravity_vote_threshold: 0.8,
+                obvious_to_close_contour_distance: 0.0,
                 searching_fov: 0.0,
                 searching_distance: 0.0,
                 growing_oob_seeking_max_steps: 10,
@@ -3939,6 +4133,7 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            obvious_to_close_contour_distance: 0.0,
             searching_fov: 0.0,
             searching_distance: 0.0,
             growing_oob_seeking_max_steps: 10,
@@ -4439,6 +4634,7 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            obvious_to_close_contour_distance: 0.0,
             searching_fov: 0.0,
             searching_distance: 0.0,
             growing_oob_seeking_max_steps: 0,
