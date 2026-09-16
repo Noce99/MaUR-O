@@ -2120,37 +2120,58 @@ fn grow_one_step(
     // so it always reads back as a `Conflict` against itself. Skipped
     // entirely: it needs no (re)claiming, and would otherwise trigger a
     // false "already claimed" warning every single step.
-    let mut steps = steps.into_iter();
-    steps.next();
-    for (x, y, step) in steps {
-        match step {
-            PixelWalkStep::Marked => {
+    //
+    // A contour revisiting its own earlier trail among the rest is expected
+    // and silent -- whether that trail is still this contour's own open
+    // `TEMPORARY_CONTOUR` tail (per `temp_owner`) or, since a contour's two
+    // Flying Ends resolve independently, its *other* end's already-final,
+    // already-drawn real value (this same contour's own
+    // `CONTOUR_0_MATRIX_VALUE + contour_idx`, written the moment that end
+    // landed/closed/merged while this end was still flying). Anything else
+    // -- a *different* contour's real value, or another Flying End's own
+    // `TEMPORARY_CONTOUR` tail -- is a genuine conflict: exactly what
+    // `write_contour`'s own conflict rule would turn into `HIGH_DENSITY`
+    // once this contour finally resolves. Rather than silently walk through
+    // it and only find out later, the first one found becomes this step's
+    // own landing spot right now, the same treatment an already-existing
+    // `HIGH_DENSITY` pixel gets -- so a newly created one stops the Growing
+    // Process here exactly as an old one would have, instead of only
+    // surfacing as a `write_contour`-time side effect with the node
+    // positions already locked in. Every `Marked` pixel found *after* that
+    // point is this same step's own walk having already claimed it as
+    // `TEMPORARY_CONTOUR` before this loop ever got to inspect it (the walk
+    // itself doesn't stop early on a conflict) -- now abandoned, since the
+    // step stops at the conflict instead of continuing on to it.
+    let mut conflict: Option<(i64, i64, u32)> = None;
+    let mut beyond = Vec::new();
+    for (x, y, step) in steps.into_iter().skip(1) {
+        match (conflict, step) {
+            (None, PixelWalkStep::Marked) => {
                 temp_owner.insert((x, y), contour_idx);
             }
-            PixelWalkStep::Conflict(val) => {
-                // A contour revisiting its own earlier trail is expected
-                // and silent (exactly today's behavior) -- whether that
-                // trail is still this contour's own open `TEMPORARY_CONTOUR`
-                // tail (per `temp_owner`) or, since a contour's two Flying
-                // Ends resolve independently, its *other* end's already-
-                // final, already-drawn real value (this same contour's own
-                // `CONTOUR_0_MATRIX_VALUE + contour_idx`, written the moment
-                // that end landed/closed/merged while this end was still
-                // flying). Anything else -- a *different* contour's real
-                // value, or another Flying End's own `TEMPORARY_CONTOUR`
-                // tail -- is a genuine conflict worth warning about. Left
-                // exactly as it is either way (never turned into
-                // `HIGH_DENSITY`, unlike `write_contour`'s own conflict
-                // rule).
+            (None, PixelWalkStep::Conflict(val)) => {
                 let is_own_final_value = val == CONTOUR_0_MATRIX_VALUE + contour_idx as u32;
                 if !is_own_final_value && temp_owner.get(&(x, y)) != Some(&contour_idx) {
-                    warnings.push(format!(
-                        "Growing Process: contour {contour_idx}'s integration step at pixel \
-                         ({x},{y}) found it already claimed ({val}); left it as-is"
-                    ));
+                    conflict = Some((x, y, val));
                 }
             }
+            (Some(_), PixelWalkStep::Marked) => beyond.push((x, y)),
+            (Some(_), PixelWalkStep::Conflict(_)) => {}
         }
+    }
+
+    if let Some((cx, cy, val)) = conflict {
+        raster.land_on_new_conflict(cx, cy, &beyond);
+        warnings.push(format!(
+            "Growing Process: contour {contour_idx}'s integration step at pixel ({cx},{cy}) \
+             found it already claimed ({val}); marked it high density and landed there instead \
+             of continuing through it"
+        ));
+        let center = raster.pixel_center(cx, cy);
+        append_node(contours, contour_idx, is_start, center);
+        finalize_contour_ls(contour_idx, contours, raster, config, grown);
+        dots.push(center);
+        return GrowStepOutcome::Resolved;
     }
 
     match landing {
@@ -4493,6 +4514,114 @@ mod tests {
             (step_distance(2.0) - 2.0).abs() < 1e-9,
             "grow_time_step of 2.0 must move density_region_force(1.0) * 2.0 = 2.0m"
         );
+    }
+
+    #[test]
+    fn growing_step_lands_on_a_newly_created_high_density_pixel_mid_step() {
+        // A different, already-final contour's real body sits 3.5m ahead of
+        // the Flying End, well short of a high-density pixel 14m further out
+        // that pulls it there (`density_region_force`, `MatchingEnds`-only,
+        // exactly `grow_time_step_scales_the_integration_step_distance`'s own
+        // technique) -- a raw displacement (10m) that overshoots the other
+        // contour's body but not the density pixel. `contour_force_window`
+        // is tiny so that other contour's own repulsion never enters the
+        // force computation (moot anyway: `Contour` hits are dropped
+        // entirely during `MatchingEnds`), so the walk's raw path runs
+        // straight through its pixel. That pixel is a genuine conflict --
+        // `write_contour`'s own conflict rule would turn it `HIGH_DENSITY`
+        // once this contour finally resolved -- so the step must stop there
+        // right now instead of continuing on toward the density pixel: the
+        // new node lands exactly on the conflict pixel's own center, that
+        // pixel reads back `HIGH_DENSITY`, and every pixel the raw walk had
+        // already marked `TEMPORARY_CONTOUR` beyond it is reverted, since
+        // the step never actually reaches that far any more.
+        let ls = LineString::new(vec![c(10.5, 50.5), c(16.5, 50.5)]);
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 60, 60);
+        raster.write_contour(0, &ls);
+        let mut interior = Vec::new();
+        for y in 1..(raster.height as i64 - 1) {
+            for x in 1..(raster.width as i64 - 1) {
+                interior.push((x, y));
+            }
+        }
+        raster.commit_flood_pixels(&interior);
+        raster.compute_out_of_bound();
+
+        // A different contour's own real body, crossing the straight path
+        // at pixel column 20 (3.5m ahead of the Flying End at (16.5, 50.5)).
+        let blocker = LineString::new(vec![c(20.0, 48.0), c(20.0, 53.0)]);
+        raster.write_contour(1, &blocker);
+
+        // A single-pixel high-density stamp 14m ahead -- pixel (30, 50)'s
+        // own center, (30.5, 50.5) -- far enough that the 10m raw
+        // displacement below doesn't reach it, only pulls straight toward
+        // it.
+        raster.mark_high_density_polygon(&Polygon::new(
+            LineString::new(vec![
+                c(30.0, 50.0),
+                c(31.0, 50.0),
+                c(31.0, 51.0),
+                c(30.0, 51.0),
+                c(30.0, 50.0),
+            ]),
+            vec![],
+        ));
+
+        let mut contours = vec![Contour {
+            lwg: LineWithGravity::new(ls),
+            elevation_height: None,
+        }];
+        let mut point_definers = Vec::new();
+        let mut grown = vec![false];
+        let mut pending = std::collections::VecDeque::new();
+        let mut config = window_test_config(0.5, 15.0);
+        config.density_region_force = 1.0;
+        config.grow_time_step = 10.0;
+        let mut warnings = Vec::new();
+        let outcome = grow_one_step(
+            FlyingEnd {
+                contour_idx: 0,
+                is_start: false,
+            },
+            &mut pending,
+            &mut contours,
+            &mut point_definers,
+            &mut grown,
+            &mut raster,
+            &config,
+            GrowingPhase::MatchingEnds,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut std::collections::HashMap::new(),
+            &mut warnings,
+        );
+        assert!(
+            matches!(outcome, GrowStepOutcome::Resolved),
+            "landing on the newly created high-density pixel resolves this end, it should not \
+             still be flying"
+        );
+        let landing = *contours[0].lwg.ls.0.last().unwrap();
+        assert_eq!(
+            landing,
+            c(20.5, 50.5),
+            "must land exactly on the conflict pixel's own center, not the raw 10m displacement"
+        );
+        assert_eq!(
+            raster.get(20, 50),
+            crate::contour_raster::HIGH_DENSITY,
+            "the conflict pixel must now read back high density"
+        );
+        assert!(
+            !is_flying(&raster, landing),
+            "a high-density pixel is a terminal value -- this node is not flying anymore"
+        );
+        assert_eq!(
+            raster.get(23, 50),
+            crate::contour_raster::NO_CONTOUR_IN_BOUND,
+            "a pixel the raw walk had already marked TEMPORARY_CONTOUR beyond the new landing \
+             spot must be reverted, not left dangling as this end's own trail"
+        );
+        assert!(warnings.iter().any(|w| w.contains("high density")));
     }
 
     #[test]

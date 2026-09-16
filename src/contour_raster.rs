@@ -272,6 +272,29 @@ impl ContourRaster {
         }
     }
 
+    /// Promotes a still-live conflict pixel found mid-step to `HIGH_DENSITY`
+    /// right now, instead of leaving [`Self::write_contour`]'s own conflict
+    /// rule to discover it later, once this contour finally resolves and its
+    /// node positions are already locked in and resampled: a *genuine*
+    /// conflict during [`Self::walk_growing_integration_step`] (a different
+    /// contour's real value, or a different Flying End's own live
+    /// `TEMPORARY_CONTOUR` tail -- `step1_extract::grow_one_step` is the only
+    /// caller and already tells that apart from this same contour revisiting
+    /// its own earlier trail) gets exactly the landing treatment an
+    /// already-`HIGH_DENSITY` pixel gets, just discovered a step late.
+    /// `beyond` is every pixel this same step's own walk had already marked
+    /// `TEMPORARY_CONTOUR` past `(x, y)`, reverted to `NO_CONTOUR_IN_BOUND`
+    /// since the step now stops at `(x, y)` instead of continuing on to
+    /// them.
+    pub(crate) fn land_on_new_conflict(&mut self, x: i64, y: i64, beyond: &[(i64, i64)]) {
+        self.set(x, y, HIGH_DENSITY);
+        for &(bx, by) in beyond {
+            if self.get(bx, by) == TEMPORARY_CONTOUR {
+                self.set(bx, by, NO_CONTOUR_IN_BOUND);
+            }
+        }
+    }
+
     /// Resets every remaining `TEMPORARY_CONTOUR` pixel to
     /// `NO_CONTOUR_IN_BOUND`. Called once the whole Growing Process (both
     /// passes, every Flying End resolved) finishes: a Flying End's own final
