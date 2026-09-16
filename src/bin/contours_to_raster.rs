@@ -340,8 +340,7 @@ fn run() -> Result<(), (ExitCode, String)> {
             // the same picture Step 2 saw, so all seven numbered files
             // always exist together under --create_svg.
             let empty_step3 = step3_rain_drop::Step3Result {
-                resolved_by_rain: 0,
-                resolved_by_anti_rain: 0,
+                resolved_by_votes: 0,
                 ambiguous_warnings: Vec::new(),
                 defined_after_rain: vec![true; step1.contours.len()],
                 rain_paths: Vec::new(),
@@ -378,15 +377,12 @@ fn run() -> Result<(), (ExitCode, String)> {
     let resolved_by_slope_line = step2.resolved_by_slope_line;
     let resolved_by_hill = step2.resolved_by_hill;
     let resolved_by_vote = step2.resolved_by_vote;
-    let (resolved_by_rain, resolved_by_anti_rain) = step3
-        .as_ref()
-        .map(|s| (s.resolved_by_rain, s.resolved_by_anti_rain))
-        .unwrap_or((0, 0));
+    let resolved_by_rain_drop_votes = step3.as_ref().map(|s| s.resolved_by_votes).unwrap_or(0);
 
     println!(
         "{}: {contour_count} contours; gravity resolved by {resolved_by_slope_line} slope \
          line(s), {resolved_by_hill} closed hill(s), {resolved_by_vote} heavy-object/jump \
-         vote(s), {resolved_by_rain} rain drop(s), {resolved_by_anti_rain} anti rain drop(s)",
+         vote(s), {resolved_by_rain_drop_votes} rain/anti-rain drop vote(s)",
         args.map_file.display(),
     );
 

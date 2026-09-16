@@ -65,11 +65,11 @@ impl PassTrace {
 /// What Step 3 resolved, and the paths it simulated (for the `--create_svg`
 /// visualization).
 pub struct Step3Result {
-    /// How many contours got their gravity from Cold Rain Drop Production.
-    pub resolved_by_rain: u64,
-    /// How many contours got their gravity from Cold Anti Rain Drop
-    /// Production.
-    pub resolved_by_anti_rain: u64,
+    /// How many contours got their gravity from the combined Cold Rain +
+    /// Cold Anti Rain vote tally. Gravity is no longer assigned right after
+    /// the rain pass alone -- see [`resolve`] -- so there is only one count,
+    /// not one per pass.
+    pub resolved_by_votes: u64,
     /// One message per contour whose left/right vote counts were close
     /// enough to flag as ambiguous (`undefined_gravity_vote_threshold`).
     pub ambiguous_warnings: Vec<String>,
@@ -82,9 +82,13 @@ pub struct Step3Result {
     /// started -- `contours` itself is mutated in place by both passes in
     /// turn, so by the time any `--create_svg` file is written it always
     /// holds the final, post-both-passes state; this snapshot is what lets
-    /// the rain SVG draw an arrow only for a contour Cold Rain Drop
-    /// Production (or an earlier step) actually resolved, not one Cold Anti
-    /// Rain Drop Production goes on to add afterward.
+    /// the rain SVG draw an arrow only for a contour actually resolved by
+    /// that point, not one only the final vote tally goes on to add
+    /// afterward. Since votes are no longer turned into gravity until both
+    /// passes have finished (see [`resolve`]), this is now always identical
+    /// to the state before Step 3 even started -- the rain pass itself never
+    /// changes it -- but it is kept as its own snapshot rather than folded
+    /// away, so the rain SVG's filtering logic doesn't have to know that.
     pub defined_after_rain: Vec<bool>,
     /// Every point, across every rain drop's path, reached while some
     /// `rain_drop_starting_voting_hysteresis` window -- the drop's own
@@ -100,9 +104,16 @@ pub struct Step3Result {
     pub anti_rain_vote_segments: Vec<(Coord<f64>, Coord<f64>)>,
 }
 
-/// Runs Step 3: a Cold Rain Drop Production, then (if needed) a Cold Anti
-/// Rain Drop Production, resolving every contour Step 2 left without a
-/// gravity direction by simulation. Always returns the full [`Step3Result`]
+/// Runs Step 3: a Cold Rain Drop Production, then a Cold Anti Rain Drop
+/// Production, resolving every contour Step 2 left without a gravity
+/// direction by simulation. Neither pass assigns gravity from its own votes
+/// alone: both run to completion first (the anti rain pass sourced only from
+/// contours that already had gravity *before* the rain pass, deliberately
+/// not the possibly-larger set the rain pass's own votes could go on to
+/// resolve -- see [`simulate_pass`]), so a contour crossed by both ends up
+/// judged on their combined tally rather than whichever pass reached it
+/// first. Only then does [`finalize_votes`] turn every contour's
+/// accumulated votes into gravity. Always returns the full [`Step3Result`]
 /// -- including every simulated path, for `--create_svg` to draw even on
 /// failure -- alongside an `Err` naming any contour still undefined after
 /// both passes. The doc calls that "impossible," but doesn't say what to do
@@ -116,14 +127,13 @@ pub fn resolve(
     let mut ambiguous_warnings = Vec::new();
 
     let mut rain_trace = PassTrace::default();
-    let resolved_by_rain = simulate_pass(
+    simulate_pass(
         contours,
         raster,
         config,
         Temperature::Cold,
         1.0,
         &mut rain_trace,
-        &mut ambiguous_warnings,
     );
 
     let defined_after_rain: Vec<bool> = contours
@@ -132,19 +142,16 @@ pub fn resolve(
         .collect();
 
     let mut anti_rain_trace = PassTrace::default();
-    let resolved_by_anti_rain = if contours.iter().all(|c| c.lwg.gravity_dx.is_some()) {
-        0
-    } else {
-        simulate_pass(
-            contours,
-            raster,
-            config,
-            Temperature::Cold,
-            -1.0,
-            &mut anti_rain_trace,
-            &mut ambiguous_warnings,
-        )
-    };
+    simulate_pass(
+        contours,
+        raster,
+        config,
+        Temperature::Cold,
+        -1.0,
+        &mut anti_rain_trace,
+    );
+
+    let resolved_by_votes = finalize_votes(contours, config, &mut ambiguous_warnings);
 
     let still_undefined: Vec<usize> = contours
         .iter()
@@ -164,8 +171,7 @@ pub fn resolve(
 
     (
         Step3Result {
-            resolved_by_rain,
-            resolved_by_anti_rain,
+            resolved_by_votes,
             ambiguous_warnings,
             defined_after_rain,
             rain_paths: rain_trace.paths,
@@ -242,9 +248,14 @@ pub fn flood_fill_from_contour(
 
 /// One Rain Drop Production (`direction_sign = 1.0`) or Anti Rain Drop
 /// Production (`direction_sign = -1.0`) Cold pass: sources are placed along
-/// every contour that already has gravity, every drop is simulated to
-/// evaporation, and the accumulated votes are turned into gravity for every
-/// contour that received any. Returns how many contours that resolved.
+/// every contour that already has gravity *at the moment this call starts*,
+/// and every drop is simulated to evaporation, accumulating votes on
+/// whatever undefined contours it crosses. It does not turn those votes into
+/// gravity itself -- that only happens once, in [`finalize_votes`], after
+/// both the rain and anti rain passes have finished (see [`resolve`]) -- so
+/// a contour this call votes for stays undefined for the rest of this call,
+/// and (crucially, for the anti rain call) is not yet a source a later call
+/// within the same [`resolve`] can place drops from.
 ///
 /// A segment's `sources_per_contour_segment` sources do not all leave in the
 /// same, flat direction: the source at `A` (the segment's own start node)
@@ -259,8 +270,7 @@ fn simulate_pass(
     temperature: Temperature,
     direction_sign: f64,
     trace: &mut PassTrace,
-    ambiguous_warnings: &mut Vec<String>,
-) -> u64 {
+) {
     let source_contours: Vec<usize> = contours
         .iter()
         .enumerate()
@@ -319,8 +329,6 @@ fn simulate_pass(
             }
         }
     }
-
-    finalize_votes(contours, config, ambiguous_warnings)
 }
 
 /// Steps one rain drop from `source` in the fixed direction `dir` until it
@@ -490,7 +498,10 @@ fn simulate_one_drop(
 
 /// Turns accumulated votes into gravity for every contour that received any
 /// and is still undefined, flagging a near tie per
-/// `undefined_gravity_vote_threshold`. Returns how many contours resolved.
+/// `undefined_gravity_vote_threshold`. Called once, after both the rain and
+/// anti rain passes have finished, so a contour crossed by drops from both
+/// is judged on their combined left/right tally rather than whichever pass
+/// reached it first. Returns how many contours resolved.
 fn finalize_votes(contours: &mut [Contour], config: &Config, warnings: &mut Vec<String>) -> u64 {
     let mut resolved = 0u64;
     for (idx, c) in contours.iter_mut().enumerate() {
@@ -601,7 +612,6 @@ mod tests {
         config.sources_per_contour_segment = 3;
 
         let mut trace = PassTrace::default();
-        let mut warnings = Vec::new();
         simulate_pass(
             &mut contours,
             &mut raster,
@@ -609,7 +619,6 @@ mod tests {
             Temperature::Cold,
             1.0,
             &mut trace,
-            &mut warnings,
         );
 
         // The first segment (node 0 -> node 1) produces the first 3 paths,
@@ -668,7 +677,7 @@ mod tests {
 
         let (result, outcome) = resolve(&mut contours, &mut raster, &config);
         outcome.unwrap();
-        assert!(result.resolved_by_rain >= 1 || result.resolved_by_anti_rain >= 1);
+        assert!(result.resolved_by_votes >= 1);
         assert!(contours[1].lwg.gravity_dx.is_some());
     }
 
@@ -732,8 +741,9 @@ mod tests {
         let (result, outcome) = resolve(&mut contours, &mut raster, &config);
         outcome.unwrap();
         assert_eq!(
-            result.resolved_by_anti_rain, 1,
-            "expected the neighbor to be resolved only by Cold Anti Rain Drop Production"
+            result.resolved_by_votes, 1,
+            "expected the neighbor to be resolved, by votes only Cold Anti Rain Drop \
+             Production could have cast"
         );
         assert_eq!(
             contours[1].lwg.gravity_dy,
@@ -741,6 +751,76 @@ mod tests {
             "the uphill neighbor's downhill direction should point back toward its source \
              (same sense as the source's own downhill), not away from it"
         );
+    }
+
+    #[test]
+    fn anti_rain_drop_production_does_not_source_from_a_contour_only_the_rain_pass_voted_for() {
+        // A (defined, downhill +y) spans x in [0, 30]; its rain-drop sources
+        // fall at x = 0, 5, 10, 15, 20, 25 (6 evenly spaced sources on its
+        // one segment), two of which (20 and 25) fall inside B's own x span
+        // and so vote it toward gravity_dy = 1.0, same sense as A.
+        //
+        // B (undefined) spans x in [20, 50] at y = 5 -- reachable from A's
+        // rain drops, but never from A's own anti rain drops, which travel
+        // straight down (-y) from x in [0, 25] and so never cross B at all.
+        //
+        // C (undefined) spans x in [40, 60] at y = -5 -- overlapping B's own
+        // span, but not A's ([0, 30]), so the only drop that could ever
+        // reach it is an anti rain drop sourced from B itself, travelling
+        // -y (B's own uphill, once its gravity matches A's downhill sense).
+        //
+        // If Anti Rain Drop Production only ever sourced from contours
+        // defined *before* the rain pass ran, C can never be reached: B
+        // stays undefined for the whole of both passes (its votes are only
+        // tallied once, after Anti Rain Drop Production has already run),
+        // so it is never itself a source. B should still resolve, from its
+        // rain votes alone, once both passes are done and votes are
+        // finally tallied; C should not.
+        let mut a = Contour {
+            lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(30.0, 0.0)])),
+            elevation_height: None,
+        };
+        a.lwg.gravity_dx = Some(0.0);
+        a.lwg.gravity_dy = Some(1.0);
+        let b = Contour {
+            lwg: LineWithGravity::new(LineString::new(vec![c(20.0, 5.0), c(50.0, 5.0)])),
+            elevation_height: None,
+        };
+        let c_contour = Contour {
+            lwg: LineWithGravity::new(LineString::new(vec![c(40.0, -5.0), c(60.0, -5.0)])),
+            elevation_height: None,
+        };
+        let mut contours = vec![a, b, c_contour];
+        let mut raster = ContourRaster::new(c(-5.0, -10.0), 0.5, 140, 40);
+        for (i, contour) in contours.iter().enumerate() {
+            raster.write_contour(i as u64, &contour.lwg.ls);
+        }
+        let mut config = default_config();
+        config.sources_per_contour_segment = 6;
+
+        let (result, outcome) = resolve(&mut contours, &mut raster, &config);
+
+        assert!(
+            contours[1].lwg.gravity_dx.is_some(),
+            "B should still resolve from its rain-pass votes, once both passes finish"
+        );
+        assert_eq!(
+            contours[1].lwg.gravity_dy,
+            Some(1.0),
+            "B's downhill sense should match A's, same as any other rain-pass vote"
+        );
+        assert!(
+            contours[2].lwg.gravity_dx.is_none(),
+            "C should stay undefined: the only path to it is a drop sourced from B, and B is \
+             never itself a source since its own gravity is not resolved until after Anti Rain \
+             Drop Production has already run"
+        );
+        let err = outcome.unwrap_err();
+        assert!(
+            err.contains("indices [2]"),
+            "expected only C (index 2) to be reported as still undefined: {err}"
+        );
+        assert_eq!(result.resolved_by_votes, 1);
     }
 
     #[test]
@@ -762,7 +842,7 @@ mod tests {
         // The partial result -- here, simply no rain drops at all, since
         // there was no defined contour to send any from -- is still handed
         // back rather than discarded, so a caller can still inspect it.
-        assert_eq!(result.resolved_by_rain, 0);
+        assert_eq!(result.resolved_by_votes, 0);
         assert!(result.rain_paths.is_empty());
     }
 

@@ -1194,10 +1194,13 @@ pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
 /// [`write_step3_anti_rain_svg`]'s, so a drop's path stays legible where the
 /// two passes cross rather than overlaying both colors on one picture. Its
 /// gravity-arrow layer is filtered to `step3.defined_after_rain`, so it
-/// never shows an arrow for a
-/// contour only Anti Rain Drop Production went on to resolve, even though
-/// `result.contours` itself already holds that final state by the time this
-/// runs. `05_<map_name>_step3_rain.svg`.
+/// never shows an arrow for a contour only the final, combined rain +
+/// anti rain vote tally went on to resolve, even though `result.contours`
+/// itself already holds that final state by the time this runs -- gravity is
+/// no longer assigned right after the rain pass alone (see
+/// `step3_rain_drop::resolve`), so in practice `defined_after_rain` is
+/// always identical to whatever was already defined before Step 3 even
+/// started. `05_<map_name>_step3_rain.svg`.
 pub fn write_step3_rain_svg(
     path: &Path,
     result: &Step1Result,
@@ -2062,8 +2065,7 @@ mod tests {
         let path = dir.path().join("step3_rain.svg");
         let result = sample_result();
         let step3 = Step3Result {
-            resolved_by_rain: 0,
-            resolved_by_anti_rain: 0,
+            resolved_by_votes: 0,
             ambiguous_warnings: Vec::new(),
             defined_after_rain: vec![true],
             rain_paths: vec![vec![c(0.0, 0.0), c(0.0, 1.0), c(0.0, 2.0)]],
@@ -2126,8 +2128,7 @@ mod tests {
         };
 
         let step3 = Step3Result {
-            resolved_by_rain: 0,
-            resolved_by_anti_rain: 0,
+            resolved_by_votes: 0,
             ambiguous_warnings: Vec::new(),
             defined_after_rain: vec![true, false],
             rain_paths: Vec::new(),
@@ -2150,8 +2151,7 @@ mod tests {
         let path = dir.path().join("step3_rain.svg");
         let result = sample_result();
         let step3 = Step3Result {
-            resolved_by_rain: 0,
-            resolved_by_anti_rain: 0,
+            resolved_by_votes: 0,
             ambiguous_warnings: Vec::new(),
             defined_after_rain: vec![true],
             rain_paths: vec![vec![c(0.0, 0.0), c(0.0, 1.0), c(0.0, 2.0)]],
@@ -2196,8 +2196,7 @@ mod tests {
         let path = dir.path().join("step3_anti_rain.svg");
         let result = sample_result();
         let step3 = Step3Result {
-            resolved_by_rain: 0,
-            resolved_by_anti_rain: 0,
+            resolved_by_votes: 0,
             ambiguous_warnings: Vec::new(),
             defined_after_rain: vec![true],
             rain_paths: vec![vec![c(0.0, 0.0), c(0.0, 1.0), c(0.0, 2.0)]],
@@ -2218,8 +2217,7 @@ mod tests {
         let path = dir.path().join("step3_rain.svg");
         let result = sample_result();
         let step3 = Step3Result {
-            resolved_by_rain: 0,
-            resolved_by_anti_rain: 0,
+            resolved_by_votes: 0,
             ambiguous_warnings: Vec::new(),
             defined_after_rain: vec![true],
             rain_paths: vec![vec![c(0.0, 0.0), c(0.0, 1.0), c(0.0, 2.0)]],
@@ -2262,8 +2260,7 @@ mod tests {
         let path = dir.path().join("step3_rain.svg");
         let result = sample_result();
         let step3 = Step3Result {
-            resolved_by_rain: 0,
-            resolved_by_anti_rain: 0,
+            resolved_by_votes: 0,
             ambiguous_warnings: Vec::new(),
             defined_after_rain: vec![true],
             rain_paths: vec![vec![c(0.0, 0.0), c(0.0, 1.0), c(0.0, 2.0)]],
