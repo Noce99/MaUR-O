@@ -1,7 +1,7 @@
-//! The `contours_to_raster` config file: the thirty-two parameters
+//! The `contours_to_raster` config file: the thirty-three parameters
 //! `Contours-to-Raster.md` names, read from a small hand-rolled `key =
 //! value` format (no `serde`/`toml` dependency exists anywhere else in this
-//! crate, and one file with thirty-two numbers does not need one).
+//! crate, and one file with thirty-three numbers does not need one).
 
 use std::path::Path;
 
@@ -84,6 +84,19 @@ pub struct Config {
     /// decided (accordance wins an exact tie), but flagged with a warning
     /// naming both weights (Step 4).
     pub elevation_vote_min_margin: f64,
+    /// Master switch for Step 1's whole Growing Process (Close Search,
+    /// Seeking and Matching alike): `0.0` skips all three passes entirely --
+    /// every contour is left exactly as extracted, dangling Flying Ends and
+    /// all, and none of `01_<map_name>_step1_close_search.svg`/
+    /// `02_<map_name>_step1_growing_seeking.svg`/
+    /// `03_<map_name>_step1_growing_matching.svg` are written, since none of
+    /// the three passes ran for them to show. Any nonzero value runs the
+    /// Growing Process normally. Unlike every other `0.0`-disables knob
+    /// below, this does not merely skip one sub-pass -- zeroing out the
+    /// force constants instead would leave Seeking/Matching's own
+    /// round-robin loop spinning forever, since nothing would ever move or
+    /// merge for it to terminate on.
+    pub growing_enabled: f64,
     /// The Growing Process's own preliminary Close Search pass's own
     /// "obvious match" distance, in ground meters: any two Flying Ends
     /// closer than this to each other are recorded as a match candidate
@@ -246,6 +259,7 @@ const KEYS: &[&str] = &[
     "undefined_gravity_vote_threshold",
     "elevation_vote_min_total_weight",
     "elevation_vote_min_margin",
+    "growing_enabled",
     "obvious_to_close_contour_distance",
     "searching_fov",
     "searching_distance",
@@ -267,8 +281,8 @@ const KEYS: &[&str] = &[
 
 impl Config {
     /// Parses a config file: one `key = value` per line, blank lines and
-    /// lines starting with `#` ignored. All thirty-two keys are required -- a
-    /// config file missing one is far more likely a mistake than an
+    /// lines starting with `#` ignored. All thirty-three keys are required --
+    /// a config file missing one is far more likely a mistake than an
     /// intentional partial override -- and an unknown key or an unparseable
     /// value is an error naming the offending line.
     pub fn load(path: &Path) -> Result<Config, String> {
@@ -331,6 +345,7 @@ impl Config {
             undefined_gravity_vote_threshold: values[&"undefined_gravity_vote_threshold"],
             elevation_vote_min_total_weight: values[&"elevation_vote_min_total_weight"],
             elevation_vote_min_margin: values[&"elevation_vote_min_margin"],
+            growing_enabled: values[&"growing_enabled"],
             obvious_to_close_contour_distance: values[&"obvious_to_close_contour_distance"],
             searching_fov: values[&"searching_fov"],
             searching_distance: values[&"searching_distance"],
@@ -374,6 +389,7 @@ rain_drop_starting_voting_hysteresis = 5
 undefined_gravity_vote_threshold = 0.8
 elevation_vote_min_total_weight = 0.3
 elevation_vote_min_margin = 0.15
+growing_enabled = 1.0
 obvious_to_close_contour_distance = 2.0
 searching_fov = 90.0
 searching_distance = 3.0
@@ -402,6 +418,7 @@ growing_visualization_push_pull_vectors_scale = 1.0
         assert_eq!(config.step2_vote_min_margin, 0.2);
         assert_eq!(config.elevation_vote_min_total_weight, 0.3);
         assert_eq!(config.elevation_vote_min_margin, 0.15);
+        assert_eq!(config.growing_enabled, 1.0);
         assert_eq!(config.sources_per_contour_segment, 3);
         assert_eq!(config.obvious_to_close_contour_distance, 2.0);
         assert_eq!(config.searching_fov, 90.0);

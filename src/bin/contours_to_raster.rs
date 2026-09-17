@@ -220,56 +220,69 @@ fn run() -> Result<(), (ExitCode, String)> {
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     }
 
-    // Close Search: a cheap, non-iterative pass that resolves whatever
-    // Flying Ends are already essentially where they need to be -- another
-    // Flying End or an out-of-bound pixel directly in front of them -- before
-    // Seeking/Matching ever take an integration step. `01_..._step1_close_search.svg`
-    // shows the result, plus every search cone it actually used.
-    step1_extract::run_growing_close_search(&mut step1, &config);
+    // `growing_enabled = 0.0` skips Step 1's whole Growing Process (Close
+    // Search, Seeking and Matching alike): every contour is left exactly as
+    // extracted, dangling Flying Ends and all, and none of the three passes'
+    // own `01_..._step1_close_search.svg`/`02_..._step1_growing_seeking.svg`/
+    // `03_..._step1_growing_matching.svg` are written, since none of them
+    // ran for those files to show -- `00_..._step1.svg` above already covers
+    // the pre-growing state.
+    if config.growing_enabled != 0.0 {
+        // Close Search: a cheap, non-iterative pass that resolves whatever
+        // Flying Ends are already essentially where they need to be --
+        // another Flying End or an out-of-bound pixel directly in front of
+        // them -- before Seeking/Matching ever take an integration step.
+        // `01_..._step1_close_search.svg` shows the result, plus every
+        // search cone it actually used.
+        step1_extract::run_growing_close_search(&mut step1, &config);
 
-    if args.create_svg {
-        write_step1_close_search_svg(
-            &numbered_svg_path(&output_path, "01", "step1_close_search"),
-            &step1,
-        )
-        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
-    }
+        if args.create_svg {
+            write_step1_close_search_svg(
+                &numbered_svg_path(&output_path, "01", "step1_close_search"),
+                &step1,
+            )
+            .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        }
 
-    // The Growing Process's own two remaining phases (Seeking then Matching
-    // -- see `Contours-to-Raster.md`'s Growing Process section), each with
-    // its own `--create_svg` file: `02_..._step1_growing_seeking.svg` shows
-    // what Phase 1 (matching-free, chasing the out-of-bound area on its own)
-    // managed alone, `03_..._step1_growing_matching.svg` what Phase 2 (the
-    // full process, restored merging) went on to do with whatever Phase 1
-    // didn't resolve.
-    let (growing_state, seeking_warnings) = step1_extract::run_growing_seeking(&mut step1, &config);
-    for warning in &seeking_warnings {
-        eprintln!("Warning: {warning}");
-    }
-    step1.warnings.extend(seeking_warnings);
+        // The Growing Process's own two remaining phases (Seeking then
+        // Matching -- see `Contours-to-Raster.md`'s Growing Process
+        // section), each with its own `--create_svg` file:
+        // `02_..._step1_growing_seeking.svg` shows what Phase 1
+        // (matching-free, chasing the out-of-bound area on its own) managed
+        // alone, `03_..._step1_growing_matching.svg` what Phase 2 (the full
+        // process, restored merging) went on to do with whatever Phase 1
+        // didn't resolve.
+        let (growing_state, seeking_warnings) =
+            step1_extract::run_growing_seeking(&mut step1, &config);
+        for warning in &seeking_warnings {
+            eprintln!("Warning: {warning}");
+        }
+        step1.warnings.extend(seeking_warnings);
 
-    if args.create_svg {
-        write_step1_growing_svg(
-            &numbered_svg_path(&output_path, "02", "step1_growing_seeking"),
-            &step1,
-            &config,
-        )
-        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
-    }
+        if args.create_svg {
+            write_step1_growing_svg(
+                &numbered_svg_path(&output_path, "02", "step1_growing_seeking"),
+                &step1,
+                &config,
+            )
+            .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        }
 
-    let matching_warnings =
-        step1_extract::run_growing_matching(&mut step1, &config, growing_state);
-    for warning in &matching_warnings {
-        eprintln!("Warning: {warning}");
+        let matching_warnings =
+            step1_extract::run_growing_matching(&mut step1, &config, growing_state);
+        for warning in &matching_warnings {
+            eprintln!("Warning: {warning}");
+        }
+        step1.warnings.extend(matching_warnings);
     }
-    step1.warnings.extend(matching_warnings);
 
     // Heavy Object gravity is resolved only now, against each contour's
-    // final, post-Matching geometry (see `resolve_heavy_object_gravity`'s
-    // own doc comment for why) -- so this must run after
-    // `run_growing_matching` returns and before
-    // `03_..._step1_growing_matching.svg` is written, the first file meant
-    // to show a Heavy Object's own arrow.
+    // final geometry -- post-Matching's, or, with `growing_enabled = 0.0`,
+    // whatever Step 1 extracted it as, dangling ends and all (see
+    // `resolve_heavy_object_gravity`'s own doc comment for why post-Matching
+    // is preferred) -- so this must run after the Growing Process above and
+    // before `03_..._step1_growing_matching.svg` is written, the first file
+    // meant to show a Heavy Object's own arrow.
     let heavy_object_warnings = step1_extract::resolve_heavy_object_gravity(&mut step1, &config);
     for warning in &heavy_object_warnings {
         eprintln!("Warning: {warning}");
@@ -277,12 +290,14 @@ fn run() -> Result<(), (ExitCode, String)> {
     step1.warnings.extend(heavy_object_warnings);
 
     if args.create_svg {
-        write_step1_growing_svg(
-            &numbered_svg_path(&output_path, "03", "step1_growing_matching"),
-            &step1,
-            &config,
-        )
-        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        if config.growing_enabled != 0.0 {
+            write_step1_growing_svg(
+                &numbered_svg_path(&output_path, "03", "step1_growing_matching"),
+                &step1,
+                &config,
+            )
+            .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        }
         // The Contour Raster itself never changes again past this point
         // (only contours' own gravity does, in Steps 2/3), so this is the
         // one point a full-raster, every-pixel-colored PNG companion to the

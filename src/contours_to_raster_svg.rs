@@ -1723,6 +1723,7 @@ mod tests {
             undefined_gravity_vote_threshold: 0.8,
             elevation_vote_min_total_weight: 0.3,
             elevation_vote_min_margin: 0.15,
+            growing_enabled: 1.0,
             obvious_to_close_contour_distance: 0.0,
             searching_fov: 0.0,
             searching_distance: 0.0,
