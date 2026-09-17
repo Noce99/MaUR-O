@@ -16,7 +16,7 @@ use geo::Coord;
 use tiff::encoder::colortype::Gray32Float;
 use tiff::encoder::TiffEncoder;
 
-use crate::contour_raster::{ContourRaster, CONTOUR_0_MATRIX_VALUE, OUT_OF_BOUND};
+use crate::contour_raster::{ContourRaster, StepHit, CONTOUR_0_MATRIX_VALUE, OUT_OF_BOUND};
 use crate::contours_to_raster_config::Config;
 use crate::gravity_model::{contour_gravity_side, Contour};
 use crate::step3_rain_drop::{elevation_fill_drop_track, placed_sources};
@@ -25,25 +25,30 @@ fn dist(a: Coord<f64>, b: Coord<f64>) -> f64 {
     (a.x - b.x).hypot(a.y - b.y)
 }
 
-/// One E2V pixel's own accumulated evidence: a running sum and count of
-/// every value written to it (a contour's own seed value counts as one, and
-/// so does a later gap-filling round's own average), so the final value is
-/// their mean without keeping every individual value around, per the doc's
-/// own note on why (Step 5).
+/// One E2V pixel's own accumulated evidence: a running weighted sum and
+/// weight total of every value written to it, so the final value is their
+/// weighted mean without keeping every individual value around (Step 5). A
+/// contour's own seed value and a gap-filling round's own neighbor average
+/// each count with weight `1.0`; an Elevation Fill Rain Drop Production's
+/// own track instead weighs its value by `1.0 / track_len` -- the shorter a
+/// drop's own whole straight track, the more its reading is trusted,
+/// specifically so a rare, very long track (an open area with no closer
+/// contour along that exact ray) can no longer dominate a pixel some other,
+/// much shorter, more locally-relevant track also reached.
 #[derive(Clone, Copy, Default)]
 struct Accum {
-    sum: f64,
-    count: u32,
+    weighted_sum: f64,
+    weight_total: f64,
 }
 
 impl Accum {
-    fn add(&mut self, value: f64) {
-        self.sum += value;
-        self.count += 1;
+    fn add(&mut self, value: f64, weight: f64) {
+        self.weighted_sum += value * weight;
+        self.weight_total += weight;
     }
 
     fn mean(&self) -> Option<f64> {
-        (self.count > 0).then(|| self.sum / self.count as f64)
+        (self.weight_total > 0.0).then(|| self.weighted_sum / self.weight_total)
     }
 }
 
@@ -111,7 +116,7 @@ pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config
             if val >= CONTOUR_0_MATRIX_VALUE {
                 let idx = (val - CONTOUR_0_MATRIX_VALUE) as usize;
                 if let Some(h) = contours[idx].elevation_height {
-                    accum[y][x].add(h);
+                    accum[y][x].add(h, 1.0);
                 }
             }
         }
@@ -125,18 +130,38 @@ pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config
             continue;
         };
         for (source, dir) in placed_sources(&c.lwg.ls, side, config.sources_per_contour_segment) {
-            let Some((hit_idx, start, end)) =
+            let Some((hit, start, end)) =
                 elevation_fill_drop_track(raster, c_idx as u64, source, dir, config)
             else {
                 continue; // out of bound: a no-op, per the doc
             };
-            let Some(hit_height) = contours[hit_idx as usize].elevation_height else {
-                continue; // Step 4 assumes this can't happen by Step 5; skip defensively
+            let hit_height = match hit {
+                StepHit::Contour(hit_idx) => {
+                    let Some(h) = contours[hit_idx as usize].elevation_height else {
+                        continue; // Step 4 assumes this can't happen by Step 5; skip defensively
+                    };
+                    h
+                }
+                // No real contour to read an elevation from under a
+                // high-density conflict -- suppose the drop travelled one
+                // step further downhill from its own source instead (the
+                // same "accordance" assumption Step 4 makes), per the doc's
+                // own note on why a high-density hit can no longer be
+                // treated as a dead end here.
+                StepHit::HighDensity => c_height - 1.0,
+                StepHit::OutOfBound => unreachable!(
+                    "elevation_fill_drop_track already turns an out-of-bound hit into None"
+                ),
             };
             let track_len = dist(start, end);
             if track_len <= 0.0 {
                 continue; // a degenerate, zero-length track has nothing to interpolate along
             }
+            // A track's own weight is constant along its whole length: the
+            // shorter the drop's own straight track, the more every pixel
+            // it touches trusts its reading over a longer, less locally
+            // relevant one (see `Accum`'s own doc comment on why).
+            let weight = 1.0 / track_len;
             for (px, py) in raster.pixels_along_segment(start, end) {
                 if px < 0 || py < 0 || px as usize >= width || py as usize >= height {
                     continue;
@@ -144,8 +169,12 @@ pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config
                 let center = raster.pixel_center(px, py);
                 let d_a = dist(center, start);
                 let d_b = dist(center, end);
-                let value = (d_a * c_height + d_b * hit_height) / (d_a + d_b);
-                accum[py as usize][px as usize].add(value);
+                // Weight each end by the distance to the *other* end, not
+                // its own: a pixel right next to the start (d_a ~= 0) must
+                // land close to eA, so eA's own share of the blend has to
+                // grow as d_a shrinks -- i.e. it's carried by d_b, not d_a.
+                let value = (d_b * c_height + d_a * hit_height) / (d_a + d_b);
+                accum[py as usize][px as usize].add(value, weight);
             }
         }
     }
@@ -189,7 +218,7 @@ pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config
             break;
         }
         for (x, y, v) in newly_filled {
-            accum[y][x].add(v);
+            accum[y][x].add(v, 1.0);
         }
     }
 
@@ -347,7 +376,26 @@ pub fn write_colored_png(e2v: &ElevationRaster, path: &Path) -> Result<(), Strin
 mod tests {
     use super::*;
     use crate::gravity_model::LineWithGravity;
-    use geo::LineString;
+    use geo::{LineString, Polygon};
+
+    #[test]
+    fn accum_mean_is_none_until_something_is_added() {
+        assert!(Accum::default().mean().is_none());
+    }
+
+    #[test]
+    fn accum_weighted_mean_favors_the_higher_weight_contribution() {
+        let mut a = Accum::default();
+        a.add(0.0, 1.0); // e.g. a long track (small 1.0 / track_len weight)
+        a.add(10.0, 9.0); // e.g. a short track (large 1.0 / track_len weight)
+        // A plain average would land on 5.0; the weighted mean must land
+        // much closer to the higher-weight (shorter-track) reading instead.
+        let mean = a.mean().unwrap();
+        assert!(
+            (mean - 9.0).abs() < 1e-9,
+            "expected the weighted mean to favor the weight-9 reading, got {mean}"
+        );
+    }
 
     fn c(x: f64, y: f64) -> Coord<f64> {
         Coord { x, y }
@@ -435,6 +483,65 @@ mod tests {
     }
 
     #[test]
+    fn a_drop_evaporating_on_high_density_assumes_one_step_below_its_own_source() {
+        // A single contour (height 5) with nothing else nearby except a
+        // high-density band directly downhill of it -- every drop it fires
+        // must evaporate there (no real contour to reach instead), assuming
+        // a fallback elevation of 5 - 1 = 4 for it. A single source
+        // (`sources_per_contour_segment = 1`, placed at the segment's own
+        // start node, x = 0) keeps this deterministic: exactly one straight,
+        // purely-vertical track to reason about, rather than several
+        // differently-angled ones blending together at any given pixel.
+        let contours = vec![contour_with_gravity(10.0, -1.0, 5.0)];
+        let mut raster = raster_for(&contours);
+        let band = Polygon::new(
+            LineString::new(vec![
+                c(0.0, 4.0),
+                c(20.0, 4.0),
+                c(20.0, 6.0),
+                c(0.0, 6.0),
+                c(0.0, 4.0),
+            ]),
+            vec![],
+        );
+        raster.mark_high_density_polygon(&band);
+        let mut config = default_config();
+        config.sources_per_contour_segment = 1;
+
+        // Learn exactly where this one deterministic drop actually lands --
+        // Appendix 4's own stepped walk reports the step's raw endpoint as
+        // the landing spot, not the precise crossing point, so this is more
+        // robust than assuming a hand-picked coordinate is close enough.
+        let (hit, _, end) =
+            crate::step3_rain_drop::elevation_fill_drop_track(&mut raster, 0, c(0.0, 10.0), (0.0, -1.0), &config)
+                .unwrap();
+        assert_eq!(hit, StepHit::HighDensity);
+
+        let result = resolve(&contours, &mut raster, &config);
+
+        // Right at the drop's own landing pixel: close to the fallback
+        // value, 4.
+        let (px, py) = raster.to_px(end);
+        let near_band = result.e2v.get(px as usize, py as usize).unwrap();
+        assert!(
+            (near_band - 4.0).abs() < 0.5,
+            "expected a value close to the fallback 4.0 right at the drop's own landing pixel, \
+             got {near_band}"
+        );
+
+        // Halfway between the contour (y = 10, height 5) and the drop's own
+        // landing point (fallback height 4), same x: close to their mean,
+        // 4.5.
+        let (px, py) = raster.to_px(c(0.0, (10.0 + end.y) / 2.0));
+        let midway = result.e2v.get(px as usize, py as usize).unwrap();
+        assert!(
+            (midway - 4.5).abs() < 0.5,
+            "expected a value close to 4.5 midway between the contour and the landing point, \
+             got {midway}"
+        );
+    }
+
+    #[test]
     fn a_pixel_midway_between_two_contours_gets_the_average_of_their_two_heights() {
         // Two parallel contours 10m apart, downhill = -y: a pixel exactly
         // halfway between them should land close to the mean of the two
@@ -451,6 +558,35 @@ mod tests {
         assert!(
             (value - (-5.0)).abs() < 1.0,
             "expected a value near -5.0 (the mean of 0.0 and -10.0), got {value}"
+        );
+    }
+
+    #[test]
+    fn a_pixel_near_the_start_lands_near_the_starting_contours_own_height_not_the_far_one() {
+        // Same two parallel contours as above, but this time querying right
+        // next to the top one (height 0) instead of the midpoint -- a case
+        // the midpoint test above can't distinguish a correct interpolation
+        // from one that swapped which distance weighs which elevation,
+        // since dA and dB are equal there. `sources_per_contour_segment = 1`
+        // keeps the drop's own track deterministic (see the high-density
+        // test above for why).
+        let contours = vec![
+            contour_with_gravity(10.0, -1.0, 0.0),
+            contour_with_gravity(0.0, -1.0, -10.0),
+        ];
+        let mut raster = raster_for(&contours);
+        let mut config = default_config();
+        config.sources_per_contour_segment = 1;
+        let result = resolve(&contours, &mut raster, &config);
+
+        // Just below the top contour (height 0): must land close to 0, not
+        // close to -10 (the far contour a swapped formula would produce).
+        let (px, py) = raster.to_px(c(0.0, 9.5));
+        let value = result.e2v.get(px as usize, py as usize).unwrap();
+        assert!(
+            value > -2.0,
+            "expected a value close to 0.0 (the nearby contour's own height) right below it, \
+             got {value}, suspiciously close to the far contour's -10.0 instead"
         );
     }
 

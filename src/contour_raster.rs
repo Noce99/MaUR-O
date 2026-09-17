@@ -508,37 +508,6 @@ impl ContourRaster {
         hit
     }
 
-    /// Like [`Self::first_hit_along_step`], but a high-density (`3`) pixel
-    /// is never reported as a hit -- Step 5's own Elevation Fill Rain Drop
-    /// Production (the only caller) must pass straight through one exactly
-    /// like an undefined or no-contour-in-bound pixel, rather than stopping
-    /// on it (see `Contours-to-Raster.md`'s Step 5).
-    pub fn first_hit_along_step_no_high_density(
-        &self,
-        prev: Coord<f64>,
-        next: Coord<f64>,
-        exclude_contour_idx: u64,
-    ) -> Option<StepHit> {
-        let mut hit = None;
-        walk_pixels(self.origin, self.px_size, prev, next, |x, y| {
-            let val = self.get(x, y);
-            if val == OUT_OF_BOUND {
-                hit = Some(StepHit::OutOfBound);
-                return false;
-            }
-            if val < CONTOUR_0_MATRIX_VALUE {
-                return true; // undefined, no-contour-in-bound, or high density: keep walking
-            }
-            let contour_idx = (val - CONTOUR_0_MATRIX_VALUE) as u64;
-            if contour_idx == exclude_contour_idx {
-                return true;
-            }
-            hit = Some(StepHit::Contour(contour_idx));
-            false // found one, stop
-        });
-        hit
-    }
-
     /// Every pixel the straight segment `prev -> next` touches (Appendix
     /// 4's own walk), with no notion of a hit to stop early at. Step 5's own
     /// Elevation Fill Rain Drop Production already knows, from its own
