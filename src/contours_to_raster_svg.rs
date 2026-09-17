@@ -87,9 +87,10 @@
 //! After Step 4: `08_<map_name>_step5_gravity.svg`, Step 5's own per-pixel
 //! Gravity Direction sub-step ([`crate::step5_gravity_raster`]) -- the same
 //! grid/pixel/heavy-object picture Steps 1-2 draw (see [`base_layers`]),
-//! plus one teal segment per pixel, tail at its own center, showing the
-//! per-pixel downhill direction that sub-step resolved (a pixel whose own
-//! contributing readings nearly cancel out gets no segment at all -- see
+//! plus one segment per pixel, tail at its own center, showing the per-pixel
+//! downhill direction that sub-step resolved, colored red (intense) to blue
+//! (weak) by its own magnitude (a pixel whose own contributing readings
+//! nearly cancel out gets no segment at all -- see
 //! [`GRAVITY_DIRECTION_MIN_MAGNITUDE`]).
 
 use std::collections::HashMap;
@@ -144,10 +145,6 @@ const PUSH_PULL_DENSITY: Color = Color::Rgb(0, 100, 0);
 const PUSH_PULL_FLYING_END: Color = Color::Rgb(0, 191, 255);
 /// `3` (high density) pixels.
 const LIGHT_GREEN: Color = Color::Rgb(144, 238, 144);
-/// `08_..._step5_gravity.svg`'s own per-pixel gravity direction segment --
-/// deliberately distinct from [`YELLOW`] (a *contour's* own gravity arrow),
-/// so the two "gravity" layers never read as the same thing.
-const TEAL: Color = Color::Rgb(0, 150, 136);
 /// `02_..._step1_growing_seeking.svg`/`03_..._step1_growing_matching.svg`'s
 /// own integration-step dot layer -- a more saturated green than [`GREEN`]
 /// (the un-grown linearized-contour layer) so the two read as distinct even
@@ -204,6 +201,15 @@ const GRAVITY_SEGMENT_STROKE_WIDTH: f32 = 0.2;
 /// draw a segment for at all, rather than drawing one whose direction is
 /// mostly noise.
 const GRAVITY_DIRECTION_MIN_MAGNITUDE: f64 = 0.3;
+/// How many discrete color buckets `08_..._step5_gravity.svg`'s own
+/// gravity-direction segment layer quantizes its red ([`RED`], intense) to
+/// blue ([`BLUE`], weak) magnitude gradient into: one `MultiLineString`
+/// (one SVG element) drawn per bucket, rather than one individually-colored
+/// element per pixel -- at a real map's own pixel count, the latter would
+/// blow this file's size right back up to what [`pixel_layers`]'s own doc
+/// comment already explains this whole sparse vector format exists to
+/// avoid. High enough that the gradient still reads as continuous by eye.
+const GRAVITY_INTENSITY_BUCKETS: usize = 20;
 /// A push/pull vector's own stroke width, in ground meters -- see
 /// [`push_pull_vector_layers`].
 const PUSH_PULL_VECTOR_STROKE_WIDTH: f32 = 0.15;
@@ -1189,17 +1195,43 @@ pub fn write_step2_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
     )
 }
 
+/// Linearly interpolates each of `low`'s and `high`'s own RGB channels by
+/// `t` (clamped to `[0, 1]`) -- `t = 0.0` is `low`, `t = 1.0` is `high`. Every
+/// color this file defines is [`Color::Rgb`], so that's the only variant
+/// handled.
+fn lerp_color(low: Color, high: Color, t: f64) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let (Color::Rgb(lr, lg, lb), Color::Rgb(hr, hg, hb)) = (low, high) else {
+        unreachable!("every color this file defines is Color::Rgb");
+    };
+    Color::Rgb(lerp_u8(lr, hr, t), lerp_u8(lg, hg, t), lerp_u8(lb, hb, t))
+}
+
+fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
+    (a as f64 + (b as f64 - a as f64) * t).round() as u8
+}
+
 /// One segment per in-bound pixel `gravity` gave a confidently-decided
 /// direction to (see [`GRAVITY_DIRECTION_MIN_MAGNITUDE`]): tail at the
 /// pixel's own center, head half a pixel further along the pixel's own
 /// (normalized) gravity direction -- long enough to read as an arrow field at
 /// a glance without one pixel's own segment overlapping its neighbor's.
+/// Grouped into [`GRAVITY_INTENSITY_BUCKETS`] magnitude buckets, index `0`
+/// (weakest ever drawn, [`BLUE`]) to `GRAVITY_INTENSITY_BUCKETS - 1`
+/// (strongest possible, [`RED`]) -- bucketed by magnitude *rescaled* against
+/// the `[GRAVITY_DIRECTION_MIN_MAGNITUDE, 1.0]` range this function actually
+/// draws (rather than the raw `[0.0, 1.0]` a pixel's magnitude can take, see
+/// [`crate::step5_gravity_raster::GravityRaster::get`]'s own doc comment on
+/// why it's never negative or above `1.0`), so the full blue-to-red gradient
+/// is actually visible across what's drawn instead of every pixel bunching
+/// into the reddish end of a range whose own bluest 30% (below the
+/// threshold) is never drawn at all.
 fn gravity_direction_segments(
     raster: &ContourRaster,
     gravity: &GravityRaster,
-) -> MultiLineString<f64> {
+) -> Vec<MultiLineString<f64>> {
     let half_px = raster.px_size / 2.0;
-    let mut lines = Vec::new();
+    let mut buckets: Vec<Vec<LineString<f64>>> = vec![Vec::new(); GRAVITY_INTENSITY_BUCKETS];
     for y in 0..gravity.height {
         for x in 0..gravity.width {
             let Some((vx, vy)) = gravity.get(x, y) else {
@@ -1209,27 +1241,34 @@ fn gravity_direction_segments(
             if magnitude < GRAVITY_DIRECTION_MIN_MAGNITUDE {
                 continue;
             }
+            let intensity =
+                (magnitude - GRAVITY_DIRECTION_MIN_MAGNITUDE) / (1.0 - GRAVITY_DIRECTION_MIN_MAGNITUDE);
             let center = raster.pixel_center(x as i64, y as i64);
             let (ux, uy) = (vx / magnitude, vy / magnitude);
-            lines.push(LineString::new(vec![
+            let line = LineString::new(vec![
                 center,
                 Coord {
                     x: center.x + ux * half_px,
                     y: center.y + uy * half_px,
                 },
-            ]));
+            ]);
+            let bucket = ((intensity.clamp(0.0, 1.0) * GRAVITY_INTENSITY_BUCKETS as f64) as usize)
+                .min(GRAVITY_INTENSITY_BUCKETS - 1);
+            buckets[bucket].push(line);
         }
     }
-    MultiLineString::new(lines)
+    buckets.into_iter().map(MultiLineString::new).collect()
 }
 
 /// Step 5's own Gravity Direction sub-step, visualized: [`base_layers`] (the
 /// raster grid, brown contour pixels, green high-density area, pink heavy
 /// object area -- the same picture `00_..._step1.svg` through
-/// `04_..._step2.svg` already draw), plus one teal segment per pixel showing
+/// `04_..._step2.svg` already draw), plus one segment per pixel showing
 /// [`crate::step5_gravity_raster::resolve`]'s own per-pixel gravity
-/// direction. Diagnostic only for now -- there is no TIFF or further use of
-/// `gravity` yet, unlike Step 5's own altitude
+/// direction, colored by its own magnitude -- [`RED`] for the most
+/// confidently-decided pixels, fading to [`BLUE`] for the least (see
+/// [`gravity_direction_segments`]). Diagnostic only for now -- there is no
+/// TIFF or further use of `gravity` yet, unlike Step 5's own altitude
 /// ([`crate::step5_elevation_raster`]). `08_<map_name>_step5_gravity.svg`.
 pub fn write_step5_gravity_svg(
     path: &Path,
@@ -1237,15 +1276,14 @@ pub fn write_step5_gravity_svg(
     gravity: &GravityRaster,
 ) -> Result<(), String> {
     let data = BaseLayerData::new(result);
-    let segments = gravity_direction_segments(&result.raster, gravity);
-    write(
-        path,
-        base_layers(&data).and(line_layer(
-            &segments,
-            TEAL,
-            GRAVITY_SEGMENT_STROKE_WIDTH,
-        )),
-    )
+    let buckets = gravity_direction_segments(&result.raster, gravity);
+    let mut svg = base_layers(&data);
+    for (i, bucket) in buckets.iter().enumerate() {
+        let t = (i as f64 + 0.5) / GRAVITY_INTENSITY_BUCKETS as f64;
+        let color = lerp_color(BLUE, RED, t);
+        svg = svg.and(line_layer(bucket, color, GRAVITY_SEGMENT_STROKE_WIDTH));
+    }
+    write(path, svg)
 }
 
 /// The algorithm's actual answer, once every contour's gravity is settled:
@@ -1778,6 +1816,7 @@ mod tests {
             matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 2.0,
+            gravity_gaussian_kernel_size: 5,
         }
     }
 
@@ -2635,5 +2674,65 @@ mod tests {
         assert!(text.contains(">0: 0</text>"), "resolved contour 0: {text}");
         assert!(text.contains(">1</text>"), "undefined contour 1, bare index: {text}");
         assert_eq!(count(&text, "<rect"), 1, "one dead end marker");
+    }
+
+    #[test]
+    fn lerp_color_returns_each_endpoint_at_t_zero_and_one() {
+        assert_eq!(lerp_color(BLUE, RED, 0.0), BLUE);
+        assert_eq!(lerp_color(BLUE, RED, 1.0), RED);
+    }
+
+    #[test]
+    fn lerp_color_is_the_channel_wise_midpoint_at_t_half() {
+        let Color::Rgb(mr, mg, mb) = lerp_color(BLUE, RED, 0.5) else {
+            panic!("expected Color::Rgb");
+        };
+        let Color::Rgb(br, bg, bb) = BLUE else { unreachable!() };
+        let Color::Rgb(rr, rg, rb) = RED else { unreachable!() };
+        assert_eq!(mr, ((br as i32 + rr as i32) / 2) as u8);
+        assert_eq!(mg, ((bg as i32 + rg as i32) / 2) as u8);
+        assert_eq!(mb, ((bb as i32 + rb as i32) / 2) as u8);
+    }
+
+    #[test]
+    fn lerp_color_clamps_t_outside_zero_one() {
+        assert_eq!(lerp_color(BLUE, RED, -5.0), BLUE);
+        assert_eq!(lerp_color(BLUE, RED, 5.0), RED);
+    }
+
+    #[test]
+    fn gravity_direction_segments_sorts_a_weak_and_a_strong_pixel_into_different_buckets() {
+        let raster = ContourRaster::new(c(-5.0, -5.0), 1.0, 20, 20);
+
+        // Two synthetic grid entries: pixel (2, 2) confidently decided
+        // (magnitude 1.0), pixel (3, 3) barely above the drawing threshold
+        // (magnitude just over `GRAVITY_DIRECTION_MIN_MAGNITUDE`) -- built
+        // directly rather than through `step5_gravity_raster::resolve`,
+        // since only the bucketing/coloring here is under test.
+        let mut grid = vec![vec![None; 20]; 20];
+        grid[2][2] = Some((1.0, 0.0));
+        grid[3][3] = Some((GRAVITY_DIRECTION_MIN_MAGNITUDE + 0.01, 0.0));
+        let gravity = crate::step5_gravity_raster::GravityRaster::for_test(grid, 20, 20);
+
+        let buckets = gravity_direction_segments(&raster, &gravity);
+        assert_eq!(buckets.len(), GRAVITY_INTENSITY_BUCKETS);
+
+        let non_empty: Vec<usize> = buckets
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !b.0.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(non_empty.len(), 2, "expected exactly two non-empty buckets: {non_empty:?}");
+        assert_eq!(
+            *non_empty.last().unwrap(),
+            GRAVITY_INTENSITY_BUCKETS - 1,
+            "the magnitude-1.0 pixel must land in the strongest (reddest) bucket"
+        );
+        assert!(
+            non_empty[0] < GRAVITY_INTENSITY_BUCKETS - 1,
+            "the barely-above-threshold pixel must land in a weaker (bluer) bucket than the \
+             magnitude-1.0 one: {non_empty:?}"
+        );
     }
 }

@@ -5,9 +5,13 @@
 //! 2D downhill direction, built the same way -- an Elevation Fill Rain Drop
 //! Production's own track ([`crate::step3_rain_drop::elevation_fill_drop_track`])
 //! seeds every pixel it passes through with its own (constant, since a track
-//! is a single straight segment) direction, weighted the same
-//! `1.0 / track_len` way, and an iterative 8-connected front propagation
-//! fills whatever is left. See [`resolve`].
+//! is a single straight segment) direction, weighted by `1.0 / track_len^2`
+//! -- a steeper distance decay than elevation's own `1.0 / track_len`,
+//! since a direction reading has no d_a/d_b interpolation of its own to
+//! smooth a long track's reach the way elevation's blend already does, so
+//! it leans on its weight alone to favor a short, locally-relevant track
+//! over a long one even more aggressively -- and an iterative 8-connected
+//! front propagation fills whatever is left. See [`resolve`].
 
 use geo::Coord;
 
@@ -73,6 +77,20 @@ impl GravityRaster {
     pub fn get(&self, x: usize, y: usize) -> Option<(f64, f64)> {
         self.grid.get(y).and_then(|row| row.get(x)).copied().flatten()
     }
+
+    /// Builds a [`GravityRaster`] directly from a `grid`, bypassing
+    /// [`resolve`] entirely -- for `contours_to_raster_svg`'s own tests of
+    /// its gravity-direction drawing layer, which need specific, hand-picked
+    /// magnitudes at specific pixels rather than whatever a full Elevation
+    /// Fill Rain Drop Production run happens to produce.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        grid: Vec<Vec<Option<(f64, f64)>>>,
+        width: usize,
+        height: usize,
+    ) -> Self {
+        GravityRaster { grid, width, height }
+    }
 }
 
 /// Runs Step 5's Gravity Direction sub-step: builds the G2V at the same size
@@ -109,10 +127,12 @@ pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config
             }
             // A track's own direction is constant along its whole straight
             // length, so (unlike elevation's own d_a/d_b height blend) every
-            // pixel it touches gets the same value; only the weight follows
-            // elevation's own `1.0 / track_len` rule.
+            // pixel it touches gets the same value; the weight itself uses
+            // an inverse-square distance decay instead -- see this module's
+            // own doc comment on why that's steeper than elevation's `1.0 /
+            // track_len`.
             let direction = ((end.x - start.x) / track_len, (end.y - start.y) / track_len);
-            let weight = 1.0 / track_len;
+            let weight = 1.0 / (track_len * track_len);
             for (px, py) in raster.pixels_along_segment(start, end) {
                 if px < 0 || py < 0 || px as usize >= width || py as usize >= height {
                     continue;
@@ -163,12 +183,71 @@ pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config
         }
     }
 
-    let grid = accum
+    let grid: Vec<Vec<Option<(f64, f64)>>> = accum
         .into_iter()
         .map(|row| row.into_iter().map(|a| a.mean()).collect())
         .collect();
+    let grid = gaussian_smooth(&grid, config.gravity_gaussian_kernel_size);
 
     GravityRaster { grid, width, height }
+}
+
+/// Gaussian-smooths `grid`'s own direction field: every pixel that already
+/// has a direction gets, as its final value, a Gaussian-weighted average of
+/// itself and every same-defined neighbor within `kernel_size`'s own window
+/// (`config.gravity_gaussian_kernel_size`) -- radius `(kernel_size - 1) / 2`,
+/// standard deviation `radius / 3.0` so the window's own edge sits at
+/// roughly three standard deviations, normalized by however much of that
+/// weight actually landed on a defined neighbor (a pixel near an
+/// out-of-bound edge or a still-undefined pocket is averaged over fewer
+/// neighbors, not diluted by them reading as zero). A pixel with no
+/// direction of its own is left `None` -- this smooths noise among
+/// already-resolved pixels; it does not fill new ones (gap-filling above
+/// already did that). `kernel_size <= 1` is a no-op, returning `grid`
+/// unchanged, since a zero-radius window has nothing else to average with
+/// anyway.
+fn gaussian_smooth(
+    grid: &[Vec<Option<(f64, f64)>>],
+    kernel_size: usize,
+) -> Vec<Vec<Option<(f64, f64)>>> {
+    let height = grid.len();
+    let width = grid.first().map_or(0, Vec::len);
+    if kernel_size <= 1 {
+        return grid.to_vec();
+    }
+    let radius = (kernel_size / 2) as i64;
+    let sigma = radius as f64 / 3.0;
+
+    let mut smoothed = vec![vec![None; width]; height];
+    for y in 0..height {
+        for x in 0..width {
+            if grid[y][x].is_none() {
+                continue;
+            }
+            let (mut sum_x, mut sum_y, mut weight_total) = (0.0, 0.0, 0.0);
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+                    if nx < 0 || ny < 0 || nx as usize >= width || ny as usize >= height {
+                        continue;
+                    }
+                    let Some((vx, vy)) = grid[ny as usize][nx as usize] else {
+                        continue;
+                    };
+                    let squared_dist = (dx * dx + dy * dy) as f64;
+                    let weight = (-squared_dist / (2.0 * sigma * sigma)).exp();
+                    sum_x += vx * weight;
+                    sum_y += vy * weight;
+                    weight_total += weight;
+                }
+            }
+            // `weight_total` is always > 0 here: (dx, dy) = (0, 0) is always
+            // in range and always weight 1.0, and `grid[y][x]` (that same
+            // pixel) is already known `Some` from the check above.
+            smoothed[y][x] = Some((sum_x / weight_total, sum_y / weight_total));
+        }
+    }
+    smoothed
 }
 
 #[cfg(test)]
@@ -216,6 +295,7 @@ mod tests {
             matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
+            gravity_gaussian_kernel_size: 5,
         }
     }
 
@@ -311,6 +391,57 @@ mod tests {
         assert!(
             vy < 0.0,
             "expected the gap-filled direction to still point downhill (-y), got ({vx}, {vy})"
+        );
+    }
+
+    #[test]
+    fn gaussian_smooth_is_a_no_op_at_kernel_size_one() {
+        let grid = vec![
+            vec![Some((1.0, 0.0)), None, Some((0.0, 1.0))],
+            vec![None, Some((-1.0, 0.0)), None],
+        ];
+        assert_eq!(gaussian_smooth(&grid, 1), grid);
+        assert_eq!(gaussian_smooth(&grid, 0), grid);
+    }
+
+    #[test]
+    fn gaussian_smooth_never_gives_a_direction_to_an_undefined_pixel() {
+        let grid = vec![vec![Some((1.0, 0.0)), Some((1.0, 0.0)), None]];
+        let smoothed = gaussian_smooth(&grid, 5);
+        assert_eq!(smoothed[0][2], None, "no pixel of its own to smooth from");
+    }
+
+    #[test]
+    fn gaussian_smooth_is_unaffected_by_a_wholly_undefined_neighborhood() {
+        // A single defined pixel with nothing but `None` all around it: its
+        // own weight (distance 0, weight 1.0) is the *only* contribution to
+        // its own weighted average, so it must come back completely
+        // unchanged, not diluted toward zero by its absent neighbors.
+        let mut grid = vec![vec![None; 5]; 5];
+        grid[2][2] = Some((3.0, -4.0));
+        let smoothed = gaussian_smooth(&grid, 5);
+        assert_eq!(smoothed[2][2], Some((3.0, -4.0)));
+    }
+
+    #[test]
+    fn gaussian_smooth_blends_toward_a_defined_neighbors_own_direction() {
+        // Two side-by-side defined pixels pointing opposite ways: each
+        // pixel's own smoothed direction must lean toward its neighbor's
+        // (pulling its own x component off of its un-smoothed extreme, here
+        // 1.0/-1.0), without fully reaching it (its own, still-largest
+        // weight keeps it closer to its own original value than to the
+        // neighbor's).
+        let grid = vec![vec![Some((1.0, 0.0)), Some((-1.0, 0.0))]];
+        let smoothed = gaussian_smooth(&grid, 5);
+        let (sx0, _) = smoothed[0][0].unwrap();
+        let (sx1, _) = smoothed[0][1].unwrap();
+        assert!(
+            sx0 < 1.0 && sx0 > 0.0,
+            "expected pixel 0 to lean toward its neighbor's -1.0 without reaching it, got {sx0}"
+        );
+        assert!(
+            sx1 > -1.0 && sx1 < 0.0,
+            "expected pixel 1 to lean toward its neighbor's 1.0 without reaching it, got {sx1}"
         );
     }
 }

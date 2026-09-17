@@ -1,7 +1,7 @@
-//! The `contours_to_raster` config file: the thirty-three parameters
+//! The `contours_to_raster` config file: the thirty-four parameters
 //! `Contours-to-Raster.md` names, read from a small hand-rolled `key =
 //! value` format (no `serde`/`toml` dependency exists anywhere else in this
-//! crate, and one file with thirty-three numbers does not need one).
+//! crate, and one file with thirty-four numbers does not need one).
 
 use std::path::Path;
 
@@ -239,6 +239,16 @@ pub struct Config {
     /// affects the Growing Process itself, only how long those arrows are
     /// drawn.
     pub growing_visualization_push_pull_vectors_scale: f64,
+    /// The window size, in pixels, of the Gaussian kernel Step 5's own
+    /// Gravity Direction sub-step ([`crate::step5_gravity_raster`]) smooths
+    /// its per-pixel direction field with, once gap-filling has run: a
+    /// `kernel_size x kernel_size` window (radius `(kernel_size - 1) / 2`)
+    /// centered on each pixel, standard deviation `radius / 3.0` (so the
+    /// window's own edge sits at roughly three standard deviations -- the
+    /// usual rule of thumb for how large a Gaussian window needs to be to
+    /// capture essentially all of the kernel's own mass). `1` (or `0`) turns
+    /// smoothing off outright.
+    pub gravity_gaussian_kernel_size: usize,
 }
 
 /// The keys `Config::load` requires, in the order they are checked, paired
@@ -277,11 +287,12 @@ const KEYS: &[&str] = &[
     "matching_min_force",
     "grow_time_step",
     "growing_visualization_push_pull_vectors_scale",
+    "gravity_gaussian_kernel_size",
 ];
 
 impl Config {
     /// Parses a config file: one `key = value` per line, blank lines and
-    /// lines starting with `#` ignored. All thirty-three keys are required --
+    /// lines starting with `#` ignored. All thirty-four keys are required --
     /// a config file missing one is far more likely a mistake than an
     /// intentional partial override -- and an unknown key or an unparseable
     /// value is an error naming the offending line.
@@ -364,6 +375,7 @@ impl Config {
             grow_time_step: values[&"grow_time_step"],
             growing_visualization_push_pull_vectors_scale: values
                 [&"growing_visualization_push_pull_vectors_scale"],
+            gravity_gaussian_kernel_size: values[&"gravity_gaussian_kernel_size"] as usize,
         })
     }
 }
@@ -407,6 +419,7 @@ flying_end_merge_distance = 1.0
 matching_min_force = 0.1
 grow_time_step = 1.0
 growing_visualization_push_pull_vectors_scale = 1.0
+gravity_gaussian_kernel_size = 5
 ";
 
     #[test]
@@ -437,6 +450,7 @@ growing_visualization_push_pull_vectors_scale = 1.0
         assert_eq!(config.matching_min_force, 0.1);
         assert_eq!(config.grow_time_step, 1.0);
         assert_eq!(config.growing_visualization_push_pull_vectors_scale, 1.0);
+        assert_eq!(config.gravity_gaussian_kernel_size, 5);
     }
 
     #[test]

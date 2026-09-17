@@ -317,6 +317,7 @@ mod tests {
             matching_min_force: 0.0,
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
+            gravity_gaussian_kernel_size: 5,
         }
     }
 
