@@ -24,10 +24,13 @@ use std::path::Path;
 use geo::Coord;
 use tiff::encoder::colortype::Gray32Float;
 use tiff::encoder::TiffEncoder;
+use tiff::tags::Tag;
 
 use crate::contour_raster::{ContourRaster, StepHit, CONTOUR_0_MATRIX_VALUE, OUT_OF_BOUND};
 use crate::contours_to_raster_config::Config;
+use crate::geotiff;
 use crate::gravity_model::{contour_gravity_side, Contour};
+use crate::map::Georeferencing;
 use crate::step3_rain_drop::placed_sources;
 use crate::step5_gravity_raster::GravityRaster;
 
@@ -443,14 +446,38 @@ fn count_defined(accum: &[Vec<Accum>], in_bound: &[Vec<bool>]) -> u64 {
     n
 }
 
+/// GeoTIFF's own `ModelTransformationTag`/`GeoKeyDirectoryTag`/`GDAL_NODATA`
+/// tag numbers -- none of them baseline TIFF tags the `tiff` crate already
+/// knows by name, so every one goes through `Tag::Unknown` (see
+/// `crate::geotiff`'s own doc comment for why nothing else builds one for
+/// us).
+const MODEL_TRANSFORMATION_TAG: u16 = 34264;
+const GEO_KEY_DIRECTORY_TAG: u16 = 34735;
+const GDAL_NODATA_TAG: u16 = 42113;
+
 /// Writes `e2v` as a single-band 32-bit float TIFF -- the elevation value,
 /// up to a constant (`Contours-to-Raster.md`'s own opening line), for every
 /// pixel that has one; `f32::NAN` for a pixel that never got one (always an
 /// out-of-bound pixel, only ever a genuinely unreachable in-bound pocket
-/// otherwise). No georeferencing tags: nothing else in this crate carries a
-/// full georeferenced transform either (see `contour_geometry::meters_per_mm`'s
-/// own note on why).
-pub fn write_tiff(e2v: &ElevationRaster, path: &Path) -> Result<(), String> {
+/// otherwise), also declared as this file's own `GDAL_NODATA` value so a GIS
+/// tool doesn't have to guess.
+///
+/// `origin`/`px_size` are the same `ContourRaster` fields `e2v` was resolved
+/// against (`raster.origin`, `raster.px_size`); `georeferencing` is the
+/// source map's own [`Georeferencing`], if it has one. Real GeoTIFF tags
+/// (see `crate::geotiff`) are only ever written when `georeferencing` is
+/// `Some` *and* names a real projected CRS (`epsg != 0`) -- a map with no
+/// georeferencing at all, or one whose own `<projected_crs>` names none (a
+/// `"Local"` CRS, `xml_writer.rs`'s own default for a map drawn on no real
+/// ground), falls back to exactly the plain, tagless TIFF this function
+/// always used to write, since there is no real-world place left to put it.
+pub fn write_tiff(
+    e2v: &ElevationRaster,
+    origin: Coord<f64>,
+    px_size: f64,
+    georeferencing: Option<&Georeferencing>,
+    path: &Path,
+) -> Result<(), String> {
     let mut data = Vec::with_capacity(e2v.width * e2v.height);
     for y in 0..e2v.height {
         for x in 0..e2v.width {
@@ -462,9 +489,42 @@ pub fn write_tiff(e2v: &ElevationRaster, path: &Path) -> Result<(), String> {
         std::fs::File::create(path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     let mut encoder = TiffEncoder::new(BufWriter::new(file))
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    let image = encoder
+    let mut image = encoder
         .new_image::<Gray32Float>(e2v.width as u32, e2v.height as u32)
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+
+    image
+        .encoder()
+        .write_tag(Tag::Unknown(GDAL_NODATA_TAG), "nan")
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+
+    if let Some(georef) = georeferencing {
+        if let Some(transform) = geotiff::model_transformation(georef, origin, px_size) {
+            match u16::try_from(georef.epsg) {
+                Ok(epsg) => {
+                    image
+                        .encoder()
+                        .write_tag(Tag::Unknown(MODEL_TRANSFORMATION_TAG), &transform[..])
+                        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                    image
+                        .encoder()
+                        .write_tag(
+                            Tag::Unknown(GEO_KEY_DIRECTORY_TAG),
+                            &geotiff::geo_key_directory(epsg)[..],
+                        )
+                        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                }
+                Err(_) => {
+                    // An EPSG code past u16::MAX can't fit a plain SHORT
+                    // GeoKey value -- vanishingly unlikely for any real
+                    // projected CRS a map would actually use, so this is
+                    // simply left ungeoreferenced rather than worth a
+                    // GeoDoubleParamsTag indirection just for it.
+                }
+            }
+        }
+    }
+
     image
         .write_data(&data)
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
@@ -1055,5 +1115,85 @@ mod tests {
         // must have reached (nothing else claims it), so it must come out
         // black.
         assert_eq!(&buf[0..3], &[0, 0, 0]);
+    }
+
+    fn tiny_e2v() -> ElevationRaster {
+        ElevationRaster {
+            grid: vec![vec![Some(1.0), Some(2.0)], vec![Some(3.0), None]],
+            width: 2,
+            height: 2,
+        }
+    }
+
+    #[test]
+    fn write_tiff_without_georeferencing_writes_no_geo_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("elevation.tif");
+        write_tiff(&tiny_e2v(), c(0.0, 0.0), 1.0, None, &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut decoder = tiff::decoder::Decoder::new(file).unwrap();
+        assert!(decoder
+            .find_tag(Tag::Unknown(GEO_KEY_DIRECTORY_TAG))
+            .unwrap()
+            .is_none());
+        assert!(decoder
+            .find_tag(Tag::Unknown(MODEL_TRANSFORMATION_TAG))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            decoder.get_tag_ascii_string(Tag::Unknown(GDAL_NODATA_TAG)).unwrap(),
+            "nan"
+        );
+    }
+
+    #[test]
+    fn write_tiff_without_a_real_crs_falls_back_to_no_geo_tags() {
+        // `epsg == 0` -- a `<projected_crs>` naming no real CRS
+        // (`xml_writer.rs`'s own "Local" default) -- must fall back exactly
+        // like `georeferencing: None` above, not write a bogus GeoKey
+        // directory with a meaningless CRS code of 0.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("elevation.tif");
+        let georef = Georeferencing::default(); // epsg == 0
+        write_tiff(&tiny_e2v(), c(0.0, 0.0), 1.0, Some(&georef), &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut decoder = tiff::decoder::Decoder::new(file).unwrap();
+        assert!(decoder
+            .find_tag(Tag::Unknown(GEO_KEY_DIRECTORY_TAG))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn write_tiff_with_georeferencing_writes_the_expected_geo_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("elevation.tif");
+        let georef = Georeferencing {
+            scale: 15000,
+            epsg: 3006,
+            ref_point_x: 322500.0,
+            ref_point_y: 6397500.0,
+            grivation: 7.1,
+            grivation_specified: true,
+            auxiliary_scale_factor: 1.000014,
+        };
+        let origin = c(2252.39, -2312.17);
+        let px_size = 1.0;
+        write_tiff(&tiny_e2v(), origin, px_size, Some(&georef), &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut decoder = tiff::decoder::Decoder::new(file).unwrap();
+        let keys = decoder.get_tag_u16_vec(Tag::Unknown(GEO_KEY_DIRECTORY_TAG)).unwrap();
+        assert_eq!(keys, geotiff::geo_key_directory(3006));
+
+        let transform = decoder.get_tag_f64_vec(Tag::Unknown(MODEL_TRANSFORMATION_TAG)).unwrap();
+        let expected = geotiff::model_transformation(&georef, origin, px_size).unwrap();
+        assert_eq!(transform, expected);
+        assert_eq!(
+            decoder.get_tag_ascii_string(Tag::Unknown(GDAL_NODATA_TAG)).unwrap(),
+            "nan"
+        );
     }
 }

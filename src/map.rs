@@ -1049,7 +1049,7 @@ pub fn symbol_leaves<'m>(symbol: &'m Symbol, map: &'m Map, out: &mut Vec<&'m Sym
 /// drawn on no ground at all still carries a scale. What makes it a
 /// georeference is the projected CRS — [`epsg`](Self::epsg) and the reference
 /// point in it.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Georeferencing {
     /// The map scale: 15000 for a 1:15000 map.
     pub scale: i32,
@@ -1067,6 +1067,28 @@ pub struct Georeferencing {
     /// undeclared is not a map declared to be unrotated, and anything
     /// solving a georeference has to know which it is looking at.
     pub grivation_specified: bool,
+    /// The combined ground-to-grid scale factor (Mapper's own
+    /// `combined_scale_factor`: a projection's grid scale factor times the
+    /// elevation/auxiliary scale factor) -- only the latter is ever actually
+    /// stored in the file, as `<georeferencing auxiliary_scale_factor="…">`,
+    /// so this is that value alone. `1.0` (the multiplicative identity, not
+    /// `f64::default()`'s `0.0`) where the file names none -- which is why
+    /// this struct's own `Default` is hand-written rather than derived.
+    pub auxiliary_scale_factor: f64,
+}
+
+impl Default for Georeferencing {
+    fn default() -> Self {
+        Georeferencing {
+            scale: 0,
+            epsg: 0,
+            ref_point_x: 0.0,
+            ref_point_y: 0.0,
+            grivation: 0.0,
+            grivation_specified: false,
+            auxiliary_scale_factor: 1.0,
+        }
+    }
 }
 
 /// A map: colors, symbols, and the objects of all map parts.

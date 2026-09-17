@@ -377,6 +377,7 @@ impl<'a> XmlMapReader<'a> {
             scale: attr_int(start, "scale", 0),
             grivation: attr_double(start, "grivation", 0.0),
             grivation_specified: has_attr(start, "grivation"),
+            auxiliary_scale_factor: attr_double(start, "auxiliary_scale_factor", 1.0),
             ..Default::default()
         };
 

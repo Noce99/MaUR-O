@@ -125,6 +125,7 @@ fn a_georeferenced_map_says_where_it_is_and_which_way_it_points() {
             ref_point_y: 6397500.0,
             grivation: 7.1,
             grivation_specified: true,
+            auxiliary_scale_factor: 1.0,
         })
     );
     assert_eq!(map.symbol_set.as_deref(), Some("ISOM 2017-2"));

@@ -428,8 +428,14 @@ fn run() -> Result<(), (ExitCode, String)> {
             format!("cannot make {}: {e}", run_dir.display()),
         )
     })?;
-    step5_elevation_raster::write_tiff(&step5.e2v, &output_path)
-        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+    step5_elevation_raster::write_tiff(
+        &step5.e2v,
+        step1.raster.origin,
+        config.rasterization_px_size,
+        map.georeferencing.as_ref(),
+        &output_path,
+    )
+    .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     if args.create_svg {
         step5_elevation_raster::write_colored_png(&step5.e2v, &elevation_png_path(&output_path))
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;

@@ -89,6 +89,7 @@ pub mod course;
 pub mod dem;
 pub mod differences;
 pub mod geometry;
+pub mod geotiff;
 pub mod gravity_model;
 pub mod map;
 pub mod naming;
