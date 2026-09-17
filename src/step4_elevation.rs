@@ -71,9 +71,12 @@ impl Tree {
 
     /// Whether `node` is a descendant of `ancestor` -- walks `node`'s own
     /// parent chain looking for `ancestor`. Used to guard the one case the
-    /// doc says "should not be possible": evicting `ancestor`'s subtree while
-    /// re-parenting it under `node` would otherwise remove `node` itself out
-    /// from under the very proliferation that is currently running on it.
+    /// doc says should "ordinarily" not be possible: evicting `ancestor`'s
+    /// subtree while re-parenting it under `node` would otherwise remove
+    /// `node` itself out from under the very proliferation that is currently
+    /// running on it. A hole Step 1's Growing Process left unfilled can still
+    /// make this happen in practice, in which case [`elevation_proliferation`]
+    /// voids the eviction and warns instead of crashing.
     fn is_descendant(&self, node: usize, ancestor: usize) -> bool {
         let mut current = self.nodes.get(&node).and_then(|n| n.parent);
         while let Some(p) = current {
@@ -184,25 +187,13 @@ fn expected_elevation_height(c_height: f64, accordance: bool, anti: bool) -> f64
     }
 }
 
-/// An [`elevation_proliferation`] failure: the doc's own "should not be
-/// possible" message, plus the exact Hot (Anti) Rain Drop path that
-/// triggered it (source to the fatal evaporation), so `--create_svg`'s own
-/// `07_<map_name>_step4.svg` can draw exactly which drop caused the crash --
-/// there is no other way to recover a specific drop's path after the fact,
-/// once `resolve` has moved on to reporting the failure.
-#[derive(Debug)]
-struct ProliferationError {
-    message: String,
-    drop_path: Vec<Coord<f64>>,
-}
-
 /// One hit contour's own accumulated vote, across every source in a single
 /// [`elevation_proliferation`] call that reached it: summed confidence
 /// weight on each side (accordance/discordance -- see [`accordance`]), plus
-/// each side's own single most-confident drop path, kept only so
-/// `--create_svg`'s own diagnostics have a real, representative drop to draw
-/// if this hit contour's own decision ends up triggering
-/// [`ProliferationError`].
+/// each side's own single most-confident drop path, kept so a warning this
+/// vote goes on to raise (a near tie, or a voided cycle-forming eviction --
+/// see [`elevation_proliferation`]) can name a real, representative landing
+/// point rather than just the two contours' own indices.
 #[derive(Default)]
 struct HitVote {
     accordance_weight: f64,
@@ -283,12 +274,14 @@ fn decide_vote(vote: &HitVote, config: &Config) -> Option<VoteVerdict> {
 /// A single near-perpendicular drop -- exactly the case where the raw
 /// accordance/discordance sign is most sensitive to noise -- can then no
 /// longer flip a contour's own elevation on its own. Once decided, the doc's
-/// own three cases (Step 4) apply exactly as before. Returns the number of
+/// own three cases (Step 4) apply exactly as before, except when winning an
+/// eviction would require evicting `c_idx`'s own ancestor -- `c_idx` already
+/// a descendant of the contour it just "won" against -- in which case the
+/// eviction is voided (that contour is left exactly as it was) and a warning
+/// is raised instead, rather than corrupting `tree`. Returns the number of
 /// distinct contours newly added (or evicted and re-parented) as children of
-/// `c_idx`, or `Err` if the doc's own "should not be possible" invariant
-/// (`c_idx` already a descendant of the contour it just evicted) is ever
-/// violated. `warnings` collects one entry per contour whose own vote this
-/// call decided despite a too-close margin.
+/// `c_idx`. `warnings` collects one entry per contour whose own vote this
+/// call decided despite a too-close margin, plus one per voided eviction.
 fn elevation_proliferation(
     c_idx: usize,
     anti: bool,
@@ -297,7 +290,7 @@ fn elevation_proliferation(
     tree: &mut Tree,
     config: &Config,
     warnings: &mut Vec<String>,
-) -> Result<u64, ProliferationError> {
+) -> u64 {
     let pass_name = if anti {
         "Anti Elevation Proliferation"
     } else {
@@ -365,25 +358,28 @@ fn elevation_proliferation(
             }
             Some(existing) if expected.abs() > existing.abs() => {
                 if tree.is_descendant(c_idx, hit_idx) {
+                    // A hole Step 1's Growing Process left unfilled let this
+                    // drop reach back up to its own ancestor -- evicting
+                    // hit_idx's subtree would also remove c_idx, the very
+                    // contour this call is running on. Void the eviction
+                    // (hit_idx is left exactly as it was) and warn instead of
+                    // corrupting the tree.
                     let at = representative_path.last().copied().unwrap_or(Coord { x: f64::NAN, y: f64::NAN });
-                    return Err(ProliferationError {
-                        message: format!(
-                            "Step 4: {pass_name} from contour {c_idx} (elevation_height \
-                             {c_height}) decided contour {hit_idx} (currently elevation_height \
-                             {existing}) should be in {acc_word} with its own gravity direction \
-                             (weighted vote: accordance {:.2} vs discordance {:.2}, most \
-                             confident drop landing at ({:.2}, {:.2})), computing an expected \
-                             elevation_height of {expected} for it. abs({expected}) > \
-                             abs({existing}), so {hit_idx} would normally be evicted (along with \
-                             its own subtree) and re-parented under {c_idx} at the new value -- \
-                             but {c_idx} is itself already a descendant of {hit_idx} in T, so \
-                             evicting {hit_idx}'s subtree would also remove {c_idx}, the very \
-                             contour this {pass_name} call is running on. \
-                             Contours-to-Raster.md's Step 4 assumes this cannot happen.",
-                            vote.accordance_weight, vote.discordance_weight, at.x, at.y,
-                        ),
-                        drop_path: representative_path.to_vec(),
-                    });
+                    warnings.push(format!(
+                        "Step 4: {pass_name} from contour {c_idx} (elevation_height {c_height}) \
+                         decided contour {hit_idx} (currently elevation_height {existing}) \
+                         should be in {acc_word} with its own gravity direction (weighted vote: \
+                         accordance {:.2} vs discordance {:.2}, most confident drop landing at \
+                         ({:.2}, {:.2})), computing an expected elevation_height of {expected} \
+                         for it. abs({expected}) > abs({existing}), so {hit_idx} would normally \
+                         be evicted (along with its own subtree) and re-parented under {c_idx} \
+                         at the new value -- but {c_idx} is itself already a descendant of \
+                         {hit_idx} in T, so evicting {hit_idx}'s subtree would also remove \
+                         {c_idx}, the very contour this {pass_name} call is running on. Voiding \
+                         the eviction: contour {hit_idx} keeps its current elevation_height.",
+                        vote.accordance_weight, vote.discordance_weight, at.x, at.y,
+                    ));
+                    continue;
                 }
                 for removed in tree.evict_subtree(hit_idx) {
                     contours[removed].elevation_height = None;
@@ -396,7 +392,7 @@ fn elevation_proliferation(
             Some(_) => {} // abs(expected) <= abs(existing): no-op
         }
     }
-    Ok(children_added)
+    children_added
 }
 
 /// What Step 4 resolved: how many contours got an `elevation_height`, one
@@ -409,11 +405,9 @@ pub struct Step4Result {
     pub resolved: u64,
     /// One warning per contour that ended Step 4 without an
     /// `elevation_height`, naming its own length in meters, the same
-    /// convention Step 3 uses for a contour it drops. Empty if [`error`] is
-    /// `Some` -- the run was cut short, so a contour still undefined at that
-    /// point is not yet a genuine Step 4 dead end, just unreached so far.
-    ///
-    /// [`error`]: Step4Result::error
+    /// convention Step 3 uses for a contour it drops, plus one per near-tied
+    /// vote and one per voided cycle-forming eviction (see
+    /// [`elevation_proliferation`]).
     pub warnings: Vec<String>,
     /// Every `(parent_contour_idx, child_contour_idx)` edge of `T`, as far as
     /// it got built.
@@ -422,22 +416,6 @@ pub struct Step4Result {
     /// `T` whose Elevation and Anti Elevation Proliferation both added zero
     /// children.
     pub dead_ends: Vec<usize>,
-    /// `Some` only if the doc's own "should not be possible" invariant (Step
-    /// 4, point 3: a contour found to be its own ancestor in `T`) was
-    /// violated -- every other field above still reports `T` exactly as far
-    /// as it got before that happened, so `--create_svg`'s own
-    /// `07_<map_name>_step4.svg` can still be inspected, but the run as a
-    /// whole should be treated as failed.
-    pub error: Option<String>,
-    /// The exact Hot (Anti) Rain Drop path (source to evaporation) that
-    /// triggered [`error`], if any -- empty whenever `error` is `None`. Lets
-    /// `--create_svg`'s own `07_<map_name>_step4.svg` draw exactly which
-    /// drop caused the crash, rather than leaving whoever is debugging it to
-    /// re-derive the drop from the error message's own contour indices and
-    /// coordinates by hand.
-    ///
-    /// [`error`]: Step4Result::error
-    pub error_drop_path: Vec<Coord<f64>>,
 }
 
 /// Runs Step 4: erases the raster footprint of any contour Step 3 already
@@ -446,12 +424,6 @@ pub struct Step4Result {
 /// contour at height `0` by repeatedly proliferating whichever leaf
 /// [`next_proliferator_selection`] returns, and reports whatever contour is
 /// still without an `elevation_height` once no leaf is left to proliferate.
-///
-/// Always returns a [`Step4Result`], even when the doc's own "should not be
-/// possible" invariant is violated ([`Step4Result::error`]) -- the caller
-/// decides whether to still write `--create_svg`'s own diagnostics for
-/// whatever of `T` was built before stopping, and/or to treat the run as
-/// failed, rather than losing that state to an immediate `Err`.
 pub fn resolve(contours: &mut [Contour], raster: &mut ContourRaster, config: &Config) -> Step4Result {
     for (idx, c) in contours.iter().enumerate() {
         if c.lwg.gravity_dx.is_none() {
@@ -468,36 +440,16 @@ pub fn resolve(contours: &mut [Contour], raster: &mut ContourRaster, config: &Co
             warnings,
             tree_edges: Vec::new(),
             dead_ends: Vec::new(),
-            error: None,
-            error_drop_path: Vec::new(),
         };
     };
     tree.insert_root(root_idx);
     contours[root_idx].elevation_height = Some(0.0);
 
-    let mut error = None;
-    let mut error_drop_path = Vec::new();
     while let Some(c_idx) = next_proliferator_selection(&tree, contours) {
-        let rain_children = match elevation_proliferation(
-            c_idx, false, contours, raster, &mut tree, config, &mut warnings,
-        ) {
-            Ok(n) => n,
-            Err(e) => {
-                error = Some(e.message);
-                error_drop_path = e.drop_path;
-                break;
-            }
-        };
-        let anti_children = match elevation_proliferation(
-            c_idx, true, contours, raster, &mut tree, config, &mut warnings,
-        ) {
-            Ok(n) => n,
-            Err(e) => {
-                error = Some(e.message);
-                error_drop_path = e.drop_path;
-                break;
-            }
-        };
+        let rain_children =
+            elevation_proliferation(c_idx, false, contours, raster, &mut tree, config, &mut warnings);
+        let anti_children =
+            elevation_proliferation(c_idx, true, contours, raster, &mut tree, config, &mut warnings);
         if rain_children == 0 && anti_children == 0 {
             contours[c_idx].empty_progeny = true;
         }
@@ -510,7 +462,7 @@ pub fn resolve(contours: &mut [Contour], raster: &mut ContourRaster, config: &Co
         }
         if c.elevation_height.is_some() {
             resolved += 1;
-        } else if error.is_none() {
+        } else {
             let length_m = Euclidean.length(&c.lwg.ls);
             warnings.push(format!(
                 "contour {idx} ({length_m:.1}m long) still has no elevation height after Step 4; \
@@ -529,8 +481,6 @@ pub fn resolve(contours: &mut [Contour], raster: &mut ContourRaster, config: &Co
             .filter(|(_, c)| c.empty_progeny)
             .map(|(i, _)| i)
             .collect(),
-        error,
-        error_drop_path,
     }
 }
 
@@ -882,8 +832,7 @@ mod tests {
             &mut tree,
             &config,
             &mut warnings,
-        )
-        .unwrap();
+        );
 
         assert_eq!(children_added, 1);
         assert_eq!(
@@ -907,12 +856,13 @@ mod tests {
     }
 
     #[test]
-    fn c_descendant_of_ac_is_rejected_instead_of_corrupting_the_tree() {
+    fn c_descendant_of_ac_voids_the_eviction_and_warns_instead_of_corrupting_the_tree() {
         // AC (index 0) is C's own ancestor in T (AC -> C). If C's own drop
         // now reaches back to AC with a stronger competing height, evicting
         // AC's subtree would also remove C -- the very contour currently
-        // being proliferated -- which the doc says should not be possible;
-        // this must be rejected instead of silently corrupting T.
+        // being proliferated -- which the doc says should ordinarily not be
+        // possible; this must be voided (AC left untouched) and warned about
+        // instead of corrupting T.
         let mut contours = vec![
             contour_with_gravity(5.0, -1.0), // AC
             contour_with_gravity(0.0, -1.0), // C, AC's own child
@@ -930,7 +880,7 @@ mod tests {
         // Anti Elevation Proliferation: C's own drop travels uphill, toward
         // AC sitting above it.
         let mut warnings = Vec::new();
-        let err = elevation_proliferation(
+        let children_added = elevation_proliferation(
             1,
             true,
             &mut contours,
@@ -938,53 +888,43 @@ mod tests {
             &mut tree,
             &config,
             &mut warnings,
-        )
-        .unwrap_err();
-        // The message must be debuggable on its own: which pass, which two
+        );
+
+        assert_eq!(children_added, 0, "the voided eviction adds no child");
+        assert_eq!(
+            contours[0].elevation_height,
+            Some(-1.0),
+            "AC must be left exactly as it was, not evicted or re-parented"
+        );
+        assert_eq!(tree.depth_of(0), Some(0), "AC is still T's own root");
+        assert_eq!(tree.depth_of(1), Some(1), "C is still AC's own child");
+
+        // The warning must be debuggable on its own: which pass, which two
         // contours, their elevation_height values, the accordance/discordance
         // verdict, and the expected value that triggered the eviction
         // attempt -- not just "1" and "0" somewhere in the text.
+        assert_eq!(warnings.len(), 1, "expected exactly one warning: {warnings:?}");
+        let warning = &warnings[0];
         assert!(
-            err.message.contains("Anti Elevation Proliferation from contour 1"),
-            "expected the error to name the pass and the proliferating contour: {}",
-            err.message
+            warning.contains("Anti Elevation Proliferation from contour 1"),
+            "expected the warning to name the pass and the proliferating contour: {warning}"
         );
         assert!(
-            err.message.contains("elevation_height -100"),
-            "expected the error to name C's own elevation_height: {}",
-            err.message
+            warning.contains("elevation_height -100"),
+            "expected the warning to name C's own elevation_height: {warning}"
         );
         assert!(
-            err.message.contains("contour 0 (currently elevation_height -1)"),
-            "expected the error to name AC and its own current elevation_height: {}",
-            err.message
+            warning.contains("contour 0 (currently elevation_height -1)"),
+            "expected the warning to name AC and its own current elevation_height: {warning}"
         );
         assert!(
-            err.message.contains("discordance"),
-            "expected the error to name the accordance/discordance verdict: {}",
-            err.message
+            warning.contains("discordance"),
+            "expected the warning to name the accordance/discordance verdict: {warning}"
         );
         assert!(
-            err.message.contains("expected elevation_height of -99"),
-            "expected the error to name the computed expected value that triggered the \
-             eviction attempt: {}",
-            err.message
-        );
-        assert!(
-            err.drop_path.len() >= 2,
-            "expected the exact drop path that triggered the crash to be reported too, got \
-             {:?}",
-            err.drop_path
-        );
-        assert_eq!(
-            err.drop_path.first().unwrap().y,
-            0.0,
-            "the path should start on C's own line (y=0)"
-        );
-        assert!(
-            (err.drop_path.last().unwrap().y - 5.0).abs() < 1e-9,
-            "the path should end right where it hit AC's own line (y=5), got {:?}",
-            err.drop_path.last()
+            warning.contains("expected elevation_height of -99"),
+            "expected the warning to name the computed expected value that triggered the \
+             eviction attempt: {warning}"
         );
     }
 

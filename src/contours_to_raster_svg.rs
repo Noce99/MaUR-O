@@ -191,18 +191,6 @@ const MARGIN: f32 = 2.0;
 /// ([`LINEARIZED_CONTOUR_STROKE_WIDTH`]), so the gradient color reads clearly
 /// on top of it.
 const STEP4_CONTOUR_STROKE_WIDTH: f64 = LINEARIZED_CONTOUR_STROKE_WIDTH as f64 * 2.0;
-/// `07_..._step4.svg`'s own color for the one Hot (Anti) Rain Drop path that
-/// triggered `step4.error`, if any (`Step4Result::error_drop_path`) --
-/// bright orange, unlike anything else this file draws, so it stands out
-/// immediately against the gradient-colored contours underneath it.
-const STEP4_ERROR_DROP_COLOR: &str = "#ff8c00";
-/// The error drop path's own stroke width: thicker than a contour's own
-/// ([`STEP4_CONTOUR_STROKE_WIDTH`]), since this is the one thing a crashed
-/// run most needs to find at a glance.
-const STEP4_ERROR_DROP_STROKE_WIDTH: f64 = STEP4_CONTOUR_STROKE_WIDTH * 1.5;
-/// Radius of the two end markers drawn on the error drop path: a hollow
-/// circle at its own source, a filled one at the fatal evaporation point.
-const STEP4_ERROR_DROP_DOT_RADIUS: f64 = 1.0;
 /// `07_..._step4.svg`'s own numeric elevation label font size, in ground
 /// meters (matching every other size constant in this file).
 const STEP4_LABEL_FONT_SIZE: f64 = 1.5;
@@ -1342,16 +1330,11 @@ fn contour_label_point(ls: &LineString<f64>) -> Option<Point<f64>> {
 /// contour that ended Step 4 without an `elevation_height`) and a `<text>`
 /// label at its own [`contour_label_point`] naming its own index into
 /// `contours` -- `"<idx>: <height>"` for a resolved one, just `"<idx>"`
-/// (still visible, so any contour named in a warning or error, like Step 4's
-/// own "contour N is a descendant of contour M", can actually be found in
-/// the picture) for one that isn't; one gray `<line>` per
-/// `step4.tree_edges` entry, parent's label point to child's; one black
-/// `<rect>` per `step4.dead_ends` entry, centered on that contour's own
-/// label point; and, drawn last so it's the first thing to catch the eye,
-/// `step4.error_drop_path` itself -- the exact Hot (Anti) Rain Drop that
-/// triggered `step4.error`, if any -- as a thick orange line with a hollow
-/// circle at its own source and a filled one at the fatal evaporation
-/// point.
+/// (still visible, so any contour named in a warning, like Step 4's own
+/// "contour N is a descendant of contour M", can actually be found in the
+/// picture) for one that isn't; one gray `<line>` per `step4.tree_edges`
+/// entry, parent's label point to child's; and one black `<rect>` per
+/// `step4.dead_ends` entry, centered on that contour's own label point.
 fn step4_overlay_svg(contours: &[Contour], step4: &Step4Result) -> String {
     let (min_h, max_h) = contours
         .iter()
@@ -1423,34 +1406,6 @@ fn step4_overlay_svg(contours: &[Contour], step4: &Step4Result) -> String {
         }
     }
 
-    // The one Hot (Anti) Rain Drop that triggered `step4.error`, if any --
-    // drawn last, on top of every contour/edge/marker above, so it's the
-    // first thing that stands out on a crashed run's own picture.
-    if step4.error_drop_path.len() >= 2 {
-        let points: String = step4
-            .error_drop_path
-            .iter()
-            .map(|p| format!("{},{}", p.x, p.y))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let _ = write!(
-            out,
-            r#"<polyline points="{points}" fill="none" stroke="{STEP4_ERROR_DROP_COLOR}" stroke-width="{STEP4_ERROR_DROP_STROKE_WIDTH}"/>"#
-        );
-        let source = step4.error_drop_path[0];
-        let evaporation = *step4.error_drop_path.last().unwrap();
-        let _ = write!(
-            out,
-            r#"<circle cx="{}" cy="{}" r="{STEP4_ERROR_DROP_DOT_RADIUS}" fill="none" stroke="{STEP4_ERROR_DROP_COLOR}" stroke-width="{STEP4_CONTOUR_STROKE_WIDTH}"/>"#,
-            source.x, source.y,
-        );
-        let _ = write!(
-            out,
-            r#"<circle cx="{}" cy="{}" r="{STEP4_ERROR_DROP_DOT_RADIUS}" fill="{STEP4_ERROR_DROP_COLOR}"/>"#,
-            evaporation.x, evaporation.y,
-        );
-    }
-
     out
 }
 
@@ -1460,9 +1415,8 @@ fn step4_overlay_svg(contours: &[Contour], step4: &Step4Result) -> String {
 /// every contour redrawn on top per [`step4_overlay_svg`]: gradient-colored
 /// by `elevation_height` (blue lowest to red highest) with a numeric label,
 /// gray for one Step 4 leaves without a height; a gray line per `T` edge
-/// (parent centroid to child centroid); a black square on every
-/// `empty_progeny` dead end; and, if `step4.error` is `Some`, the exact drop
-/// that triggered it, in orange, on top of everything else.
+/// (parent centroid to child centroid); and a black square on every
+/// `empty_progeny` dead end.
 pub fn write_step4_svg(
     path: &Path,
     result: &Step1Result,
@@ -2518,8 +2472,6 @@ mod tests {
             warnings: Vec::new(),
             tree_edges: Vec::new(),
             dead_ends: Vec::new(),
-            error: None,
-            error_drop_path: Vec::new(),
         };
         write_step4_svg(&path, &result, &step4).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -2583,8 +2535,6 @@ mod tests {
             warnings: vec!["contour 1 (10.0m long) still has no elevation height".to_string()],
             tree_edges: Vec::new(),
             dead_ends: vec![0],
-            error: None,
-            error_drop_path: Vec::new(),
         };
         write_step4_svg(&path, &result, &step4).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -2596,75 +2546,11 @@ mod tests {
         );
         // Both contours get a label -- the resolved one names its own index
         // and height, the undefined one just its own bare index, so either
-        // can still be found in the picture from a warning or error naming
-        // it by index alone.
+        // can still be found in the picture from a warning naming it by
+        // index alone.
         assert_eq!(count(&text, "<text"), 2);
         assert!(text.contains(">0: 0</text>"), "resolved contour 0: {text}");
         assert!(text.contains(">1</text>"), "undefined contour 1, bare index: {text}");
         assert_eq!(count(&text, "<rect"), 1, "one dead end marker");
-    }
-
-    #[test]
-    fn step4_svg_draws_the_error_drop_path_on_top_when_step4_errored() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step4.svg");
-        let mut result = sample_result();
-        result.contours[0].elevation_height = Some(0.0);
-        let step4 = Step4Result {
-            resolved: 1,
-            warnings: Vec::new(),
-            tree_edges: Vec::new(),
-            dead_ends: Vec::new(),
-            error: Some("Step 4: contour 0 is a descendant of contour 0 (test fixture)".into()),
-            error_drop_path: vec![c(0.0, 0.0), c(1.0, 0.5), c(2.0, 1.0)],
-        };
-        write_step4_svg(&path, &result, &step4).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-
-        assert_eq!(
-            count(&text, &format!(r#"stroke="{STEP4_ERROR_DROP_COLOR}""#)),
-            2,
-            "expected the path itself plus the hollow source marker, both stroked in orange"
-        );
-        assert_eq!(
-            count(&text, &format!(r#"fill="{STEP4_ERROR_DROP_COLOR}""#)),
-            1,
-            "expected exactly one filled marker, at the fatal evaporation point"
-        );
-        assert!(
-            text.contains("0,0 1,0.5 2,1"),
-            "expected the error drop's own path points drawn as one polyline: {text}"
-        );
-
-        // The one resolved contour (height 0, the only height on the map)
-        // falls back to the gradient's own midpoint color, "#800080" -- its
-        // own polyline must come before the error drop path's own, so the
-        // orange path paints on top of it rather than the other way around.
-        let contour_pos = text.find("#800080").expect("resolved contour missing");
-        let error_pos = text
-            .find(STEP4_ERROR_DROP_COLOR)
-            .expect("error drop path missing");
-        assert!(
-            error_pos > contour_pos,
-            "the error drop path must be drawn last, on top of every contour"
-        );
-    }
-
-    #[test]
-    fn step4_svg_draws_no_error_drop_path_when_step4_did_not_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step4.svg");
-        let result = sample_result();
-        let step4 = Step4Result {
-            resolved: 0,
-            warnings: Vec::new(),
-            tree_edges: Vec::new(),
-            dead_ends: Vec::new(),
-            error: None,
-            error_drop_path: Vec::new(),
-        };
-        write_step4_svg(&path, &result, &step4).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(count(&text, STEP4_ERROR_DROP_COLOR), 0);
     }
 }

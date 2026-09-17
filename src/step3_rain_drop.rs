@@ -663,14 +663,14 @@ fn simulate_one_drop(
 /// `source_contour_idx` (its own source contour) from counting as a hit, and
 /// returns which contour it evaporated on, where, and its own whole path
 /// (source to evaporation) -- kept, unlike every other caller of
-/// [`simulate_one_drop`], because Step 4's own "should not be possible" error
-/// draws the exact drop that triggered it into `--create_svg`'s own
-/// `07_<map_name>_step4.svg`, and there is no other way to recover a
-/// specific drop's path after the fact. `None` for a drop that instead
-/// evaporates on a high density or out-of-bound pixel -- a non-operation,
-/// per the doc (Step 4). Reuses [`simulate_one_drop`]'s own physics and
-/// discards everything else about its trace; `contours` is never touched (a
-/// Hot drop never votes), so an empty slice is passed.
+/// [`simulate_one_drop`], so a near-tied vote or a voided cycle-forming
+/// eviction can name a real, representative landing point in its own
+/// warning, and there is no other way to recover a specific drop's path
+/// after the fact. `None` for a drop that instead evaporates on a high
+/// density or out-of-bound pixel -- a non-operation, per the doc (Step 4).
+/// Reuses [`simulate_one_drop`]'s own physics and discards everything else
+/// about its trace; `contours` is never touched (a Hot drop never votes), so
+/// an empty slice is passed.
 pub(crate) fn hot_drop_evaporation_contour(
     raster: &mut ContourRaster,
     source_contour_idx: u64,

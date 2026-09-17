@@ -360,11 +360,6 @@ fn run() -> Result<(), (ExitCode, String)> {
         write_step3_svgs(&output_path, &step1, &empty_step3)?;
     }
 
-    // Never `Err` outright: even the doc's own "should not be possible" tree
-    // invariant violation is reported through `step4.error` instead, so
-    // whatever of T got built before that happens can still be written to
-    // --create_svg's own 07_..._step4.svg below for inspection, rather than
-    // losing that state to an immediate exit.
     let step4 = step4_elevation::resolve(&mut step1.contours, &mut step1.raster, &config);
     for warning in &step4.warnings {
         eprintln!("Warning: {warning}");
@@ -397,10 +392,6 @@ fn run() -> Result<(), (ExitCode, String)> {
             numbered_svg_path(&output_path, "07", "step4").display(),
             step_svg_path(&output_path, "final").display(),
         );
-    }
-
-    if let Some(e) = step4.error {
-        return Err((ExitCode::from(5), format!("Error: {e}")));
     }
 
     let contour_count = step1.contours.len();
