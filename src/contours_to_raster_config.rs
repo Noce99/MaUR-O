@@ -1,7 +1,7 @@
-//! The `contours_to_raster` config file: the thirty parameters
+//! The `contours_to_raster` config file: the thirty-two parameters
 //! `Contours-to-Raster.md` names, read from a small hand-rolled `key =
 //! value` format (no `serde`/`toml` dependency exists anywhere else in this
-//! crate, and one file with thirty numbers does not need one).
+//! crate, and one file with thirty-two numbers does not need one).
 
 use std::path::Path;
 
@@ -66,6 +66,24 @@ pub struct Config {
     /// How close left and right vote counts must be, as a ratio in (0, 1),
     /// before being flagged as ambiguous (Step 3, Cold-only).
     pub undefined_gravity_vote_threshold: f64,
+    /// Minimum combined confidence weight -- every Hot (Anti) Rain Drop that
+    /// hits a given contour during one Elevation/Anti Elevation
+    /// Proliferation call, each weighted by how far from perpendicular its
+    /// own direction is to the hit contour's own gravity there (`1.0`
+    /// exactly aligned/anti-aligned, `0.0` exactly perpendicular) -- before
+    /// Step 4's own vote will decide that contour's `elevation_height` at
+    /// all in this call. Below this, there simply isn't enough evidence to
+    /// trust either accordance or discordance yet, and the contour is left
+    /// undecided for a later call (a different, better-placed contour) to
+    /// resolve instead (Step 4).
+    pub elevation_vote_min_total_weight: f64,
+    /// Minimum margin, in the same confidence-weight units as
+    /// `elevation_vote_min_total_weight`, the winning side (accordance or
+    /// discordance) of Step 4's own vote must lead the losing side by.
+    /// Below this the vote is too close to call cleanly; it is still
+    /// decided (accordance wins an exact tie), but flagged with a warning
+    /// naming both weights (Step 4).
+    pub elevation_vote_min_margin: f64,
     /// The Growing Process's own preliminary Close Search pass's own
     /// "obvious match" distance, in ground meters: any two Flying Ends
     /// closer than this to each other are recorded as a match candidate
@@ -226,6 +244,8 @@ const KEYS: &[&str] = &[
     "sources_per_contour_segment",
     "rain_drop_starting_voting_hysteresis",
     "undefined_gravity_vote_threshold",
+    "elevation_vote_min_total_weight",
+    "elevation_vote_min_margin",
     "obvious_to_close_contour_distance",
     "searching_fov",
     "searching_distance",
@@ -247,7 +267,7 @@ const KEYS: &[&str] = &[
 
 impl Config {
     /// Parses a config file: one `key = value` per line, blank lines and
-    /// lines starting with `#` ignored. All thirty keys are required -- a
+    /// lines starting with `#` ignored. All thirty-two keys are required -- a
     /// config file missing one is far more likely a mistake than an
     /// intentional partial override -- and an unknown key or an unparseable
     /// value is an error naming the offending line.
@@ -309,6 +329,8 @@ impl Config {
             rain_drop_starting_voting_hysteresis: values[&"rain_drop_starting_voting_hysteresis"]
                 as u64,
             undefined_gravity_vote_threshold: values[&"undefined_gravity_vote_threshold"],
+            elevation_vote_min_total_weight: values[&"elevation_vote_min_total_weight"],
+            elevation_vote_min_margin: values[&"elevation_vote_min_margin"],
             obvious_to_close_contour_distance: values[&"obvious_to_close_contour_distance"],
             searching_fov: values[&"searching_fov"],
             searching_distance: values[&"searching_distance"],
@@ -350,6 +372,8 @@ rain_drop_step = 1.0
 sources_per_contour_segment = 3
 rain_drop_starting_voting_hysteresis = 5
 undefined_gravity_vote_threshold = 0.8
+elevation_vote_min_total_weight = 0.3
+elevation_vote_min_margin = 0.15
 obvious_to_close_contour_distance = 2.0
 searching_fov = 90.0
 searching_distance = 3.0
@@ -376,6 +400,8 @@ growing_visualization_push_pull_vectors_scale = 1.0
         assert_eq!(config.circumference_fitting_points_number, 4);
         assert_eq!(config.step2_vote_min_total_weight, 0.5);
         assert_eq!(config.step2_vote_min_margin, 0.2);
+        assert_eq!(config.elevation_vote_min_total_weight, 0.3);
+        assert_eq!(config.elevation_vote_min_margin, 0.15);
         assert_eq!(config.sources_per_contour_segment, 3);
         assert_eq!(config.obvious_to_close_contour_distance, 2.0);
         assert_eq!(config.searching_fov, 90.0);

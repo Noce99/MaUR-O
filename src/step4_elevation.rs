@@ -143,15 +143,25 @@ fn next_proliferator_selection(tree: &Tree, contours: &[Contour]) -> Option<usiz
 
 /// The doc's own accordance/discordance check (Step 4): whether `dir` (the
 /// drop's own direction of travel) agrees with `hit`'s own gravity direction
-/// at the point `at` it was hit. `None` only if `hit` somehow has no gravity
-/// yet, which should not happen in Step 4 (every contour still in play is
-/// assumed to have one by this point).
-fn accordance(hit: &LineWithGravity, at: Coord<f64>, dir: (f64, f64)) -> Option<bool> {
+/// at the point `at` it was hit, plus how confidently so, as `|cos(theta)|`
+/// between the two (both already unit vectors) -- `1.0` when `dir` is
+/// exactly aligned or anti-aligned with `hit`'s own gravity there (a
+/// confident read either way), fading to `0.0` exactly at the perpendicular
+/// case, where the sign this same dot product's own accordance verdict
+/// hinges on is most sensitive to noise. [`elevation_proliferation`] uses
+/// this as a vote's own weight, precisely so a single near-perpendicular
+/// drop can't flip a hit contour's own decision on its own (see
+/// `Contours-to-Raster.md`'s own note on why Step 4 votes rather than
+/// letting the first, or every, drop decide immediately). `None` only if
+/// `hit` somehow has no gravity yet, which should not happen in Step 4
+/// (every contour still in play is assumed to have one by this point).
+fn accordance(hit: &LineWithGravity, at: Coord<f64>, dir: (f64, f64)) -> Option<(bool, f64)> {
     let side = lwg_gravity_side(hit)?;
     let idx = nearest_index(&hit.ls, at);
     let (tf, tt) = local_tangent(&hit.ls, idx);
     let (hgx, hgy) = vector_on_side(tf, tt, side);
-    Some(dir.0 * hgx + dir.1 * hgy >= 0.0)
+    let dot = dir.0 * hgx + dir.1 * hgy;
+    Some((dot >= 0.0, dot.abs()))
 }
 
 /// The height a hit contour should get, given its source's own `c_height`
@@ -186,15 +196,99 @@ struct ProliferationError {
     drop_path: Vec<Coord<f64>>,
 }
 
+/// One hit contour's own accumulated vote, across every source in a single
+/// [`elevation_proliferation`] call that reached it: summed confidence
+/// weight on each side (accordance/discordance -- see [`accordance`]), plus
+/// each side's own single most-confident drop path, kept only so
+/// `--create_svg`'s own diagnostics have a real, representative drop to draw
+/// if this hit contour's own decision ends up triggering
+/// [`ProliferationError`].
+#[derive(Default)]
+struct HitVote {
+    accordance_weight: f64,
+    discordance_weight: f64,
+    accordance_best_weight: f64,
+    discordance_best_weight: f64,
+    accordance_path: Vec<Coord<f64>>,
+    discordance_path: Vec<Coord<f64>>,
+}
+
+impl HitVote {
+    fn add(&mut self, accordance: bool, weight: f64, path: Vec<Coord<f64>>) {
+        if accordance {
+            self.accordance_weight += weight;
+            if weight > self.accordance_best_weight {
+                self.accordance_best_weight = weight;
+                self.accordance_path = path;
+            }
+        } else {
+            self.discordance_weight += weight;
+            if weight > self.discordance_best_weight {
+                self.discordance_best_weight = weight;
+                self.discordance_path = path;
+            }
+        }
+    }
+
+    /// The single most-confident drop path on `accordance`'s own winning
+    /// side -- whichever of [`Self::accordance_path`]/[`Self::discordance_path`]
+    /// that side accumulated.
+    fn representative_path(&self, accordance: bool) -> &[Coord<f64>] {
+        if accordance {
+            &self.accordance_path
+        } else {
+            &self.discordance_path
+        }
+    }
+}
+
+/// The verdict [`elevation_proliferation`] draws from one hit contour's own
+/// accumulated [`HitVote`], or `None` if its own total weight never cleared
+/// `config.elevation_vote_min_total_weight` -- not enough evidence yet, left
+/// for a later call (a different, better-placed contour) to decide instead.
+/// `near_tie` is `true` when the margin between the two sides didn't clear
+/// `config.elevation_vote_min_margin` even though a decision was still made
+/// (accordance wins an exact tie, per `Contours-to-Raster.md`'s own note on
+/// why).
+struct VoteVerdict {
+    accordance: bool,
+    near_tie: bool,
+}
+
+fn decide_vote(vote: &HitVote, config: &Config) -> Option<VoteVerdict> {
+    let total_weight = vote.accordance_weight + vote.discordance_weight;
+    if total_weight < config.elevation_vote_min_total_weight {
+        return None;
+    }
+    let accordance = vote.accordance_weight >= vote.discordance_weight;
+    let margin = (vote.accordance_weight - vote.discordance_weight).abs();
+    Some(VoteVerdict {
+        accordance,
+        near_tie: margin < config.elevation_vote_min_margin,
+    })
+}
+
 /// **Elevation Proliferation** (`anti = false`, a Hot Rain Drop Production)
 /// or **Anti Elevation Proliferation** (`anti = true`, a Hot Anti Rain Drop
 /// Production) on `c_idx`, already a member of `tree` with a defined height:
-/// runs one Hot (Anti) Rain Drop Production from `c_idx`'s own `ls` and
-/// applies the doc's own three cases (Step 4) at every evaporation that
-/// lands on a contour -- a non-operation for one that lands on high density
-/// or out of bound instead. Returns the number of children added to `c_idx`,
-/// or `Err` if the doc's own "should not be possible" invariant (`c_idx`
-/// already a descendant of the contour it just evicted) is ever violated.
+/// runs one Hot (Anti) Rain Drop Production from `c_idx`'s own `ls`, but
+/// unlike the doc's own literal point-2/3 wording, no single drop decides a
+/// hit contour's own fate the moment it evaporates -- every drop that hits a
+/// given contour during this call instead casts a confidence-weighted vote
+/// (accordance or discordance, weighted by [`accordance`]'s own `|cos|`) for
+/// it, and only once every source has evaporated does each hit contour's own
+/// tally get turned into a decision (`config.elevation_vote_min_total_weight`/
+/// `elevation_vote_min_margin` gating whether it is decided at all this call,
+/// and how confidently -- see `Contours-to-Raster.md`'s own updated Step 4).
+/// A single near-perpendicular drop -- exactly the case where the raw
+/// accordance/discordance sign is most sensitive to noise -- can then no
+/// longer flip a contour's own elevation on its own. Once decided, the doc's
+/// own three cases (Step 4) apply exactly as before. Returns the number of
+/// distinct contours newly added (or evicted and re-parented) as children of
+/// `c_idx`, or `Err` if the doc's own "should not be possible" invariant
+/// (`c_idx` already a descendant of the contour it just evicted) is ever
+/// violated. `warnings` collects one entry per contour whose own vote this
+/// call decided despite a too-close margin.
 fn elevation_proliferation(
     c_idx: usize,
     anti: bool,
@@ -202,6 +296,7 @@ fn elevation_proliferation(
     raster: &mut ContourRaster,
     tree: &mut Tree,
     config: &Config,
+    warnings: &mut Vec<String>,
 ) -> Result<u64, ProliferationError> {
     let pass_name = if anti {
         "Anti Elevation Proliferation"
@@ -224,7 +319,7 @@ fn elevation_proliferation(
         )
     });
 
-    let mut children_added = 0u64;
+    let mut votes: HashMap<usize, HitVote> = HashMap::new();
     for (source, (dx, dy)) in placed_sources(&ls, side, config.sources_per_contour_segment) {
         let dir = if anti { (-dx, -dy) } else { (dx, dy) };
         let Some((hit_idx, at, drop_path)) =
@@ -234,15 +329,33 @@ fn elevation_proliferation(
         };
         let hit_idx = hit_idx as usize;
 
-        let acc = accordance(&contours[hit_idx].lwg, at, dir).unwrap_or_else(|| {
+        let (acc, weight) = accordance(&contours[hit_idx].lwg, at, dir).unwrap_or_else(|| {
             panic!(
                 "Step 4 ({pass_name} from contour {c_idx}) assumes every contour still in play \
                  has a gravity direction, but contour {hit_idx}, hit at ({:.2}, {:.2}), does not",
                 at.x, at.y
             )
         });
-        let expected = expected_elevation_height(c_height, acc, anti);
+        votes.entry(hit_idx).or_default().add(acc, weight, drop_path);
+    }
+
+    let mut children_added = 0u64;
+    for (hit_idx, vote) in votes {
+        let Some(verdict) = decide_vote(&vote, config) else {
+            continue; // not enough evidence yet; a later call may still resolve it
+        };
+        let acc = verdict.accordance;
         let acc_word = if acc { "accordance" } else { "discordance" };
+        if verdict.near_tie {
+            warnings.push(format!(
+                "contour {hit_idx} has a near-tied elevation vote from contour {c_idx}'s \
+                 {pass_name} (accordance weight {:.2} vs discordance weight {:.2}); picked \
+                 {acc_word}",
+                vote.accordance_weight, vote.discordance_weight,
+            ));
+        }
+        let expected = expected_elevation_height(c_height, acc, anti);
+        let representative_path = vote.representative_path(acc);
 
         match contours[hit_idx].elevation_height {
             None => {
@@ -252,22 +365,24 @@ fn elevation_proliferation(
             }
             Some(existing) if expected.abs() > existing.abs() => {
                 if tree.is_descendant(c_idx, hit_idx) {
+                    let at = representative_path.last().copied().unwrap_or(Coord { x: f64::NAN, y: f64::NAN });
                     return Err(ProliferationError {
                         message: format!(
                             "Step 4: {pass_name} from contour {c_idx} (elevation_height \
-                             {c_height}) hit contour {hit_idx} (currently elevation_height \
-                             {existing}) at ({:.2}, {:.2}), in {acc_word} with {hit_idx}'s own \
-                             gravity direction there, computing an expected elevation_height of \
-                             {expected} for it. abs({expected}) > abs({existing}), so {hit_idx} \
-                             would normally be evicted (along with its own subtree) and \
-                             re-parented under {c_idx} at the new value -- but {c_idx} is itself \
-                             already a descendant of {hit_idx} in T, so evicting {hit_idx}'s \
-                             subtree would also remove {c_idx}, the very contour this \
-                             {pass_name} call is running on. Contours-to-Raster.md's Step 4 \
-                             assumes this cannot happen.",
-                            at.x, at.y,
+                             {c_height}) decided contour {hit_idx} (currently elevation_height \
+                             {existing}) should be in {acc_word} with its own gravity direction \
+                             (weighted vote: accordance {:.2} vs discordance {:.2}, most \
+                             confident drop landing at ({:.2}, {:.2})), computing an expected \
+                             elevation_height of {expected} for it. abs({expected}) > \
+                             abs({existing}), so {hit_idx} would normally be evicted (along with \
+                             its own subtree) and re-parented under {c_idx} at the new value -- \
+                             but {c_idx} is itself already a descendant of {hit_idx} in T, so \
+                             evicting {hit_idx}'s subtree would also remove {c_idx}, the very \
+                             contour this {pass_name} call is running on. \
+                             Contours-to-Raster.md's Step 4 assumes this cannot happen.",
+                            vote.accordance_weight, vote.discordance_weight, at.x, at.y,
                         ),
-                        drop_path,
+                        drop_path: representative_path.to_vec(),
                     });
                 }
                 for removed in tree.evict_subtree(hit_idx) {
@@ -345,11 +460,12 @@ pub fn resolve(contours: &mut [Contour], raster: &mut ContourRaster, config: &Co
     }
 
     let mut tree = Tree::default();
+    let mut warnings = Vec::new();
     let root_idx = contours.iter().position(|c| c.lwg.gravity_dx.is_some());
     let Some(root_idx) = root_idx else {
         return Step4Result {
             resolved: 0,
-            warnings: Vec::new(),
+            warnings,
             tree_edges: Vec::new(),
             dead_ends: Vec::new(),
             error: None,
@@ -362,31 +478,32 @@ pub fn resolve(contours: &mut [Contour], raster: &mut ContourRaster, config: &Co
     let mut error = None;
     let mut error_drop_path = Vec::new();
     while let Some(c_idx) = next_proliferator_selection(&tree, contours) {
-        let rain_children =
-            match elevation_proliferation(c_idx, false, contours, raster, &mut tree, config) {
-                Ok(n) => n,
-                Err(e) => {
-                    error = Some(e.message);
-                    error_drop_path = e.drop_path;
-                    break;
-                }
-            };
-        let anti_children =
-            match elevation_proliferation(c_idx, true, contours, raster, &mut tree, config) {
-                Ok(n) => n,
-                Err(e) => {
-                    error = Some(e.message);
-                    error_drop_path = e.drop_path;
-                    break;
-                }
-            };
+        let rain_children = match elevation_proliferation(
+            c_idx, false, contours, raster, &mut tree, config, &mut warnings,
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                error = Some(e.message);
+                error_drop_path = e.drop_path;
+                break;
+            }
+        };
+        let anti_children = match elevation_proliferation(
+            c_idx, true, contours, raster, &mut tree, config, &mut warnings,
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                error = Some(e.message);
+                error_drop_path = e.drop_path;
+                break;
+            }
+        };
         if rain_children == 0 && anti_children == 0 {
             contours[c_idx].empty_progeny = true;
         }
     }
 
     let mut resolved = 0u64;
-    let mut warnings = Vec::new();
     for (idx, c) in contours.iter().enumerate() {
         if c.lwg.gravity_dx.is_none() {
             continue; // already reported (and erased above) as a Step 3 drop
@@ -442,6 +559,8 @@ mod tests {
             sources_per_contour_segment: 3,
             rain_drop_starting_voting_hysteresis: 3,
             undefined_gravity_vote_threshold: 0.8,
+            elevation_vote_min_total_weight: 0.3,
+            elevation_vote_min_margin: 0.15,
             obvious_to_close_contour_distance: 0.0,
             searching_fov: 0.0,
             searching_distance: 0.0,
@@ -483,6 +602,103 @@ mod tests {
             r.write_contour(i as u64, &contour.lwg.ls);
         }
         r
+    }
+
+    #[test]
+    fn accordance_weight_is_the_cosine_magnitude_between_drop_and_hit_gravity() {
+        let hit = {
+            let mut lwg = LineWithGravity::new(straight_ls(0.0));
+            lwg.gravity_dx = Some(0.0);
+            lwg.gravity_dy = Some(-1.0);
+            lwg
+        };
+        // Straight down: exactly aligned with the hit's own downhill -- full
+        // confidence, accordance.
+        let (acc, weight) = accordance(&hit, c(5.0, 0.0), (0.0, -1.0)).unwrap();
+        assert!(acc);
+        assert!((weight - 1.0).abs() < 1e-9);
+
+        // Straight up: exactly anti-aligned -- full confidence, discordance.
+        let (acc, weight) = accordance(&hit, c(5.0, 0.0), (0.0, 1.0)).unwrap();
+        assert!(!acc);
+        assert!((weight - 1.0).abs() < 1e-9);
+
+        // Sideways: exactly perpendicular -- zero confidence either way, the
+        // exact case a single vote must not be allowed to decide alone.
+        let (_, weight) = accordance(&hit, c(5.0, 0.0), (1.0, 0.0)).unwrap();
+        assert!(weight.abs() < 1e-9);
+    }
+
+    #[test]
+    fn hit_vote_accumulates_weight_and_keeps_the_most_confident_path_per_side() {
+        let mut vote = HitVote::default();
+        vote.add(true, 0.2, vec![c(0.0, 0.0), c(1.0, 0.0)]);
+        vote.add(true, 0.9, vec![c(0.0, 0.0), c(2.0, 0.0)]); // stronger accordance vote
+        vote.add(false, 0.4, vec![c(0.0, 0.0), c(3.0, 0.0)]);
+
+        assert!((vote.accordance_weight - 1.1).abs() < 1e-9);
+        assert!((vote.discordance_weight - 0.4).abs() < 1e-9);
+        // The most confident accordance vote (weight 0.9) is the
+        // representative one, not the first or the weakest.
+        assert_eq!(vote.representative_path(true), &[c(0.0, 0.0), c(2.0, 0.0)]);
+        assert_eq!(vote.representative_path(false), &[c(0.0, 0.0), c(3.0, 0.0)]);
+    }
+
+    #[test]
+    fn decide_vote_skips_a_contour_below_the_minimum_total_weight() {
+        let mut config = default_config();
+        config.elevation_vote_min_total_weight = 1.0;
+        let vote = HitVote {
+            accordance_weight: 0.9,
+            ..Default::default()
+        };
+        assert!(
+            decide_vote(&vote, &config).is_none(),
+            "0.9 total weight must not clear a 1.0 minimum"
+        );
+    }
+
+    #[test]
+    fn decide_vote_flags_a_near_tie_but_still_decides_it() {
+        let mut config = default_config();
+        config.elevation_vote_min_total_weight = 0.1;
+        config.elevation_vote_min_margin = 0.5;
+        let vote = HitVote {
+            accordance_weight: 2.1,
+            discordance_weight: 1.9,
+            ..Default::default()
+        };
+        let verdict = decide_vote(&vote, &config).unwrap();
+        assert!(verdict.accordance, "the larger side still wins");
+        assert!(verdict.near_tie, "a 0.2 margin must not clear a 0.5 minimum");
+    }
+
+    #[test]
+    fn decide_vote_favors_accordance_on_an_exact_tie() {
+        let mut config = default_config();
+        config.elevation_vote_min_total_weight = 0.1;
+        config.elevation_vote_min_margin = 0.0;
+        let vote = HitVote {
+            accordance_weight: 1.5,
+            discordance_weight: 1.5,
+            ..Default::default()
+        };
+        let verdict = decide_vote(&vote, &config).unwrap();
+        assert!(verdict.accordance);
+        assert!(!verdict.near_tie, "an exact tie still clears a 0.0 margin");
+    }
+
+    #[test]
+    fn decide_vote_does_not_flag_a_clear_win() {
+        let config = default_config();
+        let vote = HitVote {
+            accordance_weight: 3.0,
+            discordance_weight: 0.1,
+            ..Default::default()
+        };
+        let verdict = decide_vote(&vote, &config).unwrap();
+        assert!(verdict.accordance);
+        assert!(!verdict.near_tie);
     }
 
     #[test]
@@ -656,9 +872,17 @@ mod tests {
         tree.insert_root(1);
         tree.insert_child(1, 2);
 
-        let children_added =
-            elevation_proliferation(0, false, &mut contours, &mut raster, &mut tree, &config)
-                .unwrap();
+        let mut warnings = Vec::new();
+        let children_added = elevation_proliferation(
+            0,
+            false,
+            &mut contours,
+            &mut raster,
+            &mut tree,
+            &config,
+            &mut warnings,
+        )
+        .unwrap();
 
         assert_eq!(children_added, 1);
         assert_eq!(
@@ -704,8 +928,17 @@ mod tests {
 
         // Anti Elevation Proliferation: C's own drop travels uphill, toward
         // AC sitting above it.
-        let err = elevation_proliferation(1, true, &mut contours, &mut raster, &mut tree, &config)
-            .unwrap_err();
+        let mut warnings = Vec::new();
+        let err = elevation_proliferation(
+            1,
+            true,
+            &mut contours,
+            &mut raster,
+            &mut tree,
+            &config,
+            &mut warnings,
+        )
+        .unwrap_err();
         // The message must be debuggable on its own: which pass, which two
         // contours, their elevation_height values, the accordance/discordance
         // verdict, and the expected value that triggered the eviction
