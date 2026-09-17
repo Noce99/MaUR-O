@@ -108,6 +108,7 @@ pub mod step2_obvious_gravity;
 pub mod step3_rain_drop;
 pub mod step4_elevation;
 pub mod step5_elevation_raster;
+pub mod step5_gravity_raster;
 pub mod svg;
 pub mod text;
 pub mod validate;

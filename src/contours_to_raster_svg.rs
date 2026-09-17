@@ -83,6 +83,14 @@
 //! Jump-only definer arrows, or any of Step 3's own rain-drop-path
 //! diagnostics, since those are per-step working detail rather than the
 //! final picture.
+//!
+//! After Step 4: `08_<map_name>_step5_gravity.svg`, Step 5's own per-pixel
+//! Gravity Direction sub-step ([`crate::step5_gravity_raster`]) -- the same
+//! grid/pixel/heavy-object picture Steps 1-2 draw (see [`base_layers`]),
+//! plus one teal segment per pixel, tail at its own center, showing the
+//! per-pixel downhill direction that sub-step resolved (a pixel whose own
+//! contributing readings nearly cancel out gets no segment at all -- see
+//! [`GRAVITY_DIRECTION_MIN_MAGNITUDE`]).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -104,6 +112,7 @@ use crate::gravity_model::{
 use crate::step1_extract::{contour_force_magnitude, Step1Result};
 use crate::step3_rain_drop::Step3Result;
 use crate::step4_elevation::Step4Result;
+use crate::step5_gravity_raster::GravityRaster;
 
 const GRAY: Color = Color::Rgb(160, 160, 160);
 const BROWN: Color = Color::Rgb(139, 69, 19);
@@ -135,6 +144,10 @@ const PUSH_PULL_DENSITY: Color = Color::Rgb(0, 100, 0);
 const PUSH_PULL_FLYING_END: Color = Color::Rgb(0, 191, 255);
 /// `3` (high density) pixels.
 const LIGHT_GREEN: Color = Color::Rgb(144, 238, 144);
+/// `08_..._step5_gravity.svg`'s own per-pixel gravity direction segment --
+/// deliberately distinct from [`YELLOW`] (a *contour's* own gravity arrow),
+/// so the two "gravity" layers never read as the same thing.
+const TEAL: Color = Color::Rgb(0, 150, 136);
 /// `02_..._step1_growing_seeking.svg`/`03_..._step1_growing_matching.svg`'s
 /// own integration-step dot layer -- a more saturated green than [`GREEN`]
 /// (the un-grown linearized-contour layer) so the two read as distinct even
@@ -180,6 +193,17 @@ const FLYING_END_RING_STROKE_WIDTH: f32 = 0.3;
 /// it's background context for the drop's path rather than something to
 /// emphasize the way an actual vote is.
 const DROP_TRAIL_STROKE_WIDTH: f32 = VOTE_SEGMENT_STROKE_WIDTH / 3.0;
+/// `08_..._step5_gravity.svg`'s own per-pixel gravity direction segment's
+/// stroke width, in ground meters.
+const GRAVITY_SEGMENT_STROKE_WIDTH: f32 = 0.2;
+/// Below this averaged-direction magnitude (out of the `1.0` a single,
+/// perfectly-agreeing contribution has -- see
+/// [`crate::step5_gravity_raster::GravityRaster::get`]'s own doc comment on
+/// why the raw magnitude is kept), a pixel's own gravity direction is
+/// considered too undecided -- opposing tracks nearly cancelling out -- to
+/// draw a segment for at all, rather than drawing one whose direction is
+/// mostly noise.
+const GRAVITY_DIRECTION_MIN_MAGNITUDE: f64 = 0.3;
 /// A push/pull vector's own stroke width, in ground meters -- see
 /// [`push_pull_vector_layers`].
 const PUSH_PULL_VECTOR_STROKE_WIDTH: f32 = 0.15;
@@ -1161,6 +1185,65 @@ pub fn write_step2_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
             &vote_points,
             VOTE_CIRCLE_RADIUS,
             DARK_GREEN,
+        )),
+    )
+}
+
+/// One segment per in-bound pixel `gravity` gave a confidently-decided
+/// direction to (see [`GRAVITY_DIRECTION_MIN_MAGNITUDE`]): tail at the
+/// pixel's own center, head half a pixel further along the pixel's own
+/// (normalized) gravity direction -- long enough to read as an arrow field at
+/// a glance without one pixel's own segment overlapping its neighbor's.
+fn gravity_direction_segments(
+    raster: &ContourRaster,
+    gravity: &GravityRaster,
+) -> MultiLineString<f64> {
+    let half_px = raster.px_size / 2.0;
+    let mut lines = Vec::new();
+    for y in 0..gravity.height {
+        for x in 0..gravity.width {
+            let Some((vx, vy)) = gravity.get(x, y) else {
+                continue;
+            };
+            let magnitude = vx.hypot(vy);
+            if magnitude < GRAVITY_DIRECTION_MIN_MAGNITUDE {
+                continue;
+            }
+            let center = raster.pixel_center(x as i64, y as i64);
+            let (ux, uy) = (vx / magnitude, vy / magnitude);
+            lines.push(LineString::new(vec![
+                center,
+                Coord {
+                    x: center.x + ux * half_px,
+                    y: center.y + uy * half_px,
+                },
+            ]));
+        }
+    }
+    MultiLineString::new(lines)
+}
+
+/// Step 5's own Gravity Direction sub-step, visualized: [`base_layers`] (the
+/// raster grid, brown contour pixels, green high-density area, pink heavy
+/// object area -- the same picture `00_..._step1.svg` through
+/// `04_..._step2.svg` already draw), plus one teal segment per pixel showing
+/// [`crate::step5_gravity_raster::resolve`]'s own per-pixel gravity
+/// direction. Diagnostic only for now -- there is no TIFF or further use of
+/// `gravity` yet, unlike Step 5's own altitude
+/// ([`crate::step5_elevation_raster`]). `08_<map_name>_step5_gravity.svg`.
+pub fn write_step5_gravity_svg(
+    path: &Path,
+    result: &Step1Result,
+    gravity: &GravityRaster,
+) -> Result<(), String> {
+    let data = BaseLayerData::new(result);
+    let segments = gravity_direction_segments(&result.raster, gravity);
+    write(
+        path,
+        base_layers(&data).and(line_layer(
+            &segments,
+            TEAL,
+            GRAVITY_SEGMENT_STROKE_WIDTH,
         )),
     )
 }

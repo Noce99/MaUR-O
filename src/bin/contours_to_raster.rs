@@ -34,13 +34,14 @@ use maur_o::contours_to_raster_config::{Config, DEFAULT_CONFIG_PATH};
 use maur_o::contours_to_raster_svg::{
     write_contours_function_svg, write_final_svg, write_step1_close_search_svg,
     write_step1_growing_svg, write_step1_svg, write_step2_svg, write_step3_anti_rain_svg,
-    write_step3_rain_svg, write_step4_svg,
+    write_step3_rain_svg, write_step4_svg, write_step5_gravity_svg,
 };
 use maur_o::step1_extract;
 use maur_o::step2_obvious_gravity;
 use maur_o::step3_rain_drop;
 use maur_o::step4_elevation;
 use maur_o::step5_elevation_raster;
+use maur_o::step5_gravity_raster;
 use maur_o::xml_reader::read_xml_map;
 
 #[derive(Parser)]
@@ -69,11 +70,12 @@ struct Args {
     #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
     config: PathBuf,
 
-    /// Write the eight per-step validation SVGs Contours-to-Raster.md's
+    /// Write the nine per-step validation SVGs Contours-to-Raster.md's
     /// "Visualization" section describes (Step 1 before its own Growing
     /// Process sub-step, after that sub-step's own Close Search pass, after
     /// its Seeking phase, after its Matching phase, Step 2, Step 3's Rain
-    /// and Anti Rain Drop Productions each in their own file, and Step 4), an
+    /// and Anti Rain Drop Productions each in their own file, Step 4, and
+    /// Step 5's own per-pixel Gravity Direction sub-step), an
     /// unnumbered "final" SVG with
     /// just the algorithm's actual answer once every contour's gravity is
     /// resolved, an unnumbered "contours_function" SVG plotting the
@@ -389,8 +391,21 @@ fn run() -> Result<(), (ExitCode, String)> {
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
         write_step4_svg(&numbered_svg_path(&output_path, "07", "step4"), &step1, &step4)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        // Step 5's own Gravity Direction sub-step -- diagnostic only for now
+        // (no TIFF, nothing downstream reads it yet), so it is only ever
+        // computed under --create_svg. Shares `step5_elevation_raster::resolve`'s
+        // own post-Step-4 raster state (a dropped contour's footprint is
+        // already erased by then), even though it needs no `elevation_height`
+        // itself.
+        let gravity = step5_gravity_raster::resolve(&step1.contours, &mut step1.raster, &config);
+        write_step5_gravity_svg(
+            &numbered_svg_path(&output_path, "08", "step5_gravity"),
+            &step1,
+            &gravity,
+        )
+        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
         println!(
-            "wrote {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}",
+            "wrote {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}",
             step_svg_path(&output_path, "contours_function").display(),
             numbered_svg_path(&output_path, "00", "step1").display(),
             numbered_svg_path(&output_path, "01", "step1_close_search").display(),
@@ -401,6 +416,7 @@ fn run() -> Result<(), (ExitCode, String)> {
             numbered_svg_path(&output_path, "05", "step3_rain").display(),
             numbered_svg_path(&output_path, "06", "step3_anti_rain").display(),
             numbered_svg_path(&output_path, "07", "step4").display(),
+            numbered_svg_path(&output_path, "08", "step5_gravity").display(),
             step_svg_path(&output_path, "final").display(),
         );
     }
