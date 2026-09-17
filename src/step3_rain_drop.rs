@@ -29,17 +29,25 @@ const MAX_DROP_STEPS: u64 = 1_000_000;
 
 /// Cold evaporates on an already-defined contour, high density, or out of
 /// bound, and votes on an undefined contour; Hot evaporates on any contour,
-/// high density, or out of bound, and never votes. Reverse Cold evaporates on
-/// exactly what Cold does, but the other way round: a still-undefined contour
-/// is a silent pass (never a vote), while an already-defined contour or a
-/// Jump's own high-density area (`line_definers`) casts one vote onto the
-/// drop's own *source* instead of the hit -- see
-/// [`simulate_reverse_pass`]/[`simulate_one_drop`]'s own handling. See the
-/// Rain Drop Production Definition.
+/// high density, or out of bound, and never votes. Fill evaporates on any
+/// contour at all -- including, past `rain_drop_starting_voting_hysteresis`
+/// steps, its own starting one, the same exemption window Hot's own starting
+/// contour gets -- or out of bound, but *never* on high density: unlike
+/// every other variant, a high-density pixel is skipped over exactly like an
+/// undefined or no-contour-in-bound one, rather than stopping the drop (Step
+/// 5's own Elevation Fill Rain Drop Production; see
+/// [`ContourRaster::first_hit_along_step_no_high_density`]). Reverse Cold
+/// evaporates on exactly what Cold does, but the other way round: a
+/// still-undefined contour is a silent pass (never a vote), while an
+/// already-defined contour or a Jump's own high-density area
+/// (`line_definers`) casts one vote onto the drop's own *source* instead of
+/// the hit -- see [`simulate_reverse_pass`]/[`simulate_one_drop`]'s own
+/// handling. See the Rain Drop Production Definition.
 #[derive(Clone, Copy)]
 enum Temperature<'a> {
     Cold,
     Hot,
+    Fill,
     ReverseCold {
         line_definers: &'a [LineGravityDefiners],
     },
@@ -541,6 +549,7 @@ fn simulate_one_drop(
             Temperature::Cold | Temperature::ReverseCold { .. } => {
                 raster.first_hit_along_step(pos, next, exclude)
             }
+            Temperature::Fill => raster.first_hit_along_step_no_high_density(pos, next, exclude),
             Temperature::Hot => {
                 let (hit, candidates) = raster.step_flood_candidates(pos, next, exclude);
                 flood_candidates.extend(candidates);
@@ -575,6 +584,13 @@ fn simulate_one_drop(
                 // Production Definition says a Hot drop should. Unlike Cold,
                 // there is no separate per-vote window to track, since a Hot
                 // drop never votes.
+                !(hit_idx == source_contour_idx && steps < hysteresis)
+            }
+            (Temperature::Fill, Some(StepHit::Contour(hit_idx))) => {
+                // Same starting-contour exemption window a Hot drop gets --
+                // past it, even the drop's own starting contour evaporates
+                // it, exactly like any other (the doc's own "also the
+                // contours that has generate them").
                 !(hit_idx == source_contour_idx && steps < hysteresis)
             }
             (Temperature::ReverseCold { .. }, Some(StepHit::Contour(hit_idx))) => {
@@ -692,6 +708,44 @@ pub(crate) fn hot_drop_evaporation_contour(
         Some(StepHit::Contour(hit_idx)) => {
             let at = *drop.path.last()?;
             Some((hit_idx, at, drop.path))
+        }
+        _ => None,
+    }
+}
+
+/// Step 5's own Elevation Fill Rain Drop Production
+/// ([`crate::step5_elevation_raster`]): simulates one Fill drop from
+/// `source` in direction `dir`, returning which contour it evaporated on
+/// together with the drop's own straight track (`source`, then the point it
+/// evaporated at) -- `None` for a drop that instead leaves the map (a
+/// no-op, per the doc: nothing it touched gets written). Unlike
+/// [`hot_drop_evaporation_contour`], the caller has no use for every
+/// intermediate step position: since a drop's own direction never changes
+/// once it starts (Rain Drop Production Definition), its whole track is a
+/// single straight segment, and the caller re-walks that segment itself
+/// (`ContourRaster::pixels_along_segment`) to find every pixel needing a
+/// value, so only the two endpoints are returned.
+pub(crate) fn elevation_fill_drop_track(
+    raster: &mut ContourRaster,
+    source_contour_idx: u64,
+    source: Coord<f64>,
+    dir: (f64, f64),
+    config: &Config,
+) -> Option<(u64, Coord<f64>, Coord<f64>)> {
+    let drop = simulate_one_drop(
+        &mut [],
+        raster,
+        config,
+        Temperature::Fill,
+        source_contour_idx,
+        source,
+        dir,
+        1.0,
+    );
+    match drop.final_hit {
+        Some(StepHit::Contour(hit_idx)) => {
+            let end = *drop.path.last()?;
+            Some((hit_idx, source, end))
         }
         _ => None,
     }
@@ -1531,6 +1585,128 @@ mod tests {
             "expected the drop to evaporate on its own contour's far arm, got {:?}",
             drop.path.last()
         );
+    }
+
+    #[test]
+    fn fill_drop_passes_straight_through_high_density_instead_of_evaporating() {
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 0.5, 40, 40);
+        raster.write_contour(1, &LineString::new(vec![c(4.9, 5.0), c(5.1, 5.0)]));
+        raster.write_contour(2, &LineString::new(vec![c(4.9, 5.0), c(5.1, 5.0)])); // conflict -> high density
+        raster.write_contour(3, &LineString::new(vec![c(0.0, 10.0), c(20.0, 10.0)]));
+        let drop = simulate_one_drop(
+            &mut [],
+            &mut raster,
+            &default_config(),
+            Temperature::Fill,
+            0,
+            c(5.0, 0.0),
+            (0.0, 1.0),
+            1.0,
+        );
+        // A Hot drop would have stopped at the high-density pixel around
+        // y = 5 (see `hot_drop_evaporates_on_high_density` above); a Fill
+        // drop must instead pass straight through it and evaporate on the
+        // real contour further along at y = 10.
+        assert_eq!(drop.final_hit, Some(StepHit::Contour(3)));
+        assert!(drop.path.last().unwrap().y < 12.0);
+    }
+
+    #[test]
+    fn fill_drop_evaporates_on_any_other_contour_regardless_of_gravity() {
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 0.5, 40, 40);
+        let target_ls = LineString::new(vec![c(0.0, 10.0), c(20.0, 10.0)]);
+        raster.write_contour(1, &target_ls); // no gravity ever set on contour 1
+        let drop = simulate_one_drop(
+            &mut [],
+            &mut raster,
+            &default_config(),
+            Temperature::Fill,
+            0,
+            c(5.0, 0.0),
+            (0.0, 1.0),
+            1.0,
+        );
+        assert_eq!(drop.final_hit, Some(StepHit::Contour(1)));
+        assert!(drop.path.last().unwrap().y < 12.0);
+    }
+
+    #[test]
+    fn fill_drop_evaporates_on_its_own_starting_contour_once_outside_the_hysteresis_window() {
+        // Same concave "U" shape `hot_drop_evaporates_on_its_own_source_contour_once_outside_the_hysteresis_window`
+        // uses: a Fill drop must get exactly the same starting-contour
+        // exemption window Hot gets, past which even its own source
+        // contour evaporates it (the doc's own "also the contours that has
+        // generate them").
+        let mut raster = ContourRaster::new(c(-20.0, -5.0), 0.5, 80, 80);
+        let concave_ls = LineString::new(vec![
+            c(0.0, 0.0),
+            c(0.0, 20.0),
+            c(-15.0, 20.0),
+            c(-15.0, 0.0),
+        ]);
+        raster.write_contour(0, &concave_ls);
+        let mut config = default_config();
+        config.rain_drop_starting_voting_hysteresis = 3;
+
+        let drop = simulate_one_drop(
+            &mut [],
+            &mut raster,
+            &config,
+            Temperature::Fill,
+            0,
+            c(0.0, 5.0),
+            (-1.0, 0.0),
+            1.0,
+        );
+        assert_eq!(drop.final_hit, Some(StepHit::Contour(0)));
+        assert!(
+            drop.path.last().unwrap().x > -17.0,
+            "expected the drop to evaporate on its own contour's far arm, got {:?}",
+            drop.path.last()
+        );
+    }
+
+    #[test]
+    fn fill_drop_clears_its_own_starting_contour_within_the_hysteresis_window() {
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 0.5, 40, 40);
+        let own_ls = LineString::new(vec![c(0.0, 5.0), c(20.0, 5.0)]);
+        raster.write_contour(0, &own_ls);
+        let drop = simulate_one_drop(
+            &mut [],
+            &mut raster,
+            &default_config(),
+            Temperature::Fill,
+            0,
+            c(5.0, 5.0),
+            (0.0, 1.0),
+            1.0,
+        );
+        // Never hits its own contour again on the way out; only the map
+        // border (out of bound) stops it.
+        assert_eq!(drop.final_hit, Some(StepHit::OutOfBound));
+        assert!(drop.path.last().unwrap().y > 15.0);
+    }
+
+    #[test]
+    fn elevation_fill_drop_track_is_none_when_the_drop_leaves_the_map() {
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 0.5, 20, 20);
+        // Nothing else on the raster: straight out of bound.
+        let result =
+            elevation_fill_drop_track(&mut raster, 0, c(5.0, 5.0), (0.0, 1.0), &default_config());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn elevation_fill_drop_track_reports_the_hit_contour_and_the_straight_track_endpoints() {
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 0.5, 40, 40);
+        raster.write_contour(1, &LineString::new(vec![c(0.0, 10.0), c(20.0, 10.0)]));
+        let source = c(5.0, 0.0);
+        let (hit_idx, start, end) =
+            elevation_fill_drop_track(&mut raster, 0, source, (0.0, 1.0), &default_config())
+                .unwrap();
+        assert_eq!(hit_idx, 1);
+        assert_eq!(start, source);
+        assert!(end.y > 9.5 && end.y < 12.0);
     }
 
     #[test]

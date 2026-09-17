@@ -49,6 +49,13 @@ zip = { version = "2", default-features = false, features = ["deflate", "time"] 
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 png = "0.17"
 tempfile = "3"
+# Writes contours_to_raster's own Step 5 output (Contours-to-Raster.md): a
+# single-band 32-bit float elevation TIFF. Already pulled in transitively by
+# `image`'s own "tiff" feature, but `image`'s safe `TiffEncoder` only exposes
+# 8/16-bit and 3/4-channel 32-bit float color types (no single-channel float),
+# so this talks to the underlying `tiff` crate directly for its own
+# `Gray32Float` color type instead.
+tiff = "0.11"
 # Contour-to-polygon buffering and point-in-polygon for contours_to_raster
 # (see Contours-to-Raster.md), whose appendices are written directly against
 # this crate's LineString/Polygon/Buffer/Contains API.

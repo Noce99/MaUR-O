@@ -779,6 +779,7 @@ dependencies = [
  "quick-xml",
  "rustybuzz",
  "tempfile",
+ "tiff",
  "tiny-skia",
  "zip",
 ]

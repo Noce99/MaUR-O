@@ -1,8 +1,5 @@
-//! Extracts elevation-gravity information from an .omap's contours --
-//! `Contours-to-Raster.md`'s Steps 1 through 4. Step 5 (writing the final
-//! elevation TIFF) is still `TO DO` in the doc, so this binary works out,
-//! for every contour, which way is downhill and its own relative elevation,
-//! and stops there: no TIFF is written yet.
+//! Extracts elevation-gravity information from an .omap's contours and
+//! writes it out as a raster -- `Contours-to-Raster.md`'s Steps 1 through 5.
 //!
 //! ```text
 //! contours_to_raster <map.omap> [output.tif] [--results <dir>] [--config <path>] [--create_svg]
@@ -16,18 +13,17 @@
 //! ```
 //!
 //! `--results` (default `Results`) says where that folder is created.
-//! `[output.tif]` names the files written inside it -- only its file name is
-//! used, since the directory is always the run folder -- and is used to name
-//! the `--create_svg` files even though nothing is written under it yet, so
-//! this interface does not need to change once Step 5 lands.
+//! `[output.tif]` names both the final elevation TIFF and the
+//! `--create_svg` files -- only its file name is used, since the directory
+//! is always the run folder.
 //!
 //! Exit codes: 0 success, 1 usage error, 2 the map could not be read, 3 the
-//! config file could not be read or parsed, 4 the run folder or a
-//! `--create_svg` file could not be written, or a Step 1 geometry error (a
-//! degenerate buffer polygon -- a raster conflict no longer fails the run at
-//! all, see `Contours-to-Raster.md`'s Step 1), or 5 a Step 2/Step 3 gravity
-//! conflict, or a Step 4 tree invariant violation (a contour found to be its
-//! own ancestor -- see `step4_elevation::resolve`).
+//! config file could not be read or parsed, 4 the run folder, the elevation
+//! TIFF, or a `--create_svg` file could not be written, or a Step 1 geometry
+//! error (a degenerate buffer polygon -- a raster conflict no longer fails
+//! the run at all, see `Contours-to-Raster.md`'s Step 1), or 5 a Step 2/Step
+//! 3 gravity conflict, or a Step 4 tree invariant violation (a contour found
+//! to be its own ancestor -- see `step4_elevation::resolve`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -44,24 +40,25 @@ use maur_o::step1_extract;
 use maur_o::step2_obvious_gravity;
 use maur_o::step3_rain_drop;
 use maur_o::step4_elevation;
+use maur_o::step5_elevation_raster;
 use maur_o::xml_reader::read_xml_map;
 
 #[derive(Parser)]
 #[command(
     name = "contours_to_raster",
     version,
-    about = "Extracts elevation-gravity information from an .omap's contours (Contours-to-Raster.md, \
-             Steps 1-4). Step 5 is not yet implemented, so no TIFF is written yet."
+    about = "Extracts elevation-gravity information from an .omap's contours and writes it out as \
+             an elevation TIFF (Contours-to-Raster.md, Steps 1-5)."
 )]
 struct Args {
     /// The .omap file to read.
     map_file: PathBuf,
 
-    /// The file name the elevation TIFF would be written as, and what the
+    /// The file name the elevation TIFF is written as, and what the
     /// --create_svg files are named after. Any directory given here is
     /// ignored -- everything this run produces goes inside its own folder
     /// under --results. Defaults to the map file's own name with a .tif
-    /// suffix. Unused until Step 5 exists.
+    /// suffix.
     output_file: Option<PathBuf>,
 
     /// Where this run's own timestamped folder is created.
@@ -81,9 +78,12 @@ struct Args {
     /// just the algorithm's actual answer once every contour's gravity is
     /// resolved, an unnumbered "contours_function" SVG plotting the
     /// contour-pixel force curve itself (a function of --config alone, not of
-    /// the map), and a full-raster, every-pixel-colored PNG (the vector SVGs
+    /// the map), a full-raster, every-pixel-colored PNG (the vector SVGs
     /// only square a contour or high-density pixel, to keep their file size
-    /// sane), all inside this run's own folder.
+    /// sane), and a hypsometric-colored PNG of the actual Step 5 elevation
+    /// raster (the TIFF itself is written every run, --create_svg or not,
+    /// but isn't a format most image viewers render as a picture), all
+    /// inside this run's own folder.
     #[arg(long = "create_svg")]
     create_svg: bool,
 }
@@ -123,6 +123,17 @@ fn raster_png_path(output_path: &Path) -> PathBuf {
         .unwrap_or_default()
         .to_string_lossy();
     output_path.with_file_name(format!("{stem}_raster.png"))
+}
+
+/// `<output>_elevation.png`, next to `output_path` -- a human-readable,
+/// hypsometric-colored companion to the actual float TIFF Step 5 writes (see
+/// `step5_elevation_raster::ElevationRaster::write_colored_png`).
+fn elevation_png_path(output_path: &Path) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    output_path.with_file_name(format!("{stem}_elevation.png"))
 }
 
 /// Step 3's two files: one with every Rain Drop Production drop's path, one
@@ -394,6 +405,29 @@ fn run() -> Result<(), (ExitCode, String)> {
         );
     }
 
+    let step5 = step5_elevation_raster::resolve(&step1.contours, &mut step1.raster, &config);
+    std::fs::create_dir_all(&run_dir).map_err(|e| {
+        (
+            ExitCode::from(4),
+            format!("cannot make {}: {e}", run_dir.display()),
+        )
+    })?;
+    step5_elevation_raster::write_tiff(&step5.e2v, &output_path)
+        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+    if args.create_svg {
+        step5_elevation_raster::write_colored_png(&step5.e2v, &elevation_png_path(&output_path))
+            .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        println!("wrote {}", elevation_png_path(&output_path).display());
+    }
+    println!(
+        "wrote {}: {} pixel(s) from contours/rain, {} more from gap-filling, {} still \
+         undefined",
+        output_path.display(),
+        step5.filled_by_rain,
+        step5.filled_by_gap_fill,
+        step5.still_undefined,
+    );
+
     let contour_count = step1.contours.len();
     let resolved_by_slope_line = step2.resolved_by_slope_line;
     let resolved_by_hill = step2.resolved_by_hill;
@@ -410,11 +444,6 @@ fn run() -> Result<(), (ExitCode, String)> {
         "elevation resolved for {}/{contour_count} contours ({} dropped, still undefined)",
         step4.resolved,
         contour_count as u64 - step4.resolved,
-    );
-
-    eprintln!(
-        "Note: Step 5 (final TIFF) is not yet implemented; {} was not written.",
-        output_path.display()
     );
 
     Ok(())
