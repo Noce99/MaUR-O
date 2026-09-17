@@ -378,6 +378,13 @@ fn run() -> Result<(), (ExitCode, String)> {
         eprintln!("Warning: {warning}");
     }
 
+    // Step 5's own Gravity Direction sub-step: no longer just a
+    // `--create_svg` diagnostic -- the Gravity-Guided Elevation Fill drop
+    // below follows it step by step, so it always runs now, right after
+    // Step 4 settles `step1.raster`'s own final state (a dropped contour's
+    // footprint already erased by then).
+    let gravity = step5_gravity_raster::resolve(&step1.contours, &mut step1.raster, &config);
+
     if args.create_svg {
         // Written after Step 4, against `step1` only once every contour's
         // gravity is fully settled (Step 3 having run above, or having been
@@ -391,13 +398,6 @@ fn run() -> Result<(), (ExitCode, String)> {
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
         write_step4_svg(&numbered_svg_path(&output_path, "07", "step4"), &step1, &step4)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
-        // Step 5's own Gravity Direction sub-step -- diagnostic only for now
-        // (no TIFF, nothing downstream reads it yet), so it is only ever
-        // computed under --create_svg. Shares `step5_elevation_raster::resolve`'s
-        // own post-Step-4 raster state (a dropped contour's footprint is
-        // already erased by then), even though it needs no `elevation_height`
-        // itself.
-        let gravity = step5_gravity_raster::resolve(&step1.contours, &mut step1.raster, &config);
         write_step5_gravity_svg(
             &numbered_svg_path(&output_path, "08", "step5_gravity"),
             &step1,
@@ -421,7 +421,7 @@ fn run() -> Result<(), (ExitCode, String)> {
         );
     }
 
-    let step5 = step5_elevation_raster::resolve(&step1.contours, &mut step1.raster, &config);
+    let step5 = step5_elevation_raster::resolve(&step1.contours, &step1.raster, &gravity, &config);
     std::fs::create_dir_all(&run_dir).map_err(|e| {
         (
             ExitCode::from(4),

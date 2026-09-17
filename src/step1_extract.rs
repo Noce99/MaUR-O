@@ -2632,6 +2632,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         };
 
         let contour_symbol = Symbol::Line(LineSymbol {
@@ -2780,6 +2781,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         };
 
         let contour_symbol = Symbol::Line(LineSymbol {
@@ -2917,6 +2919,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         };
 
         let warnings = run_growing(&mut result, &config);
@@ -3040,6 +3043,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         };
 
         let warnings = run_growing(&mut result, &config);
@@ -3218,6 +3222,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         };
 
         let growing_warnings = run_growing(&mut result, &config);
@@ -3292,6 +3297,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         }
     }
 
@@ -3873,6 +3879,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         };
 
         let warnings = run_growing(&mut result, &config);
@@ -3975,6 +3982,7 @@ mod tests {
                 grow_time_step: 1.0,
                 growing_visualization_push_pull_vectors_scale: 1.0,
                 gravity_gaussian_kernel_size: 5,
+                elevation_gaussian_kernel_size: 5,
             };
             let outcome = grow_one_step(
                 FlyingEnd {
@@ -4076,6 +4084,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         };
         let outcome = grow_one_step(
             FlyingEnd {
@@ -4176,6 +4185,7 @@ mod tests {
                 grow_time_step: 1.0,
                 growing_visualization_push_pull_vectors_scale: 1.0,
                 gravity_gaussian_kernel_size: 5,
+                elevation_gaussian_kernel_size: 5,
             };
             let mut push_pull_vectors = Vec::new();
             let outcome = grow_one_step(
@@ -4303,6 +4313,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         }
     }
 
@@ -4933,6 +4944,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         };
 
         let warnings = run_growing(&mut result, &config);

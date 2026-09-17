@@ -1,7 +1,7 @@
-//! The `contours_to_raster` config file: the thirty-four parameters
+//! The `contours_to_raster` config file: the thirty-five parameters
 //! `Contours-to-Raster.md` names, read from a small hand-rolled `key =
 //! value` format (no `serde`/`toml` dependency exists anywhere else in this
-//! crate, and one file with thirty-four numbers does not need one).
+//! crate, and one file with thirty-five numbers does not need one).
 
 use std::path::Path;
 
@@ -249,6 +249,14 @@ pub struct Config {
     /// capture essentially all of the kernel's own mass). `1` (or `0`) turns
     /// smoothing off outright.
     pub gravity_gaussian_kernel_size: usize,
+    /// The same, for Step 5's own final per-pixel elevation
+    /// ([`crate::step5_elevation_raster`]) instead of its gravity direction:
+    /// the window size, in pixels, of the Gaussian kernel the E2V is
+    /// smoothed with once gap-filling has run. Independent of
+    /// `gravity_gaussian_kernel_size` -- the two fields have different
+    /// units and no reason to share a single knob. `1` (or `0`) turns
+    /// smoothing off outright.
+    pub elevation_gaussian_kernel_size: usize,
 }
 
 /// The keys `Config::load` requires, in the order they are checked, paired
@@ -288,11 +296,12 @@ const KEYS: &[&str] = &[
     "grow_time_step",
     "growing_visualization_push_pull_vectors_scale",
     "gravity_gaussian_kernel_size",
+    "elevation_gaussian_kernel_size",
 ];
 
 impl Config {
     /// Parses a config file: one `key = value` per line, blank lines and
-    /// lines starting with `#` ignored. All thirty-four keys are required --
+    /// lines starting with `#` ignored. All thirty-five keys are required --
     /// a config file missing one is far more likely a mistake than an
     /// intentional partial override -- and an unknown key or an unparseable
     /// value is an error naming the offending line.
@@ -376,6 +385,7 @@ impl Config {
             growing_visualization_push_pull_vectors_scale: values
                 [&"growing_visualization_push_pull_vectors_scale"],
             gravity_gaussian_kernel_size: values[&"gravity_gaussian_kernel_size"] as usize,
+            elevation_gaussian_kernel_size: values[&"elevation_gaussian_kernel_size"] as usize,
         })
     }
 }
@@ -420,6 +430,7 @@ matching_min_force = 0.1
 grow_time_step = 1.0
 growing_visualization_push_pull_vectors_scale = 1.0
 gravity_gaussian_kernel_size = 5
+elevation_gaussian_kernel_size = 5
 ";
 
     #[test]
@@ -451,6 +462,7 @@ gravity_gaussian_kernel_size = 5
         assert_eq!(config.grow_time_step, 1.0);
         assert_eq!(config.growing_visualization_push_pull_vectors_scale, 1.0);
         assert_eq!(config.gravity_gaussian_kernel_size, 5);
+        assert_eq!(config.elevation_gaussian_kernel_size, 5);
     }
 
     #[test]

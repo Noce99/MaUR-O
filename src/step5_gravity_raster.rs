@@ -296,6 +296,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         }
     }
 

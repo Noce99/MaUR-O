@@ -1,13 +1,22 @@
 //! Step 5: Final Tiff Computation (`Contours-to-Raster.md`). Builds the
 //! Elevation 2D Vector (E2V) -- one elevation value per in-bound Contour
 //! Raster (C2V) pixel -- by seeding every contour's own pixels with its own
-//! `elevation_height`, running an Elevation Fill Rain Drop Production
-//! downhill from every contour to spread a distance-weighted value into
-//! every pixel between it and its next lower neighbor
-//! ([`crate::step3_rain_drop::elevation_fill_drop_track`]), and filling
-//! whatever is left with an iterative 8-connected front propagation. See
-//! [`resolve`] for the full pipeline and [`write_tiff`] for turning the
-//! result into the actual file.
+//! `elevation_height`, running a Gravity-Guided Elevation Fill drop downhill
+//! from every contour to spread a distance-weighted value into every pixel
+//! along its own (possibly bent) path to its next lower neighbor (see
+//! [`gravity_guided_drop_track`]), and filling whatever is left with an
+//! iterative 8-connected front propagation. See [`resolve`] for the full
+//! pipeline and [`write_tiff`] for turning the result into the actual file.
+//!
+//! Unlike every Rain Drop Production variant `step3_rain_drop` defines
+//! (whose whole direction is fixed for its entire life, by design -- see
+//! that module's own Rain Drop Production Definition), a Gravity-Guided
+//! Elevation Fill drop's direction bends: at every step it re-reads
+//! [`crate::step5_gravity_raster::GravityRaster`]'s own per-pixel downhill
+//! direction (already resolved, gap-filled, and Gaussian-smoothed by the
+//! time this step runs) and moves along whatever it finds there, rather
+//! than whatever direction it happened to launch in. This is why it is its
+//! own function here rather than one more `step3_rain_drop::Temperature`.
 
 use std::io::BufWriter;
 use std::path::Path;
@@ -19,22 +28,36 @@ use tiff::encoder::TiffEncoder;
 use crate::contour_raster::{ContourRaster, StepHit, CONTOUR_0_MATRIX_VALUE, OUT_OF_BOUND};
 use crate::contours_to_raster_config::Config;
 use crate::gravity_model::{contour_gravity_side, Contour};
-use crate::step3_rain_drop::{elevation_fill_drop_track, placed_sources};
+use crate::step3_rain_drop::placed_sources;
+use crate::step5_gravity_raster::GravityRaster;
 
 fn dist(a: Coord<f64>, b: Coord<f64>) -> f64 {
     (a.x - b.x).hypot(a.y - b.y)
 }
 
+/// A generous cap on one Gravity-Guided Elevation Fill drop's own simulated
+/// steps, purely as a safety valve against an unbounded loop -- the same
+/// role, and the same value, as `step3_rain_drop`'s own (private)
+/// `MAX_DROP_STEPS` plays for every other rain drop. A bent path could in
+/// principle wander far longer than a straight one before ever evaporating
+/// (e.g. lingering near a saddle where the smoothed gravity field is weak
+/// and noisy), but this run's own doc comment on [`Accum`] already explains
+/// why an unusually long track can't dominate a pixel a shorter one also
+/// reached -- it just ends up contributing at a vanishingly small weight
+/// once it finally does evaporate.
+const MAX_GRAVITY_GUIDED_STEPS: u64 = 1_000_000;
+
 /// One E2V pixel's own accumulated evidence: a running weighted sum and
 /// weight total of every value written to it, so the final value is their
 /// weighted mean without keeping every individual value around (Step 5). A
 /// contour's own seed value and a gap-filling round's own neighbor average
-/// each count with weight `1.0`; an Elevation Fill Rain Drop Production's
-/// own track instead weighs its value by `1.0 / track_len` -- the shorter a
-/// drop's own whole straight track, the more its reading is trusted,
-/// specifically so a rare, very long track (an open area with no closer
-/// contour along that exact ray) can no longer dominate a pixel some other,
-/// much shorter, more locally-relevant track also reached.
+/// each count with weight `1.0`; a Gravity-Guided Elevation Fill drop's own
+/// track instead weighs its value by `1.0 / track_len` (`track_len` now its
+/// own whole, possibly bent, path length) -- the shorter a drop's own whole
+/// path, the more its reading is trusted, specifically so a rare, very long
+/// track (an open area with no closer contour along its own bent path) can
+/// no longer dominate a pixel some other, much shorter, more
+/// locally-relevant track also reached.
 #[derive(Clone, Copy, Default)]
 struct Accum {
     weighted_sum: f64,
@@ -49,6 +72,82 @@ impl Accum {
 
     fn mean(&self) -> Option<f64> {
         (self.weight_total > 0.0).then(|| self.weighted_sum / self.weight_total)
+    }
+}
+
+/// Steps one Gravity-Guided Elevation Fill drop from `source`, re-reading
+/// `gravity`'s own per-pixel direction at *every* step (including the
+/// first) rather than committing to one direction at launch. Evaporates the
+/// same way `step3_rain_drop`'s own `Fill` temperature does: an
+/// out-of-bound pixel, a high-density pixel, or any contour, exempting its
+/// own starting one (`source_contour_idx`) for
+/// `rain_drop_starting_voting_hysteresis` steps so it can clear its own
+/// source's immediate footprint. Also evaporates as a no-op -- returning
+/// `None`, the same as leaving the map -- the moment it steps onto a pixel
+/// `gravity` itself has no direction for (should be rare: gap-filling
+/// already covers nearly every in-bound pixel) or a genuine zero vector.
+///
+/// Returns `None` for that no-op case, for leaving the map
+/// ([`StepHit::OutOfBound`]), or for running out its own
+/// [`MAX_GRAVITY_GUIDED_STEPS`] budget without evaporating meaningfully;
+/// otherwise the hit and the drop's own whole path (source to evaporation,
+/// every intermediate step included) -- unlike
+/// `step3_rain_drop::elevation_fill_drop_track`'s own two endpoints, a bent
+/// path needs every vertex, since [`resolve`] must walk it leg by leg to
+/// find each pixel's own true along-path distance.
+fn gravity_guided_drop_track(
+    raster: &ContourRaster,
+    gravity: &GravityRaster,
+    source_contour_idx: u64,
+    source: Coord<f64>,
+    config: &Config,
+) -> Option<(StepHit, Vec<Coord<f64>>)> {
+    let hysteresis = config.rain_drop_starting_voting_hysteresis;
+    let mut pos = source;
+    let mut path = vec![pos];
+    let mut steps = 0u64;
+
+    loop {
+        let (px, py) = raster.to_px(pos);
+        if px < 0 || py < 0 || px as usize >= raster.width || py as usize >= raster.height {
+            return None; // off the grid entirely: a no-op, same as StepHit::OutOfBound
+        }
+        let Some((gx, gy)) = gravity.get(px as usize, py as usize) else {
+            return None; // an unreached pocket has no direction to follow: a no-op
+        };
+        let magnitude = gx.hypot(gy);
+        if magnitude <= 0.0 {
+            return None; // a zero vector has no direction to follow either
+        }
+        let dir = (gx / magnitude, gy / magnitude);
+
+        let next = Coord {
+            x: pos.x + dir.0 * config.rain_drop_step,
+            y: pos.y + dir.1 * config.rain_drop_step,
+        };
+        let hit = raster.first_hit_along_step(pos, next, u64::MAX);
+        let evaporate = match hit {
+            None => false,
+            Some(StepHit::OutOfBound) | Some(StepHit::HighDensity) => true,
+            Some(StepHit::Contour(hit_idx)) => {
+                !(hit_idx == source_contour_idx && steps < hysteresis)
+            }
+        };
+
+        if evaporate {
+            path.push(next);
+            return match hit.expect("evaporate is only ever true alongside a real hit") {
+                StepHit::OutOfBound => None,
+                h => Some((h, path)),
+            };
+        }
+
+        pos = next;
+        path.push(pos);
+        steps += 1;
+        if steps >= MAX_GRAVITY_GUIDED_STEPS {
+            return None;
+        }
     }
 }
 
@@ -77,8 +176,9 @@ pub struct Step5Result {
     /// The final Elevation 2D Vector.
     pub e2v: ElevationRaster,
     /// How many in-bound pixels got a value seeded directly from a
-    /// contour's own `elevation_height` or written to by some Elevation
-    /// Fill Rain Drop Production's own track, before gap-filling ran.
+    /// contour's own `elevation_height` or written to by some
+    /// Gravity-Guided Elevation Fill drop's own track, before gap-filling
+    /// ran.
     pub filled_by_rain: u64,
     /// How many more in-bound pixels got a value from the gap-filling pass
     /// instead.
@@ -92,16 +192,24 @@ pub struct Step5Result {
 
 /// Runs Step 5: builds the E2V at the same size and pixel grid as `raster`,
 /// seeds every contour pixel with its own contour's `elevation_height`, runs
-/// one Elevation Fill Rain Drop Production (Rain direction only -- see the
+/// one Gravity-Guided Elevation Fill drop (Rain direction only -- see the
 /// doc's own note on why Anti Rain is not needed here) from every contour
 /// with both a gravity direction and an elevation, and fills whatever is
-/// left with iterative 8-connected front propagation. Assumes every contour
-/// still without an `elevation_height` or a gravity direction has already
-/// been dropped/warned about by Steps 3/4; such a contour's own raster
-/// footprint is simply skipped as a source (never a sink -- a track can
-/// still land on any of its pixels, but only ones that keep some other
-/// contour's own real index).
-pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config) -> Step5Result {
+/// left with iterative 8-connected front propagation. `gravity` must already
+/// be fully resolved ([`crate::step5_gravity_raster::resolve`]) against this
+/// same `raster`/`contours`, since every drop follows it step by step
+/// instead of a direction fixed at launch. Assumes every contour still
+/// without an `elevation_height` or a gravity direction has already been
+/// dropped/warned about by Steps 3/4; such a contour's own raster footprint
+/// is simply skipped as a source (never a sink -- a track can still land on
+/// any of its pixels, but only ones that keep some other contour's own real
+/// index).
+pub fn resolve(
+    contours: &[Contour],
+    raster: &ContourRaster,
+    gravity: &GravityRaster,
+    config: &Config,
+) -> Step5Result {
     let (width, height) = (raster.width, raster.height);
     let mut accum = vec![vec![Accum::default(); width]; height];
     let mut in_bound = vec![vec![false; width]; height];
@@ -126,14 +234,19 @@ pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config
         let Some(c_height) = c.elevation_height else {
             continue;
         };
+        // `side` only feeds `placed_sources`' own source-point placement
+        // here -- unlike every other Rain Drop Production variant, a
+        // Gravity-Guided Elevation Fill drop reads its own direction fresh
+        // from `gravity` at every step (including its first), so
+        // `placed_sources`' own per-source direction is simply discarded.
         let Some(side) = contour_gravity_side(c) else {
             continue;
         };
-        for (source, dir) in placed_sources(&c.lwg.ls, side, config.sources_per_contour_segment) {
-            let Some((hit, start, end)) =
-                elevation_fill_drop_track(raster, c_idx as u64, source, dir, config)
+        for (source, _dir) in placed_sources(&c.lwg.ls, side, config.sources_per_contour_segment) {
+            let Some((hit, path)) =
+                gravity_guided_drop_track(raster, gravity, c_idx as u64, source, config)
             else {
-                continue; // out of bound: a no-op, per the doc
+                continue; // out of bound, an unreached gravity pocket, or ran its own step budget out
             };
             let hit_height = match hit {
                 StepHit::Contour(hit_idx) => {
@@ -149,32 +262,49 @@ pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config
                 // own note on why a high-density hit can no longer be
                 // treated as a dead end here.
                 StepHit::HighDensity => c_height - 1.0,
-                StepHit::OutOfBound => unreachable!(
-                    "elevation_fill_drop_track already turns an out-of-bound hit into None"
-                ),
+                StepHit::OutOfBound => {
+                    unreachable!("gravity_guided_drop_track already turns this hit into None")
+                }
             };
-            let track_len = dist(start, end);
+            let track_len: f64 = path.windows(2).map(|w| dist(w[0], w[1])).sum();
             if track_len <= 0.0 {
                 continue; // a degenerate, zero-length track has nothing to interpolate along
             }
             // A track's own weight is constant along its whole length: the
-            // shorter the drop's own straight track, the more every pixel
-            // it touches trusts its reading over a longer, less locally
-            // relevant one (see `Accum`'s own doc comment on why).
+            // shorter the drop's own whole (possibly bent) path, the more
+            // every pixel it touches trusts its reading over a longer, less
+            // locally-relevant one (see `Accum`'s own doc comment on why).
             let weight = 1.0 / track_len;
-            for (px, py) in raster.pixels_along_segment(start, end) {
-                if px < 0 || py < 0 || px as usize >= width || py as usize >= height {
-                    continue;
+            // Walked leg by leg (each one straight, `pixels_along_segment`
+            // already knows how to find every pixel a straight segment
+            // touches) rather than treated as one straight segment, since
+            // the path itself may now bend. `cumulative_before` is how far
+            // along the whole path this leg's own start sits, so a pixel
+            // found partway through it still gets its own true along-path
+            // `d_a`/`d_b`, not just this one leg's own local distances --
+            // this reduces to the exact original single-segment formula
+            // whenever the path happens to be straight (`cumulative_before
+            // == 0`, `leg_len == track_len`, one leg total).
+            let mut cumulative_before = 0.0;
+            for leg in path.windows(2) {
+                let (leg_start, leg_end) = (leg[0], leg[1]);
+                let leg_len = dist(leg_start, leg_end);
+                for (px, py) in raster.pixels_along_segment(leg_start, leg_end) {
+                    if px < 0 || py < 0 || px as usize >= width || py as usize >= height {
+                        continue;
+                    }
+                    let center = raster.pixel_center(px, py);
+                    let d_a = cumulative_before + dist(leg_start, center);
+                    let d_b = (track_len - cumulative_before - leg_len) + dist(center, leg_end);
+                    // Weight each end by the distance to the *other* end,
+                    // not its own: a pixel right next to the start (d_a ~=
+                    // 0) must land close to eA, so eA's own share of the
+                    // blend has to grow as d_a shrinks -- i.e. it's carried
+                    // by d_b, not d_a.
+                    let value = (d_b * c_height + d_a * hit_height) / (d_a + d_b);
+                    accum[py as usize][px as usize].add(value, weight);
                 }
-                let center = raster.pixel_center(px, py);
-                let d_a = dist(center, start);
-                let d_b = dist(center, end);
-                // Weight each end by the distance to the *other* end, not
-                // its own: a pixel right next to the start (d_a ~= 0) must
-                // land close to eA, so eA's own share of the blend has to
-                // grow as d_a shrinks -- i.e. it's carried by d_b, not d_a.
-                let value = (d_b * c_height + d_a * hit_height) / (d_a + d_b);
-                accum[py as usize][px as usize].add(value, weight);
+                cumulative_before += leg_len;
             }
         }
     }
@@ -229,10 +359,11 @@ pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config
         .filter(|&&b| b)
         .count() as u64;
 
-    let grid = accum
+    let grid: Vec<Vec<Option<f64>>> = accum
         .into_iter()
         .map(|row| row.into_iter().map(|a| a.mean()).collect())
         .collect();
+    let grid = gaussian_smooth(&grid, config.elevation_gaussian_kernel_size);
 
     Step5Result {
         e2v: ElevationRaster { grid, width, height },
@@ -240,6 +371,64 @@ pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config
         filled_by_gap_fill: filled_after_gap_fill - filled_by_rain,
         still_undefined: total_in_bound - filled_after_gap_fill,
     }
+}
+
+/// Gaussian-smooths `grid`'s own elevation field: every pixel that already
+/// has a value gets, as its final value, a Gaussian-weighted average of
+/// itself and every same-defined neighbor within `kernel_size`'s own window
+/// (`config.elevation_gaussian_kernel_size`) -- radius `(kernel_size - 1) /
+/// 2`, standard deviation `radius / 3.0` so the window's own edge sits at
+/// roughly three standard deviations, normalized by however much of that
+/// weight actually landed on a defined neighbor (a pixel near an
+/// out-of-bound edge or a still-undefined pocket is averaged over fewer
+/// neighbors, not diluted by them reading as zero). A pixel with no value of
+/// its own is left `None` -- this smooths noise among already-resolved
+/// pixels; it does not fill new ones (gap-filling above already did that).
+/// `kernel_size <= 1` is a no-op, returning `grid` unchanged, since a
+/// zero-radius window has nothing else to average with anyway. The exact
+/// same algorithm as `step5_gravity_raster`'s own (private) `gaussian_smooth`,
+/// just over a scalar instead of a 2D vector -- not shared as one generic
+/// function since the two live in different modules over different `Accum`
+/// types, and duplicating this small a loop is cheaper than the abstraction
+/// it would take to unify them.
+fn gaussian_smooth(grid: &[Vec<Option<f64>>], kernel_size: usize) -> Vec<Vec<Option<f64>>> {
+    let height = grid.len();
+    let width = grid.first().map_or(0, Vec::len);
+    if kernel_size <= 1 {
+        return grid.to_vec();
+    }
+    let radius = (kernel_size / 2) as i64;
+    let sigma = radius as f64 / 3.0;
+
+    let mut smoothed = vec![vec![None; width]; height];
+    for y in 0..height {
+        for x in 0..width {
+            if grid[y][x].is_none() {
+                continue;
+            }
+            let (mut sum, mut weight_total) = (0.0, 0.0);
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+                    if nx < 0 || ny < 0 || nx as usize >= width || ny as usize >= height {
+                        continue;
+                    }
+                    let Some(v) = grid[ny as usize][nx as usize] else {
+                        continue;
+                    };
+                    let squared_dist = (dx * dx + dy * dy) as f64;
+                    let weight = (-squared_dist / (2.0 * sigma * sigma)).exp();
+                    sum += v * weight;
+                    weight_total += weight;
+                }
+            }
+            // `weight_total` is always > 0 here: (dx, dy) = (0, 0) is always
+            // in range and always weight 1.0, and `grid[y][x]` (that same
+            // pixel) is already known `Some` from the check above.
+            smoothed[y][x] = Some(sum / weight_total);
+        }
+    }
+    smoothed
 }
 
 fn count_defined(accum: &[Vec<Accum>], in_bound: &[Vec<bool>]) -> u64 {
@@ -397,6 +586,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gaussian_smooth_is_a_no_op_at_kernel_size_one() {
+        let grid = vec![vec![Some(3.0), None, Some(1.0)], vec![None, Some(-2.0), None]];
+        assert_eq!(gaussian_smooth(&grid, 1), grid);
+        assert_eq!(gaussian_smooth(&grid, 0), grid);
+    }
+
+    #[test]
+    fn gaussian_smooth_never_gives_a_value_to_an_undefined_pixel() {
+        let grid = vec![vec![Some(3.0), Some(3.0), None]];
+        let smoothed = gaussian_smooth(&grid, 5);
+        assert_eq!(smoothed[0][2], None, "no value of its own to smooth from");
+    }
+
+    #[test]
+    fn gaussian_smooth_is_unaffected_by_a_wholly_undefined_neighborhood() {
+        let mut grid = vec![vec![None; 5]; 5];
+        grid[2][2] = Some(7.5);
+        let smoothed = gaussian_smooth(&grid, 5);
+        assert_eq!(smoothed[2][2], Some(7.5));
+    }
+
+    #[test]
+    fn gaussian_smooth_blends_toward_a_defined_neighbors_own_value() {
+        let grid = vec![vec![Some(0.0), Some(10.0)]];
+        let smoothed = gaussian_smooth(&grid, 5);
+        let s0 = smoothed[0][0].unwrap();
+        let s1 = smoothed[0][1].unwrap();
+        assert!(
+            s0 > 0.0 && s0 < 10.0,
+            "expected pixel 0 to lean toward its neighbor's 10.0 without reaching it, got {s0}"
+        );
+        assert!(
+            s1 < 10.0 && s1 > 0.0,
+            "expected pixel 1 to lean toward its neighbor's 0.0 without reaching it, got {s1}"
+        );
+    }
+
     fn c(x: f64, y: f64) -> Coord<f64> {
         Coord { x, y }
     }
@@ -437,6 +664,7 @@ mod tests {
             grow_time_step: 1.0,
             growing_visualization_push_pull_vectors_scale: 1.0,
             gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
         }
     }
 
@@ -473,11 +701,89 @@ mod tests {
         r
     }
 
+    /// Every test below needs a resolved [`GravityRaster`] to hand
+    /// [`resolve`] before it can build its own drop paths -- computed
+    /// against the exact same `contours`/`raster`/`config` the elevation
+    /// call itself then uses, the same way `src/bin/contours_to_raster.rs`
+    /// chains the two.
+    fn gravity_for(contours: &[Contour], raster: &mut ContourRaster, config: &Config) -> GravityRaster {
+        crate::step5_gravity_raster::resolve(contours, raster, config)
+    }
+
+    #[test]
+    fn gravity_guided_drop_track_bends_with_the_gravity_field() {
+        // A synthetic, hand-built gravity field (bypassing
+        // `step5_gravity_raster::resolve` entirely, via `GravityRaster::for_test`
+        // -- see that constructor's own doc comment): due east for x < 10,
+        // due south for x >= 10, an deliberate "L" turn no straight-line
+        // drop could ever trace. A target contour sits south of the turn, so
+        // only a drop that actually turns can ever reach it.
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 20, 20);
+        let target = LineString::new(vec![c(10.0, 15.5), c(15.0, 15.5)]);
+        raster.write_contour(0, &target);
+
+        let grid: Vec<Vec<Option<(f64, f64)>>> = (0..20)
+            .map(|_y| {
+                (0..20)
+                    .map(|x| Some(if x < 10 { (1.0, 0.0) } else { (0.0, 1.0) }))
+                    .collect()
+            })
+            .collect();
+        let gravity = GravityRaster::for_test(grid, 20, 20);
+
+        let config = default_config();
+        let (hit, path) = gravity_guided_drop_track(
+            &raster,
+            &gravity,
+            99, // no contour at this index: nothing to self-exempt against
+            c(2.5, 2.5),
+            &config,
+        )
+        .expect("a drop following an eastward-then-southward field must reach the target");
+
+        assert_eq!(hit, StepHit::Contour(0));
+        assert!(
+            path.iter().any(|p| p.x > 9.5),
+            "expected the path to actually cross into the eastern region: {path:?}"
+        );
+        assert!(
+            path.last().unwrap().y > 10.0,
+            "expected the path to travel south once inside the eastern region: {path:?}"
+        );
+        // Non-collinearity check: the source, the point where it enters the
+        // eastern (southward) region, and the final landing point must not
+        // all lie on one straight line -- a plain cross product of the two
+        // legs is zero only if they do.
+        let turn = path
+            .iter()
+            .find(|p| p.x > 9.5)
+            .copied()
+            .expect("already asserted this point exists above");
+        let end = *path.last().unwrap();
+        let (v1x, v1y) = (turn.x - path[0].x, turn.y - path[0].y);
+        let (v2x, v2y) = (end.x - turn.x, end.y - turn.y);
+        let cross = v1x * v2y - v1y * v2x;
+        assert!(cross.abs() > 1.0, "expected a genuine bend, not a straight line: cross={cross}");
+    }
+
+    #[test]
+    fn gravity_guided_drop_track_evaporates_as_a_no_op_when_gravity_is_undefined_at_the_source() {
+        let raster = ContourRaster::new(c(0.0, 0.0), 1.0, 20, 20);
+        let grid = vec![vec![None; 20]; 20]; // no direction anywhere
+        let gravity = GravityRaster::for_test(grid, 20, 20);
+
+        let result =
+            gravity_guided_drop_track(&raster, &gravity, 0, c(2.5, 2.5), &default_config());
+        assert!(result.is_none());
+    }
+
     #[test]
     fn contour_pixels_are_seeded_with_their_own_elevation() {
         let contours = vec![contour_with_gravity(10.0, -1.0, 3.0)];
         let mut raster = raster_for(&contours);
-        let result = resolve(&contours, &mut raster, &default_config());
+        let config = default_config();
+        let gravity = gravity_for(&contours, &mut raster, &config);
+        let result = resolve(&contours, &raster, &gravity, &config);
 
         let (px, py) = raster.to_px(c(5.0, 10.0));
         assert_eq!(result.e2v.get(px as usize, py as usize), Some(3.0));
@@ -518,7 +824,8 @@ mod tests {
                 .unwrap();
         assert_eq!(hit, StepHit::HighDensity);
 
-        let result = resolve(&contours, &mut raster, &config);
+        let gravity = gravity_for(&contours, &mut raster, &config);
+        let result = resolve(&contours, &raster, &gravity, &config);
 
         // Right at the drop's own landing pixel: close to the fallback
         // value, 4.
@@ -552,7 +859,9 @@ mod tests {
             contour_with_gravity(0.0, -1.0, -10.0),
         ];
         let mut raster = raster_for(&contours);
-        let result = resolve(&contours, &mut raster, &default_config());
+        let config = default_config();
+        let gravity = gravity_for(&contours, &mut raster, &config);
+        let result = resolve(&contours, &raster, &gravity, &config);
 
         let (px, py) = raster.to_px(c(5.0, 5.0));
         let value = result.e2v.get(px as usize, py as usize).unwrap();
@@ -578,7 +887,8 @@ mod tests {
         let mut raster = raster_for(&contours);
         let mut config = default_config();
         config.sources_per_contour_segment = 1;
-        let result = resolve(&contours, &mut raster, &config);
+        let gravity = gravity_for(&contours, &mut raster, &config);
+        let result = resolve(&contours, &raster, &gravity, &config);
 
         // Just below the top contour (height 0): must land close to 0, not
         // close to -10 (the far contour a swapped formula would produce).
@@ -616,7 +926,9 @@ mod tests {
         raster.write_contour(0, &contours[0].lwg.ls);
         raster.compute_out_of_bound();
 
-        let result = resolve(&contours, &mut raster, &default_config());
+        let config = default_config();
+        let gravity = gravity_for(&contours, &mut raster, &config);
+        let result = resolve(&contours, &raster, &gravity, &config);
 
         assert_eq!(result.e2v.get(0, 0), None, "the raster's own border is out of bound");
     }
@@ -651,13 +963,20 @@ mod tests {
         raster.write_contour(0, &contours[0].lwg.ls);
         raster.compute_out_of_bound();
 
-        let result = resolve(&contours, &mut raster, &default_config());
+        let config = default_config();
+        let gravity = gravity_for(&contours, &mut raster, &config);
+        let result = resolve(&contours, &raster, &gravity, &config);
 
         let (px, py) = raster.to_px(c(5.0, 5.0)); // dead center of the ring
-        assert_eq!(
-            result.e2v.get(px as usize, py as usize),
-            Some(5.0),
-            "the ring's own interior must be reached by gap-filling, at the ring's own height"
+        let center = result.e2v.get(px as usize, py as usize).unwrap();
+        // Close to, rather than bit-exact, the ring's own height: Gaussian
+        // smoothing's own weighted average introduces harmless
+        // floating-point noise even over an otherwise perfectly uniform
+        // field.
+        assert!(
+            (center - 5.0).abs() < 1e-6,
+            "the ring's own interior must be reached by gap-filling, at close to the ring's own \
+             height, got {center}"
         );
         assert!(result.filled_by_gap_fill > 0);
     }
@@ -714,7 +1033,9 @@ mod tests {
         raster.write_contour(0, &contours[0].lwg.ls);
         raster.compute_out_of_bound();
 
-        let result = resolve(&contours, &mut raster, &default_config());
+        let config = default_config();
+        let gravity = gravity_for(&contours, &mut raster, &config);
+        let result = resolve(&contours, &raster, &gravity, &config);
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("elevation.png");
