@@ -106,6 +106,7 @@ pub mod stats;
 pub mod step1_extract;
 pub mod step2_obvious_gravity;
 pub mod step3_rain_drop;
+pub mod step4_elevation;
 pub mod svg;
 pub mod text;
 pub mod validate;

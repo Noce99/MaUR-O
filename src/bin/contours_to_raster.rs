@@ -1,9 +1,8 @@
 //! Extracts elevation-gravity information from an .omap's contours --
-//! `Contours-to-Raster.md`'s Steps 1, 2 and 3. Step 4 (actually assigning an
-//! elevation number to each contour) is still `TO DO` in the doc, so this
-//! binary works out, for every contour, which way is downhill, and stops
-//! there: no TIFF is written yet, since there is no real elevation to put in
-//! one.
+//! `Contours-to-Raster.md`'s Steps 1 through 4. Step 5 (writing the final
+//! elevation TIFF) is still `TO DO` in the doc, so this binary works out,
+//! for every contour, which way is downhill and its own relative elevation,
+//! and stops there: no TIFF is written yet.
 //!
 //! ```text
 //! contours_to_raster <map.omap> [output.tif] [--results <dir>] [--config <path>] [--create_svg]
@@ -20,14 +19,15 @@
 //! `[output.tif]` names the files written inside it -- only its file name is
 //! used, since the directory is always the run folder -- and is used to name
 //! the `--create_svg` files even though nothing is written under it yet, so
-//! this interface does not need to change once Step 4 lands.
+//! this interface does not need to change once Step 5 lands.
 //!
 //! Exit codes: 0 success, 1 usage error, 2 the map could not be read, 3 the
 //! config file could not be read or parsed, 4 the run folder or a
 //! `--create_svg` file could not be written, or a Step 1 geometry error (a
 //! degenerate buffer polygon -- a raster conflict no longer fails the run at
 //! all, see `Contours-to-Raster.md`'s Step 1), or 5 a Step 2/Step 3 gravity
-//! conflict, or a contour left undefined after both rain-drop passes.
+//! conflict, or a Step 4 tree invariant violation (a contour found to be its
+//! own ancestor -- see `step4_elevation::resolve`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -38,11 +38,12 @@ use maur_o::contours_to_raster_config::{Config, DEFAULT_CONFIG_PATH};
 use maur_o::contours_to_raster_svg::{
     write_contours_function_svg, write_final_svg, write_step1_close_search_svg,
     write_step1_growing_svg, write_step1_svg, write_step2_svg, write_step3_anti_rain_svg,
-    write_step3_rain_svg,
+    write_step3_rain_svg, write_step4_svg,
 };
 use maur_o::step1_extract;
 use maur_o::step2_obvious_gravity;
 use maur_o::step3_rain_drop;
+use maur_o::step4_elevation;
 use maur_o::xml_reader::read_xml_map;
 
 #[derive(Parser)]
@@ -50,7 +51,7 @@ use maur_o::xml_reader::read_xml_map;
     name = "contours_to_raster",
     version,
     about = "Extracts elevation-gravity information from an .omap's contours (Contours-to-Raster.md, \
-             Steps 1-3). Step 4 is not yet implemented, so no TIFF is written yet."
+             Steps 1-4). Step 5 is not yet implemented, so no TIFF is written yet."
 )]
 struct Args {
     /// The .omap file to read.
@@ -60,7 +61,7 @@ struct Args {
     /// --create_svg files are named after. Any directory given here is
     /// ignored -- everything this run produces goes inside its own folder
     /// under --results. Defaults to the map file's own name with a .tif
-    /// suffix. Unused until Step 4 exists.
+    /// suffix. Unused until Step 5 exists.
     output_file: Option<PathBuf>,
 
     /// Where this run's own timestamped folder is created.
@@ -71,18 +72,18 @@ struct Args {
     #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
     config: PathBuf,
 
-    /// Write the seven per-step validation SVGs Contours-to-Raster.md's
+    /// Write the eight per-step validation SVGs Contours-to-Raster.md's
     /// "Visualization" section describes (Step 1 before its own Growing
     /// Process sub-step, after that sub-step's own Close Search pass, after
-    /// its Seeking phase, after its Matching phase, Step 2, and Step 3's
-    /// Rain and Anti Rain Drop Productions each in their own file), an
+    /// its Seeking phase, after its Matching phase, Step 2, Step 3's Rain
+    /// and Anti Rain Drop Productions each in their own file, and Step 4), an
     /// unnumbered "final" SVG with
-    /// just the algorithm's actual answer once every contour is resolved, an
-    /// unnumbered "contours_function" SVG plotting the contour-pixel force
-    /// curve itself (a function of --config alone, not of the map), and a
-    /// full-raster, every-pixel-colored PNG (the vector SVGs only square a
-    /// contour or high-density pixel, to keep their file size sane), all
-    /// inside this run's own folder.
+    /// just the algorithm's actual answer once every contour's gravity is
+    /// resolved, an unnumbered "contours_function" SVG plotting the
+    /// contour-pixel force curve itself (a function of --config alone, not of
+    /// the map), and a full-raster, every-pixel-colored PNG (the vector SVGs
+    /// only square a contour or high-density pixel, to keep their file size
+    /// sane), all inside this run's own folder.
     #[arg(long = "create_svg")]
     create_svg: bool,
 }
@@ -93,8 +94,8 @@ fn default_output_name(map_path: &Path) -> PathBuf {
     Path::new(map_path.file_stem().unwrap_or_default()).with_extension("tif")
 }
 
-/// `<prefix>_<output>_<step>.svg`, next to `output_path` -- the seven
-/// numbered `--create_svg` files (`00`.."06", see the doc's Visualization
+/// `<prefix>_<output>_<step>.svg`, next to `output_path` -- the eight
+/// numbered `--create_svg` files (`00`.."07", see the doc's Visualization
 /// section).
 fn numbered_svg_path(output_path: &Path, prefix: &str, step: &str) -> PathBuf {
     let stem = output_path
@@ -326,32 +327,49 @@ fn run() -> Result<(), (ExitCode, String)> {
         Some(result)
     };
 
+    if args.create_svg && step3.is_none() {
+        // Every contour was already resolved before Step 3 ran: write
+        // the same picture Step 2 saw, so every numbered file that depends
+        // on it still exists under --create_svg.
+        let empty_step3 = step3_rain_drop::Step3Result {
+            resolved_by_votes: 0,
+            warnings: Vec::new(),
+            defined_after_rain: vec![true; step1.contours.len()],
+            rain_paths: Vec::new(),
+            anti_rain_paths: Vec::new(),
+            rain_hysteresis_points: Vec::new(),
+            anti_rain_hysteresis_points: Vec::new(),
+            rain_vote_segments: Vec::new(),
+            anti_rain_vote_segments: Vec::new(),
+        };
+        write_step3_svgs(&output_path, &step1, &empty_step3)?;
+    }
+
+    // Never `Err` outright: even the doc's own "should not be possible" tree
+    // invariant violation is reported through `step4.error` instead, so
+    // whatever of T got built before that happens can still be written to
+    // --create_svg's own 07_..._step4.svg below for inspection, rather than
+    // losing that state to an immediate exit.
+    let step4 = step4_elevation::resolve(&mut step1.contours, &mut step1.raster, &config);
+    for warning in &step4.warnings {
+        eprintln!("Warning: {warning}");
+    }
+
     if args.create_svg {
-        if step3.is_none() {
-            // Every contour was already resolved before Step 3 ran: write
-            // the same picture Step 2 saw, so all seven numbered files
-            // always exist together under --create_svg.
-            let empty_step3 = step3_rain_drop::Step3Result {
-                resolved_by_votes: 0,
-                warnings: Vec::new(),
-                defined_after_rain: vec![true; step1.contours.len()],
-                rain_paths: Vec::new(),
-                anti_rain_paths: Vec::new(),
-                rain_hysteresis_points: Vec::new(),
-                anti_rain_hysteresis_points: Vec::new(),
-                rain_vote_segments: Vec::new(),
-                anti_rain_vote_segments: Vec::new(),
-            };
-            write_step3_svgs(&output_path, &step1, &empty_step3)?;
-        }
-        // Written last, against `step1` only after every contour's gravity
-        // is fully settled (Step 3 having run above, or having been skipped
-        // because Step 2 already resolved everything) -- the
-        // algorithm's actual answer, not a per-step snapshot.
+        // Written after Step 4, against `step1` only once every contour's
+        // gravity is fully settled (Step 3 having run above, or having been
+        // skipped because Step 2 already resolved everything) -- the
+        // algorithm's actual gravity answer, not a per-step snapshot. Step
+        // 4's own mutation of `step1.raster` (erasing a dropped contour's own
+        // footprint, see `step4_elevation::resolve`) does not affect this
+        // file, since it never draws that raster's pixel layer for a contour
+        // gravity itself already left undefined.
         write_final_svg(&step_svg_path(&output_path, "final"), &step1)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        write_step4_svg(&numbered_svg_path(&output_path, "07", "step4"), &step1, &step4)
+            .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
         println!(
-            "wrote {}, {}, {}, {}, {}, {}, {}, {}, {} and {}",
+            "wrote {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}",
             step_svg_path(&output_path, "contours_function").display(),
             numbered_svg_path(&output_path, "00", "step1").display(),
             numbered_svg_path(&output_path, "01", "step1_close_search").display(),
@@ -361,8 +379,13 @@ fn run() -> Result<(), (ExitCode, String)> {
             numbered_svg_path(&output_path, "04", "step2").display(),
             numbered_svg_path(&output_path, "05", "step3_rain").display(),
             numbered_svg_path(&output_path, "06", "step3_anti_rain").display(),
+            numbered_svg_path(&output_path, "07", "step4").display(),
             step_svg_path(&output_path, "final").display(),
         );
+    }
+
+    if let Some(e) = step4.error {
+        return Err((ExitCode::from(5), format!("Error: {e}")));
     }
 
     let contour_count = step1.contours.len();
@@ -377,9 +400,14 @@ fn run() -> Result<(), (ExitCode, String)> {
          vote(s), {resolved_by_rain_drop_votes} rain/anti-rain drop vote(s)",
         args.map_file.display(),
     );
+    println!(
+        "elevation resolved for {}/{contour_count} contours ({} dropped, still undefined)",
+        step4.resolved,
+        contour_count as u64 - step4.resolved,
+    );
 
     eprintln!(
-        "Note: Step 4 (elevation assignment) is not yet implemented; {} was not written.",
+        "Note: Step 5 (final TIFF) is not yet implemented; {} was not written.",
         output_path.display()
     );
 

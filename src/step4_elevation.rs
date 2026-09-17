@@ -1,0 +1,773 @@
+//! Step 4: Elevation Value Assignation (`Contours-to-Raster.md`). Grows a
+//! tree **T** of contours, rooted at an arbitrary already-gravity-defined
+//! contour at height `0`, by repeatedly running a Hot Rain Drop Production
+//! and a Hot Anti Rain Drop Production (Elevation/Anti Elevation
+//! Proliferation) from whichever leaf of **T** still has unexplored progeny
+//! -- see [`resolve`] for the full loop and [`Tree`] for the data structure
+//! backing it.
+//!
+//! Every "choose randomly" in the doc (the root contour, and a tie-break
+//! among equal-depth leaves) is instead a deterministic smallest-index pick,
+//! the same convention `step1_extract::merge_contours` already uses for the
+//! doc's own "one of the two contour indices is discarded at random": any
+//! consistent choice satisfies the doc, and this one needs no RNG dependency
+//! and keeps every run and test reproducible.
+
+use std::collections::HashMap;
+
+use geo::{Coord, Euclidean, Length};
+
+use crate::contour_geometry::{local_tangent, nearest_index};
+use crate::contour_raster::ContourRaster;
+use crate::contours_to_raster_config::Config;
+use crate::gravity_model::{contour_gravity_side, lwg_gravity_side, vector_on_side, Contour, LineWithGravity};
+use crate::step3_rain_drop::{hot_drop_evaporation_contour, placed_sources};
+
+/// One node of [`Tree`]: its parent (`None` for the root), its own children,
+/// and its depth (the root is `0`, a child is its parent's depth plus one).
+struct TreeNode {
+    parent: Option<usize>,
+    children: Vec<usize>,
+    depth: usize,
+}
+
+/// Step 4's own tree **T**: which contours (by index into the `Vec<Contour>`
+/// Step 4 runs over) are members, and how they relate. Membership here and a
+/// contour's own `elevation_height` being `Some` are kept as one invariant
+/// throughout [`resolve`]: a contour is in `T` exactly when it has a height.
+#[derive(Default)]
+struct Tree {
+    nodes: HashMap<usize, TreeNode>,
+}
+
+impl Tree {
+    /// Adds `idx` as `T`'s own root, at depth `0` with no parent. Only ever
+    /// called once, before the main loop in [`resolve`] starts.
+    fn insert_root(&mut self, idx: usize) {
+        self.nodes.insert(
+            idx,
+            TreeNode {
+                parent: None,
+                children: Vec::new(),
+                depth: 0,
+            },
+        );
+    }
+
+    /// Adds `child_idx` as a new child of `parent_idx`, one depth level
+    /// deeper. `parent_idx` must already be in `T`.
+    fn insert_child(&mut self, parent_idx: usize, child_idx: usize) {
+        let depth = self.nodes[&parent_idx].depth + 1;
+        self.nodes.insert(
+            child_idx,
+            TreeNode {
+                parent: Some(parent_idx),
+                children: Vec::new(),
+                depth,
+            },
+        );
+        self.nodes.get_mut(&parent_idx).unwrap().children.push(child_idx);
+    }
+
+    /// Whether `node` is a descendant of `ancestor` -- walks `node`'s own
+    /// parent chain looking for `ancestor`. Used to guard the one case the
+    /// doc says "should not be possible": evicting `ancestor`'s subtree while
+    /// re-parenting it under `node` would otherwise remove `node` itself out
+    /// from under the very proliferation that is currently running on it.
+    fn is_descendant(&self, node: usize, ancestor: usize) -> bool {
+        let mut current = self.nodes.get(&node).and_then(|n| n.parent);
+        while let Some(p) = current {
+            if p == ancestor {
+                return true;
+            }
+            current = self.nodes.get(&p).and_then(|n| n.parent);
+        }
+        false
+    }
+
+    /// Removes `idx` and every descendant of it from `T` (detaching `idx`
+    /// from its own parent's children list first), returning every removed
+    /// index, `idx` included, in no particular order. The caller is
+    /// responsible for resetting each removed contour's own
+    /// `elevation_height`/`empty_progeny` and for re-inserting `idx` itself
+    /// elsewhere if the doc calls for it (Step 4's own eviction, point 3):
+    /// every *other* removed index is simply dropped out of `T` for good,
+    /// unless some later proliferation happens to re-discover it.
+    fn evict_subtree(&mut self, idx: usize) -> Vec<usize> {
+        if let Some(parent) = self.nodes.get(&idx).and_then(|n| n.parent) {
+            if let Some(p) = self.nodes.get_mut(&parent) {
+                p.children.retain(|&c| c != idx);
+            }
+        }
+        let mut removed = Vec::new();
+        let mut stack = vec![idx];
+        while let Some(i) = stack.pop() {
+            if let Some(node) = self.nodes.remove(&i) {
+                stack.extend(node.children);
+                removed.push(i);
+            }
+        }
+        removed
+    }
+
+    fn depth_of(&self, idx: usize) -> Option<usize> {
+        self.nodes.get(&idx).map(|n| n.depth)
+    }
+
+    fn is_leaf(&self, idx: usize) -> bool {
+        self.nodes.get(&idx).is_some_and(|n| n.children.is_empty())
+    }
+
+    /// Every `(parent, child)` edge of `T`, for `--create_svg`'s own
+    /// `07_<map_name>_step4.svg`.
+    fn edges(&self) -> Vec<(usize, usize)> {
+        self.nodes
+            .iter()
+            .filter_map(|(&i, n)| n.parent.map(|p| (p, i)))
+            .collect()
+    }
+}
+
+/// **Next Proliferator Selection**: the leaf of `tree` with the smallest
+/// depth whose own `empty_progeny` is still `false`, or `None` if no such
+/// leaf remains. Ties are broken by the smallest contour index (see the
+/// module's own doc comment on why this is deterministic rather than the
+/// doc's literal "chooses randomly").
+fn next_proliferator_selection(tree: &Tree, contours: &[Contour]) -> Option<usize> {
+    tree.nodes
+        .keys()
+        .copied()
+        .filter(|&i| tree.is_leaf(i) && !contours[i].empty_progeny)
+        .min_by_key(|&i| (tree.depth_of(i).unwrap(), i))
+}
+
+/// The doc's own accordance/discordance check (Step 4): whether `dir` (the
+/// drop's own direction of travel) agrees with `hit`'s own gravity direction
+/// at the point `at` it was hit. `None` only if `hit` somehow has no gravity
+/// yet, which should not happen in Step 4 (every contour still in play is
+/// assumed to have one by this point).
+fn accordance(hit: &LineWithGravity, at: Coord<f64>, dir: (f64, f64)) -> Option<bool> {
+    let side = lwg_gravity_side(hit)?;
+    let idx = nearest_index(&hit.ls, at);
+    let (tf, tt) = local_tangent(&hit.ls, idx);
+    let (hgx, hgy) = vector_on_side(tf, tt, side);
+    Some(dir.0 * hgx + dir.1 * hgy >= 0.0)
+}
+
+/// The height a hit contour should get, given its source's own `c_height`
+/// and whether the drop reached it in `accordance` -- Elevation Proliferation
+/// (`anti = false`, a Hot Rain Drop): accordance means one step further
+/// downhill (`c_height - 1`), discordance means the same downhill band
+/// reached from its other side (`c_height`). Anti Elevation Proliferation
+/// (`anti = true`, a Hot Anti Rain Drop) flips both cases: since the drop
+/// already travels *against* `C`'s own downhill, the *ordinary* case of
+/// genuinely reaching higher ground is discordance with the hit's own
+/// gravity (`c_height + 1`), and accordance is the "same band, other side"
+/// case instead (`c_height`). See `Contours-to-Raster.md`'s own note on why
+/// this flip is needed.
+fn expected_elevation_height(c_height: f64, accordance: bool, anti: bool) -> f64 {
+    match (anti, accordance) {
+        (false, true) => c_height - 1.0,
+        (false, false) => c_height,
+        (true, true) => c_height,
+        (true, false) => c_height + 1.0,
+    }
+}
+
+/// An [`elevation_proliferation`] failure: the doc's own "should not be
+/// possible" message, plus the exact Hot (Anti) Rain Drop path that
+/// triggered it (source to the fatal evaporation), so `--create_svg`'s own
+/// `07_<map_name>_step4.svg` can draw exactly which drop caused the crash --
+/// there is no other way to recover a specific drop's path after the fact,
+/// once `resolve` has moved on to reporting the failure.
+#[derive(Debug)]
+struct ProliferationError {
+    message: String,
+    drop_path: Vec<Coord<f64>>,
+}
+
+/// **Elevation Proliferation** (`anti = false`, a Hot Rain Drop Production)
+/// or **Anti Elevation Proliferation** (`anti = true`, a Hot Anti Rain Drop
+/// Production) on `c_idx`, already a member of `tree` with a defined height:
+/// runs one Hot (Anti) Rain Drop Production from `c_idx`'s own `ls` and
+/// applies the doc's own three cases (Step 4) at every evaporation that
+/// lands on a contour -- a non-operation for one that lands on high density
+/// or out of bound instead. Returns the number of children added to `c_idx`,
+/// or `Err` if the doc's own "should not be possible" invariant (`c_idx`
+/// already a descendant of the contour it just evicted) is ever violated.
+fn elevation_proliferation(
+    c_idx: usize,
+    anti: bool,
+    contours: &mut [Contour],
+    raster: &mut ContourRaster,
+    tree: &mut Tree,
+    config: &Config,
+) -> Result<u64, ProliferationError> {
+    let pass_name = if anti {
+        "Anti Elevation Proliferation"
+    } else {
+        "Elevation Proliferation"
+    };
+
+    let ls = contours[c_idx].lwg.ls.clone();
+    let side = contour_gravity_side(&contours[c_idx]).unwrap_or_else(|| {
+        panic!(
+            "Step 4 ({pass_name} from contour {c_idx}) assumes every contour still in play has \
+             a gravity direction, but contour {c_idx} itself does not"
+        )
+    });
+    let c_height = contours[c_idx].elevation_height.unwrap_or_else(|| {
+        panic!(
+            "Step 4 ({pass_name} from contour {c_idx}): a contour Next Proliferator Selection \
+             picks is always already in T with a defined elevation_height, but contour {c_idx} \
+             has none"
+        )
+    });
+
+    let mut children_added = 0u64;
+    for (source, (dx, dy)) in placed_sources(&ls, side, config.sources_per_contour_segment) {
+        let dir = if anti { (-dx, -dy) } else { (dx, dy) };
+        let Some((hit_idx, at, drop_path)) =
+            hot_drop_evaporation_contour(raster, c_idx as u64, source, dir, config)
+        else {
+            continue; // high density or out of bound: a non-operation
+        };
+        let hit_idx = hit_idx as usize;
+
+        let acc = accordance(&contours[hit_idx].lwg, at, dir).unwrap_or_else(|| {
+            panic!(
+                "Step 4 ({pass_name} from contour {c_idx}) assumes every contour still in play \
+                 has a gravity direction, but contour {hit_idx}, hit at ({:.2}, {:.2}), does not",
+                at.x, at.y
+            )
+        });
+        let expected = expected_elevation_height(c_height, acc, anti);
+        let acc_word = if acc { "accordance" } else { "discordance" };
+
+        match contours[hit_idx].elevation_height {
+            None => {
+                contours[hit_idx].elevation_height = Some(expected);
+                tree.insert_child(c_idx, hit_idx);
+                children_added += 1;
+            }
+            Some(existing) if expected.abs() > existing.abs() => {
+                if tree.is_descendant(c_idx, hit_idx) {
+                    return Err(ProliferationError {
+                        message: format!(
+                            "Step 4: {pass_name} from contour {c_idx} (elevation_height \
+                             {c_height}) hit contour {hit_idx} (currently elevation_height \
+                             {existing}) at ({:.2}, {:.2}), in {acc_word} with {hit_idx}'s own \
+                             gravity direction there, computing an expected elevation_height of \
+                             {expected} for it. abs({expected}) > abs({existing}), so {hit_idx} \
+                             would normally be evicted (along with its own subtree) and \
+                             re-parented under {c_idx} at the new value -- but {c_idx} is itself \
+                             already a descendant of {hit_idx} in T, so evicting {hit_idx}'s \
+                             subtree would also remove {c_idx}, the very contour this \
+                             {pass_name} call is running on. Contours-to-Raster.md's Step 4 \
+                             assumes this cannot happen.",
+                            at.x, at.y,
+                        ),
+                        drop_path,
+                    });
+                }
+                for removed in tree.evict_subtree(hit_idx) {
+                    contours[removed].elevation_height = None;
+                    contours[removed].empty_progeny = false;
+                }
+                contours[hit_idx].elevation_height = Some(expected);
+                tree.insert_child(c_idx, hit_idx);
+                children_added += 1;
+            }
+            Some(_) => {} // abs(expected) <= abs(existing): no-op
+        }
+    }
+    Ok(children_added)
+}
+
+/// What Step 4 resolved: how many contours got an `elevation_height`, one
+/// warning per contour that ended without one (either because Step 3 had
+/// already dropped it, or because Step 4's own tree never reached it), plus
+/// `T`'s own structure for `--create_svg`'s `07_<map_name>_step4.svg`.
+pub struct Step4Result {
+    /// How many contours have a defined `elevation_height` once Step 4
+    /// finishes -- excludes contours Step 3 had already dropped.
+    pub resolved: u64,
+    /// One warning per contour that ended Step 4 without an
+    /// `elevation_height`, naming its own length in meters, the same
+    /// convention Step 3 uses for a contour it drops. Empty if [`error`] is
+    /// `Some` -- the run was cut short, so a contour still undefined at that
+    /// point is not yet a genuine Step 4 dead end, just unreached so far.
+    ///
+    /// [`error`]: Step4Result::error
+    pub warnings: Vec<String>,
+    /// Every `(parent_contour_idx, child_contour_idx)` edge of `T`, as far as
+    /// it got built.
+    pub tree_edges: Vec<(usize, usize)>,
+    /// Every contour index whose own `empty_progeny` ended `true`: a leaf of
+    /// `T` whose Elevation and Anti Elevation Proliferation both added zero
+    /// children.
+    pub dead_ends: Vec<usize>,
+    /// `Some` only if the doc's own "should not be possible" invariant (Step
+    /// 4, point 3: a contour found to be its own ancestor in `T`) was
+    /// violated -- every other field above still reports `T` exactly as far
+    /// as it got before that happened, so `--create_svg`'s own
+    /// `07_<map_name>_step4.svg` can still be inspected, but the run as a
+    /// whole should be treated as failed.
+    pub error: Option<String>,
+    /// The exact Hot (Anti) Rain Drop path (source to evaporation) that
+    /// triggered [`error`], if any -- empty whenever `error` is `None`. Lets
+    /// `--create_svg`'s own `07_<map_name>_step4.svg` draw exactly which
+    /// drop caused the crash, rather than leaving whoever is debugging it to
+    /// re-derive the drop from the error message's own contour indices and
+    /// coordinates by hand.
+    ///
+    /// [`error`]: Step4Result::error
+    pub error_drop_path: Vec<Coord<f64>>,
+}
+
+/// Runs Step 4: erases the raster footprint of any contour Step 3 already
+/// dropped (still gravity-undefined -- see the doc's own note on why, added
+/// alongside this rewrite), grows `T` from an arbitrary gravity-defined root
+/// contour at height `0` by repeatedly proliferating whichever leaf
+/// [`next_proliferator_selection`] returns, and reports whatever contour is
+/// still without an `elevation_height` once no leaf is left to proliferate.
+///
+/// Always returns a [`Step4Result`], even when the doc's own "should not be
+/// possible" invariant is violated ([`Step4Result::error`]) -- the caller
+/// decides whether to still write `--create_svg`'s own diagnostics for
+/// whatever of `T` was built before stopping, and/or to treat the run as
+/// failed, rather than losing that state to an immediate `Err`.
+pub fn resolve(contours: &mut [Contour], raster: &mut ContourRaster, config: &Config) -> Step4Result {
+    for (idx, c) in contours.iter().enumerate() {
+        if c.lwg.gravity_dx.is_none() {
+            raster.clear_contour(idx as u64);
+        }
+    }
+
+    let mut tree = Tree::default();
+    let root_idx = contours.iter().position(|c| c.lwg.gravity_dx.is_some());
+    let Some(root_idx) = root_idx else {
+        return Step4Result {
+            resolved: 0,
+            warnings: Vec::new(),
+            tree_edges: Vec::new(),
+            dead_ends: Vec::new(),
+            error: None,
+            error_drop_path: Vec::new(),
+        };
+    };
+    tree.insert_root(root_idx);
+    contours[root_idx].elevation_height = Some(0.0);
+
+    let mut error = None;
+    let mut error_drop_path = Vec::new();
+    while let Some(c_idx) = next_proliferator_selection(&tree, contours) {
+        let rain_children =
+            match elevation_proliferation(c_idx, false, contours, raster, &mut tree, config) {
+                Ok(n) => n,
+                Err(e) => {
+                    error = Some(e.message);
+                    error_drop_path = e.drop_path;
+                    break;
+                }
+            };
+        let anti_children =
+            match elevation_proliferation(c_idx, true, contours, raster, &mut tree, config) {
+                Ok(n) => n,
+                Err(e) => {
+                    error = Some(e.message);
+                    error_drop_path = e.drop_path;
+                    break;
+                }
+            };
+        if rain_children == 0 && anti_children == 0 {
+            contours[c_idx].empty_progeny = true;
+        }
+    }
+
+    let mut resolved = 0u64;
+    let mut warnings = Vec::new();
+    for (idx, c) in contours.iter().enumerate() {
+        if c.lwg.gravity_dx.is_none() {
+            continue; // already reported (and erased above) as a Step 3 drop
+        }
+        if c.elevation_height.is_some() {
+            resolved += 1;
+        } else if error.is_none() {
+            let length_m = Euclidean.length(&c.lwg.ls);
+            warnings.push(format!(
+                "contour {idx} ({length_m:.1}m long) still has no elevation height after Step 4; \
+                 dropped"
+            ));
+        }
+    }
+
+    Step4Result {
+        resolved,
+        warnings,
+        tree_edges: tree.edges(),
+        dead_ends: contours
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.empty_progeny)
+            .map(|(i, _)| i)
+            .collect(),
+        error,
+        error_drop_path,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gravity_model::LineWithGravity;
+    use geo::LineString;
+
+    fn c(x: f64, y: f64) -> Coord<f64> {
+        Coord { x, y }
+    }
+
+    fn default_config() -> Config {
+        Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 1.0,
+            rasterization_px_size: 0.5,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 4,
+            slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            obvious_to_close_contour_distance: 0.0,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
+            growing_oob_seeking_max_steps: 0,
+            contour_force_window: 4.0,
+            attraction_force_window: 4.0,
+            contour_force_max_repulsion: 2.0,
+            contour_force_equilibrium: 1.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 3.0,
+            out_of_bound_force: 0.5,
+            density_region_force: 1.0,
+            flying_end_force: 1.0,
+            flying_end_merge_distance: 0.5,
+            matching_min_force: 0.0,
+            grow_time_step: 1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
+        }
+    }
+
+    fn straight_ls(y: f64) -> LineString<f64> {
+        LineString::new(vec![c(0.0, y), c(20.0, y)])
+    }
+
+    fn contour_with_gravity(y: f64, gravity_dy: f64) -> Contour {
+        let mut contour = Contour {
+            lwg: LineWithGravity::new(straight_ls(y)),
+            elevation_height: None,
+            empty_progeny: false,
+        };
+        contour.lwg.gravity_dx = Some(0.0);
+        contour.lwg.gravity_dy = Some(gravity_dy);
+        contour
+    }
+
+    fn raster_for(contours: &[Contour]) -> ContourRaster {
+        let mut r = ContourRaster::new(c(-5.0, -20.0), 0.5, 60, 100);
+        for (i, contour) in contours.iter().enumerate() {
+            r.write_contour(i as u64, &contour.lwg.ls);
+        }
+        r
+    }
+
+    #[test]
+    fn a_stack_of_parallel_contours_gets_one_lower_height_per_downhill_step() {
+        // Three parallel contours, downhill = -y (toward y=0), 5m apart:
+        // a Hot Rain Drop from the top one reaches the middle one directly
+        // below, and from there the bottom one -- each one step lower.
+        let mut contours = vec![
+            contour_with_gravity(10.0, -1.0),
+            contour_with_gravity(5.0, -1.0),
+            contour_with_gravity(0.0, -1.0),
+        ];
+        let mut raster = raster_for(&contours);
+        let config = default_config();
+
+        let result = resolve(&mut contours, &mut raster, &config);
+
+        assert_eq!(contours[0].elevation_height, Some(0.0), "the root");
+        assert_eq!(contours[1].elevation_height, Some(-1.0));
+        assert_eq!(contours[2].elevation_height, Some(-2.0));
+        assert_eq!(result.resolved, 3);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn anti_elevation_proliferation_gives_higher_ground_a_higher_height() {
+        // Same stack, but rooted at the *bottom* contour (index 2, the only
+        // one whose gravity Step 2 would have found first here doesn't
+        // matter -- resolve always roots at the lowest surviving index).
+        // Anti Elevation Proliferation should climb the stack: y=5 above
+        // y=0 gets +1, y=10 above that gets +2.
+        let mut contours = vec![
+            contour_with_gravity(0.0, -1.0),
+            contour_with_gravity(5.0, -1.0),
+            contour_with_gravity(10.0, -1.0),
+        ];
+        let mut raster = raster_for(&contours);
+        let config = default_config();
+
+        let result = resolve(&mut contours, &mut raster, &config);
+
+        assert_eq!(contours[0].elevation_height, Some(0.0), "the root");
+        assert_eq!(
+            contours[1].elevation_height,
+            Some(1.0),
+            "one genuine step uphill from the root"
+        );
+        assert_eq!(
+            contours[2].elevation_height,
+            Some(2.0),
+            "two genuine steps uphill from the root"
+        );
+        assert_eq!(result.resolved, 3);
+    }
+
+    #[test]
+    fn a_contour_step3_dropped_is_skipped_and_its_raster_footprint_erased() {
+        // The middle contour never got a gravity direction (as if Step 3 had
+        // dropped it): its own pixels must be erased before Step 4 starts,
+        // so a Hot Rain Drop from the top contour passes straight through to
+        // the bottom one instead of evaporating on it.
+        let mut top = contour_with_gravity(10.0, -1.0);
+        top.lwg.gravity_dx = Some(0.0);
+        let middle = Contour {
+            lwg: LineWithGravity::new(straight_ls(5.0)),
+            elevation_height: None,
+            empty_progeny: false,
+        }; // no gravity: as if Step 3 dropped it
+        let bottom = contour_with_gravity(0.0, -1.0);
+        let mut contours = vec![top, middle, bottom];
+        let mut raster = raster_for(&contours);
+        let config = default_config();
+
+        let result = resolve(&mut contours, &mut raster, &config);
+
+        assert_eq!(contours[0].elevation_height, Some(0.0));
+        assert!(
+            contours[1].elevation_height.is_none(),
+            "never had gravity, so Step 4 must never touch it"
+        );
+        assert_eq!(
+            contours[2].elevation_height,
+            Some(-1.0),
+            "reached straight through where the dropped contour used to be"
+        );
+        assert_eq!(result.resolved, 2, "the dropped contour is not counted");
+        assert!(
+            result.warnings.is_empty(),
+            "a Step-3-dropped contour is not Step 4's own warning to raise"
+        );
+    }
+
+    #[test]
+    fn a_contour_step4_never_reaches_is_warned_about_and_left_undefined() {
+        // A lone contour far away in x from the reachable stack: since every
+        // drop from the stack travels straight in y (gravity_dx = 0), none
+        // of them ever changes x, so nothing ever reaches a contour placed
+        // far off to the side regardless of the raster's own size -- a
+        // genuinely unreachable contour, not just a distant one.
+        let mut contours = vec![
+            contour_with_gravity(0.0, -1.0),
+            contour_with_gravity(5.0, -1.0),
+        ];
+        let mut isolated = contour_with_gravity(0.0, -1.0);
+        isolated.lwg.ls = LineString::new(vec![c(200.0, 0.0), c(220.0, 0.0)]);
+        contours.push(isolated);
+        let mut raster = ContourRaster::new(c(-5.0, -20.0), 0.5, 460, 60);
+        for (i, contour) in contours.iter().enumerate() {
+            raster.write_contour(i as u64, &contour.lwg.ls);
+        }
+        let config = default_config();
+
+        let result = resolve(&mut contours, &mut raster, &config);
+
+        assert!(contours[0].elevation_height.is_some());
+        assert!(contours[1].elevation_height.is_some());
+        assert!(contours[2].elevation_height.is_none());
+        assert_eq!(result.resolved, 2);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("contour 2") && w.contains("20.0m")),
+            "expected a warning naming the isolated contour's own length: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn a_leaf_with_no_new_children_is_marked_empty_progeny_and_never_reselected() {
+        // A single contour with no neighbors at all: its own Elevation and
+        // Anti Elevation Proliferation both add zero children, so it should
+        // be marked empty_progeny and the loop should terminate immediately
+        // rather than spin forever reselecting it.
+        let mut contours = vec![contour_with_gravity(0.0, -1.0)];
+        let mut raster = raster_for(&contours);
+        let config = default_config();
+
+        let result = resolve(&mut contours, &mut raster, &config);
+
+        assert!(contours[0].empty_progeny);
+        assert_eq!(result.dead_ends, vec![0]);
+        assert_eq!(result.resolved, 1);
+    }
+
+    #[test]
+    fn a_stronger_competing_path_evicts_and_reparents_a_weaker_one() {
+        // AC (index 1) starts out already in T as its own root, at a weak
+        // height (-1.0, abs 1), with its own child AC_child (index 2, height
+        // -2.0) already hanging off it. C0 (index 0), sitting one segment
+        // above AC and artificially set to a much lower height (-5.0, as if
+        // deep in some other branch of the real tree), now proliferates and
+        // its Hot Rain Drop reaches AC directly: accordance gives AC an
+        // expected height of -6.0, abs 6 > abs 1, so AC (and everything under
+        // it) must be evicted and AC re-parented under C0 with the new,
+        // stronger height -- exactly Step 4's own point 3.
+        let mut contours = vec![
+            contour_with_gravity(10.0, -1.0), // C0
+            contour_with_gravity(5.0, -1.0),  // AC
+            contour_with_gravity(0.0, -1.0),  // AC_child (never on the drop's path)
+        ];
+        contours[0].elevation_height = Some(-5.0);
+        contours[1].elevation_height = Some(-1.0);
+        contours[2].elevation_height = Some(-2.0);
+
+        let mut raster = raster_for(&contours[..2]);
+        let config = default_config();
+
+        let mut tree = Tree::default();
+        tree.insert_root(0);
+        tree.insert_root(1);
+        tree.insert_child(1, 2);
+
+        let children_added =
+            elevation_proliferation(0, false, &mut contours, &mut raster, &mut tree, &config)
+                .unwrap();
+
+        assert_eq!(children_added, 1);
+        assert_eq!(
+            contours[1].elevation_height,
+            Some(-6.0),
+            "AC should be re-parented under C0 with the new, stronger expected height"
+        );
+        assert_eq!(tree.depth_of(1), Some(1), "AC is now C0's own child");
+        assert!(
+            contours[2].elevation_height.is_none(),
+            "AC's evicted former child must have its own height reset"
+        );
+        assert!(
+            !contours[2].empty_progeny,
+            "AC's evicted former child must have empty_progeny reset too"
+        );
+        assert!(
+            tree.depth_of(2).is_none(),
+            "AC's evicted former child is no longer a member of T at all"
+        );
+    }
+
+    #[test]
+    fn c_descendant_of_ac_is_rejected_instead_of_corrupting_the_tree() {
+        // AC (index 0) is C's own ancestor in T (AC -> C). If C's own drop
+        // now reaches back to AC with a stronger competing height, evicting
+        // AC's subtree would also remove C -- the very contour currently
+        // being proliferated -- which the doc says should not be possible;
+        // this must be rejected instead of silently corrupting T.
+        let mut contours = vec![
+            contour_with_gravity(5.0, -1.0), // AC
+            contour_with_gravity(0.0, -1.0), // C, AC's own child
+        ];
+        contours[0].elevation_height = Some(-1.0);
+        contours[1].elevation_height = Some(-100.0); // artificially huge, forces eviction
+
+        let mut raster = raster_for(&contours);
+        let config = default_config();
+
+        let mut tree = Tree::default();
+        tree.insert_root(0);
+        tree.insert_child(0, 1);
+
+        // Anti Elevation Proliferation: C's own drop travels uphill, toward
+        // AC sitting above it.
+        let err = elevation_proliferation(1, true, &mut contours, &mut raster, &mut tree, &config)
+            .unwrap_err();
+        // The message must be debuggable on its own: which pass, which two
+        // contours, their elevation_height values, the accordance/discordance
+        // verdict, and the expected value that triggered the eviction
+        // attempt -- not just "1" and "0" somewhere in the text.
+        assert!(
+            err.message.contains("Anti Elevation Proliferation from contour 1"),
+            "expected the error to name the pass and the proliferating contour: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("elevation_height -100"),
+            "expected the error to name C's own elevation_height: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("contour 0 (currently elevation_height -1)"),
+            "expected the error to name AC and its own current elevation_height: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("discordance"),
+            "expected the error to name the accordance/discordance verdict: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("expected elevation_height of -99"),
+            "expected the error to name the computed expected value that triggered the \
+             eviction attempt: {}",
+            err.message
+        );
+        assert!(
+            err.drop_path.len() >= 2,
+            "expected the exact drop path that triggered the crash to be reported too, got \
+             {:?}",
+            err.drop_path
+        );
+        assert_eq!(
+            err.drop_path.first().unwrap().y,
+            0.0,
+            "the path should start on C's own line (y=0)"
+        );
+        assert!(
+            (err.drop_path.last().unwrap().y - 5.0).abs() < 1e-9,
+            "the path should end right where it hit AC's own line (y=5), got {:?}",
+            err.drop_path.last()
+        );
+    }
+
+    #[test]
+    fn tree_edges_report_every_parent_child_relationship() {
+        let mut contours = vec![
+            contour_with_gravity(10.0, -1.0),
+            contour_with_gravity(5.0, -1.0),
+            contour_with_gravity(0.0, -1.0),
+        ];
+        let mut raster = raster_for(&contours);
+        let config = default_config();
+
+        let result = resolve(&mut contours, &mut raster, &config);
+
+        assert_eq!(result.tree_edges.len(), 2);
+        assert!(result.tree_edges.contains(&(0, 1)));
+        assert!(result.tree_edges.contains(&(1, 2)));
+    }
+}

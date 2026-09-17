@@ -1,5 +1,5 @@
-//! CLI-level checks for `contours_to_raster`: it runs Steps 1-3 end to end
-//! on a small fixture, `--create_svg` writes the nine validation files (seven
+//! CLI-level checks for `contours_to_raster`: it runs Steps 1-4 end to end
+//! on a small fixture, `--create_svg` writes the ten validation files (eight
 //! numbered, plus the unnumbered "final" and "contours_function" ones), and
 //! the documented exit codes fire on a missing map or config file.
 
@@ -24,13 +24,14 @@ fn contours() {
         .success()
         .stdout(predicates::str::contains("2 contours"))
         .stdout(predicates::str::contains("1 slope line(s)"))
-        .stdout(predicates::str::contains("1 closed hill(s)"));
+        .stdout(predicates::str::contains("1 closed hill(s)"))
+        .stdout(predicates::str::contains("elevation resolved for 2/2 contours"));
 }
 
 /// `--create_svg` writes into this run's own `contours_to_raster_<timestamp>`
 /// folder under `--results`, not next to the map or the output file.
 #[test]
-fn create_svg_writes_nine_non_empty_files_in_a_timestamped_run_folder() {
+fn create_svg_writes_ten_non_empty_files_in_a_timestamped_run_folder() {
     let dir = tempfile::tempdir().unwrap();
     let results = dir.path().join("Results");
     let out = dir.path().join("contours.tif");
@@ -68,6 +69,7 @@ fn create_svg_writes_nine_non_empty_files_in_a_timestamped_run_folder() {
         "04_contours_step2.svg",
         "05_contours_step3_rain.svg",
         "06_contours_step3_anti_rain.svg",
+        "07_contours_step4.svg",
         "contours_final.svg",
     ] {
         let svg = run_dir.join(name);

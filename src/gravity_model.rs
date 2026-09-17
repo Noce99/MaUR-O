@@ -96,12 +96,20 @@ impl LineWithGravity {
     }
 }
 
-/// One contour line, and the elevation Step 4 will eventually assign it.
+/// One contour line, and the elevation Step 4 assigns it.
 pub struct Contour {
     /// The contour's own line and gravity.
     pub lwg: LineWithGravity,
-    /// Step 4's output; always `None` until Step 4 exists.
+    /// Step 4's output: `None` until this contour is added to Step 4's own
+    /// tree `T` (as the root, as an ordinary child, or by re-insertion after
+    /// an eviction -- see [`crate::step4_elevation`]).
     pub elevation_height: Option<f64>,
+    /// Step 4-only: `true` once this contour is a leaf of `T` whose own
+    /// Elevation Proliferation and Anti Elevation Proliferation both added
+    /// zero children, so [`crate::step4_elevation`]'s own Next Proliferator
+    /// Selection never picks it again. Always `false` outside of Step 4,
+    /// including for a contour Step 4 never even reaches.
+    pub empty_progeny: bool,
 }
 
 /// Which symbol produced a [`PointGravityDefiners`] reading: a Slope Line's
@@ -373,6 +381,7 @@ mod tests {
         Contour {
             lwg: LineWithGravity::new(ls),
             elevation_height: None,
+            empty_progeny: false,
         }
     }
 

@@ -274,6 +274,7 @@ mod tests {
                 c(20.0, 5.0),
             ])),
             elevation_height: None,
+            empty_progeny: false,
         }
     }
 
@@ -554,6 +555,7 @@ mod tests {
         Contour {
             lwg: LineWithGravity::new(ls),
             elevation_height: None,
+            empty_progeny: false,
         }
     }
 

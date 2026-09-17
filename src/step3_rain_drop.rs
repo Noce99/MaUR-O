@@ -55,6 +55,13 @@ struct DropTrace {
     path: Vec<Coord<f64>>,
     hysteresis_points: Vec<Coord<f64>>,
     vote_segments: Vec<(Coord<f64>, Coord<f64>)>,
+    /// What the drop actually evaporated on, if it evaporated at all before
+    /// `MAX_DROP_STEPS` -- `None` for a drop that ran out its own step
+    /// budget without hitting anything. Step 4's own Hot Rain/Anti Rain Drop
+    /// Production ([`hot_drop_evaporation_contour`]) is the only caller that
+    /// reads this; every other caller already knows what it needs from
+    /// `path`/`vote_segments` alone.
+    final_hit: Option<StepHit>,
 }
 
 /// One Rain (or Anti Rain) Drop Production pass's accumulated paths and
@@ -261,7 +268,7 @@ pub fn flood_fill_from_contour(
 /// blends the two by the same fraction used to place it along the segment --
 /// so the direction turns smoothly along the contour instead of jumping at
 /// each node.
-fn placed_sources(
+pub(crate) fn placed_sources(
     ls: &LineString<f64>,
     side: f64,
     sources_per_contour_segment: usize,
@@ -420,10 +427,17 @@ fn simulate_reverse_pass(
 /// `rain_drop_starting_voting_hysteresis` exemptions below), and
 /// votes-and-continues on an undefined contour. A Hot drop evaporates on an
 /// out-of-bound pixel, a high-density pixel, or any contour at all, never
-/// votes, and (unlike Cold, which relies on its own hysteresis window
-/// instead) has its own source contour permanently excluded from counting as
-/// a hit, since it has no grace-period mechanism to survive hitting it
-/// otherwise. A Reverse Cold drop evaporates on exactly what Cold does, but
+/// votes, and is exempt from evaporating on its own starting contour only
+/// within `rain_drop_starting_voting_hysteresis` steps of its own creation
+/// (the same window Cold's own starting-contour exemption uses, just without
+/// Cold's separate per-vote one, which a Hot drop has no use for since it
+/// never votes) -- long enough to clear a concave source's own immediate
+/// self-overlap right at its own origin, but not forever: a source contour
+/// re-crossed *later*, well clear of its own origin, is a real crossing this
+/// drop should evaporate on like any other, exactly as a source concave
+/// enough to loop back across itself demands (see `Contours-to-Raster.md`'s
+/// Step 4 for where this was actually discovered). A Reverse Cold drop
+/// evaporates on exactly what Cold does, but
 /// with each outcome flipped: crossing a still-undefined contour is a silent
 /// pass (never a vote -- there is no gravity at its own source yet to judge a
 /// side from), while evaporating on an already-defined contour, or a
@@ -493,19 +507,18 @@ fn simulate_one_drop(
         hysteresis_points.push(pos);
     }
 
-    // A Cold drop relies on its own time-limited hysteresis window (below)
-    // to survive its first few steps near its own source contour, so
-    // nothing is excluded at the raster level. A Hot drop has no such
-    // window at all, so its own source contour must be permanently excluded
-    // here instead, or it would evaporate against its own origin
-    // immediately (see the Rain Drop Production Definition). A Reverse Cold
-    // drop needs no exclusion either: its own source contour is, by
-    // construction, always still undefined when this runs, and an undefined
-    // hit never evaporates the drop regardless of which contour it is.
-    let exclude = match temperature {
-        Temperature::Cold | Temperature::ReverseCold { .. } => u64::MAX,
-        Temperature::Hot => source_contour_idx,
-    };
+    // Every temperature relies on its own time-limited (or, for Reverse
+    // Cold, permanent-by-construction) exemption below to survive crossing
+    // its own source contour, so nothing is excluded at the raster level
+    // itself: a concave source contour can legitimately send a drop back
+    // across its *own* boundary later in its life (not just at step 0,
+    // right at its own origin), and that later crossing must still be able
+    // to evaporate the drop like any other -- a permanent raster-level
+    // exclusion would instead let the drop sail straight through every
+    // later self-crossing too, right past a contour that is very much still
+    // there. See the Cold/Hot hysteresis handling and Reverse Cold's own
+    // "still undefined" handling below.
+    let exclude = u64::MAX;
 
     // A Hot drop's own touched-but-still-undefined pixels, accumulated
     // across its whole life and only committed (via
@@ -516,6 +529,7 @@ fn simulate_one_drop(
     // `ContourRaster::commit_flood_pixels`). Unused for a Cold or Reverse
     // Cold drop.
     let mut flood_candidates: Vec<(i64, i64)> = Vec::new();
+    let mut final_hit: Option<StepHit> = None;
 
     loop {
         let next = Coord {
@@ -551,7 +565,18 @@ fn simulate_one_drop(
                 true // always evaporates on high density, whether or not it voted
             }
             (_, Some(StepHit::HighDensity)) => true,
-            (Temperature::Hot, Some(StepHit::Contour(_))) => true,
+            (Temperature::Hot, Some(StepHit::Contour(hit_idx))) => {
+                // Exempt only within `hysteresis` steps of the drop's own
+                // creation, and only for its own starting contour -- long
+                // enough to clear a concave source's own immediate
+                // self-overlap right at its own origin, but any other
+                // contour (or this same one again, once outside the window)
+                // evaporates it immediately, exactly as the Rain Drop
+                // Production Definition says a Hot drop should. Unlike Cold,
+                // there is no separate per-vote window to track, since a Hot
+                // drop never votes.
+                !(hit_idx == source_contour_idx && steps < hysteresis)
+            }
             (Temperature::ReverseCold { .. }, Some(StepHit::Contour(hit_idx))) => {
                 match accordance_downhill(&contours[hit_idx as usize].lwg, next, dir) {
                     Some(inferred_downhill) => {
@@ -606,6 +631,7 @@ fn simulate_one_drop(
 
         if evaporate {
             path.push(next);
+            final_hit = hit;
             if matches!(temperature, Temperature::Hot) && !matches!(hit, Some(StepHit::OutOfBound))
             {
                 raster.commit_flood_pixels(&flood_candidates);
@@ -628,6 +654,46 @@ fn simulate_one_drop(
         path,
         hysteresis_points,
         vote_segments,
+        final_hit,
+    }
+}
+
+/// Step 4's own Hot Rain/Anti Rain Drop Production ([`crate::step4_elevation`]):
+/// simulates one Hot drop from `source` in direction `dir`, excluding
+/// `source_contour_idx` (its own source contour) from counting as a hit, and
+/// returns which contour it evaporated on, where, and its own whole path
+/// (source to evaporation) -- kept, unlike every other caller of
+/// [`simulate_one_drop`], because Step 4's own "should not be possible" error
+/// draws the exact drop that triggered it into `--create_svg`'s own
+/// `07_<map_name>_step4.svg`, and there is no other way to recover a
+/// specific drop's path after the fact. `None` for a drop that instead
+/// evaporates on a high density or out-of-bound pixel -- a non-operation,
+/// per the doc (Step 4). Reuses [`simulate_one_drop`]'s own physics and
+/// discards everything else about its trace; `contours` is never touched (a
+/// Hot drop never votes), so an empty slice is passed.
+pub(crate) fn hot_drop_evaporation_contour(
+    raster: &mut ContourRaster,
+    source_contour_idx: u64,
+    source: Coord<f64>,
+    dir: (f64, f64),
+    config: &Config,
+) -> Option<(u64, Coord<f64>, Vec<Coord<f64>>)> {
+    let drop = simulate_one_drop(
+        &mut [],
+        raster,
+        config,
+        Temperature::Hot,
+        source_contour_idx,
+        source,
+        dir,
+        1.0,
+    );
+    match drop.final_hit {
+        Some(StepHit::Contour(hit_idx)) => {
+            let at = *drop.path.last()?;
+            Some((hit_idx, at, drop.path))
+        }
+        _ => None,
     }
 }
 
@@ -801,6 +867,7 @@ mod tests {
         let mut source = Contour {
             lwg: LineWithGravity::new(ls.clone()),
             elevation_height: None,
+            empty_progeny: false,
         };
         source.lwg.gravity_dx = Some(gx);
         source.lwg.gravity_dy = Some(gy);
@@ -863,12 +930,14 @@ mod tests {
         let mut defined = Contour {
             lwg: LineWithGravity::new(straight_ls(0.0)),
             elevation_height: None,
+            empty_progeny: false,
         };
         defined.lwg.gravity_dx = Some(0.0);
         defined.lwg.gravity_dy = Some(1.0); // downhill = +y, toward the second contour
         let undefined = Contour {
             lwg: LineWithGravity::new(straight_ls(5.0)),
             elevation_height: None,
+            empty_progeny: false,
         };
         let mut contours = vec![defined, undefined];
         let mut raster = raster_for(&contours);
@@ -887,16 +956,19 @@ mod tests {
         let mut top = Contour {
             lwg: LineWithGravity::new(straight_ls(0.0)),
             elevation_height: None,
+            empty_progeny: false,
         };
         top.lwg.gravity_dx = Some(0.0);
         top.lwg.gravity_dy = Some(1.0);
         let middle = Contour {
             lwg: LineWithGravity::new(straight_ls(5.0)),
             elevation_height: None,
+            empty_progeny: false,
         };
         let mut bottom = Contour {
             lwg: LineWithGravity::new(straight_ls(10.0)),
             elevation_height: None,
+            empty_progeny: false,
         };
         bottom.lwg.gravity_dx = Some(0.0);
         bottom.lwg.gravity_dy = Some(-1.0);
@@ -924,12 +996,14 @@ mod tests {
         let mut defined = Contour {
             lwg: LineWithGravity::new(straight_ls(0.0)),
             elevation_height: None,
+            empty_progeny: false,
         };
         defined.lwg.gravity_dx = Some(0.0);
         defined.lwg.gravity_dy = Some(1.0);
         let undefined = Contour {
             lwg: LineWithGravity::new(straight_ls(-3.0)),
             elevation_height: None,
+            empty_progeny: false,
         };
         let mut contours = vec![defined, undefined];
         let mut raster = raster_for(&contours);
@@ -974,16 +1048,19 @@ mod tests {
         let mut a = Contour {
             lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(30.0, 0.0)])),
             elevation_height: None,
+            empty_progeny: false,
         };
         a.lwg.gravity_dx = Some(0.0);
         a.lwg.gravity_dy = Some(1.0);
         let b = Contour {
             lwg: LineWithGravity::new(LineString::new(vec![c(20.0, 5.0), c(50.0, 5.0)])),
             elevation_height: None,
+            empty_progeny: false,
         };
         let c_contour = Contour {
             lwg: LineWithGravity::new(LineString::new(vec![c(40.0, -5.0), c(60.0, -5.0)])),
             elevation_height: None,
+            empty_progeny: false,
         };
         let mut contours = vec![a, b, c_contour];
         let mut raster = ContourRaster::new(c(-5.0, -10.0), 0.5, 140, 40);
@@ -1017,6 +1094,7 @@ mod tests {
         let c_contour = Contour {
             lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(10.0, 0.0)])),
             elevation_height: None,
+            empty_progeny: false,
         };
         let mut contours = vec![c_contour];
         let mut raster = ContourRaster::new(c(-10.0, -10.0), 0.5, 60, 40);
@@ -1070,6 +1148,7 @@ mod tests {
         let c_contour = Contour {
             lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(10.0, 0.0)])),
             elevation_height: None,
+            empty_progeny: false,
         };
         let mut contours = vec![c_contour];
         let mut raster = ContourRaster::new(c(-10.0, -10.0), 0.5, 60, 40);
@@ -1108,6 +1187,7 @@ mod tests {
         let mut contours = vec![Contour {
             lwg: LineWithGravity::new(straight_ls(0.0)),
             elevation_height: None,
+            empty_progeny: false,
         }];
         let mut raster = raster_for(&contours);
         let config = default_config();
@@ -1141,6 +1221,7 @@ mod tests {
         let mut source = Contour {
             lwg: LineWithGravity::new(straight_ls(-100.0)),
             elevation_height: None,
+            empty_progeny: false,
         };
         source.lwg.gravity_dx = Some(0.0);
         source.lwg.gravity_dy = Some(1.0);
@@ -1152,6 +1233,7 @@ mod tests {
                 c(3.0, 2.0),
             ])),
             elevation_height: None,
+            empty_progeny: false,
         };
         vec![source, bracket]
     }
@@ -1235,6 +1317,7 @@ mod tests {
                 let mut source = Contour {
                     lwg: LineWithGravity::new(straight_ls(-100.0)),
                     elevation_height: None,
+                    empty_progeny: false,
                 };
                 source.lwg.gravity_dx = Some(0.0);
                 source.lwg.gravity_dy = Some(1.0);
@@ -1248,6 +1331,7 @@ mod tests {
                     c(3.0, 51.0),
                 ])),
                 elevation_height: None,
+                empty_progeny: false,
             },
         ];
         let mut raster = ContourRaster::new(c(0.0, 0.0), 0.5, 20, 220);
@@ -1299,6 +1383,7 @@ mod tests {
                 let mut source = Contour {
                     lwg: LineWithGravity::new(straight_ls(-100.0)),
                     elevation_height: None,
+                    empty_progeny: false,
                 };
                 source.lwg.gravity_dx = Some(0.0);
                 source.lwg.gravity_dy = Some(1.0);
@@ -1307,6 +1392,7 @@ mod tests {
             Contour {
                 lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 20.0), c(10.0, 20.0)])),
                 elevation_height: None,
+                empty_progeny: false,
             },
         ];
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 20, 40);
@@ -1379,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn hot_drop_never_evaporates_on_its_own_permanently_excluded_source() {
+    fn hot_drop_clears_its_own_starting_contour_without_evaporating_on_it() {
         let mut raster = ContourRaster::new(c(0.0, 0.0), 0.5, 40, 40);
         let own_ls = LineString::new(vec![c(0.0, 5.0), c(20.0, 5.0)]);
         raster.write_contour(0, &own_ls);
@@ -1394,8 +1480,54 @@ mod tests {
             1.0,
         );
         // Never hits its own contour again on the way out; only the map
-        // border (an out-of-array pixel) stops it.
+        // border (an out-of-array pixel) stops it. A straight source never
+        // re-crosses itself, so this alone can't tell a time-limited
+        // exemption apart from a permanent one -- see the test below for
+        // that.
         assert!(drop.path.last().unwrap().y > 15.0);
+    }
+
+    #[test]
+    fn hot_drop_evaporates_on_its_own_source_contour_once_outside_the_hysteresis_window() {
+        // A concave source contour that curves back across its own path:
+        // the drop, launched perpendicular to the near arm, re-crosses the
+        // far arm of the *same* contour well outside its own starting
+        // window. It must evaporate there instead of sailing straight
+        // through, or a concave hill contour in Step 4 could send a Hot
+        // drop back onto its own boundary and never stop -- see
+        // Contours-to-Raster.md's Step 4 for where this was discovered.
+        let mut raster = ContourRaster::new(c(-20.0, -5.0), 0.5, 80, 80);
+        // An upside-down "U" (no bottom edge): a horizontal ray at y = 5
+        // crosses the near arm (x = 0) right at the drop's own origin, and
+        // the far arm (x = -15) again much later -- a real self-crossing of
+        // the *same* contour, not a different one.
+        let concave_ls = LineString::new(vec![
+            c(0.0, 0.0),
+            c(0.0, 20.0),
+            c(-15.0, 20.0),
+            c(-15.0, 0.0),
+        ]);
+        raster.write_contour(0, &concave_ls);
+        let mut config = default_config();
+        config.rain_drop_starting_voting_hysteresis = 3;
+
+        let drop = simulate_one_drop(
+            &mut [],
+            &mut raster,
+            &config,
+            Temperature::Hot,
+            0,
+            c(0.0, 5.0),
+            (-1.0, 0.0),
+            1.0,
+        );
+        // Evaporates around x = -15 (the far arm), nowhere near the map's
+        // own border at x = -20.
+        assert!(
+            drop.path.last().unwrap().x > -17.0,
+            "expected the drop to evaporate on its own contour's far arm, got {:?}",
+            drop.path.last()
+        );
     }
 
     #[test]

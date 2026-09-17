@@ -710,6 +710,7 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
                 contours.push(Contour {
                     lwg: LineWithGravity::new(ls.clone()),
                     elevation_height: None,
+                    empty_progeny: false,
                 });
                 raw_polylines.push(raw_poly.clone());
             }
@@ -2547,6 +2548,7 @@ mod tests {
         let contours = vec![Contour {
             lwg: LineWithGravity::new(LineString::new(ring)),
             elevation_height: None,
+            empty_progeny: false,
         }];
 
         let at = points[0]; // a point actually on the circle
@@ -2572,6 +2574,7 @@ mod tests {
         let contours = vec![Contour {
             lwg: LineWithGravity::new(ls),
             elevation_height: None,
+            empty_progeny: false,
         }];
 
         let mut point_definers = Vec::new();
@@ -2852,6 +2855,7 @@ mod tests {
         let contour = Contour {
             lwg: LineWithGravity::new(ls),
             elevation_height: None,
+            empty_progeny: false,
         };
 
         let mut result = Step1Result {
@@ -2967,10 +2971,12 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ],
             raw_polylines: vec![raw_a.clone(), raw_b.clone()],
@@ -3082,10 +3088,12 @@ mod tests {
         let contours_a = vec![Contour {
             lwg: LineWithGravity::new(ls_a),
             elevation_height: None,
+            empty_progeny: false,
         }];
         let contours_b = vec![Contour {
             lwg: LineWithGravity::new(ls_b),
             elevation_height: None,
+            empty_progeny: false,
         }];
 
         let mut pd_a = Vec::new();
@@ -3137,10 +3145,12 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ],
             raw_polylines: Vec::new(),
@@ -3305,10 +3315,12 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ],
             raster,
@@ -3337,6 +3349,7 @@ mod tests {
             vec![Contour {
                 lwg: LineWithGravity::new(ls),
                 elevation_height: None,
+                empty_progeny: false,
             }],
             raster,
         );
@@ -3377,14 +3390,17 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_c),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ],
             raster,
@@ -3421,6 +3437,7 @@ mod tests {
             vec![Contour {
                 lwg: LineWithGravity::new(ls),
                 elevation_height: None,
+                empty_progeny: false,
             }],
             raster,
         );
@@ -3470,6 +3487,7 @@ mod tests {
             vec![Contour {
                 lwg: LineWithGravity::new(ls),
                 elevation_height: None,
+                empty_progeny: false,
             }],
             raster,
         );
@@ -3503,6 +3521,7 @@ mod tests {
             vec![Contour {
                 lwg: LineWithGravity::new(ls.clone()),
                 elevation_height: None,
+                empty_progeny: false,
             }],
             raster,
         );
@@ -3536,10 +3555,12 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ],
             raster,
@@ -3573,10 +3594,12 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ],
             raster,
@@ -3610,10 +3633,12 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ],
             raster,
@@ -3651,14 +3676,17 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_c),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ],
             raster,
@@ -3702,14 +3730,17 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls1.clone()),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_x),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls3),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ],
             raster,
@@ -3761,10 +3792,12 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ],
             raw_polylines: vec![Vec::new(), Vec::new()],
@@ -3874,6 +3907,7 @@ mod tests {
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
                 elevation_height: None,
+                empty_progeny: false,
             }];
             let mut point_definers = Vec::new();
             let mut grown = vec![false];
@@ -3970,6 +4004,7 @@ mod tests {
         let mut contours = vec![Contour {
             lwg: LineWithGravity::new(ls),
             elevation_height: None,
+            empty_progeny: false,
         }];
         let mut point_definers = Vec::new();
         let mut grown = vec![false];
@@ -4065,6 +4100,7 @@ mod tests {
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
                 elevation_height: None,
+                empty_progeny: false,
             }];
             let mut point_definers = Vec::new();
             let mut grown = vec![false];
@@ -4286,6 +4322,7 @@ mod tests {
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
                 elevation_height: None,
+                empty_progeny: false,
             }];
             let mut point_definers = Vec::new();
             let mut grown = vec![false];
@@ -4358,10 +4395,12 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ];
             let mut point_definers = Vec::new();
@@ -4427,10 +4466,12 @@ mod tests {
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
                     elevation_height: None,
+                    empty_progeny: false,
                 },
             ];
             let mut point_definers = Vec::new();
@@ -4525,6 +4566,7 @@ mod tests {
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
                 elevation_height: None,
+                empty_progeny: false,
             }];
             let mut point_definers = Vec::new();
             let mut grown = vec![false];
@@ -4626,6 +4668,7 @@ mod tests {
         let mut contours = vec![Contour {
             lwg: LineWithGravity::new(ls),
             elevation_height: None,
+            empty_progeny: false,
         }];
         let mut point_definers = Vec::new();
         let mut grown = vec![false];
@@ -4716,6 +4759,7 @@ mod tests {
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
                 elevation_height: None,
+                empty_progeny: false,
             }];
             let mut point_definers = Vec::new();
             let mut grown = vec![false];
@@ -4791,6 +4835,7 @@ mod tests {
         let contour = Contour {
             lwg: LineWithGravity::new(ls),
             elevation_height: None,
+            empty_progeny: false,
         };
 
         let mut result = Step1Result {
