@@ -2,7 +2,8 @@
 //! writes it out as a raster -- `Contours-to-Raster.md`'s Steps 1 through 5.
 //!
 //! ```text
-//! contours_to_raster <map.omap> [output.tif] [--results <dir>] [--config <path>] [--create_svg]
+//! contours_to_raster <map.omap> [output.tif] [--results <dir>] [--config <path>]
+//!     [--equidistance <meters>] [--create_svg]
 //! ```
 //!
 //! Every run gets its own timestamped folder, so nothing from an earlier run
@@ -69,6 +70,17 @@ struct Args {
     /// The config file with the algorithm's parameters.
     #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
     config: PathBuf,
+
+    /// The vertical distance, in meters, between two adjacent contour
+    /// lines -- every contour's own `elevation_height` (Step 4, an integer
+    /// count of bands relative to an arbitrary zero) is multiplied by this
+    /// before it is written to the elevation TIFF, turning that count into
+    /// an actual elevation in meters (still up to an unknown absolute
+    /// baseline -- see `step5_elevation_raster::write_tiff`'s own doc
+    /// comment). Does not affect the `--create_svg` hypsometric PNG, whose
+    /// colors are scaled by this run's own min/max regardless.
+    #[arg(long, default_value_t = 5.0)]
+    equidistance: f64,
 
     /// Write the nine per-step validation SVGs Contours-to-Raster.md's
     /// "Visualization" section describes (Step 1 before its own Growing
@@ -432,6 +444,7 @@ fn run() -> Result<(), (ExitCode, String)> {
         &step5.e2v,
         step1.raster.origin,
         config.rasterization_px_size,
+        args.equidistance,
         map.georeferencing.as_ref(),
         &output_path,
     )

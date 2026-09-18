@@ -485,12 +485,14 @@ fn sample_e2v_bilinear(e2v: &ElevationRaster, origin: Coord<f64>, px_size: f64, 
     }
 }
 
-/// Writes `e2v` as a single-band 32-bit float TIFF -- the elevation value,
-/// up to a constant (`Contours-to-Raster.md`'s own opening line), for every
-/// pixel that has one; `f32::NAN` for a pixel that never got one (always an
-/// out-of-bound pixel, only ever a genuinely unreachable in-bound pocket
-/// otherwise), also declared as this file's own `GDAL_NODATA` value so a GIS
-/// tool doesn't have to guess.
+/// Writes `e2v` as a single-band 32-bit float TIFF -- each pixel's own
+/// `elevation_height` (an integer band count relative to an arbitrary zero,
+/// `Contours-to-Raster.md`'s own opening line) times `equidistance`, turning
+/// that count into an actual elevation in meters, still up to that same
+/// unknown constant baseline; `f32::NAN` for a pixel that never got one
+/// (always an out-of-bound pixel, only ever a genuinely unreachable in-bound
+/// pocket otherwise), also declared as this file's own `GDAL_NODATA` value so
+/// a GIS tool doesn't have to guess.
 ///
 /// `origin`/`px_size` are the same `ContourRaster` fields `e2v` was resolved
 /// against (`raster.origin`, `raster.px_size`); `georeferencing` is the
@@ -514,6 +516,7 @@ pub fn write_tiff(
     e2v: &ElevationRaster,
     origin: Coord<f64>,
     px_size: f64,
+    equidistance: f64,
     georeferencing: Option<&Georeferencing>,
     path: &Path,
 ) -> Result<(), String> {
@@ -526,7 +529,7 @@ pub fn write_tiff(
             px_size,
             |local| {
                 sample_e2v_bilinear(e2v, origin, px_size, local)
-                    .map(|v| v as f32)
+                    .map(|v| (v * equidistance) as f32)
                     .unwrap_or(f32::NAN)
             },
             georef,
@@ -540,7 +543,7 @@ pub fn write_tiff(
             let mut data = Vec::with_capacity(e2v.width * e2v.height);
             for y in 0..e2v.height {
                 for x in 0..e2v.width {
-                    data.push(e2v.get(x, y).map(|v| v as f32).unwrap_or(f32::NAN));
+                    data.push(e2v.get(x, y).map(|v| (v * equidistance) as f32).unwrap_or(f32::NAN));
                 }
             }
             (e2v.width, e2v.height, data)
@@ -1188,7 +1191,7 @@ mod tests {
     fn write_tiff_without_georeferencing_writes_no_geo_tags() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("elevation.tif");
-        write_tiff(&tiny_e2v(), c(0.0, 0.0), 1.0, None, &path).unwrap();
+        write_tiff(&tiny_e2v(), c(0.0, 0.0), 1.0, 1.0, None, &path).unwrap();
 
         let file = std::fs::File::open(&path).unwrap();
         let mut decoder = tiff::decoder::Decoder::new(file).unwrap();
@@ -1219,7 +1222,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("elevation.tif");
         let georef = Georeferencing::default(); // epsg == 0
-        write_tiff(&tiny_e2v(), c(0.0, 0.0), 1.0, Some(&georef), &path).unwrap();
+        write_tiff(&tiny_e2v(), c(0.0, 0.0), 1.0, 1.0, Some(&georef), &path).unwrap();
 
         let file = std::fs::File::open(&path).unwrap();
         let mut decoder = tiff::decoder::Decoder::new(file).unwrap();
@@ -1245,7 +1248,7 @@ mod tests {
         let origin = c(2252.39, -2312.17);
         let px_size = 1.0;
         let e2v = tiny_e2v();
-        write_tiff(&e2v, origin, px_size, Some(&georef), &path).unwrap();
+        write_tiff(&e2v, origin, px_size, 1.0, Some(&georef), &path).unwrap();
 
         let file = std::fs::File::open(&path).unwrap();
         let mut decoder = tiff::decoder::Decoder::new(file).unwrap();
@@ -1324,7 +1327,7 @@ mod tests {
             width: 20,
             height: 20,
         };
-        write_tiff(&e2v, origin, px_size, Some(&georef), &path).unwrap();
+        write_tiff(&e2v, origin, px_size, 1.0, Some(&georef), &path).unwrap();
 
         let file = std::fs::File::open(&path).unwrap();
         let mut decoder = tiff::decoder::Decoder::new(file).unwrap();
