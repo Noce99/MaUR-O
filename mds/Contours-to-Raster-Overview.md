@@ -1,4 +1,4 @@
-# Contours to Elevation: a Synthetic Account
+# Contours to Elevation
 **Problem.** Given an orienteering map carrying digitized contour lines (curves of
 constant elevation) together with a handful of auxiliary symbols that hint at the
 direction of steepest descent, reconstruct a scalar elevation field over the whole
