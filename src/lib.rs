@@ -22,7 +22,8 @@
 //! between two controls that takes the least time. [`validate`] asks the
 //! question a mapper asks: where does this map depart from the standard it
 //! is drawn to? And [`dem`] shades a model of the ground, so that terrain
-//! can be seen at all. [`course`] lays a course out over a map: where the
+//! can be seen at all, while [`dem_geo_tiff_evaluator`] scores a predicted
+//! one against a ground truth. [`course`] lays a course out over a map: where the
 //! circles, the lines between them and the numbers beside them go. And
 //! [`svg`] writes the same drawing the renderer makes out as vector paths
 //! rather than pixels. [`stats`] counts what a map holds — its objects, the
@@ -87,6 +88,7 @@ pub mod contours_to_raster_config;
 pub mod contours_to_raster_svg;
 pub mod course;
 pub mod dem;
+pub mod dem_geo_tiff_evaluator;
 pub mod differences;
 pub mod geometry;
 pub mod geotiff;

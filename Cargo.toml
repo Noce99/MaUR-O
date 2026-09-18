@@ -38,6 +38,10 @@ path = "src/bin/create_benchmark.rs"
 name = "contours_to_raster"
 path = "src/bin/contours_to_raster.rs"
 
+[[bin]]
+name = "dem_geo_tiff_evaluator"
+path = "src/bin/dem_geo_tiff_evaluator.rs"
+
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }
