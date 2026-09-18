@@ -88,6 +88,7 @@ pub mod contours_to_raster_config;
 pub mod contours_to_raster_svg;
 pub mod course;
 pub mod dem;
+pub mod dem_from_contours;
 pub mod dem_geo_tiff_evaluator;
 pub mod differences;
 pub mod geometry;

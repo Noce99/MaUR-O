@@ -299,6 +299,11 @@ const KEYS: &[&str] = &[
     "elevation_gaussian_kernel_size",
 ];
 
+/// The config file shipped in this repository (`config/contours_to_raster.conf`),
+/// embedded at compile time so [`Config::default_shipped`] works without a
+/// filesystem (wasm callers have none).
+const SHIPPED_CONFIG: &str = include_str!("../config/contours_to_raster.conf");
+
 impl Config {
     /// Parses a config file: one `key = value` per line, blank lines and
     /// lines starting with `#` ignored. All thirty-five keys are required --
@@ -311,7 +316,21 @@ impl Config {
         Config::parse(&text, &path.display().to_string())
     }
 
-    fn parse(text: &str, source_name: &str) -> Result<Config, String> {
+    /// The shipped default config ([`SHIPPED_CONFIG`], embedded at compile
+    /// time), for callers with no filesystem access (e.g. wasm) that have no
+    /// need to tune the algorithm's own thirty-five parameters. Panics if
+    /// the embedded file is malformed, which would mean this crate itself
+    /// fails to build a working `contours_to_raster` binary either --
+    /// `tests::default_shipped_config_parses` below guards against that.
+    pub fn default_shipped() -> Config {
+        Config::parse(SHIPPED_CONFIG, "<embedded config/contours_to_raster.conf>")
+            .expect("shipped config/contours_to_raster.conf must parse")
+    }
+
+    /// Parses config file text directly (`Config::load`'s own parsing step,
+    /// exposed for callers -- e.g. wasm -- that already have the config text
+    /// in hand and have no filesystem to read a path from).
+    pub fn parse(text: &str, source_name: &str) -> Result<Config, String> {
         let mut values: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
         for (line_no, raw_line) in text.lines().enumerate() {
             let line = raw_line.trim();
@@ -432,6 +451,15 @@ growing_visualization_push_pull_vectors_scale = 1.0
 gravity_gaussian_kernel_size = 5
 elevation_gaussian_kernel_size = 5
 ";
+
+    #[test]
+    fn default_shipped_config_parses() {
+        // Guards `Config::default_shipped`'s own `expect`: if
+        // config/contours_to_raster.conf ever drifts out of sync with
+        // `KEYS`, this test fails instead of a wasm caller panicking at
+        // runtime.
+        Config::default_shipped();
+    }
 
     #[test]
     fn parses_a_full_config() {
