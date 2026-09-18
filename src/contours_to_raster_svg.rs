@@ -1079,10 +1079,6 @@ fn finish(mut svg: Svg) -> String {
     svg.to_string()
 }
 
-fn write(path: &Path, svg: Svg) -> Result<(), String> {
-    fs::write(path, finish(svg)).map_err(|e| format!("cannot write {}: {e}", path.display()))
-}
-
 /// Writes the SVG asked for after Step 1's own Contour Raster (fill,
 /// Jump density stamping, out-of-bound) is complete, but before its Growing
 /// Process sub-step runs: the raster grid and every pixel (colored by
@@ -1092,8 +1088,14 @@ fn write(path: &Path, svg: Svg) -> Result<(), String> {
 /// (deferred until after Matching) hasn't run this early, though its own
 /// buffered polygon is already drawn -- and a red ring around every Flying
 /// End's own (pre-growing) position. `00_<map_name>_step1.svg`.
+pub fn step1_svg_string(result: &Step1Result) -> String {
+    finish(base_layers(&BaseLayerData::new(result)))
+}
+
+/// Writes [`step1_svg_string`]'s own output to `path`.
 pub fn write_step1_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
-    write(path, base_layers(&BaseLayerData::new(result)))
+    fs::write(path, step1_svg_string(result))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// Identical to [`write_step1_svg`], except called once after Step 1's own
@@ -1110,13 +1112,19 @@ pub fn write_step1_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
 /// no integration steps of its own, so unlike [`write_step1_growing_svg`]
 /// below, it has no push/pull vectors or dots to draw.
 /// `01_<map_name>_step1_close_search.svg`.
-pub fn write_step1_close_search_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
+pub fn step1_close_search_svg_string(result: &Step1Result) -> String {
     let cones = MultiLineString::new(result.close_search_cones.clone());
-    write(
-        path,
-        base_layers(&BaseLayerData::new(result))
-            .and(line_layer(&cones, PURPLE, SEARCH_CONE_STROKE_WIDTH)),
-    )
+    finish(base_layers(&BaseLayerData::new(result)).and(line_layer(
+        &cones,
+        PURPLE,
+        SEARCH_CONE_STROKE_WIDTH,
+    )))
+}
+
+/// Writes [`step1_close_search_svg_string`]'s own output to `path`.
+pub fn write_step1_close_search_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
+    fs::write(path, step1_close_search_svg_string(result))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// Identical to [`write_step1_svg`] (including the same red Flying-End
@@ -1144,16 +1152,11 @@ pub fn write_step1_close_search_svg(path: &Path, result: &Step1Result) -> Result
 /// arrow, but `03_<map_name>_step1_growing_matching.svg` does, since by then
 /// `resolve_heavy_object_gravity` has already run (see
 /// `src/bin/contours_to_raster.rs`'s own call ordering).
-pub fn write_step1_growing_svg(
-    path: &Path,
-    result: &Step1Result,
-    config: &Config,
-) -> Result<(), String> {
+pub fn step1_growing_svg_string(result: &Step1Result, config: &Config) -> String {
     let push_pull =
         push_pull_vector_layers(result, config.growing_visualization_push_pull_vectors_scale);
     let dots = points(&result.growing_integration_step_dots);
-    write(
-        path,
+    finish(
         with_push_pull_vectors(base_layers(&BaseLayerData::new(result)), &push_pull).and(
             dots.to_svg()
                 .with_radius(INTEGRATION_STEP_DOT_RADIUS)
@@ -1161,6 +1164,16 @@ pub fn write_step1_growing_svg(
                 .with_stroke_opacity(0.0),
         ),
     )
+}
+
+/// Writes [`step1_growing_svg_string`]'s own output to `path`.
+pub fn write_step1_growing_svg(
+    path: &Path,
+    result: &Step1Result,
+    config: &Config,
+) -> Result<(), String> {
+    fs::write(path, step1_growing_svg_string(result, config))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// [`base_layers`] plus a gravity arrow along every contour already
@@ -1181,18 +1194,21 @@ fn resolved_layers<'a>(
 /// vote (see [`vote_reading_points`]), so the evidence behind a
 /// vote-resolved contour -- or a warning about evidence Step 2 overruled --
 /// can be judged by eye. `04_<map_name>_step2.svg`.
-pub fn write_step2_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
+pub fn step2_svg_string(result: &Step1Result) -> String {
     let data = BaseLayerData::new(result);
     let gravity_arrows = contour_gravity_arrows(result);
     let vote_points = vote_reading_points(result);
-    write(
-        path,
-        resolved_layers(&data, &gravity_arrows).and(circle_layer(
-            &vote_points,
-            VOTE_CIRCLE_RADIUS,
-            DARK_GREEN,
-        )),
-    )
+    finish(resolved_layers(&data, &gravity_arrows).and(circle_layer(
+        &vote_points,
+        VOTE_CIRCLE_RADIUS,
+        DARK_GREEN,
+    )))
+}
+
+/// Writes [`step2_svg_string`]'s own output to `path`.
+pub fn write_step2_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
+    fs::write(path, step2_svg_string(result))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// Linearly interpolates each of `low`'s and `high`'s own RGB channels by
@@ -1241,8 +1257,8 @@ fn gravity_direction_segments(
             if magnitude < GRAVITY_DIRECTION_MIN_MAGNITUDE {
                 continue;
             }
-            let intensity =
-                (magnitude - GRAVITY_DIRECTION_MIN_MAGNITUDE) / (1.0 - GRAVITY_DIRECTION_MIN_MAGNITUDE);
+            let intensity = (magnitude - GRAVITY_DIRECTION_MIN_MAGNITUDE)
+                / (1.0 - GRAVITY_DIRECTION_MIN_MAGNITUDE);
             let center = raster.pixel_center(x as i64, y as i64);
             let (ux, uy) = (vx / magnitude, vy / magnitude);
             let line = LineString::new(vec![
@@ -1270,11 +1286,7 @@ fn gravity_direction_segments(
 /// [`gravity_direction_segments`]). Diagnostic only for now -- there is no
 /// TIFF or further use of `gravity` yet, unlike Step 5's own altitude
 /// ([`crate::step5_elevation_raster`]). `08_<map_name>_step5_gravity.svg`.
-pub fn write_step5_gravity_svg(
-    path: &Path,
-    result: &Step1Result,
-    gravity: &GravityRaster,
-) -> Result<(), String> {
+pub fn step5_gravity_svg_string(result: &Step1Result, gravity: &GravityRaster) -> String {
     let data = BaseLayerData::new(result);
     let buckets = gravity_direction_segments(&result.raster, gravity);
     let mut svg = base_layers(&data);
@@ -1283,7 +1295,17 @@ pub fn write_step5_gravity_svg(
         let color = lerp_color(BLUE, RED, t);
         svg = svg.and(line_layer(bucket, color, GRAVITY_SEGMENT_STROKE_WIDTH));
     }
-    write(path, svg)
+    finish(svg)
+}
+
+/// Writes [`step5_gravity_svg_string`]'s own output to `path`.
+pub fn write_step5_gravity_svg(
+    path: &Path,
+    result: &Step1Result,
+    gravity: &GravityRaster,
+) -> Result<(), String> {
+    fs::write(path, step5_gravity_svg_string(result, gravity))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// The algorithm's actual answer, once every contour's gravity is settled:
@@ -1295,13 +1317,12 @@ pub fn write_step5_gravity_svg(
 /// (Step 2 alone, or
 /// Step 2 and Step 3 together) -- an earlier call would just draw whatever
 /// gravity happens to be set so far, silently mislabeled as final.
-pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
+pub fn final_svg_string(result: &Step1Result) -> String {
     let pixels = pixel_layers(&result.raster);
     let raw = raw_contour_lines(result);
     let (linearized, grown_linearized) = linearized_contour_lines_split(result);
     let gravity_arrows = contour_gravity_arrows(result);
-    write(
-        path,
+    finish(
         pixels
             .contours
             .to_svg()
@@ -1321,6 +1342,12 @@ pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
             ))
             .and(line_layer(&gravity_arrows, YELLOW, 0.2)),
     )
+}
+
+/// Writes [`final_svg_string`]'s own output to `path`.
+pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> {
+    fs::write(path, final_svg_string(result))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// The same as [`write_step2_svg`], plus every Rain Drop Production drop's
@@ -1343,19 +1370,14 @@ pub fn write_final_svg(path: &Path, result: &Step1Result) -> Result<(), String> 
 /// `step3_rain_drop::resolve`), so in practice `defined_after_rain` is
 /// always identical to whatever was already defined before Step 3 even
 /// started. `05_<map_name>_step3_rain.svg`.
-pub fn write_step3_rain_svg(
-    path: &Path,
-    result: &Step1Result,
-    step3: &Step3Result,
-) -> Result<(), String> {
+pub fn step3_rain_svg_string(result: &Step1Result, step3: &Step3Result) -> String {
     let data = BaseLayerData::new(result);
     let gravity_arrows = contour_gravity_arrows_filtered(result, Some(&step3.defined_after_rain));
     let trails = drop_trails(&step3.rain_paths);
     let hysteresis_marks = points(&step3.rain_hysteresis_points);
     let vote_lines = segments(&step3.rain_vote_segments);
     let rain = drop_points(&step3.rain_paths);
-    write(
-        path,
+    finish(
         resolved_layers(&data, &gravity_arrows)
             .and(line_layer(&trails, GRAY, DROP_TRAIL_STROKE_WIDTH))
             .and(
@@ -1375,24 +1397,29 @@ pub fn write_step3_rain_svg(
     )
 }
 
+/// Writes [`step3_rain_svg_string`]'s own output to `path`.
+pub fn write_step3_rain_svg(
+    path: &Path,
+    result: &Step1Result,
+    step3: &Step3Result,
+) -> Result<(), String> {
+    fs::write(path, step3_rain_svg_string(result, step3))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 /// The same as [`write_step2_svg`], plus every Anti Rain Drop Production
 /// drop's full trail, path, hysteresis marker and vote segment, the same
 /// way as [`write_step3_rain_svg`] -- see there for why this is a separate
 /// file rather than a second layer on the same one.
 /// `06_<map_name>_step3_anti_rain.svg`.
-pub fn write_step3_anti_rain_svg(
-    path: &Path,
-    result: &Step1Result,
-    step3: &Step3Result,
-) -> Result<(), String> {
+pub fn step3_anti_rain_svg_string(result: &Step1Result, step3: &Step3Result) -> String {
     let data = BaseLayerData::new(result);
     let gravity_arrows = contour_gravity_arrows(result);
     let trails = drop_trails(&step3.anti_rain_paths);
     let hysteresis_marks = points(&step3.anti_rain_hysteresis_points);
     let vote_lines = segments(&step3.anti_rain_vote_segments);
     let anti_rain = drop_points(&step3.anti_rain_paths);
-    write(
-        path,
+    finish(
         resolved_layers(&data, &gravity_arrows)
             .and(line_layer(&trails, GRAY, DROP_TRAIL_STROKE_WIDTH))
             .and(
@@ -1411,6 +1438,16 @@ pub fn write_step3_anti_rain_svg(
                     .with_stroke_opacity(0.0),
             ),
     )
+}
+
+/// Writes [`step3_anti_rain_svg_string`]'s own output to `path`.
+pub fn write_step3_anti_rain_svg(
+    path: &Path,
+    result: &Step1Result,
+    step3: &Step3Result,
+) -> Result<(), String> {
+    fs::write(path, step3_anti_rain_svg_string(result, step3))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// Linearly interpolates a blue (`min_h`, or below)-to-red (`max_h`, or
@@ -1538,17 +1575,23 @@ fn step4_overlay_svg(contours: &[Contour], step4: &Step4Result) -> String {
 /// gray for one Step 4 leaves without a height; a gray line per `T` edge
 /// (parent centroid to child centroid); and a black square on every
 /// `empty_progeny` dead end.
+pub fn step4_svg_string(result: &Step1Result, step4: &Step4Result) -> Result<String, String> {
+    let data = BaseLayerData::new(result);
+    let mut svg = finish(base_layers(&data));
+    let insert_at = svg
+        .rfind("</svg>")
+        .ok_or_else(|| "malformed SVG, no closing </svg> tag".to_string())?;
+    svg.insert_str(insert_at, &step4_overlay_svg(&result.contours, step4));
+    Ok(svg)
+}
+
+/// Writes [`step4_svg_string`]'s own output to `path`.
 pub fn write_step4_svg(
     path: &Path,
     result: &Step1Result,
     step4: &Step4Result,
 ) -> Result<(), String> {
-    let data = BaseLayerData::new(result);
-    let mut svg = finish(base_layers(&data));
-    let insert_at = svg
-        .rfind("</svg>")
-        .ok_or_else(|| format!("{}: malformed SVG, no closing </svg> tag", path.display()))?;
-    svg.insert_str(insert_at, &step4_overlay_svg(&result.contours, step4));
+    let svg = step4_svg_string(result, step4).map_err(|e| format!("{}: {e}", path.display()))?;
     fs::write(path, svg).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
@@ -1587,7 +1630,7 @@ fn contours_function_curve(config: &Config) -> LineString<f64> {
 /// `contour_force_second_equilibrium` both read at a glance. Depends only on
 /// `config`, unlike every other `write_*_svg` here, so it is written once
 /// per `--create_svg` run regardless of the map or how far Step 1-3 got.
-pub fn write_contours_function_svg(path: &Path, config: &Config) -> Result<(), String> {
+pub fn contours_function_svg_string(config: &Config) -> String {
     let curve = contours_function_curve(config);
     let max_x = 2.0 * config.contour_force_second_equilibrium;
     let (min_y, max_y) = curve
@@ -1595,12 +1638,8 @@ pub fn write_contours_function_svg(path: &Path, config: &Config) -> Result<(), S
         .iter()
         .fold((0.0_f64, 0.0_f64), |(lo, hi), c| (lo.min(c.y), hi.max(c.y)));
     let x_axis = LineString::new(vec![Coord { x: 0.0, y: 0.0 }, Coord { x: max_x, y: 0.0 }]);
-    let y_axis = LineString::new(vec![
-        Coord { x: 0.0, y: min_y },
-        Coord { x: 0.0, y: max_y },
-    ]);
-    write(
-        path,
+    let y_axis = LineString::new(vec![Coord { x: 0.0, y: min_y }, Coord { x: 0.0, y: max_y }]);
+    finish(
         line_layer(&x_axis, GRAY, CONTOURS_FUNCTION_STROKE_WIDTH)
             .and(line_layer(&y_axis, GRAY, CONTOURS_FUNCTION_STROKE_WIDTH))
             .and(line_layer(
@@ -1609,6 +1648,12 @@ pub fn write_contours_function_svg(path: &Path, config: &Config) -> Result<(), S
                 CONTOURS_FUNCTION_STROKE_WIDTH,
             )),
     )
+}
+
+/// Writes [`contours_function_svg_string`]'s own output to `path`.
+pub fn write_contours_function_svg(path: &Path, config: &Config) -> Result<(), String> {
+    fs::write(path, contours_function_svg_string(config))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -2679,7 +2724,10 @@ mod tests {
         // index alone.
         assert_eq!(count(&text, "<text"), 2);
         assert!(text.contains(">0: 0</text>"), "resolved contour 0: {text}");
-        assert!(text.contains(">1</text>"), "undefined contour 1, bare index: {text}");
+        assert!(
+            text.contains(">1</text>"),
+            "undefined contour 1, bare index: {text}"
+        );
         assert_eq!(count(&text, "<rect"), 1, "one dead end marker");
     }
 
@@ -2694,8 +2742,12 @@ mod tests {
         let Color::Rgb(mr, mg, mb) = lerp_color(BLUE, RED, 0.5) else {
             panic!("expected Color::Rgb");
         };
-        let Color::Rgb(br, bg, bb) = BLUE else { unreachable!() };
-        let Color::Rgb(rr, rg, rb) = RED else { unreachable!() };
+        let Color::Rgb(br, bg, bb) = BLUE else {
+            unreachable!()
+        };
+        let Color::Rgb(rr, rg, rb) = RED else {
+            unreachable!()
+        };
         assert_eq!(mr, ((br as i32 + rr as i32) / 2) as u8);
         assert_eq!(mg, ((bg as i32 + rg as i32) / 2) as u8);
         assert_eq!(mb, ((bb as i32 + rb as i32) / 2) as u8);
@@ -2730,7 +2782,11 @@ mod tests {
             .filter(|(_, b)| !b.0.is_empty())
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(non_empty.len(), 2, "expected exactly two non-empty buckets: {non_empty:?}");
+        assert_eq!(
+            non_empty.len(),
+            2,
+            "expected exactly two non-empty buckets: {non_empty:?}"
+        );
         assert_eq!(
             *non_empty.last().unwrap(),
             GRAVITY_INTENSITY_BUCKETS - 1,

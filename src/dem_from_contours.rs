@@ -7,6 +7,7 @@
 //! algorithm the CLI binary does.
 
 use crate::contours_to_raster_config::Config;
+use crate::contours_to_raster_svg;
 use crate::map::Map;
 use crate::{step1_extract, step2_obvious_gravity, step3_rain_drop, step4_elevation};
 use crate::{step5_elevation_raster, step5_gravity_raster};
@@ -66,6 +67,22 @@ pub struct DemFromContoursResult {
     /// How many in-bound pixels still have no value at all once
     /// gap-filling ran to completion.
     pub still_undefined: u64,
+    /// `(name, svg)` pairs, one per `--create_svg` diagnostic this run built
+    /// (see [`compute`]'s own `debug_svg` argument) -- empty when that
+    /// argument was `false`. Names match `src/bin/contours_to_raster.rs`'s
+    /// own step names (`"contours_function"`, `"step1"`,
+    /// `"step1_close_search"`, `"step1_growing_seeking"`,
+    /// `"step1_growing_matching"`, `"step2"`, `"step3_rain"`,
+    /// `"step3_anti_rain"`, `"final"`, `"step4"`, `"step5_gravity"`) minus
+    /// the CLI's two PNG outputs (full-raster and hypsometric-elevation),
+    /// which have no in-memory SVG equivalent, and minus the two Step 3 SVGs
+    /// when Step 3 never ran (Step 2 already resolved every contour) --
+    /// unlike the CLI, which still writes them empty for consistent file
+    /// numbering, a caller collecting named results has no such numbering to
+    /// keep consistent. Coordinates are ground meters, this crate's own
+    /// native unit throughout (see `origin_ground`'s own doc comment) --
+    /// converting to the caller's own units is left to the caller.
+    pub debug_svgs: Vec<(String, String)>,
 }
 
 /// Runs Steps 1 through 5 against `map`, calling `progress(stage, message)`
@@ -79,6 +96,16 @@ pub struct DemFromContoursResult {
 /// would otherwise `eprintln!` is forwarded the same way, tagged with that
 /// step's own stage name.
 ///
+/// `debug_svg` mirrors the CLI binary's own `--create_svg`: when `true`,
+/// every `--create_svg` diagnostic this pipeline can produce in memory (see
+/// [`DemFromContoursResult::debug_svgs`]) is built at the same point in the
+/// pipeline the CLI writes its own file, using this crate's `Step1Result`
+/// state at that exact moment -- the two Growing Process SVGs
+/// (`"step1_growing_seeking"`/`"step1_growing_matching"`) in particular
+/// share one drawing function called twice against the same
+/// progressively-mutated state, exactly as the CLI does. `false` skips all
+/// of it, at no extra cost over the pre-existing behavior.
+///
 /// Returns an error (from Step 1's extraction, or Step 2/Step 3's own
 /// gravity-conflict checks) exactly where the CLI binary would exit
 /// non-zero for the same reason.
@@ -86,8 +113,17 @@ pub fn compute(
     map: &Map,
     config: &Config,
     equidistance: f64,
+    debug_svg: bool,
     progress: &mut dyn FnMut(&str, &str),
 ) -> Result<DemFromContoursResult, String> {
+    let mut debug_svgs: Vec<(String, String)> = Vec::new();
+    if debug_svg {
+        debug_svgs.push((
+            "contours_function".to_string(),
+            contours_to_raster_svg::contours_function_svg_string(config),
+        ));
+    }
+
     let mut step1 = step1_extract::extract(map, config).map_err(|e| e.message().to_string())?;
     for warning in &step1.warnings {
         progress("extract", &format!("Warning: {warning}"));
@@ -96,10 +132,22 @@ pub fn compute(
         "extract",
         &format!("extracted {} contour(s)", step1.contours.len()),
     );
+    if debug_svg {
+        debug_svgs.push((
+            "step1".to_string(),
+            contours_to_raster_svg::step1_svg_string(&step1),
+        ));
+    }
 
     if config.growing_enabled != 0.0 {
         step1_extract::run_growing_close_search(&mut step1, config);
         progress("close_search", "ran Growing Process close search");
+        if debug_svg {
+            debug_svgs.push((
+                "step1_close_search".to_string(),
+                contours_to_raster_svg::step1_close_search_svg_string(&step1),
+            ));
+        }
 
         let (growing_state, seeking_warnings) =
             step1_extract::run_growing_seeking(&mut step1, config);
@@ -108,6 +156,12 @@ pub fn compute(
         }
         step1.warnings.extend(seeking_warnings);
         progress("seeking", "ran Growing Process seeking phase");
+        if debug_svg {
+            debug_svgs.push((
+                "step1_growing_seeking".to_string(),
+                contours_to_raster_svg::step1_growing_svg_string(&step1, config),
+            ));
+        }
 
         let matching_warnings =
             step1_extract::run_growing_matching(&mut step1, config, growing_state);
@@ -127,6 +181,16 @@ pub fn compute(
         "heavy_object_gravity",
         "resolved Heavy Object gravity readings",
     );
+    // Matches the CLI's own ordering: "step1_growing_matching" is captured
+    // here, after Heavy Object gravity, not right after run_growing_matching
+    // above -- by now it (like the CLI's own file) shows a Heavy Object's
+    // own arrow too.
+    if debug_svg && config.growing_enabled != 0.0 {
+        debug_svgs.push((
+            "step1_growing_matching".to_string(),
+            contours_to_raster_svg::step1_growing_svg_string(&step1, config),
+        ));
+    }
 
     let step2 = step2_obvious_gravity::resolve(
         &mut step1.contours,
@@ -145,6 +209,12 @@ pub fn compute(
             step2.resolved_by_slope_line, step2.resolved_by_hill, step2.resolved_by_vote,
         ),
     );
+    if debug_svg {
+        debug_svgs.push((
+            "step2".to_string(),
+            contours_to_raster_svg::step2_svg_string(&step1),
+        ));
+    }
 
     let step3 = if step2.still_undefined.is_empty() {
         None
@@ -165,6 +235,16 @@ pub fn compute(
                 result.resolved_by_votes
             ),
         );
+        if debug_svg {
+            debug_svgs.push((
+                "step3_rain".to_string(),
+                contours_to_raster_svg::step3_rain_svg_string(&step1, &result),
+            ));
+            debug_svgs.push((
+                "step3_anti_rain".to_string(),
+                contours_to_raster_svg::step3_anti_rain_svg_string(&step1, &result),
+            ));
+        }
         Some(result)
     };
 
@@ -184,6 +264,23 @@ pub fn compute(
 
     let gravity = step5_gravity_raster::resolve(&step1.contours, &mut step1.raster, config);
     progress("step5_gravity", "resolved Step 5 gravity direction field");
+
+    // Matches the CLI's own ordering: "final"/"step4"/"step5_gravity" are
+    // all written together, right here, once gravity is fully settled.
+    if debug_svg {
+        debug_svgs.push((
+            "final".to_string(),
+            contours_to_raster_svg::final_svg_string(&step1),
+        ));
+        debug_svgs.push((
+            "step4".to_string(),
+            contours_to_raster_svg::step4_svg_string(&step1, &step4)?,
+        ));
+        debug_svgs.push((
+            "step5_gravity".to_string(),
+            contours_to_raster_svg::step5_gravity_svg_string(&step1, &gravity),
+        ));
+    }
 
     let step5 = step5_elevation_raster::resolve(&step1.contours, &step1.raster, &gravity, config);
     progress(
@@ -223,6 +320,7 @@ pub fn compute(
         filled_by_rain: step5.filled_by_rain,
         filled_by_gap_fill: step5.filled_by_gap_fill,
         still_undefined: step5.still_undefined,
+        debug_svgs,
     })
 }
 
@@ -241,7 +339,7 @@ mod tests {
             .expect("maps/contours_to_altitude_map_1.omap must be readable");
         let config = Config::default_shipped();
         let mut stages: Vec<String> = Vec::new();
-        let result = compute(&map, &config, 5.0, &mut |stage, _message| {
+        let result = compute(&map, &config, 5.0, false, &mut |stage, _message| {
             stages.push(stage.to_string());
         })
         .expect("compute must succeed on a map with contours");
@@ -255,5 +353,46 @@ mod tests {
         assert!(result.contour_count > 0);
         assert!(stages.contains(&"extract".to_string()));
         assert!(stages.contains(&"step5_elevation".to_string()));
+        assert!(
+            result.debug_svgs.is_empty(),
+            "debug_svg=false must build no SVGs"
+        );
+    }
+
+    #[test]
+    fn debug_svg_true_builds_every_expected_named_svg() {
+        let (map, _warnings) = read_xml_map(Path::new("maps/contours_to_altitude_map_1.omap"))
+            .expect("maps/contours_to_altitude_map_1.omap must be readable");
+        let config = Config::default_shipped();
+        let result = compute(&map, &config, 5.0, true, &mut |_stage, _message| {})
+            .expect("compute must succeed on a map with contours");
+
+        let names: Vec<&str> = result.debug_svgs.iter().map(|(n, _)| n.as_str()).collect();
+        // "step3_rain"/"step3_anti_rain" are only present when Step 3 itself
+        // ran (Step 2 left something undefined) -- not asserted here since
+        // this fixture's own outcome isn't the point of this test.
+        for expected in [
+            "contours_function",
+            "step1",
+            "step1_close_search",
+            "step1_growing_seeking",
+            "step1_growing_matching",
+            "step2",
+            "final",
+            "step4",
+            "step5_gravity",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "expected a {expected:?} debug SVG; got {names:?}"
+            );
+        }
+        for (name, svg) in &result.debug_svgs {
+            assert!(
+                svg.trim_start().starts_with("<svg"),
+                "{name}'s own SVG string must start with <svg, got: {}",
+                &svg[..svg.len().min(80)]
+            );
+        }
     }
 }
