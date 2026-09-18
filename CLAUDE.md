@@ -12,6 +12,14 @@ output against a ground-truth renderer, and a second, independent pipeline
 (`contours_to_raster`) that extracts elevation/gravity information from a map's
 contour lines.
 
+This crate is consumed by the o-mnia web app as a git submodule (via
+`crates/maur-o-wasm`, o-mnia's own wasm-bindgen adapter — see that repo's
+`docs/dev/rust-backends.md`). Keep this crate a general-purpose **algorithms
+library plus its own CLI tools** — no UI, no o-mnia app policy (Settings,
+profiles, project files, extension contracts, worker/store plumbing). A new
+capability an app needs is new library/CLI surface here; the app-facing
+wiring (wasm export, job protocol, UI) belongs in o-mnia, not here.
+
 ## Commands
 
 ```bash
