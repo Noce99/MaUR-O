@@ -246,6 +246,16 @@ fn classify_all(map: &Map, config: &Config, meters_per_mm: f64) -> Vec<Classifie
             config.bezier_linearization_step,
             config.contours_step,
         );
+        // An open Form Line (code family "103", `step < 1.0`) is dropped
+        // outright rather than kept as a Contour. Unlike an ordinary
+        // contour it's drawn wherever the mapper judged the slope needed
+        // clarifying, not to trace one continuous elevation band, so an
+        // open one is as likely to be a short, isolated stroke as real
+        // gravity evidence -- keeping only the closed ones is what cuts
+        // that noise out.
+        if step < 1.0 && !linestrings.iter().all(|ls| ls.is_closed()) {
+            continue;
+        }
         let raw = contour_geometry::raw_polylines(&coords, meters_per_mm);
         out.push(Classified::Contour {
             linestrings,
@@ -2785,11 +2795,19 @@ mod tests {
             coords: vec![MapCoord::new(0.0, 0.0, 0), MapCoord::new(10.0, 0.0, 0)],
             rotation: 0.0,
         };
+        // A closed loop: an open Form Line is dropped entirely (only closed
+        // ones are kept as Contours), so this one has to actually close to
+        // survive `extract`.
         let form_line_obj = Object {
             kind: ObjectKind::Path(PathObject::default()),
             symbol_id: 1,
             symbol_index: Some(1),
-            coords: vec![MapCoord::new(0.0, 50.0, 0), MapCoord::new(10.0, 50.0, 0)],
+            coords: vec![
+                MapCoord::new(0.0, 50.0, 0),
+                MapCoord::new(10.0, 50.0, 0),
+                MapCoord::new(10.0, 60.0, 0),
+                MapCoord::new(0.0, 50.0, crate::map::coord_flag::CLOSE_POINT),
+            ],
             rotation: 0.0,
         };
 
@@ -2814,6 +2832,95 @@ mod tests {
             result.contours[1].step, 0.5,
             "a Form Line represents half an equidistance step"
         );
+    }
+
+    #[test]
+    fn extract_drops_an_open_form_line_but_keeps_an_open_ordinary_contour() {
+        use crate::map::{Coord as MapCoord, LineSymbol, Object, PathObject};
+
+        let config = Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 1.0,
+            rasterization_px_size: 0.5,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 4,
+            slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            elevation_vote_min_total_weight: 0.3,
+            elevation_vote_min_margin: 0.15,
+            growing_enabled: 1.0,
+            obvious_to_close_contour_distance: 0.0,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
+            growing_oob_seeking_max_steps: 0,
+            contour_force_window: 4.0,
+            attraction_force_window: 4.0,
+            contour_force_max_repulsion: 2.0,
+            contour_force_equilibrium: 1.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 3.0,
+            out_of_bound_force: 0.5,
+            density_region_force: 1.0,
+            flying_end_force: 1.0,
+            flying_end_merge_distance: 0.5,
+            matching_min_force: 0.0,
+            grow_time_step: 1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
+            gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
+        };
+
+        let contour_symbol = Symbol::Line(LineSymbol {
+            code: "101".to_string(),
+            ..Default::default()
+        });
+        let form_line_symbol = Symbol::Line(LineSymbol {
+            code: "103".to_string(),
+            ..Default::default()
+        });
+
+        // Neither line closes -- an ordinary [Index] Contour is still kept
+        // open (as any other contour touching the map's edge would be), but
+        // the open Form Line is dropped outright.
+        let contour_obj = Object {
+            kind: ObjectKind::Path(PathObject::default()),
+            symbol_id: 0,
+            symbol_index: Some(0),
+            coords: vec![MapCoord::new(0.0, 0.0, 0), MapCoord::new(10.0, 0.0, 0)],
+            rotation: 0.0,
+        };
+        let open_form_line_obj = Object {
+            kind: ObjectKind::Path(PathObject::default()),
+            symbol_id: 1,
+            symbol_index: Some(1),
+            coords: vec![MapCoord::new(0.0, 50.0, 0), MapCoord::new(10.0, 50.0, 0)],
+            rotation: 0.0,
+        };
+
+        let map = Map {
+            scale_denominator: 1000,
+            colors: Vec::new(),
+            symbols: vec![contour_symbol, form_line_symbol],
+            symbol_ids: vec![0, 1],
+            objects: vec![contour_obj, open_form_line_obj],
+            georeferencing: None,
+            symbol_set: None,
+        };
+
+        let result = extract(&map, &config).unwrap();
+
+        assert_eq!(
+            result.contours.len(),
+            1,
+            "the open Form Line must not become a Contour"
+        );
+        assert_eq!(result.contours[0].step, 1.0);
     }
 
     #[test]

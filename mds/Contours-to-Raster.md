@@ -51,7 +51,7 @@
 	- This gives four named variants used across the rest of this document: **Cold Rain Drop Production**, **Cold Anti Rain Drop Production**, **Hot Rain Drop Production**, and **Hot Anti Rain Drop Production**.
 - ## Step 1: Extrapolate Elevation Information from an .omap
 	- Given an .omap file we extrapolate the following symbols divided into three different families:
-		- 1) **Contours**: *[Index] Contour, Form Line*. A Form Line is a Contour like any other -- same gravity handling, same Slope Line evidence (below) -- except for its own **step** (see the **Contour** struct below): `0.5` instead of the ordinary `1.0`, per Assumption 2.
+		- 1) **Contours**: *[Index] Contour, Form Line*. A Form Line is a Contour like any other -- same gravity handling, same Slope Line evidence (below) -- except for its own **step** (see the **Contour** struct below): `0.5` instead of the ordinary `1.0`, per Assumption 2. Only a **closed** Form Line is extrapolated this way; an open one is dropped entirely, not merely treated as an ordinary Contour, since (unlike an ordinary contour) it's drawn wherever a slope needed clarifying rather than to trace one continuous elevation band.
 		- 2) **Slope Lines**: *Slope Line, for a contour or a form line alike*
 		- 2) **Jumps**: *Earth Bank [minimum size], [Small] [Impassable] Cliff [minimum size][Small]*
 		- 3) **Heavy Objects**: *Erosion Gully, [Small] [Crossable] Watercourse, Water Channel*
