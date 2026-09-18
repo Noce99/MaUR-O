@@ -273,6 +273,7 @@ mod tests {
                 c(10.0, 5.0),
                 c(20.0, 5.0),
             ])),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         }
@@ -559,6 +560,7 @@ mod tests {
     fn contour(ls: LineString<f64>) -> Contour {
         Contour {
             lwg: LineWithGravity::new(ls),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         }

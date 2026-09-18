@@ -169,21 +169,26 @@ fn accordance(hit: &LineWithGravity, at: Coord<f64>, dir: (f64, f64)) -> Option<
 
 /// The height a hit contour should get, given its source's own `c_height`
 /// and whether the drop reached it in `accordance` -- Elevation Proliferation
-/// (`anti = false`, a Hot Rain Drop): accordance means one step further
-/// downhill (`c_height - 1`), discordance means the same downhill band
+/// (`anti = false`, a Hot Rain Drop): accordance means one `step` further
+/// downhill (`c_height - step`), discordance means the same downhill band
 /// reached from its other side (`c_height`). Anti Elevation Proliferation
 /// (`anti = true`, a Hot Anti Rain Drop) flips both cases: since the drop
 /// already travels *against* `C`'s own downhill, the *ordinary* case of
 /// genuinely reaching higher ground is discordance with the hit's own
-/// gravity (`c_height + 1`), and accordance is the "same band, other side"
+/// gravity (`c_height + step`), and accordance is the "same band, other side"
 /// case instead (`c_height`). See `Contours-to-Raster.md`'s own note on why
 /// this flip is needed.
-fn expected_elevation_height(c_height: f64, accordance: bool, anti: bool) -> f64 {
+///
+/// `step` is the elevation this particular hop represents:
+/// `min(source.step, hit.step)` (see [`crate::gravity_model::Contour::step`]'s
+/// own doc comment) -- `1.0` between two ordinary contours, `0.5` the moment
+/// either end of the hop is a Form Line.
+fn expected_elevation_height(c_height: f64, accordance: bool, anti: bool, step: f64) -> f64 {
     match (anti, accordance) {
-        (false, true) => c_height - 1.0,
+        (false, true) => c_height - step,
         (false, false) => c_height,
         (true, true) => c_height,
-        (true, false) => c_height + 1.0,
+        (true, false) => c_height + step,
     }
 }
 
@@ -347,7 +352,8 @@ fn elevation_proliferation(
                 vote.accordance_weight, vote.discordance_weight,
             ));
         }
-        let expected = expected_elevation_height(c_height, acc, anti);
+        let step = contours[c_idx].step.min(contours[hit_idx].step);
+        let expected = expected_elevation_height(c_height, acc, anti, step);
         let representative_path = vote.representative_path(acc);
 
         match contours[hit_idx].elevation_height {
@@ -547,8 +553,13 @@ mod tests {
     }
 
     fn contour_with_gravity(y: f64, gravity_dy: f64) -> Contour {
+        contour_with_gravity_and_step(y, gravity_dy, 1.0)
+    }
+
+    fn contour_with_gravity_and_step(y: f64, gravity_dy: f64, step: f64) -> Contour {
         let mut contour = Contour {
             lwg: LineWithGravity::new(straight_ls(y)),
+            step,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -685,6 +696,38 @@ mod tests {
     }
 
     #[test]
+    fn a_form_line_between_two_ordinary_contours_gets_half_the_elevation_step_each_way() {
+        // Same setup as the plain stack above, except the middle contour is
+        // a Form Line (step 0.5): the hop into it, and the hop out of it,
+        // should each be half of the ordinary contour-to-contour step, so
+        // the bottom contour still ends up a full step below the root even
+        // though there's a Form Line in between.
+        let mut contours = vec![
+            contour_with_gravity(10.0, -1.0),
+            contour_with_gravity_and_step(5.0, -1.0, 0.5),
+            contour_with_gravity(0.0, -1.0),
+        ];
+        let mut raster = raster_for(&contours);
+        let config = default_config();
+
+        let result = resolve(&mut contours, &mut raster, &config);
+
+        assert_eq!(contours[0].elevation_height, Some(0.0), "the root");
+        assert_eq!(
+            contours[1].elevation_height,
+            Some(-0.5),
+            "a half step down into the Form Line"
+        );
+        assert_eq!(
+            contours[2].elevation_height,
+            Some(-1.0),
+            "another half step down, out of the Form Line, for a full step overall"
+        );
+        assert_eq!(result.resolved, 3);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
     fn anti_elevation_proliferation_gives_higher_ground_a_higher_height() {
         // Same stack, but rooted at the *bottom* contour (index 2, the only
         // one whose gravity Step 2 would have found first here doesn't
@@ -725,6 +768,7 @@ mod tests {
         top.lwg.gravity_dx = Some(0.0);
         let middle = Contour {
             lwg: LineWithGravity::new(straight_ls(5.0)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         }; // no gravity: as if Step 3 dropped it

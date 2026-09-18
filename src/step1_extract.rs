@@ -9,7 +9,7 @@ use crate::contour_raster::{
     ContourRaster, PixelWalkStep, StepHit, StepWalkOutcome, CONTOUR_0_MATRIX_VALUE, HIGH_DENSITY,
     OUT_OF_BOUND, TEMPORARY_CONTOUR,
 };
-use crate::contour_symbols::{classify_symbol, jump_gravity_side, SymbolFamily};
+use crate::contour_symbols::{classify_symbol, contour_step, jump_gravity_side, SymbolFamily};
 use crate::contours_to_raster_config::Config;
 use crate::gravity_model::{
     gravity_vector_for_side, Contour, GravityReadingSource, LineGravityDefiners, LineWithGravity,
@@ -206,6 +206,7 @@ enum Classified {
     Contour {
         linestrings: Vec<LineString<f64>>,
         raw: Vec<Vec<contour_geometry::RawVertex>>,
+        step: f64,
     },
     SlopeLine {
         pos: Coord<f64>,
@@ -238,7 +239,7 @@ fn extend_bbox_ls(min: &mut Coord<f64>, max: &mut Coord<f64>, ls: &LineString<f6
 fn classify_all(map: &Map, config: &Config, meters_per_mm: f64) -> Vec<Classified> {
     let mut out = Vec::new();
 
-    for coords in merge_contour_object_chains(map) {
+    for (coords, step) in merge_contour_object_chains(map) {
         let linestrings = coords_to_linestrings(
             &coords,
             meters_per_mm,
@@ -246,7 +247,11 @@ fn classify_all(map: &Map, config: &Config, meters_per_mm: f64) -> Vec<Classifie
             config.contours_step,
         );
         let raw = contour_geometry::raw_polylines(&coords, meters_per_mm);
-        out.push(Classified::Contour { linestrings, raw });
+        out.push(Classified::Contour {
+            linestrings,
+            raw,
+            step,
+        });
     }
 
     for object in &map.objects {
@@ -313,7 +318,12 @@ fn endpoint_key(p: crate::map::Point) -> (i64, i64) {
 }
 
 /// Chains Contour-family objects whose raw endpoints coincide into one
-/// continuous [`CoordList`] each.
+/// continuous [`CoordList`] each, paired with that chain's own
+/// [`contour_step`] -- the smallest of every piece's own step, so a chain
+/// with even one Form Line piece in it counts as a Form Line overall (see
+/// [`gravity_model::Contour::step`](crate::gravity_model::Contour)'s own doc
+/// comment for why the smaller of two adjacent steps is always the right
+/// one).
 ///
 /// Mapper sometimes splits one physical contour line across several `.omap`
 /// objects -- observed directly in real map data (`maps/forest_sample.omap`):
@@ -325,11 +335,12 @@ fn endpoint_key(p: crate::map::Point) -> (i64, i64) {
 /// evidence -- votes, Slope Lines, circle-fit readings -- across two
 /// `Contour`s that should be one, risking each resolving to a different
 /// (and, per Assumption 1, contradictory) gravity direction.
-fn merge_contour_object_chains(map: &Map) -> Vec<crate::map::CoordList> {
+fn merge_contour_object_chains(map: &Map) -> Vec<(crate::map::CoordList, f64)> {
     struct Piece {
         object_index: usize,
         start: crate::map::Point,
         end: crate::map::Point,
+        step: f64,
     }
 
     let mut pieces = Vec::new();
@@ -337,7 +348,8 @@ fn merge_contour_object_chains(map: &Map) -> Vec<crate::map::CoordList> {
         let Some(symbol_index) = object.symbol_index else {
             continue;
         };
-        if classify_symbol(&map.symbols[symbol_index]) != Some(SymbolFamily::Contour) {
+        let symbol = &map.symbols[symbol_index];
+        if classify_symbol(symbol) != Some(SymbolFamily::Contour) {
             continue;
         }
         if object.coords.len() < 2 {
@@ -347,6 +359,7 @@ fn merge_contour_object_chains(map: &Map) -> Vec<crate::map::CoordList> {
             object_index,
             start: object.coords.first().unwrap().pos(),
             end: object.coords.last().unwrap().pos(),
+            step: contour_step(symbol),
         });
     }
 
@@ -421,7 +434,11 @@ fn merge_contour_object_chains(map: &Map) -> Vec<crate::map::CoordList> {
                         .copied(),
                 );
             }
-            coords
+            let step = chain
+                .iter()
+                .map(|&i| pieces[i].step)
+                .fold(f64::INFINITY, f64::min);
+            (coords, step)
         })
         .collect()
 }
@@ -702,6 +719,7 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
         if let Classified::Contour {
             linestrings: lss,
             raw,
+            step,
         } = c
         {
             for (ls, raw_poly) in lss.iter().zip(raw) {
@@ -709,6 +727,7 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
                 raster.write_contour(idx, ls);
                 contours.push(Contour {
                     lwg: LineWithGravity::new(ls.clone()),
+                    step: *step,
                     elevation_height: None,
                     empty_progeny: false,
                 });
@@ -718,7 +737,7 @@ pub fn extract(map: &Map, config: &Config) -> Result<Step1Result, ExtractError> 
     }
     if contours.is_empty() {
         return Err(ExtractError(
-            "no Contour symbols (codes 101/102) were found on the map".to_string(),
+            "no Contour symbols (codes 101/102/103) were found on the map".to_string(),
         ));
     }
 
@@ -2547,6 +2566,7 @@ mod tests {
         ring.push(points[0]);
         let contours = vec![Contour {
             lwg: LineWithGravity::new(LineString::new(ring)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         }];
@@ -2573,6 +2593,7 @@ mod tests {
         let ls = LineString::new((0..10).map(|i| c(i as f64, 0.0)).collect::<Vec<_>>());
         let contours = vec![Contour {
             lwg: LineWithGravity::new(ls),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         }];
@@ -2701,6 +2722,153 @@ mod tests {
         );
         assert_eq!(result.point_definers[0].reference_contour, 0);
         assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn extract_gives_a_form_line_half_the_step_of_an_ordinary_contour() {
+        use crate::map::{Coord as MapCoord, LineSymbol, Object, PathObject};
+
+        let config = Config {
+            bezier_linearization_step: 0.1,
+            contours_step: 1.0,
+            rasterization_px_size: 0.5,
+            heavy_object_width: 1.0,
+            heavy_object_growing: 0.2,
+            circumference_fitting_points_number: 4,
+            slope_lines_contours_search_radius: 3.0,
+            step2_vote_min_total_weight: 0.3,
+            step2_vote_min_margin: 0.15,
+            rain_drop_step: 0.25,
+            sources_per_contour_segment: 3,
+            rain_drop_starting_voting_hysteresis: 3,
+            undefined_gravity_vote_threshold: 0.8,
+            elevation_vote_min_total_weight: 0.3,
+            elevation_vote_min_margin: 0.15,
+            growing_enabled: 1.0,
+            obvious_to_close_contour_distance: 0.0,
+            searching_fov: 0.0,
+            searching_distance: 0.0,
+            growing_oob_seeking_max_steps: 0,
+            contour_force_window: 4.0,
+            attraction_force_window: 4.0,
+            contour_force_max_repulsion: 2.0,
+            contour_force_equilibrium: 1.0,
+            contour_force_max_attraction: -0.5,
+            contour_force_second_equilibrium: 3.0,
+            out_of_bound_force: 0.5,
+            density_region_force: 1.0,
+            flying_end_force: 1.0,
+            flying_end_merge_distance: 0.5,
+            matching_min_force: 0.0,
+            grow_time_step: 1.0,
+            growing_visualization_push_pull_vectors_scale: 1.0,
+            gravity_gaussian_kernel_size: 5,
+            elevation_gaussian_kernel_size: 5,
+        };
+
+        let contour_symbol = Symbol::Line(LineSymbol {
+            code: "101".to_string(),
+            ..Default::default()
+        });
+        let form_line_symbol = Symbol::Line(LineSymbol {
+            code: "103".to_string(),
+            ..Default::default()
+        });
+
+        // Two unrelated, non-touching lines -- one an ordinary contour, one
+        // a Form Line -- so each becomes its own `Contour` with no chaining
+        // between them.
+        let contour_obj = Object {
+            kind: ObjectKind::Path(PathObject::default()),
+            symbol_id: 0,
+            symbol_index: Some(0),
+            coords: vec![MapCoord::new(0.0, 0.0, 0), MapCoord::new(10.0, 0.0, 0)],
+            rotation: 0.0,
+        };
+        let form_line_obj = Object {
+            kind: ObjectKind::Path(PathObject::default()),
+            symbol_id: 1,
+            symbol_index: Some(1),
+            coords: vec![MapCoord::new(0.0, 50.0, 0), MapCoord::new(10.0, 50.0, 0)],
+            rotation: 0.0,
+        };
+
+        let map = Map {
+            scale_denominator: 1000, // meters_per_mm == 1.0
+            colors: Vec::new(),
+            symbols: vec![contour_symbol, form_line_symbol],
+            symbol_ids: vec![0, 1],
+            objects: vec![contour_obj, form_line_obj],
+            georeferencing: None,
+            symbol_set: None,
+        };
+
+        let result = extract(&map, &config).unwrap();
+
+        assert_eq!(result.contours.len(), 2);
+        assert_eq!(
+            result.contours[0].step, 1.0,
+            "an ordinary [Index] Contour represents a full equidistance step"
+        );
+        assert_eq!(
+            result.contours[1].step, 0.5,
+            "a Form Line represents half an equidistance step"
+        );
+    }
+
+    #[test]
+    fn merge_contour_object_chains_gives_a_chain_the_smallest_step_of_any_of_its_pieces() {
+        use crate::map::{Coord as MapCoord, LineSymbol, Object, PathObject};
+
+        let contour_symbol = Symbol::Line(LineSymbol {
+            code: "101".to_string(),
+            ..Default::default()
+        });
+        let form_line_symbol = Symbol::Line(LineSymbol {
+            code: "103".to_string(),
+            ..Default::default()
+        });
+
+        // Two pieces chained end to end (the second piece's start is
+        // bit-identical to the first's end, `merge_contour_object_chains`'s
+        // own join condition): an ordinary contour piece, then a Form Line
+        // piece continuing it.
+        let contour_piece = Object {
+            kind: ObjectKind::Path(PathObject::default()),
+            symbol_id: 0,
+            symbol_index: Some(0),
+            coords: vec![MapCoord::new(0.0, 0.0, 0), MapCoord::new(10.0, 0.0, 0)],
+            rotation: 0.0,
+        };
+        let form_line_piece = Object {
+            kind: ObjectKind::Path(PathObject::default()),
+            symbol_id: 1,
+            symbol_index: Some(1),
+            coords: vec![MapCoord::new(10.0, 0.0, 0), MapCoord::new(20.0, 0.0, 0)],
+            rotation: 0.0,
+        };
+
+        let map = Map {
+            scale_denominator: 1000,
+            colors: Vec::new(),
+            symbols: vec![contour_symbol, form_line_symbol],
+            symbol_ids: vec![0, 1],
+            objects: vec![contour_piece, form_line_piece],
+            georeferencing: None,
+            symbol_set: None,
+        };
+
+        let chains = merge_contour_object_chains(&map);
+        assert_eq!(chains.len(), 1, "the two pieces join into a single chain");
+        assert_eq!(
+            chains[0].0.len(),
+            3,
+            "the shared endpoint is not duplicated"
+        );
+        assert_eq!(
+            chains[0].1, 0.5,
+            "a chain with even one Form Line piece counts as a Form Line overall"
+        );
     }
 
     #[test]
@@ -2864,6 +3032,7 @@ mod tests {
         raster.compute_out_of_bound();
         let contour = Contour {
             lwg: LineWithGravity::new(ls),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -2985,11 +3154,13 @@ mod tests {
             contours: vec![
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -3107,11 +3278,13 @@ mod tests {
 
         let contours_a = vec![Contour {
             lwg: LineWithGravity::new(ls_a),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         }];
         let contours_b = vec![Contour {
             lwg: LineWithGravity::new(ls_b),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         }];
@@ -3164,11 +3337,13 @@ mod tests {
             contours: vec![
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -3344,11 +3519,13 @@ mod tests {
             vec![
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -3378,6 +3555,7 @@ mod tests {
         let mut result = close_search_test_result(
             vec![Contour {
                 lwg: LineWithGravity::new(ls),
+                step: 1.0,
                 elevation_height: None,
                 empty_progeny: false,
             }],
@@ -3419,16 +3597,19 @@ mod tests {
             vec![
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_c),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -3466,6 +3647,7 @@ mod tests {
         let mut result = close_search_test_result(
             vec![Contour {
                 lwg: LineWithGravity::new(ls),
+                step: 1.0,
                 elevation_height: None,
                 empty_progeny: false,
             }],
@@ -3516,6 +3698,7 @@ mod tests {
         let mut result = close_search_test_result(
             vec![Contour {
                 lwg: LineWithGravity::new(ls),
+                step: 1.0,
                 elevation_height: None,
                 empty_progeny: false,
             }],
@@ -3550,6 +3733,7 @@ mod tests {
         let mut result = close_search_test_result(
             vec![Contour {
                 lwg: LineWithGravity::new(ls.clone()),
+                step: 1.0,
                 elevation_height: None,
                 empty_progeny: false,
             }],
@@ -3584,11 +3768,13 @@ mod tests {
             vec![
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -3623,11 +3809,13 @@ mod tests {
             vec![
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -3662,11 +3850,13 @@ mod tests {
             vec![
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -3705,16 +3895,19 @@ mod tests {
             vec![
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_c),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -3759,16 +3952,19 @@ mod tests {
             vec![
                 Contour {
                     lwg: LineWithGravity::new(ls1.clone()),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_x),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls3),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -3821,11 +4017,13 @@ mod tests {
             contours: vec![
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -3941,6 +4139,7 @@ mod tests {
 
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
+                step: 1.0,
                 elevation_height: None,
                 empty_progeny: false,
             }];
@@ -4043,6 +4242,7 @@ mod tests {
 
         let mut contours = vec![Contour {
             lwg: LineWithGravity::new(ls),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         }];
@@ -4144,6 +4344,7 @@ mod tests {
 
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
+                step: 1.0,
                 elevation_height: None,
                 empty_progeny: false,
             }];
@@ -4376,6 +4577,7 @@ mod tests {
 
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
+                step: 1.0,
                 elevation_height: None,
                 empty_progeny: false,
             }];
@@ -4449,11 +4651,13 @@ mod tests {
             let mut contours = vec![
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -4520,11 +4724,13 @@ mod tests {
             let mut contours = vec![
                 Contour {
                     lwg: LineWithGravity::new(ls_a),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
                 Contour {
                     lwg: LineWithGravity::new(ls_b),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 },
@@ -4620,6 +4826,7 @@ mod tests {
 
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
+                step: 1.0,
                 elevation_height: None,
                 empty_progeny: false,
             }];
@@ -4722,6 +4929,7 @@ mod tests {
 
         let mut contours = vec![Contour {
             lwg: LineWithGravity::new(ls),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         }];
@@ -4813,6 +5021,7 @@ mod tests {
 
             let mut contours = vec![Contour {
                 lwg: LineWithGravity::new(ls),
+                step: 1.0,
                 elevation_height: None,
                 empty_progeny: false,
             }];
@@ -4889,6 +5098,7 @@ mod tests {
         raster.compute_out_of_bound();
         let contour = Contour {
             lwg: LineWithGravity::new(ls),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };

@@ -12,15 +12,26 @@
 //! that is what excludes rendering-only underlay/mask lines (e.g. a "mask
 //! for small watercourse" symbol layered under the real one) without having
 //! to recognise them by a language-specific name.
+//!
+//! A Form Line (code family `"103"`) is a Contour: same family, same Slope
+//! Line evidence (`"103.1"`, alongside `"101.1"`), same gravity/elevation
+//! machinery. The one difference -- it represents half the elevation of an
+//! ordinary contour -- is [`contour_step`]'s job alone, not this
+//! classification's.
 
 use crate::map::{LineSymbol, PointSymbol, Symbol};
 
 /// Which of the doc's four symbol families a symbol belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolFamily {
-    /// *\[Index\] Contour* -- what Step 1 builds a [`crate::gravity_model::Contour`] for.
+    /// *\[Index\] Contour* or *Form Line* -- what Step 1 builds a
+    /// [`crate::gravity_model::Contour`] for. A Form Line is a Contour like
+    /// any other (same gravity handling, same Slope Line evidence -- see
+    /// [`SymbolFamily::SlopeLine`]); the only place it differs is
+    /// [`contour_step`], which Step 1 uses to give it half the elevation
+    /// weight of an ordinary contour.
     Contour,
-    /// *Slope Line*, for a contour (not for a form line).
+    /// *Slope Line*, for a contour or a form line alike.
     SlopeLine,
     /// *Earth Bank \[minimum size\]*, *\[Small\] \[Impassable\] Cliff \[minimum size\]\[Small\]*.
     Jump,
@@ -45,19 +56,31 @@ pub fn classify_symbol(symbol: &Symbol) -> Option<SymbolFamily> {
     let family = code_family(symbol.code());
     match symbol {
         Symbol::Line(_) => match family {
-            "101" | "102" => Some(SymbolFamily::Contour),
+            "101" | "102" | "103" => Some(SymbolFamily::Contour),
             "104" | "105" | "106" | "201" | "202" => Some(SymbolFamily::Jump),
             "107" | "108" | "304" | "305" | "306" => Some(SymbolFamily::HeavyObject),
             _ => None,
         },
         Symbol::Point(_) => {
-            if symbol.code() == "101.1" {
+            if symbol.code() == "101.1" || symbol.code() == "103.1" {
                 Some(SymbolFamily::SlopeLine)
             } else {
                 None
             }
         }
         _ => None,
+    }
+}
+
+/// How much elevation a [`SymbolFamily::Contour`] symbol represents crossing
+/// it, in equidistances: `0.5` for a Form Line (code family `"103"`), `1.0`
+/// for an ordinary `[Index] Contour`. Meaningless (and not called) for any
+/// other family -- only a Contour has an elevation weight of its own.
+pub fn contour_step(symbol: &Symbol) -> f64 {
+    if code_family(symbol.code()) == "103" {
+        0.5
+    } else {
+        1.0
     }
 }
 
@@ -164,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_contours() {
+    fn classifies_contours_and_form_lines() {
         assert_eq!(
             classify_symbol(&line_symbol("101.0", false)),
             Some(SymbolFamily::Contour)
@@ -173,15 +196,29 @@ mod tests {
             classify_symbol(&line_symbol("102.0", false)),
             Some(SymbolFamily::Contour)
         );
+        assert_eq!(
+            classify_symbol(&line_symbol("103.0", false)),
+            Some(SymbolFamily::Contour)
+        );
     }
 
     #[test]
-    fn classifies_slope_line_but_not_form_line_slope() {
+    fn classifies_slope_line_for_both_contours_and_form_lines() {
         assert_eq!(
             classify_symbol(&point_symbol("101.1")),
             Some(SymbolFamily::SlopeLine)
         );
-        assert_eq!(classify_symbol(&point_symbol("103.1")), None);
+        assert_eq!(
+            classify_symbol(&point_symbol("103.1")),
+            Some(SymbolFamily::SlopeLine)
+        );
+    }
+
+    #[test]
+    fn contour_step_is_half_for_a_form_line_and_one_for_an_ordinary_contour() {
+        assert_eq!(contour_step(&line_symbol("101.0", false)), 1.0);
+        assert_eq!(contour_step(&line_symbol("102.3", false)), 1.0);
+        assert_eq!(contour_step(&line_symbol("103.0", false)), 0.5);
     }
 
     #[test]

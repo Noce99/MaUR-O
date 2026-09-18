@@ -100,6 +100,16 @@ impl LineWithGravity {
 pub struct Contour {
     /// The contour's own line and gravity.
     pub lwg: LineWithGravity,
+    /// How much elevation crossing this contour represents, in equidistances:
+    /// `1.0` for an ordinary `[Index] Contour`, `0.5` for a Form Line (see
+    /// [`crate::contour_symbols::contour_step`]). Step 4 uses
+    /// `min(source.step, hit.step)` as the elevation delta for a single hop
+    /// between two adjacent contours, since a Form Line always sits exactly
+    /// halfway between the ordinary contours on either side of it -- so
+    /// crossing into *or* out of one is a half step, and only a hop between
+    /// two ordinary contours (with no Form Line drawn between them) is a
+    /// full one.
+    pub step: f64,
     /// Step 4's output: `None` until this contour is added to Step 4's own
     /// tree `T` (as the root, as an ordinary child, or by re-insertion after
     /// an eviction -- see [`crate::step4_elevation`]).
@@ -380,6 +390,7 @@ mod tests {
     fn contour(ls: LineString<f64>) -> Contour {
         Contour {
             lwg: LineWithGravity::new(ls),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         }

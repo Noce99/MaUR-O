@@ -307,6 +307,7 @@ mod tests {
     fn contour_with_gravity(y: f64, gravity_dy: f64) -> Contour {
         let mut contour = Contour {
             lwg: LineWithGravity::new(straight_ls(y)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -356,6 +357,7 @@ mod tests {
         ]);
         let mut contour = Contour {
             lwg: LineWithGravity::new(ring),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };

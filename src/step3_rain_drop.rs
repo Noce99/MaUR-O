@@ -919,6 +919,7 @@ mod tests {
         let (gx, gy) = gravity_vector_for_side(&ls, side);
         let mut source = Contour {
             lwg: LineWithGravity::new(ls.clone()),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -982,6 +983,7 @@ mod tests {
     fn rain_drop_production_resolves_a_parallel_undefined_contour() {
         let mut defined = Contour {
             lwg: LineWithGravity::new(straight_ls(0.0)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -989,6 +991,7 @@ mod tests {
         defined.lwg.gravity_dy = Some(1.0); // downhill = +y, toward the second contour
         let undefined = Contour {
             lwg: LineWithGravity::new(straight_ls(5.0)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -1008,6 +1011,7 @@ mod tests {
         // split.
         let mut top = Contour {
             lwg: LineWithGravity::new(straight_ls(0.0)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -1015,11 +1019,13 @@ mod tests {
         top.lwg.gravity_dy = Some(1.0);
         let middle = Contour {
             lwg: LineWithGravity::new(straight_ls(5.0)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
         let mut bottom = Contour {
             lwg: LineWithGravity::new(straight_ls(10.0)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -1048,6 +1054,7 @@ mod tests {
         // source, i.e. still +y, not the opposite (-y).
         let mut defined = Contour {
             lwg: LineWithGravity::new(straight_ls(0.0)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -1055,6 +1062,7 @@ mod tests {
         defined.lwg.gravity_dy = Some(1.0);
         let undefined = Contour {
             lwg: LineWithGravity::new(straight_ls(-3.0)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -1100,6 +1108,7 @@ mod tests {
         // resolve too.
         let mut a = Contour {
             lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(30.0, 0.0)])),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -1107,11 +1116,13 @@ mod tests {
         a.lwg.gravity_dy = Some(1.0);
         let b = Contour {
             lwg: LineWithGravity::new(LineString::new(vec![c(20.0, 5.0), c(50.0, 5.0)])),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
         let c_contour = Contour {
             lwg: LineWithGravity::new(LineString::new(vec![c(40.0, -5.0), c(60.0, -5.0)])),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -1146,6 +1157,7 @@ mod tests {
         // anywhere -- the only thing it could ever learn from is a Jump.
         let c_contour = Contour {
             lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(10.0, 0.0)])),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -1200,6 +1212,7 @@ mod tests {
         // read a vote from, and C must stay undefined.
         let c_contour = Contour {
             lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 0.0), c(10.0, 0.0)])),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -1239,6 +1252,7 @@ mod tests {
         // rather than failing the whole run.
         let mut contours = vec![Contour {
             lwg: LineWithGravity::new(straight_ls(0.0)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         }];
@@ -1273,6 +1287,7 @@ mod tests {
     fn source_and_bracket_contours() -> Vec<Contour> {
         let mut source = Contour {
             lwg: LineWithGravity::new(straight_ls(-100.0)),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -1285,6 +1300,7 @@ mod tests {
                 c(7.0, 2.0),
                 c(3.0, 2.0),
             ])),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -1369,6 +1385,7 @@ mod tests {
             {
                 let mut source = Contour {
                     lwg: LineWithGravity::new(straight_ls(-100.0)),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 };
@@ -1383,6 +1400,7 @@ mod tests {
                     c(7.0, 51.0),
                     c(3.0, 51.0),
                 ])),
+                step: 1.0,
                 elevation_height: None,
                 empty_progeny: false,
             },
@@ -1435,6 +1453,7 @@ mod tests {
             {
                 let mut source = Contour {
                     lwg: LineWithGravity::new(straight_ls(-100.0)),
+                    step: 1.0,
                     elevation_height: None,
                     empty_progeny: false,
                 };
@@ -1444,6 +1463,7 @@ mod tests {
             },
             Contour {
                 lwg: LineWithGravity::new(LineString::new(vec![c(0.0, 20.0), c(10.0, 20.0)])),
+                step: 1.0,
                 elevation_height: None,
                 empty_progeny: false,
             },

@@ -1637,6 +1637,7 @@ mod tests {
         let ls = LineString::new(vec![c(0.0, 0.0), c(5.0, 0.0), c(10.0, 0.0)]);
         let mut contour = Contour {
             lwg: LineWithGravity::new(ls.clone()),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -2246,6 +2247,7 @@ mod tests {
         let (gx, gy) = gravity_vector_for_side(&ls, side);
         let mut contour = Contour {
             lwg: LineWithGravity::new(ls),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -2387,6 +2389,7 @@ mod tests {
         let (gx1, gy1) = gravity_vector_for_side(&ls1, 1.0);
         let mut contour0 = Contour {
             lwg: LineWithGravity::new(ls0),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -2394,6 +2397,7 @@ mod tests {
         contour0.lwg.gravity_dy = Some(gy0);
         let mut contour1 = Contour {
             lwg: LineWithGravity::new(ls1),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };
@@ -2622,6 +2626,7 @@ mod tests {
         let ls1 = LineString::new(vec![c(0.0, 5.0), c(10.0, 5.0)]);
         let mut resolved = Contour {
             lwg: LineWithGravity::new(ls0.clone()),
+            step: 1.0,
             elevation_height: Some(0.0),
             empty_progeny: true,
         };
@@ -2629,6 +2634,7 @@ mod tests {
         resolved.lwg.gravity_dy = Some(1.0);
         let undefined = Contour {
             lwg: LineWithGravity::new(ls1.clone()),
+            step: 1.0,
             elevation_height: None,
             empty_progeny: false,
         };

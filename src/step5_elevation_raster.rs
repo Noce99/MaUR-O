@@ -261,10 +261,11 @@ pub fn resolve(
                 // No real contour to read an elevation from under a
                 // high-density conflict -- suppose the drop travelled one
                 // step further downhill from its own source instead (the
-                // same "accordance" assumption Step 4 makes), per the doc's
-                // own note on why a high-density hit can no longer be
-                // treated as a dead end here.
-                StepHit::HighDensity => c_height - 1.0,
+                // same "accordance" assumption Step 4 makes, including its
+                // own Form Line half-step), per the doc's own note on why a
+                // high-density hit can no longer be treated as a dead end
+                // here.
+                StepHit::HighDensity => c_height - c.step,
                 StepHit::OutOfBound => {
                     unreachable!("gravity_guided_drop_track already turns this hit into None")
                 }
@@ -797,6 +798,7 @@ mod tests {
     fn contour_with_gravity(y: f64, gravity_dy: f64, height: f64) -> Contour {
         let mut contour = Contour {
             lwg: LineWithGravity::new(straight_ls(y)),
+            step: 1.0,
             elevation_height: Some(height),
             empty_progeny: false,
         };
@@ -1038,6 +1040,7 @@ mod tests {
         ]);
         let mut contour = Contour {
             lwg: LineWithGravity::new(ring),
+            step: 1.0,
             elevation_height: Some(5.0),
             empty_progeny: false,
         };
@@ -1069,6 +1072,7 @@ mod tests {
         ]);
         let mut contour = Contour {
             lwg: LineWithGravity::new(ring),
+            step: 1.0,
             elevation_height: Some(5.0),
             empty_progeny: false,
         };
@@ -1145,6 +1149,7 @@ mod tests {
         ]);
         let mut contour = Contour {
             lwg: LineWithGravity::new(ring),
+            step: 1.0,
             elevation_height: Some(5.0),
             empty_progeny: false,
         };
