@@ -357,14 +357,22 @@ fn elevation_proliferation(
                 children_added += 1;
             }
             Some(existing) if expected.abs() > existing.abs() => {
-                if tree.is_descendant(c_idx, hit_idx) {
-                    // A hole Step 1's Growing Process left unfilled let this
-                    // drop reach back up to its own ancestor -- evicting
+                if hit_idx == c_idx || tree.is_descendant(c_idx, hit_idx) {
+                    // Either a self-hit -- a concave source contour's own
+                    // drop curled back and evaporated on itself, so hit_idx
+                    // and c_idx are literally the same node -- or a hole
+                    // Step 1's Growing Process left unfilled let the drop
+                    // reach back up to its own ancestor. Either way, evicting
                     // hit_idx's subtree would also remove c_idx, the very
                     // contour this call is running on. Void the eviction
                     // (hit_idx is left exactly as it was) and warn instead of
                     // corrupting the tree.
                     let at = representative_path.last().copied().unwrap_or(Coord { x: f64::NAN, y: f64::NAN });
+                    let relation = if hit_idx == c_idx {
+                        format!("{hit_idx} and {c_idx} are the same contour")
+                    } else {
+                        format!("{c_idx} is itself already a descendant of {hit_idx} in T")
+                    };
                     warnings.push(format!(
                         "Step 4: {pass_name} from contour {c_idx} (elevation_height {c_height}) \
                          decided contour {hit_idx} (currently elevation_height {existing}) \
@@ -373,10 +381,10 @@ fn elevation_proliferation(
                          ({:.2}, {:.2})), computing an expected elevation_height of {expected} \
                          for it. abs({expected}) > abs({existing}), so {hit_idx} would normally \
                          be evicted (along with its own subtree) and re-parented under {c_idx} \
-                         at the new value -- but {c_idx} is itself already a descendant of \
-                         {hit_idx} in T, so evicting {hit_idx}'s subtree would also remove \
-                         {c_idx}, the very contour this {pass_name} call is running on. Voiding \
-                         the eviction: contour {hit_idx} keeps its current elevation_height.",
+                         at the new value -- but {relation}, so evicting {hit_idx}'s subtree \
+                         would also remove {c_idx}, the very contour this {pass_name} call is \
+                         running on. Voiding the eviction: contour {hit_idx} keeps its current \
+                         elevation_height.",
                         vote.accordance_weight, vote.discordance_weight, at.x, at.y,
                     ));
                     continue;
