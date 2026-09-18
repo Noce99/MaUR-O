@@ -1,4 +1,4 @@
-- This is an algorithm description that should, given some contours and other terrain objects from a .omap, return a raster of the given map with, for each pixel, the elevation value up to a constant with respect to the real ones.
+- This is an algorithm description that should, given some contours and other terrain objects from a .omap, return a raster of the given map with, for each pixel, the elevation value up to a constant with respect to the real ones. For a short, implementation-free, mathematically-formal account of the same algorithm, see [Contours-to-Raster-Overview.md](Contours-to-Raster-Overview.md).
 - ## Assumptions
   collapsed:: true
 	- 1) This algorithm assumes that the gravity of the same contour line is always going in the same direction. In other words, it is not possible to find a contour line with slope lines pointing toward different parts of the same contour line.

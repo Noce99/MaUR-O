@@ -149,5 +149,7 @@ are related but downstream of this pipeline's output, not part of it.
   table, benchmark archive format, antialiasing classification.
 - **`mds/Contours-to-Raster.md`** — the full spec for the `contours_to_raster`
   pipeline (algorithm steps, appendices, every config parameter's meaning).
+  **`mds/Contours-to-Raster-Overview.md`** is a short, implementation-free,
+  mathematically-formal account of the same algorithm.
 - **`mds/bug.md`** — known rendering discrepancies against the ground-truth
   renderer, with pictures.
