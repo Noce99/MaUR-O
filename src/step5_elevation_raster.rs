@@ -446,14 +446,44 @@ fn count_defined(accum: &[Vec<Accum>], in_bound: &[Vec<bool>]) -> u64 {
     n
 }
 
-/// GeoTIFF's own `ModelTransformationTag`/`GeoKeyDirectoryTag`/`GDAL_NODATA`
-/// tag numbers -- none of them baseline TIFF tags the `tiff` crate already
-/// knows by name, so every one goes through `Tag::Unknown` (see
-/// `crate::geotiff`'s own doc comment for why nothing else builds one for
-/// us).
-const MODEL_TRANSFORMATION_TAG: u16 = 34264;
+/// GeoTIFF's own `ModelPixelScaleTag`/`ModelTiepointTag`/`GeoKeyDirectoryTag`/
+/// `GDAL_NODATA` tag numbers -- none of them baseline TIFF tags the `tiff`
+/// crate already knows by name, so every one goes through `Tag::Unknown`
+/// (see `crate::geotiff`'s own doc comment for why nothing else builds one
+/// for us).
+const MODEL_PIXEL_SCALE_TAG: u16 = 33550;
+const MODEL_TIEPOINT_TAG: u16 = 33922;
 const GEO_KEY_DIRECTORY_TAG: u16 = 34735;
 const GDAL_NODATA_TAG: u16 = 42113;
+
+/// Bilinear-samples `e2v` at a continuous local ground-meter coordinate,
+/// `origin`/`px_size` the same `ContourRaster` convention `e2v` was resolved
+/// against (`origin` is pixel `(0, 0)`'s own corner, not its center --
+/// `pixel_center`'s own `+ 0.5`). `None` outside the raster's own footprint
+/// or wherever all four surrounding pixels are themselves `None`; falls back
+/// to the nearer single pixel when only some of the four are.
+fn sample_e2v_bilinear(e2v: &ElevationRaster, origin: Coord<f64>, px_size: f64, local: Coord<f64>) -> Option<f64> {
+    let fx = (local.x - origin.x) / px_size - 0.5;
+    let fy = (local.y - origin.y) / px_size - 0.5;
+    if fx < -0.5 || fy < -0.5 || fx > e2v.width as f64 - 0.5 || fy > e2v.height as f64 - 0.5 {
+        return None;
+    }
+    let c0 = fx.floor().clamp(0.0, (e2v.width - 1) as f64) as usize;
+    let r0 = fy.floor().clamp(0.0, (e2v.height - 1) as f64) as usize;
+    let c1 = (c0 + 1).min(e2v.width - 1);
+    let r1 = (r0 + 1).min(e2v.height - 1);
+    let tx = (fx - c0 as f64).clamp(0.0, 1.0);
+    let ty = (fy - r0 as f64).clamp(0.0, 1.0);
+
+    match (e2v.get(c0, r0), e2v.get(c1, r0), e2v.get(c0, r1), e2v.get(c1, r1)) {
+        (Some(v00), Some(v01), Some(v10), Some(v11)) => {
+            let top = v00 + (v01 - v00) * tx;
+            let bottom = v10 + (v11 - v10) * tx;
+            Some(top + (bottom - top) * ty)
+        }
+        _ => e2v.get(if tx < 0.5 { c0 } else { c1 }, if ty < 0.5 { r0 } else { r1 }),
+    }
+}
 
 /// Writes `e2v` as a single-band 32-bit float TIFF -- the elevation value,
 /// up to a constant (`Contours-to-Raster.md`'s own opening line), for every
@@ -466,11 +496,20 @@ const GDAL_NODATA_TAG: u16 = 42113;
 /// against (`raster.origin`, `raster.px_size`); `georeferencing` is the
 /// source map's own [`Georeferencing`], if it has one. Real GeoTIFF tags
 /// (see `crate::geotiff`) are only ever written when `georeferencing` is
-/// `Some` *and* names a real projected CRS (`epsg != 0`) -- a map with no
-/// georeferencing at all, or one whose own `<projected_crs>` names none (a
-/// `"Local"` CRS, `xml_writer.rs`'s own default for a map drawn on no real
-/// ground), falls back to exactly the plain, tagless TIFF this function
-/// always used to write, since there is no real-world place left to put it.
+/// `Some`, names a real projected CRS (`epsg != 0`), and that EPSG code fits
+/// a plain SHORT GeoKey value (`u16`, vanishingly unlikely to matter for any
+/// real projected CRS a map would actually use) -- otherwise this falls back
+/// to exactly the plain, tagless, un-resampled TIFF this function always
+/// used to write, since there is no real-world place left to put it.
+///
+/// When georeferenced, `e2v` (which lives in the map's own rotated
+/// ground-meter frame -- grivated whenever the map itself is) is resampled
+/// onto a plain axis-aligned grid in the projected CRS
+/// ([`geotiff::resample_north_up`]) *before* writing, so the file on disk
+/// carries an ordinary `ModelPixelScaleTag`/`ModelTiepointTag`, never a
+/// rotated `ModelTransformationTag` -- see `crate::geotiff`'s own doc
+/// comment for why a rotated file used to come back silently misrotated
+/// wherever it was re-opened.
 pub fn write_tiff(
     e2v: &ElevationRaster,
     origin: Coord<f64>,
@@ -478,19 +517,42 @@ pub fn write_tiff(
     georeferencing: Option<&Georeferencing>,
     path: &Path,
 ) -> Result<(), String> {
-    let mut data = Vec::with_capacity(e2v.width * e2v.height);
-    for y in 0..e2v.height {
-        for x in 0..e2v.width {
-            data.push(e2v.get(x, y).map(|v| v as f32).unwrap_or(f32::NAN));
+    let epsg_u16 = georeferencing.and_then(|g| u16::try_from(g.epsg).ok());
+    let north_up = match (georeferencing, epsg_u16) {
+        (Some(georef), Some(_)) => geotiff::resample_north_up(
+            e2v.width,
+            e2v.height,
+            origin,
+            px_size,
+            |local| {
+                sample_e2v_bilinear(e2v, origin, px_size, local)
+                    .map(|v| v as f32)
+                    .unwrap_or(f32::NAN)
+            },
+            georef,
+        ),
+        _ => None,
+    };
+
+    let (width, height, data) = match &north_up {
+        Some(raster) => (raster.width, raster.height, raster.data.clone()),
+        None => {
+            let mut data = Vec::with_capacity(e2v.width * e2v.height);
+            for y in 0..e2v.height {
+                for x in 0..e2v.width {
+                    data.push(e2v.get(x, y).map(|v| v as f32).unwrap_or(f32::NAN));
+                }
+            }
+            (e2v.width, e2v.height, data)
         }
-    }
+    };
 
     let file =
         std::fs::File::create(path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     let mut encoder = TiffEncoder::new(BufWriter::new(file))
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     let mut image = encoder
-        .new_image::<Gray32Float>(e2v.width as u32, e2v.height as u32)
+        .new_image::<Gray32Float>(width as u32, height as u32)
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
 
     image
@@ -498,31 +560,28 @@ pub fn write_tiff(
         .write_tag(Tag::Unknown(GDAL_NODATA_TAG), "nan")
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
 
-    if let Some(georef) = georeferencing {
-        if let Some(transform) = geotiff::model_transformation(georef, origin, px_size) {
-            match u16::try_from(georef.epsg) {
-                Ok(epsg) => {
-                    image
-                        .encoder()
-                        .write_tag(Tag::Unknown(MODEL_TRANSFORMATION_TAG), &transform[..])
-                        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-                    image
-                        .encoder()
-                        .write_tag(
-                            Tag::Unknown(GEO_KEY_DIRECTORY_TAG),
-                            &geotiff::geo_key_directory(epsg)[..],
-                        )
-                        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-                }
-                Err(_) => {
-                    // An EPSG code past u16::MAX can't fit a plain SHORT
-                    // GeoKey value -- vanishingly unlikely for any real
-                    // projected CRS a map would actually use, so this is
-                    // simply left ungeoreferenced rather than worth a
-                    // GeoDoubleParamsTag indirection just for it.
-                }
-            }
-        }
+    if let (Some(raster), Some(epsg)) = (&north_up, epsg_u16) {
+        image
+            .encoder()
+            .write_tag(
+                Tag::Unknown(MODEL_PIXEL_SCALE_TAG),
+                &[raster.px_size, raster.px_size, 0.0][..],
+            )
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        image
+            .encoder()
+            .write_tag(
+                Tag::Unknown(MODEL_TIEPOINT_TAG),
+                &[0.0, 0.0, 0.0, raster.origin.x, raster.origin.y, 0.0][..],
+            )
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        image
+            .encoder()
+            .write_tag(
+                Tag::Unknown(GEO_KEY_DIRECTORY_TAG),
+                &geotiff::geo_key_directory(epsg)[..],
+            )
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     }
 
     image
@@ -1138,7 +1197,11 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(decoder
-            .find_tag(Tag::Unknown(MODEL_TRANSFORMATION_TAG))
+            .find_tag(Tag::Unknown(MODEL_PIXEL_SCALE_TAG))
+            .unwrap()
+            .is_none());
+        assert!(decoder
+            .find_tag(Tag::Unknown(MODEL_TIEPOINT_TAG))
             .unwrap()
             .is_none());
         assert_eq!(
@@ -1181,19 +1244,104 @@ mod tests {
         };
         let origin = c(2252.39, -2312.17);
         let px_size = 1.0;
-        write_tiff(&tiny_e2v(), origin, px_size, Some(&georef), &path).unwrap();
+        let e2v = tiny_e2v();
+        write_tiff(&e2v, origin, px_size, Some(&georef), &path).unwrap();
 
         let file = std::fs::File::open(&path).unwrap();
         let mut decoder = tiff::decoder::Decoder::new(file).unwrap();
         let keys = decoder.get_tag_u16_vec(Tag::Unknown(GEO_KEY_DIRECTORY_TAG)).unwrap();
         assert_eq!(keys, geotiff::geo_key_directory(3006));
 
-        let transform = decoder.get_tag_f64_vec(Tag::Unknown(MODEL_TRANSFORMATION_TAG)).unwrap();
-        let expected = geotiff::model_transformation(&georef, origin, px_size).unwrap();
-        assert_eq!(transform, expected);
+        // A plain axis-aligned ModelPixelScale/ModelTiepoint pair, not a
+        // rotated ModelTransformation -- see write_tiff's own doc comment
+        // for why: nothing downstream reads a ModelTransformation's own
+        // rotation/shear terms, so a grivated file must carry no rotation
+        // at all rather than one a naive reader would silently drop.
+        assert!(decoder
+            .find_tag(Tag::Unknown(MODEL_TRANSFORMATION_TAG_FOR_TESTS))
+            .unwrap()
+            .is_none());
+        let expected = geotiff::resample_north_up(
+            e2v.width,
+            e2v.height,
+            origin,
+            px_size,
+            |local| {
+                sample_e2v_bilinear(&e2v, origin, px_size, local)
+                    .map(|v| v as f32)
+                    .unwrap_or(f32::NAN)
+            },
+            &georef,
+        )
+        .unwrap();
+
+        let scale = decoder.get_tag_f64_vec(Tag::Unknown(MODEL_PIXEL_SCALE_TAG)).unwrap();
+        assert_eq!(scale, vec![expected.px_size, expected.px_size, 0.0]);
+
+        let tiepoint = decoder.get_tag_f64_vec(Tag::Unknown(MODEL_TIEPOINT_TAG)).unwrap();
+        assert_eq!(
+            tiepoint,
+            vec![0.0, 0.0, 0.0, expected.origin.x, expected.origin.y, 0.0]
+        );
+
+        assert_eq!(decoder.dimensions().unwrap(), (expected.width as u32, expected.height as u32));
         assert_eq!(
             decoder.get_tag_ascii_string(Tag::Unknown(GDAL_NODATA_TAG)).unwrap(),
             "nan"
         );
+    }
+
+    /// `34264` -- GeoTIFF's own `ModelTransformationTag` number, duplicated
+    /// here (rather than importing the module-level constant this file used
+    /// to keep) purely so the test above can assert none was written; see
+    /// `write_tiff`'s own doc comment for why a rotated transformation tag
+    /// is exactly the bug this file no longer writes.
+    const MODEL_TRANSFORMATION_TAG_FOR_TESTS: u16 = 34264;
+
+    #[test]
+    fn write_tiff_resamples_a_grivated_source_so_no_rotation_survives_to_disk() {
+        // The exact regression this module exists to prevent: a grivated
+        // map's own DEM, written out and read back by something that (like
+        // o-mnia's own custom-GeoTIFF importer) only understands an
+        // axis-aligned ModelPixelScale/ModelTiepoint pair, must land at the
+        // same place a full rotation-aware reader would put it -- i.e.
+        // there must be no rotation left for the naive reader to drop.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("elevation.tif");
+        let georef = Georeferencing {
+            scale: 15000,
+            epsg: 3006,
+            ref_point_x: 322500.0,
+            ref_point_y: 6397500.0,
+            grivation: 7.1,
+            grivation_specified: true,
+            auxiliary_scale_factor: 1.000014,
+        };
+        let origin = c(0.0, 0.0);
+        let px_size = 1.0;
+        let e2v = ElevationRaster {
+            grid: vec![vec![Some(10.0); 20]; 20],
+            width: 20,
+            height: 20,
+        };
+        write_tiff(&e2v, origin, px_size, Some(&georef), &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut decoder = tiff::decoder::Decoder::new(file).unwrap();
+        // A naive axis-aligned reader (origin + ModelPixelScale only, no
+        // shear) must reconstruct exactly the same footprint a
+        // rotation-aware one would -- there is none left to disagree about.
+        let scale = decoder.get_tag_f64_vec(Tag::Unknown(MODEL_PIXEL_SCALE_TAG)).unwrap();
+        let tiepoint = decoder.get_tag_f64_vec(Tag::Unknown(MODEL_TIEPOINT_TAG)).unwrap();
+        assert!(scale[0] > 0.0 && scale[1] > 0.0);
+        // The reference point (map origin) must fall strictly inside the
+        // axis-aligned bounding box the file declares, confirming the
+        // footprint was actually reprojected rather than left centered on
+        // some other, unrelated point.
+        let (min_x, max_y) = (tiepoint[3], tiepoint[4]);
+        let max_x = min_x + scale[0] * decoder.dimensions().unwrap().0 as f64;
+        let min_y = max_y - scale[1] * decoder.dimensions().unwrap().1 as f64;
+        assert!(min_x <= georef.ref_point_x && georef.ref_point_x <= max_x);
+        assert!(min_y <= georef.ref_point_y && georef.ref_point_y <= max_y);
     }
 }
