@@ -483,28 +483,56 @@ fn services_on(
 
 /// The Wednesday the feed runs the most services on, `YYYYMMDD`: a plain
 /// working day, clear of the Monday and Friday variants and of holidays.
-fn typical_weekday(calendar: &Table, exceptions: Option<&Table>) -> Result<Option<String>, String> {
-    let (start, end) = (
-        calendar.column("calendar.txt", "start_date")?,
-        calendar.column("calendar.txt", "end_date")?,
-    );
+///
+/// The Wednesdays looked at are those `calendar.txt`'s date ranges span,
+/// and those `calendar_dates.txt` adds a service on — which is all a feed
+/// that lists its days one by one, with no `calendar.txt`, has.
+fn typical_weekday(
+    calendar: Option<&Table>,
+    exceptions: Option<&Table>,
+) -> Result<Option<String>, String> {
     let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y%m%d").ok();
-    let first = calendar.rows.iter().filter_map(|r| parse(&r[start])).min();
-    let last = calendar.rows.iter().filter_map(|r| parse(&r[end])).max();
-    let (Some(first), Some(last)) = (first, last) else {
-        return Ok(None);
-    };
+    let mut days: Vec<chrono::NaiveDate> = Vec::new();
+    if let Some(calendar) = calendar {
+        let (start, end) = (
+            calendar.column("calendar.txt", "start_date")?,
+            calendar.column("calendar.txt", "end_date")?,
+        );
+        let first = calendar.rows.iter().filter_map(|r| parse(&r[start])).min();
+        let last = calendar.rows.iter().filter_map(|r| parse(&r[end])).max();
+        if let (Some(first), Some(last)) = (first, last) {
+            let mut day = first;
+            while day <= last {
+                days.push(day);
+                day += chrono::TimeDelta::days(1);
+            }
+        }
+    }
+    if let Some(exceptions) = exceptions {
+        let (on, kind) = (
+            exceptions.column("calendar_dates.txt", "date")?,
+            exceptions.column("calendar_dates.txt", "exception_type")?,
+        );
+        days.extend(
+            exceptions
+                .rows
+                .iter()
+                .filter(|row| row[kind] == "1")
+                .filter_map(|row| parse(&row[on])),
+        );
+    }
+    days.sort_unstable();
+    days.dedup();
+
     let mut best: Option<(usize, String)> = None;
-    let mut day = first;
-    while day <= last {
+    for day in days {
         if chrono::Datelike::weekday(&day) == chrono::Weekday::Wed {
             let date = day.format("%Y%m%d").to_string();
-            let count = services_on(&date, Some(calendar), exceptions)?.len();
-            if best.as_ref().is_none_or(|(most, _)| count > *most) {
+            let count = services_on(&date, calendar, exceptions)?.len();
+            if count > 0 && best.as_ref().is_none_or(|(most, _)| count > *most) {
                 best = Some((count, date));
             }
         }
-        day += chrono::TimeDelta::days(1);
     }
     Ok(best.map(|(_, date)| date))
 }
@@ -522,21 +550,23 @@ fn minutes(time: &str) -> Option<u32> {
 /// number the feed has no route for is left out.
 ///
 /// The headways are counted on `date` (`YYYYMMDD`), or where none is given
-/// on the Wednesday the feed runs the most services on.
+/// on the Wednesday the feed runs the most services on. The lines come back
+/// as lines of kind `mode`, in the colour the feed gives them where it gives
+/// one other than white.
 pub fn lines_from_gtfs(
     path: &Path,
     references: &[String],
     date: Option<&str>,
+    mode: Mode,
 ) -> Result<GtfsLines, String> {
     let mut feed = Feed::open(path)?;
 
     // calendar.txt and calendar_dates.txt: which services run that day.
     let calendar = feed.optional_table("calendar.txt")?;
     let exceptions = feed.optional_table("calendar_dates.txt")?;
-    let date = match (date, &calendar) {
-        (Some(date), _) => Some(date.to_string()),
-        (None, Some(calendar)) => typical_weekday(calendar, exceptions.as_ref())?,
-        (None, None) => None,
+    let date = match date {
+        Some(date) => Some(date.to_string()),
+        None => typical_weekday(calendar.as_ref(), exceptions.as_ref())?,
     };
     let running = match &date {
         Some(date) => services_on(date, calendar.as_ref(), exceptions.as_ref())?,
@@ -550,14 +580,26 @@ pub fn lines_from_gtfs(
         routes.column("routes.txt", "route_short_name")?,
     );
     let long_name = routes.columns.get("route_long_name").copied();
+    let route_color = routes.columns.get("route_color").copied();
     let wanted: HashSet<&str> = references.iter().map(String::as_str).collect();
     let mut route_of: HashMap<String, (String, String)> = HashMap::new();
+    let mut color_of: HashMap<String, String> = HashMap::new();
     for row in &routes.rows {
         let reference = row.get(short_name).cloned().unwrap_or_default();
         if wanted.contains(reference.as_str()) {
             let name = long_name
                 .and_then(|c| row.get(c).cloned())
                 .unwrap_or_default();
+            // A colour of the line's own, `RRGGBB` without the `#`. White
+            // is no colour at all: it is what TPER's bus feed gives every
+            // line alike.
+            let color = route_color
+                .and_then(|c| row.get(c))
+                .and_then(|c| parse_colour(&format!("#{}", c.trim())))
+                .filter(|c| c != "#ffffff");
+            if let Some(color) = color {
+                color_of.insert(reference.clone(), color);
+            }
             route_of.insert(row[route_id].clone(), (reference, name));
         }
     }
@@ -725,9 +767,8 @@ pub fn lines_from_gtfs(
                 );
             }
             Some(BusLine {
-                mode: Mode::Bus,
-                // TPER's feed gives every line the same white.
-                color: None,
+                mode,
+                color: color_of.get(reference).cloned(),
                 reference: reference.clone(),
                 name: name_of.get(reference.as_str()).unwrap_or(&"").to_string(),
                 route: vec![route.into_iter().map(|(_, p)| p).collect()],
@@ -875,7 +916,7 @@ mod tests {
             "service_id,date,exception_type\nwk,20260107,2\n",
         );
 
-        let read = lines_from_gtfs(dir.path(), &["13".to_string()], None).unwrap();
+        let read = lines_from_gtfs(dir.path(), &["13".to_string()], None, Mode::Bus).unwrap();
         // The first Wednesday the weekday service runs.
         assert_eq!(read.date.as_deref(), Some("20260114"));
         let lines = read.lines;
@@ -891,8 +932,49 @@ mod tests {
         assert_eq!(line.headway, Some(120.0));
 
         // On the 7th the weekday service is off: no trip, no headway.
-        let off = lines_from_gtfs(dir.path(), &["13".to_string()], Some("20260107")).unwrap();
+        let off =
+            lines_from_gtfs(dir.path(), &["13".to_string()], Some("20260107"), Mode::Bus).unwrap();
         assert_eq!(off.lines[0].headway, None);
+    }
+
+    #[test]
+    fn a_feed_listing_its_days_one_by_one_still_gives_a_day_and_a_colour() {
+        // The Marconi Express feed's shape: no calendar.txt, every day it
+        // runs listed in calendar_dates.txt, and a colour of its own.
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
+        write(
+            "routes.txt",
+            "route_id,route_short_name,route_long_name,route_type,route_color\n\
+             MEX,MEX,Marconi Express,12,C1D72F\n",
+        );
+        write(
+            "trips.txt",
+            "route_id,service_id,trip_id,direction_id,shape_id\n\
+             MEX,wed,t1,0,s\nMEX,wed,t2,0,s\nMEX,thu,t3,0,s\n",
+        );
+        write(
+            "shapes.txt",
+            "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\ns,44.507,11.343,1\ns,44.529,11.294,2\n",
+        );
+        write(
+            "stop_times.txt",
+            "trip_id,stop_id,stop_sequence,departure_time\n\
+             t1,a,1,10:00:00\nt2,a,1,13:00:00\nt3,a,1,11:00:00\n",
+        );
+        write("stops.txt", "stop_id,stop_lat,stop_lon\na,44.507,11.343\n");
+        write(
+            "calendar_dates.txt",
+            "service_id,date,exception_type\nwed,20261021,1\nthu,20261022,1\n",
+        );
+
+        let read = lines_from_gtfs(dir.path(), &["MEX".to_string()], None, Mode::Train).unwrap();
+        assert_eq!(read.date.as_deref(), Some("20261021"));
+        let line = &read.lines[0];
+        assert_eq!(line.mode, Mode::Train);
+        assert_eq!(line.color.as_deref(), Some("#c1d72f"));
+        // Two trips on that Wednesday: 360 minutes / 2.
+        assert_eq!(line.headway, Some(180.0));
     }
 
     #[test]

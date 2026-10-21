@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...]
-//!             [--gtfs feed.zip [--date YYYYMMDD]] [--train S1,S2A,MEX,...] [--legend]
+//!             [--train S1,S2A,MEX,...] [--gtfs feed.zip ... [--date YYYYMMDD]]
+//!             [--legend]
 //!             <osm-file> [omap-file]
 //! ```
 //!
@@ -21,21 +22,22 @@
 //! pixel for pixel.
 //!
 //! `--bus` draws bus lines over the map, each in its own colour: its route,
-//! its stops as circles and its number at both ends. They come from the
-//! extract's own route relations, or with `--gtfs` from a GTFS feed (its
-//! `.zip`, or the folder it is unpacked into). A line neither has is
+//! its stops as circles and its number at both ends. `--train` does the same
+//! for train lines — and light rail, metro, tram and monorail ones,
+//! Bologna's Marconi Express (`MEX`) among them — drawn wider, with larger
+//! stations, and in the line's own colour where the data gives one.
+//!
+//! A line is looked for in the GTFS feeds given with `--gtfs` (each a
+//! `.zip`, or the folder it is unpacked into; as many as needed, e.g. TPER's
+//! bus network and its Marconi Express), in the order given, and where none
+//! has it in the extract's own route relations. A line no source has is
 //! reported and left out.
 //!
 //! Along each line, every so often, is written how many minutes apart its
 //! buses run between 10:00 and 16:00: counted from the GTFS timetable on one
-//! working day (`--date`, or by default the Wednesday the feed runs the most
-//! services on), or taken from a relation's `interval` tag where a mapper
+//! working day (`--date`, or by default the Wednesday the first feed runs
+//! the most services on, used for every feed), or taken from a relation's `interval` tag where a mapper
 //! has set one.
-//!
-//! `--train` does the same for train lines — and light rail, metro, tram and
-//! monorail ones, Bologna's Marconi Express (`MEX`) among them — always from
-//! the route relations, drawn wider, with larger stations, and in the line's
-//! own colour where the data gives one.
 //!
 //! `--legend` adds a legend under the map, in Italian: a sample of every
 //! symbol the map uses with what it means, the bus and train lines first.
@@ -49,7 +51,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use maur_o::bus::{lines_from_gtfs, lines_from_osm, Mode, HEADWAY_HOURS};
+use maur_o::bus::{lines_from_gtfs, lines_from_osm, BusLine, Mode, HEADWAY_HOURS};
 use maur_o::osm::{read_osm, BBox};
 use maur_o::osm_convert::convert;
 use maur_o::osm_style::{carto_style_with_bus_lines, BusLook, BUS_COLORS};
@@ -76,18 +78,19 @@ struct Args {
     #[arg(long, value_delimiter = ',')]
     bus: Vec<String>,
 
-    /// Take the bus lines from this GTFS feed (.zip or unpacked folder)
-    /// rather than from the OSM file's route relations.
-    #[arg(long, requires = "bus")]
-    gtfs: Option<PathBuf>,
+    /// Take the lines from this GTFS feed (.zip or unpacked folder) before
+    /// the OSM file's route relations. May be given several times: each line
+    /// comes from the first feed that has it.
+    #[arg(long)]
+    gtfs: Vec<PathBuf>,
 
     /// The day to count the GTFS headways on, YYYYMMDD. Defaults to the
-    /// Wednesday the feed runs the most services on.
+    /// Wednesday the first feed runs the most services on.
     #[arg(long, requires = "gtfs")]
     date: Option<String>,
 
     /// Draw these train lines (and light rail, tram, monorail), by number:
-    /// e.g. S1,S2A,MEX. Always from the OSM file's route relations.
+    /// e.g. S1,S2A,MEX.
     #[arg(long, value_delimiter = ',')]
     train: Vec<String>,
 
@@ -120,17 +123,60 @@ fn run() -> Result<(), (ExitCode, String)> {
             .collect()
     };
     let (bus_refs, train_refs) = (numbers(&args.bus), numbers(&args.train));
-    let mut headway_date = None;
-    let mut transit = match &args.gtfs {
-        Some(feed) => {
-            let read = lines_from_gtfs(feed, &bus_refs, args.date.as_deref())
-                .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
-            headway_date = read.date;
-            read.lines
-        }
-        None => lines_from_osm(&data, &bus_refs, Mode::Bus),
+    // Each line from the first feed that has it; the first feed's day for
+    // every feed's headways, so that they are counted on the same day.
+    let mut headway_date = args.date.clone();
+    let mut found: Vec<BusLine> = Vec::new();
+    let has = |found: &[BusLine], mode: Mode, reference: &str| {
+        found
+            .iter()
+            .any(|l| l.mode == mode && l.reference == reference)
     };
-    transit.extend(lines_from_osm(&data, &train_refs, Mode::Train));
+    for feed in &args.gtfs {
+        let missing: Vec<(String, Mode)> = bus_refs
+            .iter()
+            .map(|r| (r.clone(), Mode::Bus))
+            .chain(train_refs.iter().map(|r| (r.clone(), Mode::Train)))
+            .filter(|(r, mode)| !has(&found, *mode, r))
+            .collect();
+        if missing.is_empty() {
+            break;
+        }
+        let references: Vec<String> = missing.iter().map(|(r, _)| r.clone()).collect();
+        let read = lines_from_gtfs(feed, &references, headway_date.as_deref(), Mode::Bus)
+            .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+        if headway_date.is_none() {
+            headway_date = read.date;
+        }
+        for mut line in read.lines {
+            if let Some((_, mode)) = missing.iter().find(|(r, _)| *r == line.reference) {
+                line.mode = *mode;
+                found.push(line);
+            }
+        }
+    }
+    let missing = |refs: &[String], mode: Mode| -> Vec<String> {
+        refs.iter()
+            .filter(|r| !has(&found, mode, r))
+            .cloned()
+            .collect()
+    };
+    let osm_bus = lines_from_osm(&data, &missing(&bus_refs, Mode::Bus), Mode::Bus);
+    let osm_train = lines_from_osm(&data, &missing(&train_refs, Mode::Train), Mode::Train);
+    found.extend(osm_bus);
+    found.extend(osm_train);
+    // In the order asked for: the buses, then the trains.
+    let transit: Vec<BusLine> = bus_refs
+        .iter()
+        .map(|r| (r, Mode::Bus))
+        .chain(train_refs.iter().map(|r| (r, Mode::Train)))
+        .filter_map(|(r, mode)| {
+            found
+                .iter()
+                .find(|l| l.mode == mode && &l.reference == r)
+                .cloned()
+        })
+        .collect();
     for (refs, mode) in [(&bus_refs, Mode::Bus), (&train_refs, Mode::Train)] {
         for reference in refs {
             if !transit
