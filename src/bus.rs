@@ -68,6 +68,19 @@ impl Mode {
         }
     }
 
+    /// Whether a GTFS `route_type` is a line of this kind: the basic types
+    /// (3 bus, 11 trolleybus; 0 tram, 1 metro, 2 rail, 5 cable car, 7
+    /// funicular, 12 monorail) and the extended ones' ranges (700s bus,
+    /// 800s trolleybus; 100s rail, 400s urban rail, 900s tram).
+    pub fn has_route_type(self, route_type: u32) -> bool {
+        match self {
+            Mode::Bus => matches!(route_type, 3 | 11 | 700..=899),
+            Mode::Train => {
+                matches!(route_type, 0 | 1 | 2 | 5 | 7 | 12 | 100..=199 | 400..=599 | 900..=999)
+            }
+        }
+    }
+
     /// The word a line's symbols are keyed by, before its number: `bus 13`,
     /// `train S1`.
     pub fn key(self) -> &'static str {
@@ -245,6 +258,63 @@ fn unique(stops: impl IntoIterator<Item = (f64, f64)>) -> Vec<(f64, f64)> {
         .into_iter()
         .filter(|&(lon, lat)| seen.insert((lon.to_bits(), lat.to_bits())))
         .collect()
+}
+
+/// The order a timetable lists line numbers in: numbers by their value,
+/// then those starting with a letter, alphabetically — `2, 11, 13, 101, A,
+/// N1` rather than `101, 11, 13, 2, A, N1`.
+pub fn line_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let number = |s: &str| -> Option<u64> {
+        let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    match (number(a), number(b)) {
+        (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.cmp(b),
+    }
+}
+
+/// Every line number of kind `mode` among `data`'s route relations, each
+/// once, in [`line_order`].
+pub fn osm_references(data: &OsmData, mode: Mode) -> Vec<String> {
+    let mut references: Vec<String> = data
+        .relations
+        .iter()
+        .filter(|r| {
+            r.tags.is("type", "route")
+                && r.tags
+                    .get("route")
+                    .is_some_and(|v| mode.routes().contains(&v))
+        })
+        .filter_map(|r| r.tags.get("ref").map(str::to_string))
+        .collect();
+    references.sort_by(|a, b| line_order(a, b));
+    references.dedup();
+    references
+}
+
+/// Every line number of kind `mode` in the GTFS feed at `path`, each once,
+/// in [`line_order`].
+pub fn gtfs_references(path: &Path, mode: Mode) -> Result<Vec<String>, String> {
+    let routes = Feed::open(path)?.table("routes.txt")?;
+    let short_name = routes.column("routes.txt", "route_short_name")?;
+    let route_type = routes.column("routes.txt", "route_type")?;
+    let mut references: Vec<String> = routes
+        .rows
+        .iter()
+        .filter(|row| {
+            row.get(route_type)
+                .and_then(|t| t.trim().parse::<u32>().ok())
+                .is_some_and(|t| mode.has_route_type(t))
+        })
+        .filter_map(|row| row.get(short_name).cloned())
+        .filter(|r| !r.is_empty())
+        .collect();
+    references.sort_by(|a, b| line_order(a, b));
+    references.dedup();
+    Ok(references)
 }
 
 /// The lines numbered `references`, of kind `mode`, from the route
@@ -975,6 +1045,23 @@ mod tests {
         assert_eq!(line.color.as_deref(), Some("#c1d72f"));
         // Two trips on that Wednesday: 360 minutes / 2.
         assert_eq!(line.headway, Some(180.0));
+    }
+
+    #[test]
+    fn line_numbers_sort_the_way_a_timetable_lists_them() {
+        let mut refs = vec!["N1", "101", "A", "13", "2", "11A", "11", "T2"];
+        refs.sort_by(|a, b| line_order(a, b));
+        assert_eq!(refs, vec!["2", "11", "11A", "13", "101", "A", "N1", "T2"]);
+    }
+
+    #[test]
+    fn route_types_tell_buses_from_trains() {
+        assert!(Mode::Bus.has_route_type(3));
+        assert!(Mode::Bus.has_route_type(704));
+        assert!(!Mode::Bus.has_route_type(12));
+        assert!(Mode::Train.has_route_type(12));
+        assert!(Mode::Train.has_route_type(2));
+        assert!(!Mode::Train.has_route_type(3));
     }
 
     #[test]

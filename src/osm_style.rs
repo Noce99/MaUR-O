@@ -95,7 +95,12 @@ pub fn adjust(hex: &str, lightness: f64, saturation: f64) -> String {
     };
     let l = (l + lightness).clamp(0.0, 1.0);
     let s = (s + saturation).clamp(0.0, 1.0);
+    hsl(h, s, l)
+}
 
+/// `#rrggbb` of a hue in degrees, a saturation and a lightness in `[0, 1]`.
+fn hsl(h: f64, s: f64, l: f64) -> String {
+    let h = h.rem_euclid(360.0);
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
     let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
     let m = l - c / 2.0;
@@ -583,6 +588,23 @@ pub const BUS_COLORS: [&str; 10] = [
     "#e6194b", "#4363d8", "#3cb44b", "#f58231", "#911eb4", "#00a0b0", "#f032e6", "#9a6324",
     "#000075", "#808000",
 ];
+
+/// The colour of the `index`th line on a map: [`BUS_COLORS`] for the first
+/// ten, and then hues a golden angle apart — each as far as it can be from
+/// all the ones before it — so that a map of every bus in the city does not
+/// give two neighbouring lines the same colour every ten lines.
+pub fn line_color(index: usize) -> String {
+    match BUS_COLORS.get(index) {
+        Some(color) => color.to_string(),
+        None => {
+            let n = (index - BUS_COLORS.len()) as f64;
+            // Alternating a little in lightness tells apart two hues the
+            // golden angle has brought round close to each other.
+            let lightness = if index.is_multiple_of(2) { 0.40 } else { 0.50 };
+            hsl(n * 137.507_764, 0.75, lightness)
+        }
+    }
+}
 
 /// A bus or train line, as far as its look goes: what kind of line, its
 /// number, and its colour as `#rrggbb`.
@@ -1343,6 +1365,16 @@ mod tests {
         assert_eq!(adjust("#444444", 0.30, 0.0), "#919191");
         // A grey has no saturation to take away.
         assert_eq!(adjust("#808080", 0.0, -0.5), "#808080");
+    }
+
+    #[test]
+    fn line_colours_after_the_first_ten_do_not_repeat() {
+        let colors: Vec<String> = (0..200).map(line_color).collect();
+        assert_eq!(colors[0], BUS_COLORS[0]);
+        assert_eq!(colors[9], BUS_COLORS[9]);
+        let unique: std::collections::HashSet<&String> = colors.iter().collect();
+        assert_eq!(unique.len(), 200);
+        assert_eq!(hsl(0.0, 1.0, 0.5), "#ff0000");
     }
 
     #[test]

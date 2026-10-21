@@ -51,10 +51,12 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use maur_o::bus::{lines_from_gtfs, lines_from_osm, BusLine, Mode, HEADWAY_HOURS};
+use maur_o::bus::{
+    gtfs_references, lines_from_gtfs, lines_from_osm, osm_references, BusLine, Mode, HEADWAY_HOURS,
+};
 use maur_o::osm::{read_osm, BBox};
 use maur_o::osm_convert::convert;
-use maur_o::osm_style::{carto_style_with_bus_lines, BusLook, BUS_COLORS};
+use maur_o::osm_style::{carto_style_with_bus_lines, line_color, BusLook};
 
 #[derive(Parser)]
 #[command(
@@ -74,7 +76,9 @@ struct Args {
     #[arg(long, value_parser = BBox::parse, allow_hyphen_values = true)]
     bbox: Option<BBox>,
 
-    /// Draw these bus lines, by number: e.g. 13,19,27.
+    /// Draw these bus lines, by number: e.g. 13,19,27. `all` draws every bus
+    /// line of the GTFS feeds (or, with none, of the OSM file) which reaches
+    /// the map.
     #[arg(long, value_delimiter = ',')]
     bus: Vec<String>,
 
@@ -90,7 +94,7 @@ struct Args {
     date: Option<String>,
 
     /// Draw these train lines (and light rail, tram, monorail), by number:
-    /// e.g. S1,S2A,MEX.
+    /// e.g. S1,S2A,MEX. `all` draws every one which reaches the map.
     #[arg(long, value_delimiter = ',')]
     train: Vec<String>,
 
@@ -123,6 +127,33 @@ fn run() -> Result<(), (ExitCode, String)> {
             .collect()
     };
     let (bus_refs, train_refs) = (numbers(&args.bus), numbers(&args.train));
+    // `all`: every line of that kind the feeds have, or where none is given,
+    // every one the extract's route relations have.
+    let every = |refs: &[String], mode: Mode| -> Result<(Vec<String>, bool), (ExitCode, String)> {
+        if !(refs.len() == 1 && refs[0].eq_ignore_ascii_case("all")) {
+            return Ok((refs.to_vec(), false));
+        }
+        let mut all: Vec<String> = Vec::new();
+        for feed in &args.gtfs {
+            let found = gtfs_references(feed, mode)
+                .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+            all.extend(found);
+        }
+        if args.gtfs.is_empty() {
+            all = osm_references(&data, mode);
+        }
+        all.sort_by(|a, b| maur_o::bus::line_order(a, b));
+        all.dedup();
+        Ok((all, true))
+    };
+    let (bus_refs, all_buses) = every(&bus_refs, Mode::Bus)?;
+    let (train_refs, all_trains) = every(&train_refs, Mode::Train)?;
+    // The area is settled before the lines are, so that `all` keeps only
+    // the lines which reach it.
+    let bbox = args.bbox.or_else(|| data.extent()).ok_or((
+        ExitCode::from(2),
+        "Error: the extract holds nothing to convert".to_string(),
+    ))?;
     // Each line from the first feed that has it; the first feed's day for
     // every feed's headways, so that they are counted on the same day.
     let mut headway_date = args.date.clone();
@@ -177,7 +208,28 @@ fn run() -> Result<(), (ExitCode, String)> {
                 .cloned()
         })
         .collect();
-    for (refs, mode) in [(&bus_refs, Mode::Bus), (&train_refs, Mode::Train)] {
+    // Of `all`, only the lines with some of their route or a stop on the map.
+    let on_map = |line: &BusLine| {
+        line.route.iter().flatten().any(|&p| bbox.contains(p))
+            || line.stops.iter().any(|&p| bbox.contains(p))
+    };
+    let transit: Vec<BusLine> = transit
+        .into_iter()
+        .filter(|line| {
+            let all = match line.mode {
+                Mode::Bus => all_buses,
+                Mode::Train => all_trains,
+            };
+            !all || on_map(line)
+        })
+        .collect();
+    for (refs, mode, all) in [
+        (&bus_refs, Mode::Bus, all_buses),
+        (&train_refs, Mode::Train, all_trains),
+    ] {
+        if all {
+            continue;
+        }
         for reference in refs {
             if !transit
                 .iter()
@@ -192,7 +244,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     }
     // A train line keeps its own colour where it has one other than white;
     // every other line takes the next colour of the palette.
-    let mut palette = BUS_COLORS.iter().cycle();
+    let mut next_color = 0;
     let looks: Vec<BusLook> = transit
         .iter()
         .map(|line| BusLook {
@@ -200,13 +252,16 @@ fn run() -> Result<(), (ExitCode, String)> {
             reference: line.reference.clone(),
             color: match (&line.color, line.mode) {
                 (Some(color), Mode::Train) if color != "#ffffff" => color.clone(),
-                _ => palette.next().expect("the palette cycles").to_string(),
+                _ => {
+                    next_color += 1;
+                    line_color(next_color - 1)
+                }
             },
         })
         .collect();
 
     let style = carto_style_with_bus_lines(&looks);
-    let mut conversion = convert(&data, &style, args.bbox)
+    let mut conversion = convert(&data, &style, Some(bbox))
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     conversion.add_bus_lines(&style, &transit);
     if args.legend {

@@ -6,6 +6,7 @@
 //! the exit codes and the resolution hint it prints — is the contract.
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 
 use maur_o::map::{ObjectKind, Symbol};
 use maur_o::xml_reader::read_xml_map;
@@ -307,4 +308,33 @@ fn a_legend_explains_the_symbols_the_map_uses_below_it() {
         .next()
         .unwrap();
     assert!(legend_top > land_bottom);
+}
+
+#[test]
+fn all_takes_every_line_of_the_feed_or_else_of_the_extract() {
+    let dir = tempfile::tempdir().unwrap();
+    // From the GTFS feed: its one route.
+    osm_to_omap()
+        .args([
+            BBOX,
+            "--bus",
+            "all",
+            "--gtfs",
+            "tests/data/gtfs_sample",
+            SAMPLE,
+        ])
+        .arg(dir.path().join("gtfs.omap"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("bus 13 (#e6194b)"))
+        .stderr(predicates::str::contains("Warning").not());
+    // With no feed, from the route relations: the bus, and the monorail as
+    // the one train.
+    osm_to_omap()
+        .args([BBOX, "--bus", "all", "--train", "all", SAMPLE])
+        .arg(dir.path().join("osm.omap"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("bus 13 (#e6194b)"))
+        .stdout(predicates::str::contains("train MEX (#000000)"));
 }

@@ -317,9 +317,9 @@ const HEADWAY_HALF: f64 = 6.0;
 /// How far a headway may be moved along its line to stay clear of others.
 const HEADWAY_SHIFT: f64 = 40.0;
 /// How close the centre of anything else may come to a written headway,
-/// in mm: the length of `ogni 12 min`, which two such texts running along
+/// in mm: the length of `ogni 120 min`, which two such texts running along
 /// the same street need between their centres, and a little more.
-const HEADWAY_CLEARANCE: f64 = 15.0;
+const HEADWAY_CLEARANCE: f64 = 18.0;
 
 /// The point `distance` mm along a polyline on the paper, clamped to its
 /// ends.

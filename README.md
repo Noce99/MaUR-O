@@ -236,7 +236,7 @@ osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...] [--gtfs f
 | `<osm-file>` | OpenStreetMap XML, as the openstreetmap.org export, Overpass or `osmium` write it. |
 | `[omap-file]` | Output map. Defaults to the input name with `.omap`. |
 | `--bbox` | Only convert this area, in degrees. Without it the whole extract is converted. |
-| `--bus` | Draw these bus lines, by number (e.g. `13,19,27`): each in its own colour, its stops as circles, its number at both ends of the route. |
+| `--bus` | Draw these bus lines, by number (e.g. `13,19,27`): each in its own colour, its stops as circles, its number at both ends of the route. `all` draws every bus line of the GTFS feeds (or, with none, of the OSM file) that reaches the map. |
 | `--gtfs` | Take lines from this GTFS feed (`.zip` or unpacked folder) before the OSM file's own route relations. Repeatable: each line comes from the first feed that has it, e.g. TPER's bus network and its Marconi Express feed together. A line's own GTFS colour is kept for train lines (white, which TPER gives every bus, counts as none). |
 | `--date` | The day (`YYYYMMDD`) the GTFS headways are counted on. Defaults to the Wednesday the first feed runs the most services on — from `calendar.txt`, or from `calendar_dates.txt` for a feed that lists its days one by one. |
 | `--train` | Draw these train lines (also light rail, tram and monorail — e.g. `S1,S2A,MEX` for Bologna's suburban lines and the Marconi Express), from the OSM file's route relations: wider than a bus line, with larger stations, in the line's own colour where OSM gives one. |
@@ -257,7 +257,7 @@ TPER publishes its network as GTFS on its
 IT: a map made from them has to credit TPER):
 
 ```bash
-osm_to_omap --bus 13,19,27 --train S1,S2A,MEX \
+osm_to_omap --bus all --train S1,S2A,MEX \
   --gtfs gommagtfsbo_20261006.zip --gtfs gtfsmex_20260421.zip \
   --legend bologna.osm bologna.omap
 ```
