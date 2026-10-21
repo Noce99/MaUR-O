@@ -228,7 +228,7 @@ one carto pixel being 0.28 mm on the paper. Labels and POI icons are not
 drawn.
 
 ```
-osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...] [--gtfs feed.zip [--date YYYYMMDD]] [--train S1,S2A,MEX,...] [--legend] <osm-file> [omap-file]
+osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...] [--gtfs feed.zip [--date YYYYMMDD]] [--max-headway N] [--train S1,S2A,MEX,...] [--legend] <osm-file> [omap-file]
 ```
 
 | Option | Meaning |
@@ -238,12 +238,15 @@ osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...] [--gtfs f
 | `--bbox` | Only convert this area, in degrees. Without it the whole extract is converted. |
 | `--bus` | Draw these bus lines, by number (e.g. `13,19,27`): each in its own colour, its stops as circles, its number at both ends of the route. `all` draws every bus line of the GTFS feeds (or, with none, of the OSM file) that reaches the map. |
 | `--gtfs` | Take lines from this GTFS feed (`.zip` or unpacked folder) before the OSM file's own route relations. Repeatable: each line comes from the first feed that has it, e.g. TPER's bus network and its Marconi Express feed together. A line's own GTFS colour is kept for train lines (white, which TPER gives every bus, counts as none). |
+| `--max-headway` | Leave out the bus lines that run less often than once every this many minutes between 10:00 and 16:00 (the "ogni N min" on the map), and those from a GTFS feed with no trips then at all. E.g. `--bus all --max-headway 15` keeps the frequent urban network. |
 | `--date` | The day (`YYYYMMDD`) the GTFS headways are counted on. Defaults to the Wednesday the first feed runs the most services on — from `calendar.txt`, or from `calendar_dates.txt` for a feed that lists its days one by one. |
 | `--train` | Draw these train lines (also light rail, tram and monorail — e.g. `S1,S2A,MEX` for Bologna's suburban lines and the Marconi Express), from the OSM file's route relations: wider than a bus line, with larger stations, in the line's own colour where OSM gives one. |
 | `--legend` | Add a legend under the map (in Italian): a sample of every symbol the map actually uses with what it means, bus and train lines first with their names. |
 
 Numbers of lines ending at the same terminus are stacked rather than drawn
-over one another. Along each bus line, every 120 mm or so, is written how
+over one another. A line the edge of the map cuts gets its number there
+too, just inside the edge on the line itself, moved further in where
+another number is already in the way. Along each bus line, every 120 mm or so, is written how
 often it runs — `ogni 8 min` — on average between 10:00 and 16:00: from a
 GTFS feed, the trips of the direction drawn that leave their first stop in
 those hours on one working day; from OpenStreetMap, a route's `interval` tag

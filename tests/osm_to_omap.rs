@@ -261,9 +261,25 @@ fn a_train_line_keeps_its_own_colour_and_is_not_a_bus() {
     let names = symbol_names(&map);
     assert_eq!(names.iter().filter(|n| *n == "train MEX").count(), 1);
     assert_eq!(names.iter().filter(|n| *n == "train MEX stop").count(), 1);
-    // The footway it runs along leaves the box at both ends: a number goes
-    // only at an end the map shows.
-    assert_eq!(names.iter().filter(|n| *n == "train MEX label").count(), 0);
+    // The footway it runs along leaves the box at both ends: its termini
+    // are off the map, so its number goes where the edge cuts it, inside.
+    let labels: Vec<(f64, f64)> = map
+        .objects
+        .iter()
+        .filter(|o| matches!(&o.kind, ObjectKind::Text(t) if t.text == "MEX"))
+        .map(|o| (o.coords[0].x, o.coords[0].y))
+        .collect();
+    assert_eq!(labels.len(), 2);
+    let land = &map.objects[0].coords;
+    let (west, east) = (
+        land.iter().map(|c| c.x).fold(f64::INFINITY, f64::min),
+        land.iter().map(|c| c.x).fold(f64::NEG_INFINITY, f64::max),
+    );
+    // About 5 mm in from each edge, along the line.
+    let mut xs: Vec<f64> = labels.iter().map(|&(x, _)| x).collect();
+    xs.sort_by(f64::total_cmp);
+    assert!((xs[0] - west - 5.0).abs() < 0.5, "{xs:?}, west edge {west}");
+    assert!((east - xs[1] - 5.0).abs() < 0.5, "{xs:?}, east edge {east}");
 }
 
 #[test]
@@ -337,4 +353,44 @@ fn all_takes_every_line_of_the_feed_or_else_of_the_extract() {
         .success()
         .stdout(predicates::str::contains("bus 13 (#e6194b)"))
         .stdout(predicates::str::contains("train MEX (#000000)"));
+}
+
+#[test]
+fn a_cap_on_the_headway_leaves_out_the_buses_running_less_often() {
+    let dir = tempfile::tempdir().unwrap();
+    let gtfs = |cap: &str, name: &str| {
+        osm_to_omap()
+            .args([
+                BBOX,
+                "--bus",
+                "13",
+                "--gtfs",
+                "tests/data/gtfs_sample",
+                "--max-headway",
+                cap,
+                SAMPLE,
+            ])
+            .arg(dir.path().join(name))
+            .assert()
+            .success()
+    };
+    // Line 13 runs every 180 minutes in the sample feed.
+    gtfs("60", "capped.omap")
+        .stdout(predicates::str::contains(
+            "Left out 1 bus lines running less often than every 60 min: 13",
+        ))
+        .stdout(predicates::str::contains("bus 13 (").not());
+    gtfs("180", "kept.omap").stdout(predicates::str::contains("bus 13 ("));
+
+    // From the route relations, with no interval tag: nothing says how
+    // often it runs, so it is kept, and said so.
+    osm_to_omap()
+        .args([BBOX, "--bus", "13", "--max-headway", "10", SAMPLE])
+        .arg(dir.path().join("unknown.omap"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("bus 13 ("))
+        .stderr(predicates::str::contains(
+            "bus 13 has no known frequency, kept",
+        ));
 }

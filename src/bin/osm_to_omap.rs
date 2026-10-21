@@ -39,6 +39,9 @@
 //! the most services on, used for every feed), or taken from a relation's `interval` tag where a mapper
 //! has set one.
 //!
+//! `--max-headway N` leaves out the bus lines which run less often than once
+//! every N minutes in those hours, or not at all.
+//!
 //! `--legend` adds a legend under the map, in Italian: a sample of every
 //! symbol the map uses with what it means, the bus and train lines first.
 //!
@@ -97,6 +100,14 @@ struct Args {
     /// e.g. S1,S2A,MEX. `all` draws every one which reaches the map.
     #[arg(long, value_delimiter = ',')]
     train: Vec<String>,
+
+    /// Leave out every bus line that runs less often than once every this
+    /// many minutes between 10:00 and 16:00: the "ogni N min" written along
+    /// it. A line from a GTFS feed with no trips in those hours is left out
+    /// too; one whose frequency nothing says (OSM, with no `interval` tag) is
+    /// kept. Train lines are not affected.
+    #[arg(long, value_name = "MINUTES")]
+    max_headway: Option<u32>,
 
     /// Add a legend under the map, explaining every symbol it uses.
     #[arg(long)]
@@ -186,6 +197,12 @@ fn run() -> Result<(), (ExitCode, String)> {
             }
         }
     }
+    // The lines a timetable stands behind: those whose missing headway
+    // means they do not run in the middle of the day at all.
+    let timetabled: Vec<(Mode, String)> = found
+        .iter()
+        .map(|l| (l.mode, l.reference.clone()))
+        .collect();
     let missing = |refs: &[String], mode: Mode| -> Vec<String> {
         refs.iter()
             .filter(|r| !has(&found, mode, r))
@@ -242,6 +259,40 @@ fn run() -> Result<(), (ExitCode, String)> {
             }
         }
     }
+    // The cap on how seldom a bus may run.
+    let transit: Vec<BusLine> = match args.max_headway {
+        None => transit,
+        Some(cap) => {
+            let (kept, dropped): (Vec<BusLine>, Vec<BusLine>) =
+                transit.into_iter().partition(|line| {
+                    if line.mode != Mode::Bus {
+                        return true;
+                    }
+                    match line.headway {
+                        Some(minutes) => minutes.round() <= f64::from(cap),
+                        None => {
+                            let known = timetabled.contains(&(line.mode, line.reference.clone()));
+                            if !known {
+                                eprintln!(
+                                    "Warning: bus {} has no known frequency, kept",
+                                    line.reference
+                                );
+                            }
+                            !known
+                        }
+                    }
+                });
+            if !dropped.is_empty() {
+                let numbers: Vec<&str> = dropped.iter().map(|l| l.reference.as_str()).collect();
+                println!(
+                    "Left out {} bus lines running less often than every {cap} min: {}",
+                    dropped.len(),
+                    numbers.join(", ")
+                );
+            }
+            kept
+        }
+    };
     // A train line keeps its own colour where it has one other than white;
     // every other line takes the next colour of the palette.
     let mut next_color = 0;

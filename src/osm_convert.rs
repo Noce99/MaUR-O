@@ -392,6 +392,34 @@ pub fn along(points: &[(f64, f64)], blocked: &[(f64, f64, f64)]) -> Vec<(f64, f6
         .collect()
 }
 
+/// A stretch of route which the edge of the map cuts, waiting for the line's
+/// number to be written just inside the edge.
+struct Exit {
+    /// The stretch inside the map, on the paper.
+    route: Vec<(f64, f64)>,
+    /// Whether it is its start, rather than its end, which the edge cuts.
+    at_start: bool,
+    /// The symbol of the line's number.
+    label: i32,
+    /// The line's number.
+    reference: String,
+}
+
+/// How far in from the edge of the map, in mm along the line, the number of
+/// a route the edge cuts is written; and the step it moves further in by,
+/// up to eight times, to stay clear of the others.
+const EXIT_STEP: f64 = 5.0;
+
+/// Whether a point lies on the edge of `bbox`, as a route cut by
+/// [`clip_polyline`] starts or ends there.
+fn on_edge((lon, lat): (f64, f64), bbox: &BBox) -> bool {
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    close(lon, bbox.min_lon)
+        || close(lon, bbox.max_lon)
+        || close(lat, bbox.min_lat)
+        || close(lat, bbox.max_lat)
+}
+
 /// How far apart, in mm on the paper, two line numbers have to be not to
 /// overlap: about a badge's height, and the width of a short one.
 const LABEL_HEIGHT: f64 = 4.4;
@@ -424,7 +452,8 @@ impl Conversion {
 
     /// Adds bus and train lines over the map: each line's route, its stops
     /// as circles, and its number at either end of the route (once, for a
-    /// circular line), with the symbols `style` keys by the line's kind and
+    /// circular line) and wherever the edge of the map cuts the route, with
+    /// the symbols `style` keys by the line's kind and
     /// number (see
     /// [`carto_style_with_bus_lines`](crate::osm_style::carto_style_with_bus_lines)).
     /// Everything is clipped to the map's area, like the rest of it; a
@@ -436,6 +465,10 @@ impl Conversion {
         // text, its symbol and the line's own stops, placed once every
         // route, stop and number is.
         let mut headways: Vec<PendingHeadway> = Vec::new();
+        // Where a route leaves the map: the stretch inside, which end of it
+        // is on the edge, and the number to write there — once the numbers
+        // at the real termini are placed.
+        let mut exits: Vec<Exit> = Vec::new();
         for line in lines {
             let key = format!("{} {}", line.mode.key(), line.reference);
             let (route, stop, label) = (
@@ -463,6 +496,17 @@ impl Conversion {
                             symbol: headway_symbol,
                             stops,
                         });
+                    }
+                    for (at_start, end) in [(true, clipped[0]), (false, clipped[clipped.len() - 1])]
+                    {
+                        if on_edge(end, &bbox) {
+                            exits.push(Exit {
+                                route: paper.clone(),
+                                at_start,
+                                label,
+                                reference: line.reference.clone(),
+                            });
+                        }
                     }
                     let coords = paper.iter().map(|&(x, y)| Coord::new(x, y, 0)).collect();
                     self.objects.push(path_object(route, coords));
@@ -510,6 +554,45 @@ impl Conversion {
                 self.objects.push(object);
                 self.counts.2 += 1;
             }
+        }
+
+        // A route cut by the edge of the map gets its number just inside the
+        // edge, on the line itself: as close to the edge as is clear of the
+        // numbers already written, moving inwards along it.
+        for Exit {
+            route: paper,
+            at_start,
+            label,
+            reference,
+        } in exits
+        {
+            let length: f64 = paper
+                .windows(2)
+                .map(|p| (p[1].0 - p[0].0).hypot(p[1].1 - p[0].1))
+                .sum();
+            let spot = (1..=8)
+                .map(|i| f64::from(i) * EXIT_STEP)
+                .take_while(|&d| d < length)
+                .map(|d| point_along(&paper, if at_start { d } else { length - d }))
+                .find(|&(x, y)| {
+                    placed.iter().all(|&(px, py)| {
+                        (px - x).abs() >= LABEL_WIDTH || (py - y).abs() >= LABEL_HEIGHT
+                    })
+                });
+            let Some((x, y)) = spot else {
+                continue;
+            };
+            placed.push((x, y));
+            let mut object = Object::new(ObjectKind::Text(TextObject {
+                text: reference,
+                h_align: h_align::HCENTER,
+                v_align: v_align::VCENTER,
+                box_size: None,
+            }));
+            object.symbol_id = label;
+            object.coords = vec![Coord::new(x, y, 0)];
+            self.objects.push(object);
+            self.counts.2 += 1;
         }
 
         // The headways last, each kept off its line's stops, off every
@@ -620,7 +703,7 @@ impl Conversion {
             entries.push((
                 label,
                 Sample::Text,
-                "Capolinea, con il numero della linea".to_string(),
+                "Numero: capolinea o bordo mappa".to_string(),
                 reference,
             ));
         }
@@ -1008,6 +1091,16 @@ mod tests {
         assert!(along(&[(0.0, 0.0), (300.0, 0.0)], &blocked).is_empty());
         // Shorter than the text: none.
         assert!(along(&[(0.0, 0.0), (10.0, 0.0)], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_point_the_clip_put_on_the_edge_is_on_the_edge() {
+        let bbox = BBox::parse("0,0,10,10").unwrap();
+        let pieces = clip_polyline(&[(-5.0, 5.0), (5.0, 5.0), (5.0, 15.0)], &bbox);
+        let piece = &pieces[0];
+        assert!(on_edge(piece[0], &bbox));
+        assert!(on_edge(piece[piece.len() - 1], &bbox));
+        assert!(!on_edge((5.0, 5.0), &bbox));
     }
 
     #[test]
