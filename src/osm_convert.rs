@@ -290,6 +290,11 @@ pub fn clip_rings(rings: Vec<Vec<(f64, f64)>>, bbox: &BBox) -> Vec<Vec<(f64, f64
         .collect()
 }
 
+/// How far apart, in mm on the paper, two line numbers have to be not to
+/// overlap: about a badge's height, and the width of a short one.
+const LABEL_HEIGHT: f64 = 4.4;
+const LABEL_WIDTH: f64 = 8.0;
+
 /// What [`convert`] makes of an extract.
 pub struct Conversion {
     /// Where the map sits, and how degrees become millimetres.
@@ -315,16 +320,18 @@ impl Conversion {
         1000.0 / (f64::from(self.scale()) * PIXEL_MM)
     }
 
-    /// Adds bus lines over the map: each line's route, its stops as circles,
-    /// and its number at either end of the route (once, for a circular line),
-    /// with the symbols `style` keys by the line number (see
+    /// Adds bus and train lines over the map: each line's route, its stops
+    /// as circles, and its number at either end of the route (once, for a
+    /// circular line), with the symbols `style` keys by the line's kind and
+    /// number (see
     /// [`carto_style_with_bus_lines`](crate::osm_style::carto_style_with_bus_lines)).
     /// Everything is clipped to the map's area, like the rest of it; a
     /// number goes only at an end which lies inside.
     pub fn add_bus_lines(&mut self, style: &Style, lines: &[BusLine]) {
         let bbox = self.bbox;
+        let mut placed: Vec<(f64, f64)> = Vec::new();
         for line in lines {
-            let key = format!("bus {}", line.reference);
+            let key = format!("{} {}", line.mode.key(), line.reference);
             let (route, stop, label) = (
                 style.id(&key),
                 style.id(&format!("{key} stop")),
@@ -363,7 +370,16 @@ impl Conversion {
                 vec![start, end]
             };
             for position in ends.into_iter().filter(|&p| bbox.contains(p)) {
-                let (x, y) = self.projection.to_paper(position);
+                let (x, mut y) = self.projection.to_paper(position);
+                // Lines ending at the same terminus — every train at the
+                // central station — stack their numbers downwards rather
+                // than print them over one another.
+                while placed.iter().any(|&(px, py): &(f64, f64)| {
+                    (px - x).abs() < LABEL_WIDTH && (py - y).abs() < LABEL_HEIGHT
+                }) {
+                    y += LABEL_HEIGHT;
+                }
+                placed.push((x, y));
                 let mut object = Object::new(ObjectKind::Text(TextObject {
                     text: line.reference.clone(),
                     h_align: h_align::HCENTER,

@@ -2,8 +2,9 @@
 <osm version="0.6" generator="hand-written fixture">
   <!-- A few features around Piazza Maggiore, Bologna: a street, a building
        with a courtyard as a multipolygon, a footway crossing the edge of the
-       box the tests convert, a tree, a node far outside it, and bus line 13
-       along the street with one stop. -->
+       box the tests convert, a tree, a node far outside it, bus line 13
+       along the street with one stop, and a monorail line whose colour only
+       its route master gives. -->
   <node id="1" lat="44.4930" lon="11.3420"/>
   <node id="2" lat="44.4930" lon="11.3440"/>
   <node id="3" lat="44.4934" lon="11.3422"/>
@@ -52,5 +53,20 @@
     <tag k="route" v="bus"/>
     <tag k="ref" v="13"/>
     <tag k="name" v="13 : West -> East"/>
+  </relation>
+  <relation id="202">
+    <member type="node" ref="15" role="stop"/>
+    <member type="way" ref="103" role=""/>
+    <tag k="type" v="route"/>
+    <tag k="route" v="monorail"/>
+    <tag k="ref" v="MEX"/>
+    <tag k="name" v="Marconi Express"/>
+  </relation>
+  <relation id="203">
+    <member type="relation" ref="202" role=""/>
+    <tag k="type" v="route_master"/>
+    <tag k="route_master" v="monorail"/>
+    <tag k="ref" v="MEX"/>
+    <tag k="colour" v="#000000"/>
   </relation>
 </osm>

@@ -1,5 +1,12 @@
-//! Bus lines: where a line runs and where it stops, read either from the
-//! route relations of OpenStreetMap data or from a GTFS feed.
+//! Bus and train lines: where a line runs and where it stops, read either
+//! from the route relations of OpenStreetMap data or, for buses, from a GTFS
+//! feed.
+//!
+//! A train line is read like a bus line, from `route=train` relations — and
+//! `light_rail`, `subway`, `tram` and `monorail` ones, which is what makes
+//! Bologna's Marconi Express (`ref=MEX`) a train line here. Train lines carry
+//! an official colour more often than bus lines do, and keep it
+//! ([`BusLine::color`]).
 //!
 //! Both sources describe a line as several variants — the two directions,
 //! and the short runs and branches a timetable adds — and a map showing a
@@ -33,9 +40,75 @@ use std::path::Path;
 
 use crate::osm::{MemberKind, OsmData, Relation};
 
-/// One bus line, as a map draws it.
+/// What kind of line: which route relations it is read from, and how it is
+/// drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// A bus or trolleybus line.
+    Bus,
+    /// A train, light rail, metro, tram or monorail line.
+    Train,
+}
+
+impl Mode {
+    /// The `route` values of the relations a line of this kind is read from.
+    pub fn routes(self) -> &'static [&'static str] {
+        match self {
+            Mode::Bus => &["bus", "trolleybus"],
+            Mode::Train => &["train", "light_rail", "subway", "tram", "monorail"],
+        }
+    }
+
+    /// The word a line's symbols are keyed by, before its number: `bus 13`,
+    /// `train S1`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Mode::Bus => "bus",
+            Mode::Train => "train",
+        }
+    }
+}
+
+/// A colour as OpenStreetMap's `colour` tag gives one — `#rgb`, `#rrggbb`
+/// or one of the plain names mappers use — as `#rrggbb`.
+pub fn parse_colour(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    if let Some(hex) = value.strip_prefix('#') {
+        if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        return match hex.len() {
+            6 => Some(format!("#{hex}")),
+            3 => Some(hex.chars().fold(String::from("#"), |mut s, c| {
+                s.push(c);
+                s.push(c);
+                s
+            })),
+            _ => None,
+        };
+    }
+    let hex = match value.as_str() {
+        "black" => "#000000",
+        "white" => "#ffffff",
+        "red" => "#ff0000",
+        "green" => "#008000",
+        "blue" => "#0000ff",
+        "yellow" => "#ffff00",
+        "orange" => "#ffa500",
+        "purple" => "#800080",
+        "brown" => "#a52a2a",
+        "gray" | "grey" => "#808080",
+        "darkblue" => "#00008b",
+        _ => return None,
+    };
+    Some(hex.to_string())
+}
+
+/// One bus or train line, as a map draws it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BusLine {
+    /// Whether it is a bus or a train line.
+    pub mode: Mode,
     /// The line number, e.g. `"13"` or `"T2"`.
     pub reference: String,
     /// What the source calls the line, e.g. `"13 : Pavese -> Piazza
@@ -46,6 +119,8 @@ pub struct BusLine {
     pub route: Vec<Vec<(f64, f64)>>,
     /// Every stop, as `(lon, lat)`, each once.
     pub stops: Vec<(f64, f64)>,
+    /// The line's own colour, `#rrggbb`, where the source gives one.
+    pub color: Option<String>,
 }
 
 impl BusLine {
@@ -138,9 +213,15 @@ fn unique(stops: impl IntoIterator<Item = (f64, f64)>) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// The lines numbered `references`, from the route relations of `data`, in
-/// the order asked for. A number with no relation is left out.
-pub fn lines_from_osm(data: &OsmData, references: &[String]) -> Vec<BusLine> {
+/// The lines numbered `references`, of kind `mode`, from the route
+/// relations of `data`, in the order asked for. A number with no relation is
+/// left out.
+///
+/// The way back is the variant running between the same two places, `from`
+/// and `to` swapped; where the relations do not say, the largest of the
+/// other variants. The colour is the main variant's `colour`, or its
+/// route master's.
+pub fn lines_from_osm(data: &OsmData, references: &[String], mode: Mode) -> Vec<BusLine> {
     references
         .iter()
         .filter_map(|reference| {
@@ -149,26 +230,49 @@ pub fn lines_from_osm(data: &OsmData, references: &[String]) -> Vec<BusLine> {
                 .iter()
                 .filter(|r| {
                     r.tags.is("type", "route")
-                        && matches!(r.tags.get("route"), Some("bus" | "trolleybus"))
+                        && r.tags
+                            .get("route")
+                            .is_some_and(|v| mode.routes().contains(&v))
                         && r.tags.get("ref") == Some(reference.as_str())
                 })
                 .collect();
             let main = *variants.iter().max_by_key(|r| r.members.len())?;
-            let back = variants.iter().find(|r| {
-                r.id != main.id
-                    && r.tags.get("from").is_some()
-                    && r.tags.get("from") == main.tags.get("to")
-                    && r.tags.get("to") == main.tags.get("from")
-            });
+            let others = variants.iter().filter(|r| r.id != main.id);
+            let back = others
+                .clone()
+                .find(|r| {
+                    r.tags.get("from").is_some()
+                        && r.tags.get("from") == main.tags.get("to")
+                        && r.tags.get("to") == main.tags.get("from")
+                })
+                .or_else(|| {
+                    let directed = main.tags.get("from").is_some() && main.tags.get("to").is_some();
+                    (!directed)
+                        .then(|| others.max_by_key(|r| r.members.len()))
+                        .flatten()
+                });
             let mut stops = relation_stops(data, main);
             if let Some(back) = back {
                 stops.extend(relation_stops(data, back));
             }
+            let master = data.relations.iter().find(|r| {
+                r.tags.is("type", "route_master")
+                    && r.members
+                        .iter()
+                        .any(|m| m.kind == MemberKind::Relation && m.id == main.id)
+            });
+            let color = main
+                .tags
+                .get("colour")
+                .or_else(|| master.and_then(|m| m.tags.get("colour")))
+                .and_then(parse_colour);
             Some(BusLine {
+                mode,
                 reference: reference.clone(),
                 name: main.tags.get("name").unwrap_or(reference).to_string(),
                 route: relation_route(data, main),
                 stops: unique(stops),
+                color,
             })
         })
         .collect()
@@ -425,6 +529,9 @@ pub fn lines_from_gtfs(path: &Path, references: &[String]) -> Result<Vec<BusLine
                 );
             }
             Some(BusLine {
+                mode: Mode::Bus,
+                // TPER's feed gives every line the same white.
+                color: None,
                 reference: reference.clone(),
                 name: name_of.get(reference.as_str()).unwrap_or(&"").to_string(),
                 route: vec![route.into_iter().map(|(_, p)| p).collect()],
@@ -478,7 +585,7 @@ mod tests {
     #[test]
     fn a_relation_is_one_route_with_both_directions_stops() {
         let data = read_osm_str(ROUTES).unwrap();
-        let lines = lines_from_osm(&data, &["13".to_string(), "99".to_string()]);
+        let lines = lines_from_osm(&data, &["13".to_string(), "99".to_string()], Mode::Bus);
         assert_eq!(lines.len(), 1, "line 99 has no relation");
         let line = &lines[0];
         assert_eq!(line.name, "13 : A -> B");
@@ -500,6 +607,32 @@ mod tests {
             line.stops,
             vec![(11.0, 44.0), (11.1, 44.05), (11.11, 44.06)]
         );
+    }
+
+    #[test]
+    fn a_train_line_is_not_a_bus_line_and_keeps_its_colour() {
+        let text = ROUTES.replace(
+            r#"<tag k="route" v="bus"/>"#,
+            r#"<tag k="route" v="train"/>"#,
+        );
+        let text = text.replace(
+            r#"<tag k="from" v="A"/>"#,
+            r##"<tag k="from" v="A"/><tag k="colour" v="#ED1D24"/>"##,
+        );
+        let data = read_osm_str(&text).unwrap();
+        assert!(lines_from_osm(&data, &["13".to_string()], Mode::Bus).is_empty());
+        let lines = lines_from_osm(&data, &["13".to_string()], Mode::Train);
+        assert_eq!(lines[0].mode, Mode::Train);
+        assert_eq!(lines[0].color.as_deref(), Some("#ed1d24"));
+    }
+
+    #[test]
+    fn colours_come_as_osm_writes_them() {
+        assert_eq!(parse_colour("#BED747").as_deref(), Some("#bed747"));
+        assert_eq!(parse_colour("#a0f").as_deref(), Some("#aa00ff"));
+        assert_eq!(parse_colour("red").as_deref(), Some("#ff0000"));
+        assert_eq!(parse_colour("#12345"), None);
+        assert_eq!(parse_colour("fuchsia-ish"), None);
     }
 
     #[test]

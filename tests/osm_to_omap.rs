@@ -203,3 +203,27 @@ fn a_missing_gtfs_feed_exits_with_2() {
         .code(2)
         .stderr(predicates::str::contains("cannot open"));
 }
+
+#[test]
+fn a_train_line_keeps_its_own_colour_and_is_not_a_bus() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("train.omap");
+    osm_to_omap()
+        .args([BBOX, "--train", "MEX", "--bus", "MEX", SAMPLE])
+        .arg(&out)
+        .assert()
+        .success()
+        // The colour is the route master's.
+        .stdout(predicates::str::contains(
+            "train MEX (#000000): 1 stops, Marconi Express",
+        ))
+        .stderr(predicates::str::contains("no bus line MEX found"));
+
+    let (map, _) = read_xml_map(&out).unwrap();
+    let names = symbol_names(&map);
+    assert_eq!(names.iter().filter(|n| *n == "train MEX").count(), 1);
+    assert_eq!(names.iter().filter(|n| *n == "train MEX stop").count(), 1);
+    // The footway it runs along leaves the box at both ends: a number goes
+    // only at an end the map shows.
+    assert_eq!(names.iter().filter(|n| *n == "train MEX label").count(), 0);
+}

@@ -37,6 +37,7 @@
 
 use std::collections::HashMap;
 
+use crate::bus::Mode;
 use crate::map::{
     cap_style, fill_pattern_type, join_style, AreaSymbol, Color, CombinedSymbol, FillPattern,
     LineSymbol, PointSymbol, Symbol, TextSymbol,
@@ -133,6 +134,7 @@ fn palette() -> Vec<(&'static str, String, f64)> {
         ("rail service", c("#aaaaaa"), 1.0),
         ("light rail", c("#666666"), 1.0),
         ("tram", c("#6e6e6e"), 1.0),
+        ("monorail", c("#777777"), 1.0),
         ("motorway fill", c("#e892a2"), 1.0),
         ("trunk fill", c("#f9b29c"), 1.0),
         ("primary fill", c("#fcd6a4"), 1.0),
@@ -567,33 +569,51 @@ pub const BUS_COLORS: [&str; 10] = [
     "#000075", "#808000",
 ];
 
-/// A bus line, as far as its look goes: its number, and its colour as
-/// `#rrggbb`.
+/// A bus or train line, as far as its look goes: what kind of line, its
+/// number, and its colour as `#rrggbb`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BusLook {
+    /// A bus or a train line.
+    pub mode: Mode,
     /// The line number, e.g. `"13"` or `"T2"`.
     pub reference: String,
     /// The line's colour, `#rrggbb`.
     pub color: String,
 }
 
-/// Carto's look at zoom 16, with bus lines drawn over everything.
+/// Carto's look at zoom 16, with bus and train lines drawn over everything.
 ///
-/// Each line gets three symbols, keyed by its number: `bus <n>` for the
-/// route (a 3 px stroke in the line's colour), `bus <n> stop` for a stop (a
-/// white dot ringed in the line's colour) and `bus <n> label` for the number
-/// at either end (white bold text on a blob of the line's colour, like the
-/// badge on the bus itself). The lines' colours go on top of the table, the
-/// first line asked for on top of the others, and the white of the stops and
-/// labels above them all.
+/// Each line gets three symbols, keyed by its kind and number: `bus <n>` or
+/// `train <n>` for the route (a stroke in the line's colour, 3 px for a bus
+/// and 4.5 px for a train), `… stop` for a stop (a white dot ringed in the
+/// line's colour, larger for a station) and `… label` for the number at
+/// either end (white bold text on a blob of the line's colour, like the
+/// badge on the vehicle itself). The lines' colours go on top of the table,
+/// in the order the lines are given; above them the white of the stops, then
+/// every badge, then the labels' white.
 pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
     let mut entries: Vec<(String, String, f64)> = Vec::new();
     if !lines.is_empty() {
         entries.push(("bus label".to_string(), "#ffffff".to_string(), 1.0));
+    }
+    // A badge in its line's colour, but above every line: a number at a
+    // terminus many lines share is not hidden under the others' routes.
+    for line in lines {
+        entries.push((
+            format!("{} {} badge", line.mode.key(), line.reference),
+            line.color.clone(),
+            1.0,
+        ));
+    }
+    if !lines.is_empty() {
         entries.push(("bus stop".to_string(), "#ffffff".to_string(), 1.0));
     }
     for line in lines {
-        entries.push((format!("bus {}", line.reference), line.color.clone(), 1.0));
+        entries.push((
+            format!("{} {}", line.mode.key(), line.reference),
+            line.color.clone(),
+            1.0,
+        ));
     }
     entries.extend(
         palette()
@@ -793,6 +813,11 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
     b.line("tram tunnel", parts);
     let parts = vec![b.stroke("tram", 0.5, false)];
     b.line("tram service", parts);
+    let parts = vec![
+        b.stroke("path halo", 4.0, true),
+        b.dashed("monorail", 3.0, true, 2.0, 3.0),
+    ];
+    b.line("monorail", parts);
 
     // Waterways (water.mss).
     // A canal is a stream 1.4 times as wide; a ditch is a stream's zoom-14
@@ -826,16 +851,20 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
     };
     b.add("tree", Symbol::Point(tree));
 
-    // Bus lines: the route, the stops and the number at either end.
+    // Bus and train lines: the route, the stops and the number at either end.
     for line in lines {
-        let key = format!("bus {}", line.reference);
-        let route = b.stroke(&key, 3.0, true);
+        let key = format!("{} {}", line.mode.key(), line.reference);
+        let (width, stop_radius, ring) = match line.mode {
+            Mode::Bus => (3.0, 2.4, 1.4),
+            Mode::Train => (4.5, 3.2, 1.8),
+        };
+        let route = b.stroke(&key, width, true);
         b.line(&key, vec![route]);
         let stop = PointSymbol {
             name: format!("{key} stop"),
-            inner_radius: px(2.4),
+            inner_radius: px(stop_radius),
             inner_color: b.color("bus stop"),
-            outer_width: px(1.4),
+            outer_width: px(ring),
             outer_color: b.color(&key),
             ..PointSymbol::new()
         };
@@ -847,7 +876,7 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
             bold: true,
             color: b.color("bus label"),
             framing: true,
-            framing_color: b.color(&key),
+            framing_color: b.color(&format!("{key} badge")),
             framing_mode: 1,
             framing_line_half_width: px(2.8),
             ..TextSymbol::default()
@@ -1007,6 +1036,7 @@ impl Style {
                 "tram" if tags.get("service").is_some() => Some("tram service"),
                 "tram" if tunnel => Some("tram tunnel"),
                 "tram" => Some("tram"),
+                "monorail" => Some("monorail"),
                 _ => None,
             };
             if let Some(key) = key {
@@ -1195,6 +1225,10 @@ mod tests {
         assert_eq!(
             area(&[("highway", "pedestrian"), ("area", "yes")]),
             vec![style.id("pedestrian area")]
+        );
+        assert_eq!(
+            line(&[("railway", "monorail"), ("bridge", "viaduct")]),
+            vec![style.id("monorail")]
         );
         // A culverted stream is not drawn at all.
         assert!(line(&[("waterway", "stream"), ("tunnel", "culvert")]).is_empty());

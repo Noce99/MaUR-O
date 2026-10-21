@@ -228,7 +228,7 @@ one carto pixel being 0.28 mm on the paper. Labels and POI icons are not
 drawn.
 
 ```
-osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...] [--gtfs feed.zip] <osm-file> [omap-file]
+osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...] [--gtfs feed.zip] [--train S1,S2A,MEX,...] <osm-file> [omap-file]
 ```
 
 | Option | Meaning |
@@ -238,8 +238,10 @@ osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...] [--gtfs f
 | `--bbox` | Only convert this area, in degrees. Without it the whole extract is converted. |
 | `--bus` | Draw these bus lines, by number (e.g. `13,19,27`): each in its own colour, its stops as circles, its number at both ends of the route. |
 | `--gtfs` | Take the bus lines from this GTFS feed (`.zip` or unpacked folder) instead of the OSM file's own route relations. |
+| `--train` | Draw these train lines (also light rail, tram and monorail — e.g. `S1,S2A,MEX` for Bologna's suburban lines and the Marconi Express), from the OSM file's route relations: wider than a bus line, with larger stations, in the line's own colour where OSM gives one. |
 
-A bus line is drawn once: the route of its main variant (the OSM relation
+Numbers of lines ending at the same terminus are stacked rather than drawn
+over one another. A line is drawn once: the route of its main variant (the OSM relation
 with the most members, or the GTFS shape most trips follow), with the stops
 of that variant and of its main variant in the other direction. For Bologna,
 TPER publishes its network as GTFS on its

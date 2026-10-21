@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...]
-//!             [--gtfs feed.zip] <osm-file> [omap-file]
+//!             [--gtfs feed.zip] [--train S1,S2A,MEX,...] <osm-file> [omap-file]
 //! ```
 //!
 //! The input is an `.osm` XML file, as openstreetmap.org's export, the
@@ -25,6 +25,11 @@
 //! `.zip`, or the folder it is unpacked into). A line neither has is
 //! reported and left out.
 //!
+//! `--train` does the same for train lines — and light rail, metro, tram and
+//! monorail ones, Bologna's Marconi Express (`MEX`) among them — always from
+//! the route relations, drawn wider, with larger stations, and in the line's
+//! own colour where the data gives one.
+//!
 //! Exit codes: 0 success, 1 usage error, 2 the OSM file or the GTFS feed
 //! could not be read, or held nothing to convert, 4 the map could not be
 //! written.
@@ -34,7 +39,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use maur_o::bus::{lines_from_gtfs, lines_from_osm};
+use maur_o::bus::{lines_from_gtfs, lines_from_osm, Mode};
 use maur_o::osm::{read_osm, BBox};
 use maur_o::osm_convert::convert;
 use maur_o::osm_style::{carto_style_with_bus_lines, BusLook, BUS_COLORS};
@@ -65,6 +70,11 @@ struct Args {
     /// rather than from the OSM file's route relations.
     #[arg(long, requires = "bus")]
     gtfs: Option<PathBuf>,
+
+    /// Draw these train lines (and light rail, tram, monorail), by number:
+    /// e.g. S1,S2A,MEX. Always from the OSM file's route relations.
+    #[arg(long, value_delimiter = ',')]
+    train: Vec<String>,
 }
 
 fn run() -> Result<(), (ExitCode, String)> {
@@ -84,35 +94,51 @@ fn run() -> Result<(), (ExitCode, String)> {
         .unwrap_or_else(|| args.osm_file.with_extension("omap"));
 
     let data = read_osm(&args.osm_file).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
-    let references: Vec<String> = args
-        .bus
-        .iter()
-        .map(|r| r.trim().to_string())
-        .filter(|r| !r.is_empty())
-        .collect();
-    let bus_lines = match &args.gtfs {
-        Some(feed) => lines_from_gtfs(feed, &references)
-            .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?,
-        None => lines_from_osm(&data, &references),
+    let numbers = |list: &[String]| -> Vec<String> {
+        list.iter()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect()
     };
-    for reference in &references {
-        if !bus_lines.iter().any(|l| &l.reference == reference) {
-            eprintln!("Warning: no bus line {reference} found, left out");
+    let (bus_refs, train_refs) = (numbers(&args.bus), numbers(&args.train));
+    let mut transit = match &args.gtfs {
+        Some(feed) => lines_from_gtfs(feed, &bus_refs)
+            .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?,
+        None => lines_from_osm(&data, &bus_refs, Mode::Bus),
+    };
+    transit.extend(lines_from_osm(&data, &train_refs, Mode::Train));
+    for (refs, mode) in [(&bus_refs, Mode::Bus), (&train_refs, Mode::Train)] {
+        for reference in refs {
+            if !transit
+                .iter()
+                .any(|l| l.mode == mode && &l.reference == reference)
+            {
+                eprintln!(
+                    "Warning: no {} line {reference} found, left out",
+                    mode.key()
+                );
+            }
         }
     }
-    let looks: Vec<BusLook> = bus_lines
+    // A train line keeps its own colour where it has one other than white;
+    // every other line takes the next colour of the palette.
+    let mut palette = BUS_COLORS.iter().cycle();
+    let looks: Vec<BusLook> = transit
         .iter()
-        .enumerate()
-        .map(|(i, line)| BusLook {
+        .map(|line| BusLook {
+            mode: line.mode,
             reference: line.reference.clone(),
-            color: BUS_COLORS[i % BUS_COLORS.len()].to_string(),
+            color: match (&line.color, line.mode) {
+                (Some(color), Mode::Train) if color != "#ffffff" => color.clone(),
+                _ => palette.next().expect("the palette cycles").to_string(),
+            },
         })
         .collect();
 
     let style = carto_style_with_bus_lines(&looks);
     let mut conversion = convert(&data, &style, args.bbox)
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
-    conversion.add_bus_lines(&style, &bus_lines);
+    conversion.add_bus_lines(&style, &transit);
     conversion
         .write(&style, &omap_file)
         .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
@@ -130,9 +156,10 @@ fn run() -> Result<(), (ExitCode, String)> {
         bbox.max_lat,
     );
     println!("{areas} areas, {lines} lines, {points} points");
-    for (line, look) in bus_lines.iter().zip(&looks) {
+    for (line, look) in transit.iter().zip(&looks) {
         println!(
-            "bus {} ({}): {} stops, {}",
+            "{} {} ({}): {} stops, {}",
+            line.mode.key(),
             line.reference,
             look.color,
             line.stops.len(),
