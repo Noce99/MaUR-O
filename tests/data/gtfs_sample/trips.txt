@@ -1,3 +1,4 @@
 route_id,service_id,trip_id,direction_id,shape_id
 "R13","s","t1","0","sh"
 "R13","s","t2","1","sh_back"
+"R13","s","t3","0","sh"

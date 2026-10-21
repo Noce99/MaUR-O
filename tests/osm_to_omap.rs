@@ -177,15 +177,52 @@ fn a_bus_line_from_a_gtfs_feed() {
         .arg(&out)
         .assert()
         .success()
-        // Its own two stops and the one of the way back.
+        // The Wednesday of the feed's weekday service with the most of it.
         .stdout(predicates::str::contains(
-            "bus 13 (#e6194b): 3 stops, West, East",
+            "trips leaving between 10:00 and 16:00 on 20260107",
+        ))
+        // Its own two stops and the one of the way back; two trips of the
+        // direction drawn leave between 10 and 16 (t2 runs the other way).
+        .stdout(predicates::str::contains(
+            "bus 13 (#e6194b): 3 stops, every 180 min, West, East",
         ));
 
     let (map, _) = read_xml_map(&out).unwrap();
     let names = symbol_names(&map);
     assert_eq!(names.iter().filter(|n| *n == "bus 13 stop").count(), 3);
     assert_eq!(names.iter().filter(|n| *n == "bus 13 label").count(), 2);
+    // How often it runs, written once along the short stretch of it the
+    // map shows.
+    let headways: Vec<&str> = map
+        .objects
+        .iter()
+        .filter_map(|o| match &o.kind {
+            ObjectKind::Text(text) if text.text.starts_with("ogni") => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(headways, vec!["ogni 180 min"]);
+}
+
+#[test]
+fn a_date_with_no_service_gives_no_headway() {
+    osm_to_omap()
+        .args([
+            BBOX,
+            "--bus",
+            "13",
+            "--gtfs",
+            "tests/data/gtfs_sample",
+            "--date",
+            "20260110",
+            SAMPLE,
+        ])
+        .arg(tempfile::tempdir().unwrap().path().join("saturday.omap"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "bus 13 (#e6194b): 3 stops, West, East",
+        ));
 }
 
 #[test]
@@ -226,4 +263,48 @@ fn a_train_line_keeps_its_own_colour_and_is_not_a_bus() {
     // The footway it runs along leaves the box at both ends: a number goes
     // only at an end the map shows.
     assert_eq!(names.iter().filter(|n| *n == "train MEX label").count(), 0);
+}
+
+#[test]
+fn a_legend_explains_the_symbols_the_map_uses_below_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("legend.omap");
+    osm_to_omap()
+        .args([BBOX, "--bus", "13", "--legend", SAMPLE])
+        .arg(&out)
+        .assert()
+        .success();
+
+    let (map, _) = read_xml_map(&out).unwrap();
+    let texts: Vec<(String, f64)> = map
+        .objects
+        .iter()
+        .filter_map(|o| match &o.kind {
+            ObjectKind::Text(text) => Some((text.text.clone(), o.coords[0].y)),
+            _ => None,
+        })
+        .collect();
+    let has = |caption: &str| texts.iter().any(|(t, _)| t == caption);
+    assert!(has("Legenda"));
+    assert!(has("Bus 13: West -> East"), "{texts:?}");
+    assert!(has("Fermata, stazione"));
+    assert!(has("Edificio"));
+    assert!(has("Strada residenziale"));
+    assert!(has("Albero"));
+    // Nothing the map does not use: there is no water in the sample.
+    assert!(!has("Acqua"));
+
+    // Below the map: every caption lower on the paper than any of the land.
+    let land_bottom = map.objects[0]
+        .coords
+        .iter()
+        .map(|c| c.y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let legend_top = texts
+        .iter()
+        .filter(|(t, _)| t == "Legenda")
+        .map(|(_, y)| *y)
+        .next()
+        .unwrap();
+    assert!(legend_top > land_bottom);
 }

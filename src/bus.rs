@@ -33,6 +33,15 @@
 //! the shape's points (`shapes.txt`) and its stops those of one trip along
 //! it (`stop_times.txt`, `stops.txt`). The feed is read from its `.zip` or
 //! from a folder it has been unpacked into.
+//!
+//! # How often a line runs
+//!
+//! [`BusLine::headway`] is the minutes between two buses of the line, on
+//! average over the middle of the day ([`HEADWAY_HOURS`], 10:00 to 16:00):
+//! the trips of the direction drawn that leave their first stop in those
+//! hours, on one service day (a Wednesday the feed runs, unless a date is
+//! asked for), spread over the six hours. OpenStreetMap has no timetables:
+//! a relation's `interval` tag, where a mapper has set one, is all it says.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -121,6 +130,31 @@ pub struct BusLine {
     pub stops: Vec<(f64, f64)>,
     /// The line's own colour, `#rrggbb`, where the source gives one.
     pub color: Option<String>,
+    /// How many minutes apart its buses run, on average between
+    /// [`HEADWAY_HOURS`], where the source says.
+    pub headway: Option<f64>,
+}
+
+/// The hours of the day [`BusLine::headway`] averages over: from 10:00 to
+/// 16:00, the middle of the day, clear of the rush hours.
+pub const HEADWAY_HOURS: (u32, u32) = (10, 16);
+
+/// An OpenStreetMap `interval` — `HH:MM`, `HH:MM:SS` or plain minutes — in
+/// minutes.
+pub fn parse_interval(value: &str) -> Option<f64> {
+    let parts: Vec<f64> = value
+        .trim()
+        .split(':')
+        .map(|p| p.trim().parse::<f64>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let minutes = match parts[..] {
+        [minutes] => minutes,
+        [hours, minutes] => hours * 60.0 + minutes,
+        [hours, minutes, seconds] => hours * 60.0 + minutes + seconds / 60.0,
+        _ => return None,
+    };
+    (minutes > 0.0).then_some(minutes)
 }
 
 impl BusLine {
@@ -261,11 +295,13 @@ pub fn lines_from_osm(data: &OsmData, references: &[String], mode: Mode) -> Vec<
                         .iter()
                         .any(|m| m.kind == MemberKind::Relation && m.id == main.id)
             });
-            let color = main
-                .tags
-                .get("colour")
-                .or_else(|| master.and_then(|m| m.tags.get("colour")))
-                .and_then(parse_colour);
+            let tag = |key: &str| {
+                main.tags
+                    .get(key)
+                    .or_else(|| master.and_then(|m| m.tags.get(key)))
+            };
+            let color = tag("colour").and_then(parse_colour);
+            let headway = tag("interval").and_then(parse_interval);
             Some(BusLine {
                 mode,
                 reference: reference.clone(),
@@ -273,6 +309,7 @@ pub fn lines_from_osm(data: &OsmData, references: &[String], mode: Mode) -> Vec<
                 route: relation_route(data, main),
                 stops: unique(stops),
                 color,
+                headway,
             })
         })
         .collect()
@@ -349,6 +386,20 @@ impl Feed {
             .map_err(|e| format!("{} is not a GTFS zip: {e}", path.display()))
     }
 
+    /// A table the GTFS reference makes optional: `None` where the feed has
+    /// none.
+    fn optional_table(&mut self, name: &str) -> Result<Option<Table>, String> {
+        let present = match self {
+            Feed::Folder(dir) => dir.join(name).exists(),
+            Feed::Zip(archive) => archive.index_for_name(name).is_some(),
+        };
+        if present {
+            self.table(name).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     fn table(&mut self, name: &str) -> Result<Table, String> {
         let mut text = String::new();
         match self {
@@ -371,11 +422,126 @@ impl Feed {
 /// Values in the order of a GTFS `*_sequence` column, still to be sorted by it.
 type Sequenced<T> = Vec<(u64, T)>;
 
+/// What [`lines_from_gtfs`] reads from a feed.
+pub struct GtfsLines {
+    /// The lines, in the order asked for.
+    pub lines: Vec<BusLine>,
+    /// The day the lines' headways were counted on, `YYYYMMDD`: `None` where
+    /// the feed has no calendar to pick one from.
+    pub date: Option<String>,
+}
+
+/// The service ids running on `date` (`YYYYMMDD`): those of `calendar.txt`
+/// whose dates and weekdays take it in, with `calendar_dates.txt`'s
+/// exceptions for that day added (type 1) and taken away (type 2).
+fn services_on(
+    date: &str,
+    calendar: Option<&Table>,
+    exceptions: Option<&Table>,
+) -> Result<HashSet<String>, String> {
+    let day = chrono::NaiveDate::parse_from_str(date, "%Y%m%d")
+        .map_err(|_| format!("not a date: {date:?} (want YYYYMMDD)"))?;
+    let weekday = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ][chrono::Datelike::weekday(&day).num_days_from_monday() as usize];
+    let mut services = HashSet::new();
+    if let Some(calendar) = calendar {
+        let (id, start, end, runs) = (
+            calendar.column("calendar.txt", "service_id")?,
+            calendar.column("calendar.txt", "start_date")?,
+            calendar.column("calendar.txt", "end_date")?,
+            calendar.column("calendar.txt", weekday)?,
+        );
+        for row in &calendar.rows {
+            if row[start].as_str() <= date && date <= row[end].as_str() && row[runs] == "1" {
+                services.insert(row[id].clone());
+            }
+        }
+    }
+    if let Some(exceptions) = exceptions {
+        let (id, on, kind) = (
+            exceptions.column("calendar_dates.txt", "service_id")?,
+            exceptions.column("calendar_dates.txt", "date")?,
+            exceptions.column("calendar_dates.txt", "exception_type")?,
+        );
+        for row in exceptions.rows.iter().filter(|row| row[on] == date) {
+            if row[kind] == "1" {
+                services.insert(row[id].clone());
+            } else {
+                services.remove(&row[id]);
+            }
+        }
+    }
+    Ok(services)
+}
+
+/// The Wednesday the feed runs the most services on, `YYYYMMDD`: a plain
+/// working day, clear of the Monday and Friday variants and of holidays.
+fn typical_weekday(calendar: &Table, exceptions: Option<&Table>) -> Result<Option<String>, String> {
+    let (start, end) = (
+        calendar.column("calendar.txt", "start_date")?,
+        calendar.column("calendar.txt", "end_date")?,
+    );
+    let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y%m%d").ok();
+    let first = calendar.rows.iter().filter_map(|r| parse(&r[start])).min();
+    let last = calendar.rows.iter().filter_map(|r| parse(&r[end])).max();
+    let (Some(first), Some(last)) = (first, last) else {
+        return Ok(None);
+    };
+    let mut best: Option<(usize, String)> = None;
+    let mut day = first;
+    while day <= last {
+        if chrono::Datelike::weekday(&day) == chrono::Weekday::Wed {
+            let date = day.format("%Y%m%d").to_string();
+            let count = services_on(&date, Some(calendar), exceptions)?.len();
+            if best.as_ref().is_none_or(|(most, _)| count > *most) {
+                best = Some((count, date));
+            }
+        }
+        day += chrono::TimeDelta::days(1);
+    }
+    Ok(best.map(|(_, date)| date))
+}
+
+/// A GTFS time, `H:MM:SS` or `HH:MM:SS` (past 24 for a trip running after
+/// midnight), in minutes since the service day began.
+fn minutes(time: &str) -> Option<u32> {
+    let mut parts = time.trim().split(':').map(|p| p.parse::<u32>().ok());
+    let (hours, mins) = (parts.next()??, parts.next()??);
+    Some(hours * 60 + mins)
+}
+
 /// The lines numbered `references`, from the GTFS feed at `path` (its `.zip`
 /// or the folder it has been unpacked into), in the order asked for. A
 /// number the feed has no route for is left out.
-pub fn lines_from_gtfs(path: &Path, references: &[String]) -> Result<Vec<BusLine>, String> {
+///
+/// The headways are counted on `date` (`YYYYMMDD`), or where none is given
+/// on the Wednesday the feed runs the most services on.
+pub fn lines_from_gtfs(
+    path: &Path,
+    references: &[String],
+    date: Option<&str>,
+) -> Result<GtfsLines, String> {
     let mut feed = Feed::open(path)?;
+
+    // calendar.txt and calendar_dates.txt: which services run that day.
+    let calendar = feed.optional_table("calendar.txt")?;
+    let exceptions = feed.optional_table("calendar_dates.txt")?;
+    let date = match (date, &calendar) {
+        (Some(date), _) => Some(date.to_string()),
+        (None, Some(calendar)) => typical_weekday(calendar, exceptions.as_ref())?,
+        (None, None) => None,
+    };
+    let running = match &date {
+        Some(date) => services_on(date, calendar.as_ref(), exceptions.as_ref())?,
+        None => HashSet::new(),
+    };
 
     // routes.txt: which routes are the lines asked for.
     let routes = feed.table("routes.txt")?;
@@ -405,8 +571,11 @@ pub fn lines_from_gtfs(path: &Path, references: &[String]) -> Result<Vec<BusLine
         trips.column("trips.txt", "shape_id")?,
     );
     let t_direction = trips.columns.get("direction_id").copied();
+    let t_service = trips.column("trips.txt", "service_id")?;
     let mut counts: HashMap<(String, String, String), usize> = HashMap::new();
     let mut trip_along: HashMap<String, String> = HashMap::new();
+    // The trips running that day: their line and direction.
+    let mut running_trips: HashMap<String, (String, String)> = HashMap::new();
     for row in &trips.rows {
         let Some((reference, _)) = route_of.get(&row[t_route]) else {
             continue;
@@ -414,6 +583,9 @@ pub fn lines_from_gtfs(path: &Path, references: &[String]) -> Result<Vec<BusLine
         let direction = t_direction
             .and_then(|c| row.get(c).cloned())
             .unwrap_or_default();
+        if running.contains(&row[t_service]) {
+            running_trips.insert(row[t_trip].clone(), (reference.clone(), direction.clone()));
+        }
         let shape = row[t_shape].clone();
         *counts
             .entry((reference.clone(), direction, shape.clone()))
@@ -478,8 +650,19 @@ pub fn lines_from_gtfs(path: &Path, references: &[String]) -> Result<Vec<BusLine
         stop_times.column("stop_times.txt", "stop_id")?,
         stop_times.column("stop_times.txt", "stop_sequence")?,
     );
+    let st_departure = stop_times.column("stop_times.txt", "departure_time")?;
     let mut stops_of: HashMap<&str, Sequenced<String>> = HashMap::new();
+    // When each trip running that day leaves its first stop.
+    let mut departs: HashMap<&str, (u64, Option<u32>)> = HashMap::new();
     for row in &stop_times.rows {
+        if running_trips.contains_key(row[st_trip].as_str()) {
+            let seq = row[st_seq].parse::<u64>().unwrap_or(0);
+            let time = minutes(&row[st_departure]);
+            let first = departs.entry(row[st_trip].as_str()).or_insert((seq, time));
+            if seq < first.0 {
+                *first = (seq, time);
+            }
+        }
         if let Some(&trip) = needed_trips.get(row[st_trip].as_str()) {
             let seq = row[st_seq].parse::<u64>().unwrap_or(0);
             stops_of
@@ -504,15 +687,28 @@ pub fn lines_from_gtfs(path: &Path, references: &[String]) -> Result<Vec<BusLine
         })
         .collect();
 
+    // How many trips each (line, direction) starts in the middle of the day.
+    let (from, to) = (HEADWAY_HOURS.0 * 60, HEADWAY_HOURS.1 * 60);
+    let mut starts: HashMap<(&str, &str), u32> = HashMap::new();
+    for (trip, (_, time)) in &departs {
+        if time.is_some_and(|t| from <= t && t < to) {
+            let (reference, direction) = &running_trips[*trip];
+            *starts.entry((reference, direction)).or_default() += 1;
+        }
+    }
+
     let name_of: HashMap<&str, &str> = route_of
         .values()
         .map(|(reference, name)| (reference.as_str(), name.as_str()))
         .collect();
-    Ok(references
+    let lines = references
         .iter()
         .filter_map(|reference| {
             let shapes = main_shapes.get(reference)?;
-            let (_, _, main) = shapes.first()?;
+            let (_, direction, main) = shapes.first()?;
+            let headway = starts
+                .get(&(reference.as_str(), direction.as_str()))
+                .map(|&count| f64::from(to - from) / f64::from(count));
             let mut route = points.remove(main.as_str()).unwrap_or_default();
             route.sort_by_key(|(seq, _)| *seq);
             let mut line_stops = Vec::new();
@@ -536,9 +732,11 @@ pub fn lines_from_gtfs(path: &Path, references: &[String]) -> Result<Vec<BusLine
                 name: name_of.get(reference.as_str()).unwrap_or(&"").to_string(),
                 route: vec![route.into_iter().map(|(_, p)| p).collect()],
                 stops: unique(line_stops),
+                headway,
             })
         })
-        .collect())
+        .collect();
+    Ok(GtfsLines { lines, date })
 }
 
 #[cfg(test)]
@@ -636,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn gtfs_takes_the_busiest_shape_and_the_stops_of_both_directions() {
+    fn gtfs_takes_the_busiest_shape_the_stops_of_both_directions_and_the_headway() {
         let dir = tempfile::tempdir().unwrap();
         let write = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
         write(
@@ -645,8 +843,9 @@ mod tests {
         );
         write(
             "trips.txt",
-            "route_id,trip_id,direction_id,shape_id\n\
-             R13,t1,0,main\nR13,t2,0,main\nR13,t3,0,short\nR13,t4,1,back\nR19,t5,0,other\n",
+            "route_id,service_id,trip_id,direction_id,shape_id\n\
+             R13,wk,t1,0,main\nR13,wk,t2,0,main\nR13,wk,t3,0,short\nR13,wk,t4,1,back\n\
+             R19,wk,t5,0,other\nR13,su,t6,0,main\nR13,wk,t7,0,main\n",
         );
         write(
             "shapes.txt",
@@ -656,14 +855,30 @@ mod tests {
         );
         write(
             "stop_times.txt",
-            "trip_id,stop_id,stop_sequence\nt1,s2,2\nt1,s1,1\nt4,s3,1\nt4,s1,2\nt3,s9,1\n",
+            "trip_id,stop_id,stop_sequence,departure_time\n\
+             t1,s2,2,10:20:00\nt1,s1,1,10:05:00\nt4,s3,1,12:00:00\nt4,s1,2,12:10:00\n\
+             t3,s9,1,15:59:00\nt2,s1,1,11:00:00\nt6,s1,1,12:00:00\nt7,s1,1,09:30:00\n",
         );
         write(
             "stops.txt",
             "stop_id,stop_lat,stop_lon\ns1,44.0,11.0\ns2,44.1,11.1\ns3,44.1,11.11\ns9,44.05,11.05\n",
         );
 
-        let lines = lines_from_gtfs(dir.path(), &["13".to_string()]).unwrap();
+        // Weekdays through January, but not on the 7th; Sundays apart.
+        write(
+            "calendar.txt",
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n\
+             wk,1,1,1,1,1,0,0,20260105,20260130\nsu,0,0,0,0,0,0,1,20260105,20260130\n",
+        );
+        write(
+            "calendar_dates.txt",
+            "service_id,date,exception_type\nwk,20260107,2\n",
+        );
+
+        let read = lines_from_gtfs(dir.path(), &["13".to_string()], None).unwrap();
+        // The first Wednesday the weekday service runs.
+        assert_eq!(read.date.as_deref(), Some("20260114"));
+        let lines = read.lines;
         assert_eq!(lines.len(), 1);
         let line = &lines[0];
         assert_eq!(line.name, "Pavese, Malpighi");
@@ -671,5 +886,21 @@ mod tests {
         // The busiest shape each way: main (2 trips) and back. The short
         // run's stop is not among them; s1 is shared.
         assert_eq!(line.stops, vec![(11.0, 44.0), (11.1, 44.1), (11.11, 44.1)]);
+        // Direction 0 starts t1, t2 and t3 between 10 and 16 on a weekday;
+        // t7 starts before 10 and t6 runs on Sundays: 360 minutes / 3.
+        assert_eq!(line.headway, Some(120.0));
+
+        // On the 7th the weekday service is off: no trip, no headway.
+        let off = lines_from_gtfs(dir.path(), &["13".to_string()], Some("20260107")).unwrap();
+        assert_eq!(off.lines[0].headway, None);
+    }
+
+    #[test]
+    fn intervals_come_as_osm_writes_them() {
+        assert_eq!(parse_interval("00:10"), Some(10.0));
+        assert_eq!(parse_interval("01:00"), Some(60.0));
+        assert_eq!(parse_interval("15"), Some(15.0));
+        assert_eq!(parse_interval("00:07:30"), Some(7.5));
+        assert_eq!(parse_interval("often"), None);
     }
 }

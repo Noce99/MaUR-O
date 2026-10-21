@@ -26,10 +26,10 @@
 
 use std::path::Path;
 
-use crate::bus::BusLine;
+use crate::bus::{BusLine, HEADWAY_HOURS};
 use crate::map::{coord_flag, h_align, v_align, Coord, Object, ObjectKind, PathObject, TextObject};
 use crate::osm::{BBox, OsmData};
-use crate::osm_style::{Style, PIXEL_MM, ZOOM};
+use crate::osm_style::{Sample, Style, PIXEL_MM, ZOOM};
 use crate::xml_writer::{
     color_element, georeferencing_element, symbol_element, Georeference, MapFile,
 };
@@ -290,6 +290,108 @@ pub fn clip_rings(rings: Vec<Vec<(f64, f64)>>, bbox: &BBox) -> Vec<Vec<(f64, f64
         .collect()
 }
 
+/// A stretch of a line's route on the paper, waiting for its headway to be
+/// written along it once everything else of every line is placed.
+struct PendingHeadway {
+    route: Vec<(f64, f64)>,
+    text: String,
+    symbol: i32,
+    stops: Vec<(f64, f64)>,
+}
+
+/// A headway, as written along a line: `ogni 8 min`.
+fn headway_text(minutes: f64) -> String {
+    format!("ogni {} min", minutes.round().max(1.0) as i64)
+}
+
+/// Where a line's headway is written along it, in mm on the paper: the first
+/// this far from where the line starts, then every [`HEADWAY_EVERY`], none
+/// closer than [`HEADWAY_END`] to where it ends.
+const HEADWAY_FIRST: f64 = 40.0;
+const HEADWAY_EVERY: f64 = 120.0;
+const HEADWAY_END: f64 = 20.0;
+/// Half the length of the stretch of line a headway's direction is taken
+/// along: about half the text's own length, so that it follows the street
+/// it is written on rather than the last corner.
+const HEADWAY_HALF: f64 = 6.0;
+/// How far a headway may be moved along its line to stay clear of others.
+const HEADWAY_SHIFT: f64 = 40.0;
+/// How close the centre of anything else may come to a written headway,
+/// in mm: the length of `ogni 12 min`, which two such texts running along
+/// the same street need between their centres, and a little more.
+const HEADWAY_CLEARANCE: f64 = 15.0;
+
+/// The point `distance` mm along a polyline on the paper, clamped to its
+/// ends.
+fn point_along(points: &[(f64, f64)], distance: f64) -> (f64, f64) {
+    let mut left = distance.max(0.0);
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let length = (b.0 - a.0).hypot(b.1 - a.1);
+        if left <= length && length > 0.0 {
+            let t = left / length;
+            return (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1));
+        }
+        left -= length;
+    }
+    *points.last().expect("a polyline has points")
+}
+
+/// Where to write a line's headway along one stretch of its route, on the
+/// paper: `(x, y, rotation)`, the rotation in radians counter-clockwise, the
+/// way Mapper turns a text object, and never more than a quarter turn
+/// either way so that the text never reads upside down. A stretch too short
+/// for the first spacing gets one in its middle, one shorter than a text gets
+/// none. Each one is moved along the line, a few mm at a time, out of every
+/// circle of `blocked` (`(x, y, radius)`, in mm: a stop, a number, another
+/// text); one with nowhere to go within 40 mm either way is left out.
+pub fn along(points: &[(f64, f64)], blocked: &[(f64, f64, f64)]) -> Vec<(f64, f64, f64)> {
+    let length: f64 = points
+        .windows(2)
+        .map(|p| (p[1].0 - p[0].0).hypot(p[1].1 - p[0].1))
+        .sum();
+    if length < 4.0 * HEADWAY_HALF {
+        return Vec::new();
+    }
+    let mut at = Vec::new();
+    let mut distance = HEADWAY_FIRST;
+    while distance <= length - HEADWAY_END {
+        at.push(distance);
+        distance += HEADWAY_EVERY;
+    }
+    if at.is_empty() {
+        at.push(length / 2.0);
+    }
+    let clear = |distance: f64, taken: &[(f64, f64, f64)]| {
+        let (x, y) = point_along(points, distance);
+        blocked
+            .iter()
+            .chain(taken)
+            .all(|&(bx, by, radius)| (bx - x).hypot(by - y) > radius)
+    };
+    let mut taken: Vec<(f64, f64, f64)> = Vec::new();
+    at.into_iter()
+        .filter_map(|distance| {
+            let steps = (HEADWAY_SHIFT / 4.0) as i32;
+            let distance = (0..=steps)
+                .flat_map(|i| [f64::from(i) * 4.0, -f64::from(i) * 4.0])
+                .map(|shift| distance + shift)
+                .find(|&d| d >= HEADWAY_HALF && d <= length - HEADWAY_HALF && clear(d, &taken))?;
+            let (x, y) = point_along(points, distance);
+            taken.push((x, y, HEADWAY_CLEARANCE));
+            let (x0, y0) = point_along(points, distance - HEADWAY_HALF);
+            let (x1, y1) = point_along(points, distance + HEADWAY_HALF);
+            let (mut dx, mut dy) = (x1 - x0, y1 - y0);
+            if dx < 0.0 {
+                (dx, dy) = (-dx, -dy);
+            }
+            // The paper's y points down: a line going down to the right is
+            // turned clockwise, a negative rotation.
+            Some((x, y, (-dy).atan2(dx)))
+        })
+        .collect()
+}
+
 /// How far apart, in mm on the paper, two line numbers have to be not to
 /// overlap: about a badge's height, and the width of a short one.
 const LABEL_HEIGHT: f64 = 4.4;
@@ -330,6 +432,10 @@ impl Conversion {
     pub fn add_bus_lines(&mut self, style: &Style, lines: &[BusLine]) {
         let bbox = self.bbox;
         let mut placed: Vec<(f64, f64)> = Vec::new();
+        // The stretches of route a headway is to be written along, with the
+        // text, its symbol and the line's own stops, placed once every
+        // route, stop and number is.
+        let mut headways: Vec<PendingHeadway> = Vec::new();
         for line in lines {
             let key = format!("{} {}", line.mode.key(), line.reference);
             let (route, stop, label) = (
@@ -337,15 +443,28 @@ impl Conversion {
                 style.id(&format!("{key} stop")),
                 style.id(&format!("{key} label")),
             );
+            let headway_text = line.headway.map(headway_text);
+            let headway_symbol = style.id(&format!("{key} headway"));
             for piece in &line.route {
                 for clipped in clip_polyline(piece, &bbox) {
-                    let coords = clipped
+                    let paper: Vec<(f64, f64)> = clipped
                         .iter()
-                        .map(|&p| {
-                            let (x, y) = self.projection.to_paper(p);
-                            Coord::new(x, y, 0)
-                        })
+                        .map(|&p| self.projection.to_paper(p))
                         .collect();
+                    if let Some(text) = &headway_text {
+                        let stops: Vec<(f64, f64)> = line
+                            .stops
+                            .iter()
+                            .map(|&p| self.projection.to_paper(p))
+                            .collect();
+                        headways.push(PendingHeadway {
+                            route: paper.clone(),
+                            text: text.clone(),
+                            symbol: headway_symbol,
+                            stops,
+                        });
+                    }
+                    let coords = paper.iter().map(|&(x, y)| Coord::new(x, y, 0)).collect();
                     self.objects.push(path_object(route, coords));
                     self.counts.1 += 1;
                 }
@@ -392,6 +511,239 @@ impl Conversion {
                 self.counts.2 += 1;
             }
         }
+
+        // The headways last, each kept off its line's stops, off every
+        // number at a terminus, and off every headway already written —
+        // two lines sharing a street would otherwise print theirs in the
+        // same place.
+        let mut written: Vec<(f64, f64, f64)> =
+            placed.iter().map(|&(x, y)| (x, y, LABEL_WIDTH)).collect();
+        for PendingHeadway {
+            route: paper,
+            text,
+            symbol,
+            stops,
+        } in headways
+        {
+            let mut blocked = written.clone();
+            blocked.extend(stops.iter().map(|&(x, y)| (x, y, HEADWAY_HALF + 1.5)));
+            for (x, y, rotation) in along(&paper, &blocked) {
+                written.push((x, y, HEADWAY_CLEARANCE));
+                blocked.push((x, y, HEADWAY_CLEARANCE));
+                let mut object = Object::new(ObjectKind::Text(TextObject {
+                    text: text.clone(),
+                    h_align: h_align::HCENTER,
+                    v_align: v_align::VCENTER,
+                    box_size: None,
+                }));
+                object.symbol_id = symbol;
+                object.rotation = rotation;
+                object.coords = vec![Coord::new(x, y, 0)];
+                self.objects.push(object);
+                self.counts.2 += 1;
+            }
+        }
+    }
+
+    /// Adds a legend under the map: a sample of every symbol the map uses,
+    /// each with what it means, in columns as wide as the map allows.
+    ///
+    /// Under the map rather than over it: in Mapper a colour is drawn at the
+    /// same level everywhere, so a panel laid over the map to hold the legend
+    /// would hide the legend's own samples along with the map. The bus and
+    /// train lines come first, each with its name from `lines`, then an
+    /// entry for their stops and one for the numbers at their ends; then
+    /// everything else, in the order the style defines it.
+    pub fn add_legend(&mut self, style: &Style, lines: &[BusLine]) {
+        let background = style.background();
+        let Some(land) = self.objects.iter().find(|o| o.symbol_id == background) else {
+            return;
+        };
+        let min_x = land
+            .coords
+            .iter()
+            .map(|c| c.x)
+            .fold(f64::INFINITY, f64::min);
+        let max_x = land
+            .coords
+            .iter()
+            .map(|c| c.x)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let max_y = land
+            .coords
+            .iter()
+            .map(|c| c.y)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let used: std::collections::HashSet<i32> =
+            self.objects.iter().map(|o| o.symbol_id).collect();
+
+        // (symbol, sample, caption, the text of a text sample)
+        let mut entries: Vec<(i32, Sample, String, String)> = Vec::new();
+        let mut first_stop = None;
+        let mut first_label = None;
+        let mut first_headway = None;
+        for line in lines {
+            let key = format!("{} {}", line.mode.key(), line.reference);
+            let id = style.id(&key);
+            if !used.contains(&id) {
+                continue;
+            }
+            let name = legend_name(&line.name, &line.reference);
+            let caption = match style.caption(id) {
+                Some(caption) if !name.is_empty() => format!("{caption}: {name}"),
+                Some(caption) => caption,
+                None => continue,
+            };
+            entries.push((id, Sample::Line, caption, String::new()));
+            let stop = style.id(&format!("{key} stop"));
+            if first_stop.is_none() && used.contains(&stop) {
+                first_stop = Some(stop);
+            }
+            let label = style.id(&format!("{key} label"));
+            if first_label.is_none() && used.contains(&label) {
+                first_label = Some((label, line.reference.clone()));
+            }
+            let headway = style.id(&format!("{key} headway"));
+            if first_headway.is_none() && used.contains(&headway) {
+                first_headway = line.headway.map(|m| (headway, headway_text(m)));
+            }
+        }
+        if let Some(stop) = first_stop {
+            entries.push((
+                stop,
+                Sample::Point,
+                "Fermata, stazione".to_string(),
+                String::new(),
+            ));
+        }
+        if let Some((label, reference)) = first_label {
+            entries.push((
+                label,
+                Sample::Text,
+                "Capolinea, con il numero della linea".to_string(),
+                reference,
+            ));
+        }
+        if let Some((headway, text)) = first_headway {
+            entries.push((
+                headway,
+                Sample::Text,
+                format!(
+                    "Frequenza media {}–{} feriali",
+                    HEADWAY_HOURS.0, HEADWAY_HOURS.1
+                ),
+                text,
+            ));
+        }
+        let mut ids: Vec<i32> = used.iter().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            if style
+                .key(id)
+                .is_some_and(|k| k.starts_with("bus ") || k.starts_with("train "))
+            {
+                continue;
+            }
+            let (Some(caption), Some(sample)) = (style.caption(id), style.sample(id)) else {
+                continue;
+            };
+            // Two symbols the legend cannot tell apart in words — a paved and
+            // an unknown cycleway — are listed once.
+            if entries.iter().all(|(_, _, c, _)| *c != caption) {
+                entries.push((id, sample, caption, String::new()));
+            }
+        }
+        if entries.is_empty() {
+            return;
+        }
+
+        const COLUMN: f64 = 70.0;
+        const ROW: f64 = 5.5;
+        const SAMPLE: f64 = 9.0;
+        const CAPTION_CHARS: usize = 34;
+        // About how wide one character of a caption is, in mm.
+        const CAPTION_CHAR_WIDTH: f64 = 1.6;
+        let columns = (((max_x - min_x) / COLUMN).floor() as usize).max(1);
+        let rows = entries.len().div_ceil(columns);
+        let top = max_y + 10.0;
+
+        let text = |symbol: i32, x: f64, y: f64, text: String, align: i32| {
+            let mut object = Object::new(ObjectKind::Text(TextObject {
+                text,
+                h_align: align,
+                v_align: v_align::VCENTER,
+                box_size: None,
+            }));
+            object.symbol_id = symbol;
+            object.coords = vec![Coord::new(x, y, 0)];
+            object
+        };
+        self.objects.push(text(
+            style.id("legend title"),
+            min_x,
+            top,
+            "Legenda".to_string(),
+            h_align::LEFT,
+        ));
+        let caption_symbol = style.id("legend text");
+        for (i, (symbol, sample, caption, sample_text)) in entries.into_iter().enumerate() {
+            // About how wide a text sample is: its badge's bold characters
+            // and the blob around them.
+            let sample_width = if sample == Sample::Text {
+                sample_text.chars().count() as f64 * 1.25 + 1.5
+            } else {
+                0.0
+            };
+            let x = min_x + (i / rows) as f64 * COLUMN;
+            let y = top + 9.0 + (i % rows) as f64 * ROW;
+            let object = match sample {
+                Sample::Area => {
+                    let (left, right, up, down) = (x, x + SAMPLE, y - 2.0, y + 2.0);
+                    path_object(
+                        symbol,
+                        vec![
+                            Coord::new(left, up, 0),
+                            Coord::new(right, up, 0),
+                            Coord::new(right, down, 0),
+                            Coord::new(left, down, 0),
+                            Coord::new(left, up, coord_flag::CLOSE_POINT),
+                        ],
+                    )
+                }
+                Sample::Line => path_object(
+                    symbol,
+                    vec![Coord::new(x, y, 0), Coord::new(x + SAMPLE, y, 0)],
+                ),
+                Sample::Point => {
+                    let mut object = Object::new(ObjectKind::Point);
+                    object.symbol_id = symbol;
+                    object.coords = vec![Coord::new(x + SAMPLE / 2.0, y, 0)];
+                    object
+                }
+                // A text wider than a sample — `ogni 8 min` — starts where
+                // the samples do and pushes its caption along.
+                Sample::Text if sample_width > SAMPLE => {
+                    text(symbol, x, y, sample_text, h_align::LEFT)
+                }
+                Sample::Text => text(symbol, x + SAMPLE / 2.0, y, sample_text, h_align::HCENTER),
+            };
+            self.objects.push(object);
+            let width = sample_width.max(SAMPLE);
+            let chars = CAPTION_CHARS - ((width - SAMPLE) / CAPTION_CHAR_WIDTH).ceil() as usize;
+            let caption = if caption.chars().count() > chars {
+                let cut: String = caption.chars().take(chars - 1).collect();
+                format!("{}…", cut.trim_end())
+            } else {
+                caption
+            };
+            self.objects.push(text(
+                caption_symbol,
+                x + width + 3.0,
+                y,
+                caption,
+                h_align::LEFT,
+            ));
+        }
     }
 
     /// Writes the map, with `style`'s colours and symbols, as an `.omap`.
@@ -413,7 +765,8 @@ impl Conversion {
             colors: &colors,
             symbols: &symbols,
             objects: &self.objects,
-            rotatable: false,
+            // The headways written along the lines are turned with them.
+            rotatable: true,
             georeferencing: Some(georeferencing_element(&self.projection.georeference)),
         }
         .write(path)
@@ -561,6 +914,25 @@ pub fn convert(data: &OsmData, style: &Style, bbox: Option<BBox>) -> Result<Conv
     })
 }
 
+/// A line's name as the legend gives it, after the line's number: without
+/// the number again where the name starts with it, as OpenStreetMap's do —
+/// `13 : Pavese -> Malpighi` is `Pavese -> Malpighi`, `S1 (Pianoro)` is
+/// `Pianoro`.
+fn legend_name(name: &str, reference: &str) -> String {
+    let Some(rest) = name.strip_prefix(reference) else {
+        return name.to_string();
+    };
+    if rest.starts_with(|c: char| c.is_alphanumeric()) {
+        // "13A : …" names a variant of 13, not 13 itself.
+        return name.to_string();
+    }
+    let rest = rest.trim_start_matches([' ', ':', '-']).trim();
+    match rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+        Some(inner) => inner.to_string(),
+        None => rest.to_string(),
+    }
+}
+
 fn path_object(symbol: i32, coords: Vec<Coord>) -> Object {
     let mut object = Object::new(ObjectKind::Path(PathObject::default()));
     object.symbol_id = symbol;
@@ -608,6 +980,48 @@ mod tests {
         assert!((-y - 182.7).abs() < 0.3, "{y}");
         assert!((projection.georeference.grivation + 1.64).abs() < 0.05);
         assert!((projection.georeference.grid_scale_factor - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_headway_follows_the_line_and_reads_upright() {
+        // A line 300 mm long: headways at 40, 160 and 280 mm.
+        let east = along(&[(0.0, 0.0), (300.0, 0.0)], &[]);
+        let at: Vec<f64> = east.iter().map(|&(x, _, _)| x).collect();
+        assert_eq!(at, vec![40.0, 160.0, 280.0]);
+        assert!(east.iter().all(|&(_, _, r)| r == 0.0));
+        // Running west, the text is still not upside down.
+        let west = along(&[(300.0, 0.0), (0.0, 0.0)], &[]);
+        assert!(west.iter().all(|&(_, _, r)| r == 0.0));
+        // Going up the paper (y decreasing) is a quarter turn
+        // counter-clockwise.
+        let north = along(&[(0.0, 100.0), (0.0, 0.0)], &[]);
+        let rotation = north[0].2;
+        assert!((rotation.abs() - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        // Too short for the first spacing: one, in the middle.
+        assert_eq!(along(&[(0.0, 0.0), (50.0, 0.0)], &[]).len(), 1);
+        // A stop where the first would go moves it along, off the stop.
+        let moved = along(&[(0.0, 0.0), (300.0, 0.0)], &[(40.0, 0.0, 7.5)]);
+        assert_eq!(moved[0].0, 48.0);
+        // Nowhere clear within reach: left out.
+        let blocked: Vec<(f64, f64, f64)> =
+            (0..=30).map(|i| (f64::from(i) * 10.0, 0.0, 9.0)).collect();
+        assert!(along(&[(0.0, 0.0), (300.0, 0.0)], &blocked).is_empty());
+        // Shorter than the text: none.
+        assert!(along(&[(0.0, 0.0), (10.0, 0.0)], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_legend_name_does_not_repeat_the_number() {
+        assert_eq!(
+            legend_name("13 : Pavese -> Malpighi", "13"),
+            "Pavese -> Malpighi"
+        );
+        assert_eq!(legend_name("S1 (Pianoro)", "S1"), "Pianoro");
+        assert_eq!(
+            legend_name("13A : Cavour -> Carteria", "13"),
+            "13A : Cavour -> Carteria"
+        );
+        assert_eq!(legend_name("Marconi Express", "MEX"), "Marconi Express");
     }
 
     #[test]

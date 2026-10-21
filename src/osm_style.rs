@@ -126,6 +126,8 @@ fn palette() -> Vec<(&'static str, String, f64)> {
     let building = "#d9d0c9";
     let building_major = adjust(building, -0.10, 0.0);
     vec![
+        // The legend's own text, which lies outside the map.
+        ("legend text", c("#000000"), 1.0),
         // #trees, drawn over the roads.
         ("tree", adjust(forest, -0.10, 0.0), 0.6),
         // #roads-fill: railways, then road fills by importance, then paths.
@@ -452,6 +454,19 @@ fn surface(tags: &Tags) -> Surface {
         Some(s) if UNPAVED.contains(&s) => Surface::Unpaved,
         _ => Surface::Unknown,
     }
+}
+
+/// What a legend entry shows for a symbol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sample {
+    /// A small rectangle filled with it.
+    Area,
+    /// A short straight line drawn with it.
+    Line,
+    /// One point drawn with it.
+    Point,
+    /// A piece of text set in it.
+    Text,
 }
 
 /// The symbol set and the rules for using it.
@@ -882,7 +897,37 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
             ..TextSymbol::default()
         };
         b.add(&format!("{key} label"), Symbol::Text(label));
+        // How often the line runs, written along it: smaller than the
+        // number at its ends, and turned with the route.
+        let headway = TextSymbol {
+            name: format!("{key} headway"),
+            font_family: "Noto Sans".to_string(),
+            font_size: px(9.0),
+            bold: true,
+            is_rotatable: true,
+            color: b.color("bus label"),
+            framing: true,
+            framing_color: b.color(&format!("{key} badge")),
+            framing_mode: 1,
+            framing_line_half_width: px(1.6),
+            ..TextSymbol::default()
+        };
+        b.add(&format!("{key} headway"), Symbol::Text(headway));
     }
+
+    // The legend's title and captions.
+    let legend_text = |name: &str, size: f64, bold: bool| TextSymbol {
+        name: name.to_string(),
+        font_family: "Noto Sans".to_string(),
+        font_size: px(size),
+        bold,
+        color: b.color("legend text"),
+        ..TextSymbol::default()
+    };
+    let title = legend_text("legend title", 16.0, true);
+    let caption = legend_text("legend text", 10.0, false);
+    b.add("legend title", Symbol::Text(title));
+    b.add("legend text", Symbol::Text(caption));
 
     for (id, symbol) in &mut b.style.symbols {
         set_code(symbol, &(*id + 1).to_string());
@@ -910,6 +955,151 @@ impl Style {
             .ids
             .get(key)
             .unwrap_or_else(|| panic!("no symbol {key:?} in the style"))
+    }
+
+    /// The key a symbol was defined with, e.g. `"highway primary"`.
+    pub fn key(&self, id: i32) -> Option<&str> {
+        self.ids
+            .iter()
+            .find(|(_, &i)| i == id)
+            .map(|(key, _)| key.as_str())
+    }
+
+    /// The symbol with this id.
+    pub fn symbol(&self, id: i32) -> Option<&Symbol> {
+        self.symbols.iter().find(|(i, _)| *i == id).map(|(_, s)| s)
+    }
+
+    /// What a legend shows for a symbol: a patch of area, a stretch of line,
+    /// a single point, or a piece of text.
+    pub fn sample(&self, id: i32) -> Option<Sample> {
+        let sample = match self.symbol(id)? {
+            Symbol::Area(_) => Sample::Area,
+            Symbol::Line(_) => Sample::Line,
+            Symbol::Point(_) => Sample::Point,
+            Symbol::Text(_) => Sample::Text,
+            Symbol::Combined(c) if c.owned_parts.iter().any(|p| matches!(p, Symbol::Area(_))) => {
+                Sample::Area
+            }
+            Symbol::Combined(_) => Sample::Line,
+        };
+        Some(sample)
+    }
+
+    /// What the legend calls a symbol, in Italian: `None` for those it does
+    /// not list — the land under everything, the legend's own text, a bus or
+    /// train line's stops and numbers, which get an entry of their own.
+    pub fn caption(&self, id: i32) -> Option<String> {
+        let key = self.key(id)?;
+        if key == "land" || key.starts_with("legend ") {
+            return None;
+        }
+        for mode in ["bus", "train"] {
+            if let Some(reference) = key.strip_prefix(mode).and_then(|k| k.strip_prefix(' ')) {
+                if reference.ends_with(" stop")
+                    || reference.ends_with(" label")
+                    || reference.ends_with(" headway")
+                {
+                    return None;
+                }
+                let word = if mode == "bus" { "Bus" } else { "Treno" };
+                return Some(format!("{word} {reference}"));
+            }
+        }
+        if let Some(road) = key.strip_prefix("highway ") {
+            let (road, tunnel) = match road.strip_suffix(" tunnel") {
+                Some(road) => (road, true),
+                None => (road, false),
+            };
+            let name = match road {
+                "motorway" => "Autostrada",
+                "motorway_link" => "Svincolo autostradale",
+                "trunk" => "Superstrada",
+                "trunk_link" => "Svincolo di superstrada",
+                "primary" => "Strada principale",
+                "primary_link" => "Svincolo di strada principale",
+                "secondary" => "Strada secondaria",
+                "secondary_link" => "Svincolo di strada secondaria",
+                "tertiary" => "Strada di quartiere",
+                "tertiary_link" => "Svincolo di strada di quartiere",
+                "residential" => "Strada residenziale",
+                "unclassified" => "Strada locale",
+                "living_street" => "Via in zona residenziale",
+                "pedestrian" => "Via pedonale",
+                "road" => "Strada",
+                "service" => "Strada di servizio",
+                "minor_service" => "Accesso o corsia di parcheggio",
+                _ => return None,
+            };
+            return Some(if tunnel {
+                format!("{name} in galleria")
+            } else {
+                name.to_string()
+            });
+        }
+        let caption = match key {
+            "residential" => "Zona residenziale",
+            "retail" => "Zona commerciale (negozi)",
+            "commercial" => "Zona commerciale (uffici)",
+            "industrial" => "Zona industriale o ferroviaria",
+            "farmland" => "Terreno agricolo",
+            "farmyard" => "Aia, fattoria",
+            "garages" => "Garage",
+            "construction" => "Cantiere",
+            "grass" => "Prato, giardino",
+            "park" => "Parco",
+            "cemetery" => "Cimitero",
+            "allotments" => "Orti",
+            "orchard" => "Frutteto, vigneto",
+            "scrub" => "Arbusteto",
+            "forest" => "Bosco",
+            "heath" => "Brughiera",
+            "sand" => "Sabbia",
+            "societal amenities" => "Scuola, università, ospedale",
+            "platform" => "Banchina",
+            "bridge" => "Ponte",
+            "water" => "Acqua",
+            "leisure" => "Impianto sportivo",
+            "playground" => "Parco giochi",
+            "pitch" => "Campo sportivo",
+            "parking" => "Parcheggio",
+            "place of worship" => "Area di culto",
+            "pedestrian area" => "Piazza, area pedonale",
+            "military" => "Zona militare",
+            "building" => "Edificio",
+            "building major" => "Chiesa, stazione",
+            "footway paved" => "Marciapiede, sentiero pavimentato",
+            "footway unpaved" => "Sentiero sterrato",
+            "footway" => "Sentiero pedonale",
+            "cycleway paved" => "Pista ciclabile",
+            "cycleway unpaved" => "Pista ciclabile sterrata",
+            "cycleway" => "Pista ciclabile",
+            "bridleway" => "Ippovia",
+            "steps" => "Scalinata",
+            "track" => "Carrareccia",
+            "track grade1" => "Carrareccia pavimentata",
+            "track grade2" => "Carrareccia compatta",
+            "track grade3" | "track grade4" | "track grade5" => "Carrareccia sterrata",
+            "rail" => "Ferrovia",
+            "rail service" => "Binario di servizio",
+            "rail tunnel" => "Ferrovia in galleria",
+            "light rail" => "Metropolitana leggera",
+            "tram" => "Tranvia",
+            "tram tunnel" => "Tranvia in galleria",
+            "tram service" => "Binario tranviario di servizio",
+            "monorail" => "Monorotaia",
+            "river" => "Fiume",
+            "canal" => "Canale",
+            "stream" => "Torrente",
+            "ditch" => "Fosso",
+            "barrier" => "Muro, recinzione",
+            "hedge" => "Siepe",
+            "city wall" => "Mura cittadine",
+            "tree row" => "Filare di alberi",
+            "tree" => "Albero",
+            _ => return None,
+        };
+        Some(caption.to_string())
     }
 
     /// The symbol the whole map is laid on: carto's land colour.

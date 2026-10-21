@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...]
-//!             [--gtfs feed.zip] [--train S1,S2A,MEX,...] <osm-file> [omap-file]
+//!             [--gtfs feed.zip [--date YYYYMMDD]] [--train S1,S2A,MEX,...] [--legend]
+//!             <osm-file> [omap-file]
 //! ```
 //!
 //! The input is an `.osm` XML file, as openstreetmap.org's export, the
@@ -25,10 +26,19 @@
 //! `.zip`, or the folder it is unpacked into). A line neither has is
 //! reported and left out.
 //!
+//! Along each line, every so often, is written how many minutes apart its
+//! buses run between 10:00 and 16:00: counted from the GTFS timetable on one
+//! working day (`--date`, or by default the Wednesday the feed runs the most
+//! services on), or taken from a relation's `interval` tag where a mapper
+//! has set one.
+//!
 //! `--train` does the same for train lines — and light rail, metro, tram and
 //! monorail ones, Bologna's Marconi Express (`MEX`) among them — always from
 //! the route relations, drawn wider, with larger stations, and in the line's
 //! own colour where the data gives one.
+//!
+//! `--legend` adds a legend under the map, in Italian: a sample of every
+//! symbol the map uses with what it means, the bus and train lines first.
 //!
 //! Exit codes: 0 success, 1 usage error, 2 the OSM file or the GTFS feed
 //! could not be read, or held nothing to convert, 4 the map could not be
@@ -39,7 +49,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use maur_o::bus::{lines_from_gtfs, lines_from_osm, Mode};
+use maur_o::bus::{lines_from_gtfs, lines_from_osm, Mode, HEADWAY_HOURS};
 use maur_o::osm::{read_osm, BBox};
 use maur_o::osm_convert::convert;
 use maur_o::osm_style::{carto_style_with_bus_lines, BusLook, BUS_COLORS};
@@ -71,10 +81,19 @@ struct Args {
     #[arg(long, requires = "bus")]
     gtfs: Option<PathBuf>,
 
+    /// The day to count the GTFS headways on, YYYYMMDD. Defaults to the
+    /// Wednesday the feed runs the most services on.
+    #[arg(long, requires = "gtfs")]
+    date: Option<String>,
+
     /// Draw these train lines (and light rail, tram, monorail), by number:
     /// e.g. S1,S2A,MEX. Always from the OSM file's route relations.
     #[arg(long, value_delimiter = ',')]
     train: Vec<String>,
+
+    /// Add a legend under the map, explaining every symbol it uses.
+    #[arg(long)]
+    legend: bool,
 }
 
 fn run() -> Result<(), (ExitCode, String)> {
@@ -101,9 +120,14 @@ fn run() -> Result<(), (ExitCode, String)> {
             .collect()
     };
     let (bus_refs, train_refs) = (numbers(&args.bus), numbers(&args.train));
+    let mut headway_date = None;
     let mut transit = match &args.gtfs {
-        Some(feed) => lines_from_gtfs(feed, &bus_refs)
-            .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?,
+        Some(feed) => {
+            let read = lines_from_gtfs(feed, &bus_refs, args.date.as_deref())
+                .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+            headway_date = read.date;
+            read.lines
+        }
         None => lines_from_osm(&data, &bus_refs, Mode::Bus),
     };
     transit.extend(lines_from_osm(&data, &train_refs, Mode::Train));
@@ -139,6 +163,9 @@ fn run() -> Result<(), (ExitCode, String)> {
     let mut conversion = convert(&data, &style, args.bbox)
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     conversion.add_bus_lines(&style, &transit);
+    if args.legend {
+        conversion.add_legend(&style, &transit);
+    }
     conversion
         .write(&style, &omap_file)
         .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
@@ -156,9 +183,19 @@ fn run() -> Result<(), (ExitCode, String)> {
         bbox.max_lat,
     );
     println!("{areas} areas, {lines} lines, {points} points");
-    for (line, look) in transit.iter().zip(&looks) {
+    if let Some(date) = &headway_date {
         println!(
-            "{} {} ({}): {} stops, {}",
+            "Headways: trips leaving between {}:00 and {}:00 on {date}",
+            HEADWAY_HOURS.0, HEADWAY_HOURS.1
+        );
+    }
+    for (line, look) in transit.iter().zip(&looks) {
+        let every = line
+            .headway
+            .map(|m| format!(", every {} min", m.round().max(1.0)))
+            .unwrap_or_default();
+        println!(
+            "{} {} ({}): {} stops{every}, {}",
             line.mode.key(),
             line.reference,
             look.color,
