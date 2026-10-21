@@ -13,6 +13,11 @@
 //! can be asked about in the abstract, Mapper's own command line renderer is
 //! the ground truth a whole suite of maps is scored against, image by image.
 //!
+//! It also goes the other way, from the world to a map: [`osm`] reads
+//! OpenStreetMap data, [`osm_style`] says what each feature looks like on
+//! openstreetmap.org's own map, and [`osm_convert`] makes a whole Mapper map
+//! out of the two.
+//!
 //! # Drawing a map
 //!
 //! [`render::render_map`] is the entire pipeline in one call — read the file,
@@ -60,6 +65,9 @@ pub mod differences;
 pub mod geometry;
 pub mod map;
 pub mod naming;
+pub mod osm;
+pub mod osm_convert;
+pub mod osm_style;
 pub mod progress;
 pub mod qbezier;
 pub mod render;

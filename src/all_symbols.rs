@@ -1046,6 +1046,7 @@ fn write_symbol(
         symbols: &symbols,
         objects: &sheet.objects,
         rotatable: reference.is_rotatable,
+        georeferencing: None,
     };
     file.write(&into.join(format!("{name}.omap")))?;
 

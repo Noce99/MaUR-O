@@ -25,6 +25,7 @@ disagree on.
   - [`map_to_image`](#map_to_image)
   - [`create_benchmark`](#create_benchmark)
   - [`benchmark`](#benchmark)
+  - [`osm_to_omap`](#osm_to_omap)
 - [Implementation Details](#implementation-details)
 - [Known Limitations](#known-limitations)
 
@@ -215,6 +216,39 @@ the top, so this is where to look first. For what each column means, see
 
 ![Expected, predicted and diff crop from a real map, showing antialiasing in orange and a real error in red](mds/assets/real_error.png)
 *A crop from `differences/` on a real map: expected (left), predicted (middle), and the diff (right), where orange is just antialiasing — not a bug — and the red cluster is a real error, a pixel one renderer drew and the other did not.*
+
+### `osm_to_omap`
+
+Converts OpenStreetMap data into a Mapper map that looks like
+[openstreetmap.org](https://www.openstreetmap.org)'s Standard map at zoom 16:
+the symbol set (colours, road casings, path dashes, landcover, buildings,
+water, railways, barriers, trees) is transcribed from
+[openstreetmap-carto](https://github.com/gravitystorm/openstreetmap-carto),
+one carto pixel being 0.28 mm on the paper. Labels and POI icons are not
+drawn.
+
+```
+osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] <osm-file> [omap-file]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `<osm-file>` | OpenStreetMap XML, as the openstreetmap.org export, Overpass or `osmium` write it. |
+| `[omap-file]` | Output map. Defaults to the input name with `.omap`. |
+| `--bbox` | Only convert this area, in degrees. Without it the whole extract is converted. |
+
+The map is georeferenced in the UTM zone of its centre, turned so that true
+north is up, at the scale where one zoom-16 pixel is 0.28 mm (about 1:6100 at
+Bologna's latitude). The tool prints the `map_to_image -r` resolution at which
+a rendering matches openstreetmap.org's own tiles pixel for pixel:
+
+```bash
+osm_to_omap --bbox 11.3304,44.4848,11.3556,44.5028 bologna.osm piazza_maggiore.omap
+map_to_image -r 0.5869 -f 0 piazza_maggiore.omap
+```
+
+Exit codes: `0` success, `1` a usage error, `2` the OSM file could not be
+read or held nothing to convert, `4` the map could not be written.
 
 ## Implementation Details
 

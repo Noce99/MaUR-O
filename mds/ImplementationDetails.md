@@ -50,10 +50,14 @@ One file per concern, plus a few modules only the benchmarking tools need:
 | `progress.rs` | The `tqdm`-style progress bar the long stages draw, and the colour their headings use. Falls back to plain lines when the output is not a terminal. |
 | `report.rs` | Word wrapping for the plain text files a run writes, which are read in whatever opens a `.txt` and so arrive already folded. |
 | `bin/map_to_image.rs` | The CLI for rendering a single map. |
+| `osm.rs` | Reads OpenStreetMap XML (`.osm`): nodes, ways, relations, tags; joins multipolygon rings split over several ways. |
+| `osm_style.rs` | The openstreetmap-carto look at zoom 16 as a Mapper symbol set — the colour table in carto's layer order, road casings and fills, path dashes, landcover — and the rules picking a symbol from a feature's tags. |
+| `osm_convert.rs` | Projects OpenStreetMap data into UTM turned to true north, clips it to a bounding box, and writes the map with `osm_style`'s symbols. |
+| `bin/osm_to_omap.rs` | The CLI for converting an `.osm` file into an `.omap`. |
 | `bin/benchmark.rs` | Runs a whole benchmark suite out of a zip archive, see [Running a benchmark archive](#running-a-benchmark-archive). |
 | `bin/create_benchmark.rs` | Builds such an archive: collects the maps, has a ground-truth renderer draw the reference images, and names everything the way `benchmark` expects. See [Making a benchmark archive](#making-a-benchmark-archive). |
 | `all_symbols.rs` | Makes one map per symbol of a symbol set, each carrying a grid of test objects. The suites this project measures itself on are built out of these, and it *uses* the renderer: a cell of the grid is as wide as what its object draws, so laying the grid out means building every object's renderables to measure them. |
-| `xml_writer.rs` | Writes a map file, for `all_symbols` — the only maps this project writes are ones it has just generated. The colours and symbols go out as the source file's own bytes rather than as anything this project reassembles, so nothing a symbol holds and the renderer ignores can be lost on the way. |
+| `xml_writer.rs` | Writes a map file — the only maps this project writes are ones it has just generated. For `all_symbols` the colours and symbols go out as the source file's own bytes rather than as anything this project reassembles, so nothing a symbol holds and the renderer ignores can be lost on the way. For `osm_convert`, which has no source file, `color_element`, `symbol_element` and `georeferencing_element` write them from the `map.rs` model. |
 
 ## One map per symbol
 

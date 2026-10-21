@@ -2,11 +2,16 @@
 //!
 //! The counterpart of [`crate::xml_reader`], and a much smaller thing than
 //! it: this project renders maps rather than edits them, so the only maps it
-//! ever writes are ones it has just generated — a grid of test objects for
-//! one symbol of an existing map, see [`crate::all_symbols`]. So the colours
-//! and the symbols go out as the source file's own bytes (see
-//! [`Fragments`](crate::xml_reader::Fragments)), and only the objects, which
-//! are new, are actually written here.
+//! ever writes are ones it has just generated. There are two kinds. A grid of
+//! test objects for one symbol of an existing map (see
+//! [`crate::all_symbols`]) keeps the colours and the symbols as the source
+//! file's own bytes (see [`Fragments`](crate::xml_reader::Fragments)), and
+//! only the objects, which are new, are actually written here. A map built
+//! from nothing — [`crate::osm_convert`] makes one out of OpenStreetMap data —
+//! has no source file to copy from, so [`color_element`] and
+//! [`symbol_element`] write its colours and symbols out of the [`crate::map`]
+//! model itself, and [`georeferencing_element`] says where on the earth it
+//! sits.
 //!
 //! The document around them is the one Mapper writes: same element order,
 //! same `barrier`, same defaults. That is what makes a generated map usable
@@ -17,7 +22,9 @@
 use std::io::Write;
 use std::path::Path;
 
-use crate::map::{Coord, Object, ObjectKind};
+use crate::map::{
+    Border, Color, Coord, FillPattern, LineSymbol, Object, ObjectKind, PointSymbol, Symbol,
+};
 use crate::xml_reader::Fragment;
 
 /// The format version this writer produces, as Mapper labels it.
@@ -217,6 +224,356 @@ fn write_coord(out: &mut String, coord: &Coord) {
     out.push(';');
 }
 
+/// A length in native units, as an attribute: the integer the file holds.
+fn length(mm: f64) -> i64 {
+    native(mm)
+}
+
+/// One `<color>` element, as Mapper writes a colour defined by its RGB
+/// values: the CMYK on the element is derived from them (`method="rgb"`),
+/// and no spot colour separations are given.
+pub fn color_element(priority: usize, color: &Color) -> String {
+    let (r, g, b) = color.rgb;
+    let (c, m, y, k) = rgb_to_cmyk(color.rgb);
+    format!(
+        "<color priority=\"{priority}\" name=\"{}\" c=\"{}\" m=\"{}\" y=\"{}\" k=\"{}\" opacity=\"{}\">\
+         <spotcolors/><cmyk method=\"rgb\"/>\
+         <rgb method=\"custom\" r=\"{}\" g=\"{}\" b=\"{}\"/></color>",
+        escape(&color.name),
+        qt_number(c, 3),
+        qt_number(m, 3),
+        qt_number(y, 3),
+        qt_number(k, 3),
+        number(color.opacity),
+        number(f64::from(r)),
+        number(f64::from(g)),
+        number(f64::from(b)),
+    )
+}
+
+/// The inks of an RGB colour, black taken as far as it will go: what Mapper
+/// derives a colour's CMYK from when it is defined by RGB.
+fn rgb_to_cmyk((r, g, b): (f32, f32, f32)) -> (f64, f64, f64, f64) {
+    let (r, g, b) = (f64::from(r), f64::from(g), f64::from(b));
+    let k = 1.0 - r.max(g).max(b);
+    if k >= 1.0 {
+        return (0.0, 0.0, 0.0, 1.0);
+    }
+    let inv = 1.0 - k;
+    (
+        (1.0 - r / inv).clamp(0.0, 1.0),
+        (1.0 - g / inv).clamp(0.0, 1.0),
+        (1.0 - b / inv).clamp(0.0, 1.0),
+        k,
+    )
+}
+
+/// A symbol's name and code, whichever kind it is.
+fn name_and_code(symbol: &Symbol) -> (&str, &str) {
+    match symbol {
+        Symbol::Point(s) => (&s.name, &s.code),
+        Symbol::Line(s) => (&s.name, &s.code),
+        Symbol::Area(s) => (&s.name, &s.code),
+        Symbol::Text(s) => (&s.name, &s.code),
+        Symbol::Combined(s) => (&s.name, &s.code),
+    }
+}
+
+/// One `<symbol>` element of the symbol table, with the file id objects and
+/// combined symbols refer to it by.
+///
+/// Writes what [`crate::map`] holds of a symbol, which is what the renderer
+/// reads: enough to draw it the same way after reading it back, not every
+/// setting Mapper's own editor keeps. A combined symbol's private parts are
+/// written inside it, its shared ones by id.
+pub fn symbol_element(id: i32, symbol: &Symbol) -> String {
+    let mut out = String::new();
+    write_symbol(&mut out, Some(id), symbol);
+    out
+}
+
+/// A symbol, with an id where it is in the symbol table and without one
+/// where it is nested inside another (an element, a mid symbol, a pattern).
+fn write_symbol(out: &mut String, id: Option<i32>, symbol: &Symbol) {
+    let kind = match symbol {
+        Symbol::Point(_) => crate::map::symbol_type::POINT,
+        Symbol::Line(_) => crate::map::symbol_type::LINE,
+        Symbol::Area(_) => crate::map::symbol_type::AREA,
+        Symbol::Text(_) => crate::map::symbol_type::TEXT,
+        Symbol::Combined(_) => crate::map::symbol_type::COMBINED,
+    };
+    out.push_str(&format!("<symbol type=\"{kind}\""));
+    if let Some(id) = id {
+        out.push_str(&format!(" id=\"{id}\""));
+    }
+    let (name, code) = name_and_code(symbol);
+    out.push_str(&format!(
+        " code=\"{}\" name=\"{}\"",
+        escape(code),
+        escape(name)
+    ));
+    if symbol.is_hidden() {
+        out.push_str(" is_hidden=\"true\"");
+    }
+    if symbol.is_helper_symbol() {
+        out.push_str(" is_helper_symbol=\"true\"");
+    }
+    out.push('>');
+
+    match symbol {
+        Symbol::Point(point) => write_point_symbol(out, point),
+        Symbol::Line(line) => write_line_symbol(out, line),
+        Symbol::Area(area) => {
+            out.push_str(&format!(
+                "<area_symbol inner_color=\"{}\" min_area=\"{}\"{} patterns=\"{}\">",
+                area.color,
+                area.minimum_area,
+                if area.is_rotatable {
+                    " rotatable=\"true\""
+                } else {
+                    ""
+                },
+                area.patterns.len()
+            ));
+            for pattern in &area.patterns {
+                write_fill_pattern(out, pattern);
+            }
+            out.push_str("</area_symbol>");
+        }
+        Symbol::Text(text) => {
+            out.push_str(&format!(
+                "<text_symbol rotatable=\"{}\"><font family=\"{}\" size=\"{}\"{}{}{}/>",
+                text.is_rotatable,
+                escape(&text.font_family),
+                length(text.font_size),
+                if text.bold { " bold=\"true\"" } else { "" },
+                if text.italic { " italic=\"true\"" } else { "" },
+                if text.underline {
+                    " underline=\"true\""
+                } else {
+                    ""
+                },
+            ));
+            out.push_str(&format!(
+                "<text color=\"{}\" line_spacing=\"{}\" paragraph_spacing=\"{}\" character_spacing=\"{}\" kerning=\"{}\"/>",
+                text.color,
+                number(text.line_spacing),
+                length(text.paragraph_spacing),
+                number(text.character_spacing),
+                text.kerning
+            ));
+            if text.framing {
+                out.push_str(&format!(
+                    "<framing color=\"{}\" mode=\"{}\" line_half_width=\"{}\" shadow_x_offset=\"{}\" shadow_y_offset=\"{}\"/>",
+                    text.framing_color,
+                    text.framing_mode,
+                    length(text.framing_line_half_width),
+                    length(text.framing_shadow_x_offset),
+                    length(text.framing_shadow_y_offset)
+                ));
+            }
+            if text.line_below {
+                out.push_str(&format!(
+                    "<line_below color=\"{}\" width=\"{}\" distance=\"{}\"/>",
+                    text.line_below_color,
+                    length(text.line_below_width),
+                    length(text.line_below_distance)
+                ));
+            }
+            out.push_str("</text_symbol>");
+        }
+        Symbol::Combined(combined) => {
+            out.push_str(&format!(
+                "<combined_symbol parts=\"{}\">",
+                combined.part_ids.len()
+            ));
+            let mut private = combined.owned_parts.iter();
+            for &part_id in &combined.part_ids {
+                if part_id >= 0 {
+                    out.push_str(&format!("<part symbol=\"{part_id}\"/>"));
+                } else if let Some(part) = private.next() {
+                    out.push_str("<part private=\"true\">");
+                    write_symbol(out, None, part);
+                    out.push_str("</part>");
+                }
+            }
+            out.push_str("</combined_symbol>");
+        }
+    }
+    out.push_str("</symbol>");
+}
+
+fn write_point_symbol(out: &mut String, point: &PointSymbol) {
+    out.push_str(&format!(
+        "<point_symbol{} inner_radius=\"{}\" inner_color=\"{}\" outer_width=\"{}\" outer_color=\"{}\" elements=\"{}\">",
+        if point.is_rotatable { " rotatable=\"true\"" } else { "" },
+        length(point.inner_radius),
+        point.inner_color,
+        length(point.outer_width),
+        point.outer_color,
+        point.elements.len()
+    ));
+    for element in &point.elements {
+        out.push_str("<element>");
+        write_symbol(out, None, &element.symbol);
+        write_object(out, &element.object, false);
+        out.push_str("</element>");
+    }
+    out.push_str("</point_symbol>");
+}
+
+fn write_line_symbol(out: &mut String, line: &LineSymbol) {
+    out.push_str(&format!(
+        "<line_symbol color=\"{}\" line_width=\"{}\" minimum_length=\"{}\" join_style=\"{}\" cap_style=\"{}\" start_offset=\"{}\" end_offset=\"{}\"",
+        line.color,
+        length(line.line_width),
+        length(line.minimum_length),
+        line.join_style,
+        line.cap_style,
+        length(line.start_offset),
+        length(line.end_offset),
+    ));
+    if line.dashed {
+        out.push_str(" dashed=\"true\"");
+    }
+    out.push_str(&format!(
+        " segment_length=\"{}\" end_length=\"{}\" show_at_least_one_symbol=\"{}\" dash_length=\"{}\" break_length=\"{}\" dashes_in_group=\"{}\" in_group_break_length=\"{}\" mid_symbols_per_spot=\"{}\" mid_symbol_distance=\"{}\" mid_symbol_placement=\"{}\"",
+        length(line.segment_length),
+        length(line.end_length),
+        line.show_at_least_one_symbol,
+        length(line.dash_length),
+        length(line.break_length),
+        line.dashes_in_group,
+        length(line.in_group_break_length),
+        line.mid_symbols_per_spot,
+        length(line.mid_symbol_distance),
+        line.mid_symbol_placement,
+    ));
+    if line.half_outer_dashes {
+        out.push_str(" half_outer_dashes=\"true\"");
+    }
+    if line.suppress_dash_symbol_at_ends {
+        out.push_str(" suppress_dash_symbol_at_ends=\"true\"");
+    }
+    if !line.scale_dash_symbol {
+        out.push_str(" scale_dash_symbol=\"false\"");
+    }
+    out.push('>');
+
+    for (name, nested) in [
+        ("start_symbol", &line.start_symbol),
+        ("mid_symbol", &line.mid_symbol),
+        ("end_symbol", &line.end_symbol),
+        ("dash_symbol", &line.dash_symbol),
+    ] {
+        if let Some(point) = nested {
+            out.push_str(&format!("<{name}><symbol type=\"1\" code=\"\">"));
+            write_point_symbol(out, point);
+            out.push_str(&format!("</symbol></{name}>"));
+        }
+    }
+
+    if line.border.is_visible() || line.right_border.is_visible() {
+        out.push_str("<borders>");
+        write_border(out, &line.border);
+        write_border(out, &line.right_border);
+        out.push_str("</borders>");
+    }
+    out.push_str("</line_symbol>");
+}
+
+fn write_border(out: &mut String, border: &Border) {
+    out.push_str(&format!(
+        "<border color=\"{}\" width=\"{}\" shift=\"{}\"",
+        border.color,
+        length(border.width),
+        length(border.shift)
+    ));
+    if border.dashed {
+        out.push_str(&format!(
+            " dashed=\"true\" dash_length=\"{}\" break_length=\"{}\"",
+            length(border.dash_length),
+            length(border.break_length)
+        ));
+    }
+    out.push_str("/>");
+}
+
+fn write_fill_pattern(out: &mut String, pattern: &FillPattern) {
+    out.push_str(&format!(
+        "<pattern type=\"{}\" angle=\"{}\" no_clipping=\"{}\"{} line_spacing=\"{}\" line_offset=\"{}\" offset_along_line=\"{}\"",
+        pattern.pattern_type,
+        number(pattern.angle),
+        pattern.no_clipping,
+        if pattern.rotatable { " rotatable=\"true\"" } else { "" },
+        length(pattern.line_spacing),
+        length(pattern.line_offset),
+        length(pattern.offset_along_line),
+    ));
+    if pattern.pattern_type == crate::map::fill_pattern_type::POINT {
+        out.push_str(&format!(
+            " point_distance=\"{}\">",
+            length(pattern.point_distance)
+        ));
+        if let Some(point) = &pattern.point {
+            out.push_str("<symbol type=\"1\" code=\"\">");
+            write_point_symbol(out, point);
+            out.push_str("</symbol>");
+        }
+    } else {
+        out.push_str(&format!(
+            " color=\"{}\" line_width=\"{}\">",
+            pattern.line_color,
+            length(pattern.line_width)
+        ));
+    }
+    out.push_str("</pattern>");
+}
+
+/// Where a map sits on the earth: what [`georeferencing_element`] writes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Georeference {
+    /// The map scale: 6085 for a 1:6085 map.
+    pub scale: i32,
+    /// The EPSG code of the projected CRS.
+    pub epsg: i32,
+    /// The point at the map's own origin, as `(easting, northing)` in the
+    /// projected CRS.
+    pub ref_point: (f64, f64),
+    /// The same point, as `(lat, lon)` in degrees, which Mapper keeps
+    /// alongside so a map can be placed again without a projection library.
+    pub ref_lat_lon: (f64, f64),
+    /// The angle between grid north and map north, in degrees.
+    pub grivation: f64,
+    /// The angle between true north and magnetic north, in degrees.
+    pub declination: f64,
+    /// The projection's own scale at the reference point.
+    pub grid_scale_factor: f64,
+}
+
+/// The `<georeferencing>` element of a map placed in a projected CRS named
+/// by its EPSG code, as Mapper writes one.
+pub fn georeferencing_element(georef: &Georeference) -> String {
+    format!(
+        "<georeferencing scale=\"{}\" grid_scale_factor=\"{}\" auxiliary_scale_factor=\"1\" declination=\"{}\" grivation=\"{}\">\
+         <ref_point x=\"0\" y=\"0\"/>\
+         <projected_crs id=\"EPSG\"><spec language=\"PROJ.4\">+init=epsg:{}</spec><parameter>{}</parameter>\
+         <ref_point x=\"{:.6}\" y=\"{:.6}\"/></projected_crs>\
+         <geographic_crs id=\"Geographic coordinates\"><spec language=\"PROJ.4\">+proj=latlong +datum=WGS84</spec>\
+         <ref_point_deg lat=\"{:.8}\" lon=\"{:.8}\"/></geographic_crs></georeferencing>",
+        georef.scale,
+        number(georef.grid_scale_factor),
+        qt_number(georef.declination, 4),
+        qt_number(georef.grivation, 4),
+        georef.epsg,
+        georef.epsg,
+        georef.ref_point.0,
+        georef.ref_point.1,
+        georef.ref_lat_lon.0,
+        georef.ref_lat_lon.1,
+    )
+}
+
 /// A map file to be written: what it holds, and what its objects are drawn
 /// with.
 pub struct MapFile<'a> {
@@ -235,6 +592,10 @@ pub struct MapFile<'a> {
     /// Whether an object's rotation is worth writing down, i.e. whether the
     /// symbol it is drawn with is rotatable.
     pub rotatable: bool,
+    /// The `<georeferencing>` element, as [`georeferencing_element`] writes
+    /// one, or `None` for a map placed on no ground at all: local
+    /// coordinates, at the scale above.
+    pub georeferencing: Option<String>,
 }
 
 impl MapFile<'_> {
@@ -246,10 +607,16 @@ impl MapFile<'_> {
             "<map xmlns=\"http://openorienteering.org/apps/mapper/xml/v2\" version=\"{FORMAT_VERSION}\">\n"
         ));
         out.push_str("<notes></notes>\n");
-        out.push_str(&format!(
-            "<georeferencing scale=\"{}\"><projected_crs id=\"Local\"/></georeferencing>\n",
-            self.scale_denominator
-        ));
+        match &self.georeferencing {
+            Some(element) => {
+                out.push_str(element);
+                out.push('\n');
+            }
+            None => out.push_str(&format!(
+                "<georeferencing scale=\"{}\"><projected_crs id=\"Local\"/></georeferencing>\n",
+                self.scale_denominator
+            )),
+        }
 
         out.push_str(&format!("<colors count=\"{}\">\n", self.colors.len()));
         for color in self.colors {
@@ -413,6 +780,144 @@ mod tests {
             out.contains("<text>a &lt; b &amp; &quot;c&quot;</text>"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn written_colours_and_symbols_read_back_the_same() {
+        use crate::map::{
+            fill_pattern_type, AreaSymbol, CombinedSymbol, LineSymbol, PartRef, PointSymbol,
+        };
+        let color = Color {
+            name: "Road & casing".to_string(),
+            rgb: (1.0, 0.5, 0.25),
+            opacity: 0.4,
+        };
+        let line = LineSymbol {
+            name: "dashed".to_string(),
+            color: 0,
+            line_width: 0.364,
+            cap_style: crate::map::cap_style::ROUND,
+            join_style: crate::map::join_style::ROUND,
+            dashed: true,
+            dash_length: 0.84,
+            break_length: 0.98,
+            border: Border {
+                color: 0,
+                width: 0.1,
+                shift: 0.05,
+                ..Border::default()
+            },
+            right_border: Border {
+                color: 0,
+                width: 0.1,
+                shift: 0.05,
+                ..Border::default()
+            },
+            ..LineSymbol::default()
+        };
+        let mut area = AreaSymbol {
+            name: "hatched".to_string(),
+            color: 0,
+            ..AreaSymbol::new()
+        };
+        area.patterns.push(FillPattern {
+            pattern_type: fill_pattern_type::LINE,
+            angle: std::f64::consts::FRAC_PI_4,
+            line_spacing: 1.584,
+            line_color: 0,
+            line_width: 0.198,
+            ..FillPattern::default()
+        });
+        let point = PointSymbol {
+            name: "dot".to_string(),
+            inner_radius: 0.35,
+            inner_color: 0,
+            ..PointSymbol::new()
+        };
+        let combined = Symbol::Combined(CombinedSymbol {
+            name: "road".to_string(),
+            part_ids: vec![-1, 1],
+            owned_parts: vec![Symbol::Line(line)],
+            ..CombinedSymbol::default()
+        });
+
+        let mut xml = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <map xmlns=\"http://openorienteering.org/apps/mapper/xml/v2\" version=\"9\">\
+             <georeferencing scale=\"6085\"/><colors count=\"1\">",
+        );
+        xml.push_str(&color_element(0, &color));
+        xml.push_str("</colors><barrier version=\"6\" required=\"0.6.0\"><symbols count=\"4\">");
+        xml.push_str(&symbol_element(0, &combined));
+        xml.push_str(&symbol_element(1, &Symbol::Area(area)));
+        xml.push_str(&symbol_element(2, &Symbol::Point(point)));
+        xml.push_str("</symbols><parts count=\"0\"/></barrier></map>");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("written.omap");
+        std::fs::write(&path, xml).unwrap();
+        let (map, _) = crate::xml_reader::read_xml_map(&path).unwrap();
+
+        let read_color = &map.colors[0];
+        assert_eq!(read_color.name, "Road & casing");
+        assert_eq!(read_color.rgb, (1.0, 0.5, 0.25));
+        assert_eq!(read_color.opacity, 0.4);
+
+        let Symbol::Combined(read_combined) = &map.symbols[0] else {
+            panic!("not combined");
+        };
+        assert!(matches!(
+            read_combined.parts[..],
+            [PartRef::Private(0), PartRef::Shared(1)]
+        ));
+        let Symbol::Line(read_line) = &read_combined.owned_parts[0] else {
+            panic!("not a line");
+        };
+        assert!(read_line.dashed);
+        assert_eq!(read_line.line_width, 0.364);
+        assert_eq!(
+            (read_line.dash_length, read_line.break_length),
+            (0.84, 0.98)
+        );
+        assert_eq!(read_line.cap_style, crate::map::cap_style::ROUND);
+        assert!(read_line.border.is_visible() && read_line.right_border.is_visible());
+        assert_eq!(read_line.right_border.shift, 0.05);
+
+        let Symbol::Area(read_area) = &map.symbols[1] else {
+            panic!("not an area");
+        };
+        let pattern = &read_area.patterns[0];
+        assert_eq!(pattern.line_spacing, 1.584);
+        assert_eq!(pattern.line_width, 0.198);
+        assert!((pattern.angle - std::f64::consts::FRAC_PI_4).abs() < 1e-6);
+
+        let Symbol::Point(read_point) = &map.symbols[2] else {
+            panic!("not a point");
+        };
+        // Native units are integers: what comes back is 350 thousandths.
+        assert!((read_point.inner_radius - 0.35).abs() < 1e-12);
+        assert_eq!(read_point.inner_color, 0);
+    }
+
+    #[test]
+    fn a_georeferencing_element_names_its_crs_and_reference_point() {
+        let element = georeferencing_element(&Georeference {
+            scale: 6085,
+            epsg: 32632,
+            ref_point: (686_512.25, 4_929_301.5),
+            ref_lat_lon: (44.4938, 11.343),
+            grivation: -1.64,
+            declination: 0.0,
+            grid_scale_factor: 1.00002,
+        });
+        for expected in [
+            "scale=\"6085\"",
+            "declination=\"0\" grivation=\"-1.64\"",
+            "+init=epsg:32632</spec><parameter>32632</parameter>",
+            "<ref_point x=\"686512.250000\" y=\"4929301.500000\"/>",
+            "<ref_point_deg lat=\"44.49380000\" lon=\"11.34300000\"/>",
+        ] {
+            assert!(element.contains(expected), "{expected} not in {element}");
+        }
     }
 
     #[test]
