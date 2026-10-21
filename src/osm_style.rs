@@ -39,7 +39,7 @@ use std::collections::HashMap;
 
 use crate::map::{
     cap_style, fill_pattern_type, join_style, AreaSymbol, Color, CombinedSymbol, FillPattern,
-    LineSymbol, PointSymbol, Symbol,
+    LineSymbol, PointSymbol, Symbol, TextSymbol,
 };
 use crate::osm::Tags;
 
@@ -464,7 +464,7 @@ pub struct Style {
 /// Builds [`Style`]: the colour keys resolved to priorities, and each symbol
 /// given the next id.
 struct Builder {
-    color_index: HashMap<&'static str, i32>,
+    color_index: HashMap<String, i32>,
     style: Style,
 }
 
@@ -556,23 +556,67 @@ impl Builder {
 
 /// Carto's look at zoom 16, as a symbol set.
 pub fn carto_style() -> Style {
-    let colors: Vec<Color> = palette()
-        .into_iter()
+    carto_style_with_bus_lines(&[])
+}
+
+/// The colours bus lines are drawn in, one per line in the order they are
+/// asked for, starting over after the last. Strong enough to read over
+/// every carto colour, and far enough apart to tell neighbours apart.
+pub const BUS_COLORS: [&str; 10] = [
+    "#e6194b", "#4363d8", "#3cb44b", "#f58231", "#911eb4", "#00a0b0", "#f032e6", "#9a6324",
+    "#000075", "#808000",
+];
+
+/// A bus line, as far as its look goes: its number, and its colour as
+/// `#rrggbb`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BusLook {
+    /// The line number, e.g. `"13"` or `"T2"`.
+    pub reference: String,
+    /// The line's colour, `#rrggbb`.
+    pub color: String,
+}
+
+/// Carto's look at zoom 16, with bus lines drawn over everything.
+///
+/// Each line gets three symbols, keyed by its number: `bus <n>` for the
+/// route (a 3 px stroke in the line's colour), `bus <n> stop` for a stop (a
+/// white dot ringed in the line's colour) and `bus <n> label` for the number
+/// at either end (white bold text on a blob of the line's colour, like the
+/// badge on the bus itself). The lines' colours go on top of the table, the
+/// first line asked for on top of the others, and the white of the stops and
+/// labels above them all.
+pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
+    let mut entries: Vec<(String, String, f64)> = Vec::new();
+    if !lines.is_empty() {
+        entries.push(("bus label".to_string(), "#ffffff".to_string(), 1.0));
+        entries.push(("bus stop".to_string(), "#ffffff".to_string(), 1.0));
+    }
+    for line in lines {
+        entries.push((format!("bus {}", line.reference), line.color.clone(), 1.0));
+    }
+    entries.extend(
+        palette()
+            .into_iter()
+            .map(|(key, hex, opacity)| (key.to_string(), hex, opacity)),
+    );
+
+    let colors: Vec<Color> = entries
+        .iter()
         .map(|(key, hex, opacity)| {
-            let (r, g, b) = rgb(&hex);
-            let rgb = (r as f32, g as f32, b as f32);
+            let (r, g, b) = rgb(hex);
             Color {
-                name: key.to_string(),
-                rgb,
-                opacity,
+                name: key.clone(),
+                rgb: (r as f32, g as f32, b as f32),
+                opacity: *opacity,
             }
         })
         .collect();
     let mut b = Builder {
-        color_index: palette()
+        color_index: entries
             .iter()
             .enumerate()
-            .map(|(i, (key, _, _))| (*key, i as i32))
+            .map(|(i, (key, _, _))| (key.clone(), i as i32))
             .collect(),
         style: Style {
             colors,
@@ -781,6 +825,35 @@ pub fn carto_style() -> Style {
         ..PointSymbol::new()
     };
     b.add("tree", Symbol::Point(tree));
+
+    // Bus lines: the route, the stops and the number at either end.
+    for line in lines {
+        let key = format!("bus {}", line.reference);
+        let route = b.stroke(&key, 3.0, true);
+        b.line(&key, vec![route]);
+        let stop = PointSymbol {
+            name: format!("{key} stop"),
+            inner_radius: px(2.4),
+            inner_color: b.color("bus stop"),
+            outer_width: px(1.4),
+            outer_color: b.color(&key),
+            ..PointSymbol::new()
+        };
+        b.add(&format!("{key} stop"), Symbol::Point(stop));
+        let label = TextSymbol {
+            name: format!("{key} label"),
+            font_family: "Noto Sans".to_string(),
+            font_size: px(13.0),
+            bold: true,
+            color: b.color("bus label"),
+            framing: true,
+            framing_color: b.color(&key),
+            framing_mode: 1,
+            framing_line_half_width: px(2.8),
+            ..TextSymbol::default()
+        };
+        b.add(&format!("{key} label"), Symbol::Text(label));
+    }
 
     for (id, symbol) in &mut b.style.symbols {
         set_code(symbol, &(*id + 1).to_string());

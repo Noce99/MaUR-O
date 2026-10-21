@@ -115,3 +115,91 @@ fn a_malformed_bounding_box_is_a_usage_error() {
         .assert()
         .code(1);
 }
+
+/// The symbol name of each object of a map, in order.
+fn symbol_names(map: &maur_o::map::Map) -> Vec<String> {
+    map.objects
+        .iter()
+        .map(|o| match &map.symbols[o.symbol_index.unwrap()] {
+            Symbol::Point(s) => s.name.clone(),
+            Symbol::Line(s) => s.name.clone(),
+            Symbol::Area(s) => s.name.clone(),
+            Symbol::Text(s) => s.name.clone(),
+            Symbol::Combined(s) => s.name.clone(),
+        })
+        .collect()
+}
+
+#[test]
+fn a_bus_line_from_the_route_relations_gets_its_route_stops_and_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("bus.omap");
+    osm_to_omap()
+        .args([BBOX, "--bus", "13,99", SAMPLE])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "bus 13 (#e6194b): 1 stops, 13 : West -> East",
+        ))
+        .stderr(predicates::str::contains("no bus line 99 found"));
+
+    let (map, _) = read_xml_map(&out).unwrap();
+    let names = symbol_names(&map);
+    let count = |name: &str| names.iter().filter(|n| *n == name).count();
+    assert_eq!(count("bus 13"), 1);
+    assert_eq!(count("bus 13 stop"), 1);
+    assert_eq!(count("bus 13 label"), 2, "one number at each end");
+    let label = map
+        .objects
+        .iter()
+        .find_map(|o| match &o.kind {
+            ObjectKind::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(label, "13");
+}
+
+#[test]
+fn a_bus_line_from_a_gtfs_feed() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("gtfs.omap");
+    osm_to_omap()
+        .args([
+            BBOX,
+            "--bus",
+            "13",
+            "--gtfs",
+            "tests/data/gtfs_sample",
+            SAMPLE,
+        ])
+        .arg(&out)
+        .assert()
+        .success()
+        // Its own two stops and the one of the way back.
+        .stdout(predicates::str::contains(
+            "bus 13 (#e6194b): 3 stops, West, East",
+        ));
+
+    let (map, _) = read_xml_map(&out).unwrap();
+    let names = symbol_names(&map);
+    assert_eq!(names.iter().filter(|n| *n == "bus 13 stop").count(), 3);
+    assert_eq!(names.iter().filter(|n| *n == "bus 13 label").count(), 2);
+}
+
+#[test]
+fn a_missing_gtfs_feed_exits_with_2() {
+    osm_to_omap()
+        .args([
+            BBOX,
+            "--bus",
+            "13",
+            "--gtfs",
+            "tests/data/no_such_feed.zip",
+            SAMPLE,
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("cannot open"));
+}

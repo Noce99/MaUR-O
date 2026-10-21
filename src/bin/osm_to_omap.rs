@@ -2,7 +2,8 @@
 //! like openstreetmap.org's own Standard map at zoom 16.
 //!
 //! ```text
-//! osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] <osm-file> [omap-file]
+//! osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...]
+//!             [--gtfs feed.zip] <osm-file> [omap-file]
 //! ```
 //!
 //! The input is an `.osm` XML file, as openstreetmap.org's export, the
@@ -18,17 +19,25 @@
 //! `map_to_image` for a rendering that matches openstreetmap.org's tiles
 //! pixel for pixel.
 //!
-//! Exit codes: 0 success, 1 usage error, 2 the OSM file could not be read or
-//! held nothing to convert, 4 the map could not be written.
+//! `--bus` draws bus lines over the map, each in its own colour: its route,
+//! its stops as circles and its number at both ends. They come from the
+//! extract's own route relations, or with `--gtfs` from a GTFS feed (its
+//! `.zip`, or the folder it is unpacked into). A line neither has is
+//! reported and left out.
+//!
+//! Exit codes: 0 success, 1 usage error, 2 the OSM file or the GTFS feed
+//! could not be read, or held nothing to convert, 4 the map could not be
+//! written.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
 
+use maur_o::bus::{lines_from_gtfs, lines_from_osm};
 use maur_o::osm::{read_osm, BBox};
 use maur_o::osm_convert::convert;
-use maur_o::osm_style::carto_style;
+use maur_o::osm_style::{carto_style_with_bus_lines, BusLook, BUS_COLORS};
 
 #[derive(Parser)]
 #[command(
@@ -47,6 +56,15 @@ struct Args {
     /// Only convert this area: min_lon,min_lat,max_lon,max_lat in degrees.
     #[arg(long, value_parser = BBox::parse, allow_hyphen_values = true)]
     bbox: Option<BBox>,
+
+    /// Draw these bus lines, by number: e.g. 13,19,27.
+    #[arg(long, value_delimiter = ',')]
+    bus: Vec<String>,
+
+    /// Take the bus lines from this GTFS feed (.zip or unpacked folder)
+    /// rather than from the OSM file's route relations.
+    #[arg(long, requires = "bus")]
+    gtfs: Option<PathBuf>,
 }
 
 fn run() -> Result<(), (ExitCode, String)> {
@@ -66,9 +84,35 @@ fn run() -> Result<(), (ExitCode, String)> {
         .unwrap_or_else(|| args.osm_file.with_extension("omap"));
 
     let data = read_osm(&args.osm_file).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
-    let style = carto_style();
-    let conversion = convert(&data, &style, args.bbox)
+    let references: Vec<String> = args
+        .bus
+        .iter()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .collect();
+    let bus_lines = match &args.gtfs {
+        Some(feed) => lines_from_gtfs(feed, &references)
+            .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?,
+        None => lines_from_osm(&data, &references),
+    };
+    for reference in &references {
+        if !bus_lines.iter().any(|l| &l.reference == reference) {
+            eprintln!("Warning: no bus line {reference} found, left out");
+        }
+    }
+    let looks: Vec<BusLook> = bus_lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| BusLook {
+            reference: line.reference.clone(),
+            color: BUS_COLORS[i % BUS_COLORS.len()].to_string(),
+        })
+        .collect();
+
+    let style = carto_style_with_bus_lines(&looks);
+    let mut conversion = convert(&data, &style, args.bbox)
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+    conversion.add_bus_lines(&style, &bus_lines);
     conversion
         .write(&style, &omap_file)
         .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
@@ -86,6 +130,15 @@ fn run() -> Result<(), (ExitCode, String)> {
         bbox.max_lat,
     );
     println!("{areas} areas, {lines} lines, {points} points");
+    for (line, look) in bus_lines.iter().zip(&looks) {
+        println!(
+            "bus {} ({}): {} stops, {}",
+            line.reference,
+            look.color,
+            line.stops.len(),
+            line.name
+        );
+    }
     println!(
         "To match openstreetmap.org's tiles: map_to_image -r {:.4} {}",
         conversion.tile_resolution(),

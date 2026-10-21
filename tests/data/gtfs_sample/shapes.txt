@@ -1,0 +1,5 @@
+shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence
+"sh","44.4931","11.3420","1"
+"sh","44.4931","11.3440","2"
+"sh_back","44.4932","11.3440","1"
+"sh_back","44.4932","11.3420","2"

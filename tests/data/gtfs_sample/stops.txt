@@ -1,0 +1,4 @@
+stop_id,stop_name,stop_lat,stop_lon
+"a","WEST","44.4931","11.3421"
+"b","EAST","44.4931","11.3439"
+"c","EAST BACK","44.4932","11.3439"

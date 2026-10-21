@@ -16,7 +16,8 @@
 //! It also goes the other way, from the world to a map: [`osm`] reads
 //! OpenStreetMap data, [`osm_style`] says what each feature looks like on
 //! openstreetmap.org's own map, and [`osm_convert`] makes a whole Mapper map
-//! out of the two.
+//! out of the two — with, where asked, bus lines over it, which [`bus`]
+//! reads from the same data or from a GTFS feed.
 //!
 //! # Drawing a map
 //!
@@ -61,6 +62,7 @@
 
 pub mod all_symbols;
 pub mod archive_info;
+pub mod bus;
 pub mod differences;
 pub mod geometry;
 pub mod map;

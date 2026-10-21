@@ -228,7 +228,7 @@ one carto pixel being 0.28 mm on the paper. Labels and POI icons are not
 drawn.
 
 ```
-osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] <osm-file> [omap-file]
+osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...] [--gtfs feed.zip] <osm-file> [omap-file]
 ```
 
 | Option | Meaning |
@@ -236,6 +236,15 @@ osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] <osm-file> [omap-file]
 | `<osm-file>` | OpenStreetMap XML, as the openstreetmap.org export, Overpass or `osmium` write it. |
 | `[omap-file]` | Output map. Defaults to the input name with `.omap`. |
 | `--bbox` | Only convert this area, in degrees. Without it the whole extract is converted. |
+| `--bus` | Draw these bus lines, by number (e.g. `13,19,27`): each in its own colour, its stops as circles, its number at both ends of the route. |
+| `--gtfs` | Take the bus lines from this GTFS feed (`.zip` or unpacked folder) instead of the OSM file's own route relations. |
+
+A bus line is drawn once: the route of its main variant (the OSM relation
+with the most members, or the GTFS shape most trips follow), with the stops
+of that variant and of its main variant in the other direction. For Bologna,
+TPER publishes its network as GTFS on its
+[open data portal](https://solweb.tper.it/web/tools/open-data/open-data.aspx)
+(`gommagtfsbo`, CC BY 3.0 IT: a map made from it has to credit TPER).
 
 The map is georeferenced in the UTM zone of its centre, turned so that true
 north is up, at the scale where one zoom-16 pixel is 0.28 mm (about 1:6100 at
@@ -247,8 +256,9 @@ osm_to_omap --bbox 11.3304,44.4848,11.3556,44.5028 bologna.osm piazza_maggiore.o
 map_to_image -r 0.5869 -f 0 piazza_maggiore.omap
 ```
 
-Exit codes: `0` success, `1` a usage error, `2` the OSM file could not be
-read or held nothing to convert, `4` the map could not be written.
+Exit codes: `0` success, `1` a usage error, `2` the OSM file or the GTFS
+feed could not be read, or held nothing to convert, `4` the map could not be
+written.
 
 ## Implementation Details
 

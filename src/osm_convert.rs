@@ -26,7 +26,8 @@
 
 use std::path::Path;
 
-use crate::map::{coord_flag, Coord, Object, ObjectKind, PathObject};
+use crate::bus::BusLine;
+use crate::map::{coord_flag, h_align, v_align, Coord, Object, ObjectKind, PathObject, TextObject};
 use crate::osm::{BBox, OsmData};
 use crate::osm_style::{Style, PIXEL_MM, ZOOM};
 use crate::xml_writer::{
@@ -312,6 +313,69 @@ impl Conversion {
     /// pixel.
     pub fn tile_resolution(&self) -> f64 {
         1000.0 / (f64::from(self.scale()) * PIXEL_MM)
+    }
+
+    /// Adds bus lines over the map: each line's route, its stops as circles,
+    /// and its number at either end of the route (once, for a circular line),
+    /// with the symbols `style` keys by the line number (see
+    /// [`carto_style_with_bus_lines`](crate::osm_style::carto_style_with_bus_lines)).
+    /// Everything is clipped to the map's area, like the rest of it; a
+    /// number goes only at an end which lies inside.
+    pub fn add_bus_lines(&mut self, style: &Style, lines: &[BusLine]) {
+        let bbox = self.bbox;
+        for line in lines {
+            let key = format!("bus {}", line.reference);
+            let (route, stop, label) = (
+                style.id(&key),
+                style.id(&format!("{key} stop")),
+                style.id(&format!("{key} label")),
+            );
+            for piece in &line.route {
+                for clipped in clip_polyline(piece, &bbox) {
+                    let coords = clipped
+                        .iter()
+                        .map(|&p| {
+                            let (x, y) = self.projection.to_paper(p);
+                            Coord::new(x, y, 0)
+                        })
+                        .collect();
+                    self.objects.push(path_object(route, coords));
+                    self.counts.1 += 1;
+                }
+            }
+            for &position in line.stops.iter().filter(|&&p| bbox.contains(p)) {
+                let (x, y) = self.projection.to_paper(position);
+                let mut object = Object::new(ObjectKind::Point);
+                object.symbol_id = stop;
+                object.coords = vec![Coord::new(x, y, 0)];
+                self.objects.push(object);
+                self.counts.2 += 1;
+            }
+            let Some((start, end)) = line.ends() else {
+                continue;
+            };
+            let (sx, sy) = self.projection.to_paper(start);
+            let (ex, ey) = self.projection.to_paper(end);
+            // Closer than a label is wide, the two ends are one terminus.
+            let ends = if (ex - sx).hypot(ey - sy) < 5.0 {
+                vec![start]
+            } else {
+                vec![start, end]
+            };
+            for position in ends.into_iter().filter(|&p| bbox.contains(p)) {
+                let (x, y) = self.projection.to_paper(position);
+                let mut object = Object::new(ObjectKind::Text(TextObject {
+                    text: line.reference.clone(),
+                    h_align: h_align::HCENTER,
+                    v_align: v_align::VCENTER,
+                    box_size: None,
+                }));
+                object.symbol_id = label;
+                object.coords = vec![Coord::new(x, y, 0)];
+                self.objects.push(object);
+                self.counts.2 += 1;
+            }
+        }
     }
 
     /// Writes the map, with `style`'s colours and symbols, as an `.omap`.
