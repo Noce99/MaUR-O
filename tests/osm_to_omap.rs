@@ -149,7 +149,10 @@ fn a_bus_line_from_the_route_relations_gets_its_route_stops_and_numbers() {
     let names = symbol_names(&map);
     let count = |name: &str| names.iter().filter(|n| *n == name).count();
     assert_eq!(count("bus 13"), 1);
-    assert_eq!(count("bus 13 stop"), 1);
+    // Its stop is on the street it runs along: a bar across it, not a
+    // circle.
+    assert_eq!(count("transit stop bar"), 1);
+    assert_eq!(count("bus 13 stop"), 0);
     assert_eq!(count("bus 13 label"), 2, "one number at each end");
     let label = map
         .objects
@@ -190,7 +193,10 @@ fn a_bus_line_from_a_gtfs_feed() {
 
     let (map, _) = read_xml_map(&out).unwrap();
     let names = symbol_names(&map);
-    assert_eq!(names.iter().filter(|n| *n == "bus 13 stop").count(), 3);
+    // Its own two stops are bars across the street; the one of the way
+    // back stands a few metres from the second, and is the same bar.
+    assert_eq!(names.iter().filter(|n| *n == "transit stop bar").count(), 2);
+    assert_eq!(names.iter().filter(|n| *n == "bus 13 stop").count(), 0);
     assert_eq!(names.iter().filter(|n| *n == "bus 13 label").count(), 2);
     // How often it runs, written once along the short stretch of it the
     // map shows.
@@ -393,4 +399,35 @@ fn a_cap_on_the_headway_leaves_out_the_buses_running_less_often() {
         .stderr(predicates::str::contains(
             "bus 13 has no known frequency, kept",
         ));
+}
+
+#[test]
+fn two_bus_lines_on_one_street_are_drawn_side_by_side_with_one_bar() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("bundle.omap");
+    osm_to_omap()
+        .args([BBOX, "--bus", "14,13", SAMPLE])
+        .arg(&out)
+        .assert()
+        .success();
+
+    let (map, _) = read_xml_map(&out).unwrap();
+    let names = symbol_names(&map);
+    let route = |name: &str| -> Vec<(f64, f64)> {
+        let i = names.iter().position(|n| n == name).unwrap();
+        map.objects[i].coords.iter().map(|c| (c.x, c.y)).collect()
+    };
+    let (thirteen, fourteen) = (route("bus 13"), route("bus 14"));
+    // A bus line is 3 carto pixels, 0.84 mm, wide: the two run that far
+    // apart, either side of the street, in the order of their numbers
+    // whichever order they were asked for in.
+    let middle = |r: &[(f64, f64)]| r[r.len() / 2];
+    let (a, b) = (middle(&thirteen), middle(&fourteen));
+    let apart = (a.0 - b.0).hypot(a.1 - b.1);
+    assert!((apart - 0.84).abs() < 0.05, "{apart} mm apart");
+    // The street runs east: 13, ranked first, on its left, the north, the
+    // paper's y pointing down.
+    assert!(a.1 < b.1, "13 at {a:?}, 14 at {b:?}");
+    // Their one stop is one bar across both.
+    assert_eq!(names.iter().filter(|n| *n == "transit stop bar").count(), 1);
 }

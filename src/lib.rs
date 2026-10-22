@@ -17,7 +17,8 @@
 //! OpenStreetMap data, [`osm_style`] says what each feature looks like on
 //! openstreetmap.org's own map, and [`osm_convert`] makes a whole Mapper map
 //! out of the two — with, where asked, bus and train lines over it, which
-//! [`bus`] reads from the same data or from a GTFS feed.
+//! [`bus`] reads from the same data or from a GTFS feed, and [`bundle`]
+//! lays out side by side where they share a street.
 //!
 //! # Drawing a map
 //!
@@ -62,6 +63,7 @@
 
 pub mod all_symbols;
 pub mod archive_info;
+pub mod bundle;
 pub mod bus;
 pub mod differences;
 pub mod geometry;

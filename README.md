@@ -241,7 +241,15 @@ osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...] [--gtfs f
 | `--max-headway` | Leave out the bus lines that run less often than once every this many minutes between 10:00 and 16:00 (the "ogni N min" on the map), and those from a GTFS feed with no trips then at all. E.g. `--bus all --max-headway 15` keeps the frequent urban network. |
 | `--date` | The day (`YYYYMMDD`) the GTFS headways are counted on. Defaults to the Wednesday the first feed runs the most services on — from `calendar.txt`, or from `calendar_dates.txt` for a feed that lists its days one by one. |
 | `--train` | Draw these train lines (also light rail, tram and monorail — e.g. `S1,S2A,MEX` for Bologna's suburban lines and the Marconi Express), from the OSM file's route relations: wider than a bus line, with larger stations, in the line's own colour where OSM gives one. |
+| `--bundle-width` | The widest a bundle of lines sharing a street may be, in carto pixels (0.28 mm each; default 12). Wider, and its lines are drawn thinner. |
 | `--legend` | Add a legend under the map (in Italian): a sample of every symbol the map actually uses with what it means, bus and train lines first with their names. |
+
+Lines sharing a street are drawn side by side on it, like on a transit map:
+every route is matched to OpenStreetMap's streets (or tracks, for trains),
+the lines on each stretch laid out across it in the order of their numbers,
+the band never wider than `--bundle-width`, and a stop drawn as one white
+bar across the whole band. A stop away from the route drawn (on the parallel
+street a one-way system sends the line back along) keeps a circle.
 
 Numbers of lines ending at the same terminus are stacked rather than drawn
 over one another. A line the edge of the map cuts gets its number there

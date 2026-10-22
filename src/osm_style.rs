@@ -37,6 +37,7 @@
 
 use std::collections::HashMap;
 
+use crate::bundle::WIDTH_FACTORS;
 use crate::bus::Mode;
 use crate::map::{
     cap_style, fill_pattern_type, join_style, AreaSymbol, Color, CombinedSymbol, FillPattern,
@@ -472,6 +473,8 @@ pub enum Sample {
     Point,
     /// A piece of text set in it.
     Text,
+    /// A short bar across, as a stop is drawn across a bundle.
+    Bar,
 }
 
 /// The symbol set and the rules for using it.
@@ -606,6 +609,16 @@ pub fn line_color(index: usize) -> String {
     }
 }
 
+/// How wide a bus or train line is drawn, in carto pixels, outside a bundle
+/// or in one narrow enough: thinner, by the factors of
+/// [`WIDTH_FACTORS`], in a bundle which would otherwise be too wide.
+pub fn line_width_px(mode: Mode) -> f64 {
+    match mode {
+        Mode::Bus => 3.0,
+        Mode::Train => 4.5,
+    }
+}
+
 /// A bus or train line, as far as its look goes: what kind of line, its
 /// number, and its colour as `#rrggbb`.
 #[derive(Clone, Debug, PartialEq)]
@@ -644,6 +657,7 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
     }
     if !lines.is_empty() {
         entries.push(("bus stop".to_string(), "#ffffff".to_string(), 1.0));
+        entries.push(("stop bar outline".to_string(), "#333333".to_string(), 1.0));
     }
     for line in lines {
         entries.push((
@@ -891,12 +905,19 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
     // Bus and train lines: the route, the stops and the number at either end.
     for line in lines {
         let key = format!("{} {}", line.mode.key(), line.reference);
-        let (width, stop_radius, ring) = match line.mode {
-            Mode::Bus => (3.0, 2.4, 1.4),
-            Mode::Train => (4.5, 3.2, 1.8),
+        let width = line_width_px(line.mode);
+        let (stop_radius, ring) = match line.mode {
+            Mode::Bus => (2.4, 1.4),
+            Mode::Train => (3.2, 1.8),
         };
         let route = b.stroke(&key, width, true);
         b.line(&key, vec![route]);
+        // Thinner, for a bundle too wide at the full width: `bus 13 w2` is
+        // the line at the third of the bundle widths.
+        for (class, factor) in WIDTH_FACTORS.iter().enumerate().skip(1) {
+            let thinner = b.stroke(&key, width * factor, true);
+            b.line(&format!("{key} w{class}"), vec![thinner]);
+        }
         let stop = PointSymbol {
             name: format!("{key} stop"),
             inner_radius: px(stop_radius),
@@ -935,6 +956,14 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
             ..TextSymbol::default()
         };
         b.add(&format!("{key} headway"), Symbol::Text(headway));
+    }
+
+    // A stop on a bundle: a white bar outlined in dark grey across it, with
+    // round ends, like a station on a transit map.
+    if !lines.is_empty() {
+        let outline = b.stroke("stop bar outline", 2.4, true);
+        let fill = b.stroke("bus stop", 1.6, true);
+        b.line("transit stop bar", vec![outline, fill]);
     }
 
     // The legend's title and captions.
@@ -1018,7 +1047,11 @@ impl Style {
         }
         for mode in ["bus", "train"] {
             if let Some(reference) = key.strip_prefix(mode).and_then(|k| k.strip_prefix(' ')) {
-                if reference.ends_with(" stop")
+                let thinner = reference
+                    .rsplit_once(" w")
+                    .is_some_and(|(_, class)| class.parse::<usize>().is_ok());
+                if thinner
+                    || reference.ends_with(" stop")
                     || reference.ends_with(" label")
                     || reference.ends_with(" headway")
                 {

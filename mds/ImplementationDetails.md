@@ -53,6 +53,7 @@ One file per concern, plus a few modules only the benchmarking tools need:
 | `osm.rs` | Reads OpenStreetMap XML (`.osm`): nodes, ways, relations, tags; joins multipolygon rings split over several ways. |
 | `osm_style.rs` | The openstreetmap-carto look at zoom 16 as a Mapper symbol set — the colour table in carto's layer order, road casings and fills, path dashes, landcover — and the rules picking a symbol from a feature's tags. |
 | `osm_convert.rs` | Projects OpenStreetMap data into UTM turned to true north, clips it to a bounding box, and writes the map with `osm_style`'s symbols. |
+| `bundle.rs` | Lines sharing a street laid out side by side: routes matched to the street and rail network, a fixed left-to-right order carried along each bundle, offsets smoothed where a bundle changes, the band capped in width, stops as one bar across it. Pure geometry on the paper, independent of OSM. |
 | `bus.rs` | Bus and train lines — route, stops, colour and midday headway of each line's main variant — read from OpenStreetMap route relations, or for buses from a GTFS feed (zip or folder), whose calendar and timetable give the headway. |
 | `bin/osm_to_omap.rs` | The CLI for converting an `.osm` file into an `.omap`. |
 | `bin/benchmark.rs` | Runs a whole benchmark suite out of a zip archive, see [Running a benchmark archive](#running-a-benchmark-archive). |

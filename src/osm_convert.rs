@@ -24,12 +24,14 @@
 //! with no bounding box given: [`crate::osm::OsmData::extent`] then decides
 //! what "whole" means.
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use crate::bus::{BusLine, HEADWAY_HOURS};
+use crate::bundle;
+use crate::bus::{BusLine, Mode, HEADWAY_HOURS};
 use crate::map::{coord_flag, h_align, v_align, Coord, Object, ObjectKind, PathObject, TextObject};
 use crate::osm::{BBox, OsmData};
-use crate::osm_style::{Sample, Style, PIXEL_MM, ZOOM};
+use crate::osm_style::{line_width_px, Sample, Style, PIXEL_MM, ZOOM};
 use crate::xml_writer::{
     color_element, georeferencing_element, symbol_element, Georeference, MapFile,
 };
@@ -290,13 +292,82 @@ pub fn clip_rings(rings: Vec<Vec<(f64, f64)>>, bbox: &BBox) -> Vec<Vec<(f64, f64
         .collect()
 }
 
-/// A stretch of a line's route on the paper, waiting for its headway to be
-/// written along it once everything else of every line is placed.
-struct PendingHeadway {
-    route: Vec<(f64, f64)>,
-    text: String,
-    symbol: i32,
-    stops: Vec<(f64, f64)>,
+/// The streets buses run on and the tracks trains do, as the network
+/// [`bundle`] matches routes to: every road and railway way of `data` with
+/// a node inside `bbox` or near it, node to node, on the paper.
+fn transit_network(
+    data: &OsmData,
+    bbox: &BBox,
+    projection: &Projection,
+    cell: f64,
+) -> bundle::Network {
+    const ROADS: &[&str] = &[
+        "motorway",
+        "motorway_link",
+        "trunk",
+        "trunk_link",
+        "primary",
+        "primary_link",
+        "secondary",
+        "secondary_link",
+        "tertiary",
+        "tertiary_link",
+        "unclassified",
+        "residential",
+        "living_street",
+        "service",
+        "pedestrian",
+        "road",
+        "busway",
+        "bus_guideway",
+    ];
+    const RAILS: &[&str] = &[
+        "rail",
+        "light_rail",
+        "subway",
+        "tram",
+        "monorail",
+        "narrow_gauge",
+        "funicular",
+    ];
+    // A little beyond the map, so that a route is matched right up to its
+    // edge.
+    let margin = 0.003;
+    let around = BBox {
+        min_lon: bbox.min_lon - margin,
+        min_lat: bbox.min_lat - margin,
+        max_lon: bbox.max_lon + margin,
+        max_lat: bbox.max_lat + margin,
+    };
+    let mut paper: HashMap<i64, (f64, f64)> = HashMap::new();
+    let mut segments = Vec::new();
+    for way in &data.ways {
+        if way.tags.is("area", "yes") {
+            continue;
+        }
+        let rail = match (way.tags.get("highway"), way.tags.get("railway")) {
+            (Some(h), _) if ROADS.contains(&h) => false,
+            (_, Some(r)) if RAILS.contains(&r) => true,
+            _ => continue,
+        };
+        for pair in way.nodes.windows(2) {
+            let (Some(&a), Some(&b)) = (data.nodes.get(&pair[0]), data.nodes.get(&pair[1])) else {
+                continue;
+            };
+            if !around.contains(a) && !around.contains(b) {
+                continue;
+            }
+            let mut at =
+                |id: i64, p: (f64, f64)| *paper.entry(id).or_insert_with(|| projection.to_paper(p));
+            segments.push(bundle::Segment {
+                a: at(pair[0], a),
+                b: at(pair[1], b),
+                nodes: (pair[0], pair[1]),
+                rail,
+            });
+        }
+    }
+    bundle::Network::new(segments, cell)
 }
 
 /// A headway, as written along a line: `ogni 8 min`.
@@ -392,19 +463,6 @@ pub fn along(points: &[(f64, f64)], blocked: &[(f64, f64, f64)]) -> Vec<(f64, f6
         .collect()
 }
 
-/// A stretch of route which the edge of the map cuts, waiting for the line's
-/// number to be written just inside the edge.
-struct Exit {
-    /// The stretch inside the map, on the paper.
-    route: Vec<(f64, f64)>,
-    /// Whether it is its start, rather than its end, which the edge cuts.
-    at_start: bool,
-    /// The symbol of the line's number.
-    label: i32,
-    /// The line's number.
-    reference: String,
-}
-
 /// How far in from the edge of the map, in mm along the line, the number of
 /// a route the edge cuts is written; and the step it moves further in by,
 /// up to eight times, to stay clear of the others.
@@ -450,90 +508,154 @@ impl Conversion {
         1000.0 / (f64::from(self.scale()) * PIXEL_MM)
     }
 
-    /// Adds bus and train lines over the map: each line's route, its stops
-    /// as circles, and its number at either end of the route (once, for a
-    /// circular line) and wherever the edge of the map cuts the route, with
-    /// the symbols `style` keys by the line's kind and
-    /// number (see
+    /// Adds bus and train lines over the map: each line's route, its stops,
+    /// and its number at either end of the route (once, for a circular line)
+    /// and wherever the edge of the map cuts the route, with the symbols
+    /// `style` keys by the line's kind and number (see
     /// [`carto_style_with_bus_lines`](crate::osm_style::carto_style_with_bus_lines)).
-    /// Everything is clipped to the map's area, like the rest of it; a
-    /// number goes only at an end which lies inside.
-    pub fn add_bus_lines(&mut self, style: &Style, lines: &[BusLine]) {
+    ///
+    /// Lines sharing a street are drawn side by side on it, in the order of
+    /// their numbers, rather than one over the other: [`crate::bundle`]
+    /// matches every route to `data`'s streets and tracks and lays the
+    /// lines out, none of its bundles wider than `bundle_cap` carto pixels.
+    /// A stop on a bundle is one bar across it; one away from the route
+    /// drawn keeps its circle. Everything is clipped to the map's area, like
+    /// the rest of it; a number goes only at an end which lies inside, or
+    /// where the edge cuts the route.
+    pub fn add_bus_lines(
+        &mut self,
+        style: &Style,
+        lines: &[BusLine],
+        data: &OsmData,
+        bundle_cap: f64,
+    ) {
         let bbox = self.bbox;
-        let mut placed: Vec<(f64, f64)> = Vec::new();
-        // The stretches of route a headway is to be written along, with the
-        // text, its symbol and the line's own stops, placed once every
-        // route, stop and number is.
-        let mut headways: Vec<PendingHeadway> = Vec::new();
-        // Where a route leaves the map: the stretch inside, which end of it
-        // is on the edge, and the number to write there — once the numbers
-        // at the real termini are placed.
-        let mut exits: Vec<Exit> = Vec::new();
-        for line in lines {
-            let key = format!("{} {}", line.mode.key(), line.reference);
-            let (route, stop, label) = (
-                style.id(&key),
-                style.id(&format!("{key} stop")),
-                style.id(&format!("{key} label")),
-            );
-            let headway_text = line.headway.map(headway_text);
-            let headway_symbol = style.id(&format!("{key} headway"));
+        let mm = 1000.0 / f64::from(self.projection.georeference.scale);
+        let settings = bundle::Settings {
+            sample: 2.0 * mm,
+            tolerance: 15.0 * mm,
+            max_angle: 35f64.to_radians(),
+            jump: 4.0 * mm,
+            smooth: 1.5,
+            // Half the widest a bundle may be, and a little more: a corner
+            // rounded that much takes the inside line round it too.
+            round: (bundle_cap * PIXEL_MM / 2.0 + 0.5).max(1.0),
+            cap: bundle_cap * PIXEL_MM,
+            stop_reach: 25.0 * mm,
+            bar_overhang: PIXEL_MM,
+        };
+        let network = transit_network(data, &bbox, &self.projection, 20.0 * mm);
+
+        // Every stretch of every line inside the map, ranked by the line's
+        // number, buses before trains.
+        let mut ranked: Vec<usize> = (0..lines.len()).collect();
+        ranked.sort_by(|&a, &b| {
+            (lines[a].mode != Mode::Bus)
+                .cmp(&(lines[b].mode != Mode::Bus))
+                .then_with(|| crate::bus::line_order(&lines[a].reference, &lines[b].reference))
+        });
+        let rank_of: HashMap<usize, usize> = ranked
+            .iter()
+            .enumerate()
+            .map(|(rank, &l)| (l, rank))
+            .collect();
+        let mut routes: Vec<bundle::RouteInput> = Vec::new();
+        // For each stretch: whether the edge of the map cuts its start and
+        // its end.
+        let mut cut: Vec<(bool, bool)> = Vec::new();
+        for (l, line) in lines.iter().enumerate() {
             for piece in &line.route {
                 for clipped in clip_polyline(piece, &bbox) {
-                    let paper: Vec<(f64, f64)> = clipped
-                        .iter()
-                        .map(|&p| self.projection.to_paper(p))
-                        .collect();
-                    if let Some(text) = &headway_text {
-                        let stops: Vec<(f64, f64)> = line
-                            .stops
+                    routes.push(bundle::RouteInput {
+                        line: l,
+                        rank: rank_of[&l],
+                        rail: line.mode == Mode::Train,
+                        width: line_width_px(line.mode) * PIXEL_MM,
+                        points: clipped
                             .iter()
                             .map(|&p| self.projection.to_paper(p))
-                            .collect();
-                        headways.push(PendingHeadway {
-                            route: paper.clone(),
-                            text: text.clone(),
-                            symbol: headway_symbol,
-                            stops,
-                        });
-                    }
-                    for (at_start, end) in [(true, clipped[0]), (false, clipped[clipped.len() - 1])]
-                    {
-                        if on_edge(end, &bbox) {
-                            exits.push(Exit {
-                                route: paper.clone(),
-                                at_start,
-                                label,
-                                reference: line.reference.clone(),
-                            });
-                        }
-                    }
-                    let coords = paper.iter().map(|&(x, y)| Coord::new(x, y, 0)).collect();
-                    self.objects.push(path_object(route, coords));
-                    self.counts.1 += 1;
+                            .collect(),
+                    });
+                    cut.push((
+                        on_edge(clipped[0], &bbox),
+                        on_edge(clipped[clipped.len() - 1], &bbox),
+                    ));
                 }
             }
-            for &position in line.stops.iter().filter(|&&p| bbox.contains(p)) {
-                let (x, y) = self.projection.to_paper(position);
+        }
+        let laid = bundle::lay_out(&network, &routes, &settings);
+
+        // The routes, each in pieces of one width.
+        let key_of = |l: usize| format!("{} {}", lines[l].mode.key(), lines[l].reference);
+        for (route, l) in routes.iter().zip(&laid) {
+            let key = key_of(route.line);
+            for (class, points) in l.pieces() {
+                let symbol = if class == 0 {
+                    style.id(&key)
+                } else {
+                    style.id(&format!("{key} w{class}"))
+                };
+                let coords = points.iter().map(|&(x, y)| Coord::new(x, y, 0)).collect();
+                self.objects.push(path_object(symbol, coords));
+                self.counts.1 += 1;
+            }
+        }
+
+        // The stops: bars across the bundles, circles off them.
+        let stops_of: HashMap<usize, Vec<(f64, f64)>> = lines
+            .iter()
+            .enumerate()
+            .map(|(l, line)| {
+                let inside = line
+                    .stops
+                    .iter()
+                    .filter(|&&p| bbox.contains(p))
+                    .map(|&p| self.projection.to_paper(p))
+                    .collect();
+                (l, inside)
+            })
+            .collect();
+        let (bars, away, on_bars) = bundle::stop_bars(&routes, &laid, &stops_of, &settings);
+        if !bars.is_empty() {
+            let bar = style.id("transit stop bar");
+            for b in &bars {
+                let coords = b.ends.iter().map(|&(x, y)| Coord::new(x, y, 0)).collect();
+                self.objects.push(path_object(bar, coords));
+                self.counts.2 += 1;
+            }
+        }
+        for (&l, stops) in &away {
+            let stop = style.id(&format!("{} stop", key_of(l)));
+            for &(x, y) in stops {
                 let mut object = Object::new(ObjectKind::Point);
                 object.symbol_id = stop;
                 object.coords = vec![Coord::new(x, y, 0)];
                 self.objects.push(object);
                 self.counts.2 += 1;
             }
-            let Some((start, end)) = line.ends() else {
+        }
+
+        // The numbers at the termini: the ends of a line's drawn route the
+        // edge of the map does not cut.
+        let mut placed: Vec<(f64, f64)> = Vec::new();
+        for (l, line) in lines.iter().enumerate() {
+            let own: Vec<usize> = (0..routes.len()).filter(|&r| routes[r].line == l).collect();
+            let (Some(&first), Some(&last)) = (own.first(), own.last()) else {
                 continue;
             };
-            let (sx, sy) = self.projection.to_paper(start);
-            let (ex, ey) = self.projection.to_paper(end);
-            // Closer than a label is wide, the two ends are one terminus.
-            let ends = if (ex - sx).hypot(ey - sy) < 5.0 {
-                vec![start]
-            } else {
-                vec![start, end]
-            };
-            for position in ends.into_iter().filter(|&p| bbox.contains(p)) {
-                let (x, mut y) = self.projection.to_paper(position);
+            let mut ends: Vec<(f64, f64)> = Vec::new();
+            if !cut[first].0 {
+                ends.push(laid[first].points[0]);
+            }
+            if !cut[last].1 {
+                let end = *laid[last].points.last().expect("a route has points");
+                // Closer than a label is wide, the two ends are one terminus.
+                if ends.iter().all(|s| (s.0 - end.0).hypot(s.1 - end.1) >= 5.0) {
+                    ends.push(end);
+                }
+            }
+            let label = style.id(&format!("{} label", key_of(l)));
+            for (x, mut y) in ends {
                 // Lines ending at the same terminus — every train at the
                 // central station — stack their numbers downwards rather
                 // than print them over one another.
@@ -543,74 +665,64 @@ impl Conversion {
                     y += LABEL_HEIGHT;
                 }
                 placed.push((x, y));
-                let mut object = Object::new(ObjectKind::Text(TextObject {
-                    text: line.reference.clone(),
-                    h_align: h_align::HCENTER,
-                    v_align: v_align::VCENTER,
-                    box_size: None,
-                }));
-                object.symbol_id = label;
-                object.coords = vec![Coord::new(x, y, 0)];
-                self.objects.push(object);
-                self.counts.2 += 1;
+                self.push_label(label, &line.reference, x, y);
             }
         }
 
         // A route cut by the edge of the map gets its number just inside the
         // edge, on the line itself: as close to the edge as is clear of the
         // numbers already written, moving inwards along it.
-        for Exit {
-            route: paper,
-            at_start,
-            label,
-            reference,
-        } in exits
-        {
-            let length: f64 = paper
-                .windows(2)
-                .map(|p| (p[1].0 - p[0].0).hypot(p[1].1 - p[0].1))
-                .sum();
-            let spot = (1..=8)
-                .map(|i| f64::from(i) * EXIT_STEP)
-                .take_while(|&d| d < length)
-                .map(|d| point_along(&paper, if at_start { d } else { length - d }))
-                .find(|&(x, y)| {
-                    placed.iter().all(|&(px, py)| {
-                        (px - x).abs() >= LABEL_WIDTH || (py - y).abs() >= LABEL_HEIGHT
-                    })
-                });
-            let Some((x, y)) = spot else {
-                continue;
-            };
-            placed.push((x, y));
-            let mut object = Object::new(ObjectKind::Text(TextObject {
-                text: reference,
-                h_align: h_align::HCENTER,
-                v_align: v_align::VCENTER,
-                box_size: None,
-            }));
-            object.symbol_id = label;
-            object.coords = vec![Coord::new(x, y, 0)];
-            self.objects.push(object);
-            self.counts.2 += 1;
+        for (r, route) in routes.iter().enumerate() {
+            let paper = &laid[r].points;
+            let label = style.id(&format!("{} label", key_of(route.line)));
+            for (at_start, is_cut) in [(true, cut[r].0), (false, cut[r].1)] {
+                if !is_cut {
+                    continue;
+                }
+                let length: f64 = paper
+                    .windows(2)
+                    .map(|p| (p[1].0 - p[0].0).hypot(p[1].1 - p[0].1))
+                    .sum();
+                let spot = (1..=8)
+                    .map(|i| f64::from(i) * EXIT_STEP)
+                    .take_while(|&d| d < length)
+                    .map(|d| point_along(paper, if at_start { d } else { length - d }))
+                    .find(|&(x, y)| {
+                        placed.iter().all(|&(px, py)| {
+                            (px - x).abs() >= LABEL_WIDTH || (py - y).abs() >= LABEL_HEIGHT
+                        })
+                    });
+                if let Some((x, y)) = spot {
+                    placed.push((x, y));
+                    self.push_label(label, &lines[route.line].reference, x, y);
+                }
+            }
         }
 
-        // The headways last, each kept off its line's stops, off every
-        // number at a terminus, and off every headway already written —
-        // two lines sharing a street would otherwise print theirs in the
-        // same place.
+        // The headways last, each kept off the stops, off every number, and
+        // off every headway already written — two lines sharing a street
+        // would otherwise print theirs in the same place.
         let mut written: Vec<(f64, f64, f64)> =
             placed.iter().map(|&(x, y)| (x, y, LABEL_WIDTH)).collect();
-        for PendingHeadway {
-            route: paper,
-            text,
-            symbol,
-            stops,
-        } in headways
-        {
+        written.extend(
+            bars.iter()
+                .map(|b| (b.centre.0, b.centre.1, HEADWAY_HALF + 1.5)),
+        );
+        for (r, route) in routes.iter().enumerate() {
+            let line = &lines[route.line];
+            let Some(minutes) = line.headway else {
+                continue;
+            };
+            let text = headway_text(minutes);
+            let symbol = style.id(&format!("{} headway", key_of(route.line)));
             let mut blocked = written.clone();
-            blocked.extend(stops.iter().map(|&(x, y)| (x, y, HEADWAY_HALF + 1.5)));
-            for (x, y, rotation) in along(&paper, &blocked) {
+            for stops in [on_bars.get(&route.line), away.get(&route.line)]
+                .into_iter()
+                .flatten()
+            {
+                blocked.extend(stops.iter().map(|&(x, y)| (x, y, HEADWAY_HALF + 1.5)));
+            }
+            for (x, y, rotation) in along(&laid[r].points, &blocked) {
                 written.push((x, y, HEADWAY_CLEARANCE));
                 blocked.push((x, y, HEADWAY_CLEARANCE));
                 let mut object = Object::new(ObjectKind::Text(TextObject {
@@ -626,6 +738,21 @@ impl Conversion {
                 self.counts.2 += 1;
             }
         }
+    }
+
+    /// A line's number, as written at a terminus or where the map's edge cuts
+    /// its route.
+    fn push_label(&mut self, symbol: i32, reference: &str, x: f64, y: f64) {
+        let mut object = Object::new(ObjectKind::Text(TextObject {
+            text: reference.to_string(),
+            h_align: h_align::HCENTER,
+            v_align: v_align::VCENTER,
+            box_size: None,
+        }));
+        object.symbol_id = symbol;
+        object.coords = vec![Coord::new(x, y, 0)];
+        self.objects.push(object);
+        self.counts.2 += 1;
     }
 
     /// Adds a legend under the map: a sample of every symbol the map uses,
@@ -668,7 +795,11 @@ impl Conversion {
         for line in lines {
             let key = format!("{} {}", line.mode.key(), line.reference);
             let id = style.id(&key);
-            if !used.contains(&id) {
+            // Drawn at any width: in a wide bundle only thinner.
+            let drawn = used.contains(&id)
+                || (1..crate::bundle::WIDTH_FACTORS.len())
+                    .any(|class| used.contains(&style.id(&format!("{key} w{class}"))));
+            if !drawn {
                 continue;
             }
             let name = legend_name(&line.name, &line.reference);
@@ -691,11 +822,24 @@ impl Conversion {
                 first_headway = line.headway.map(|m| (headway, headway_text(m)));
             }
         }
+        // A stop: the bar across a bundle, and the circle of a stop off it
+        // where there is one.
+        if !lines.is_empty() {
+            let bar = style.id("transit stop bar");
+            if used.contains(&bar) {
+                entries.push((
+                    bar,
+                    Sample::Bar,
+                    "Fermata, stazione".to_string(),
+                    String::new(),
+                ));
+            }
+        }
         if let Some(stop) = first_stop {
             entries.push((
                 stop,
                 Sample::Point,
-                "Fermata, stazione".to_string(),
+                "Fermata fuori dal percorso".to_string(),
                 String::new(),
             ));
         }
@@ -796,6 +940,13 @@ impl Conversion {
                 Sample::Line => path_object(
                     symbol,
                     vec![Coord::new(x, y, 0), Coord::new(x + SAMPLE, y, 0)],
+                ),
+                Sample::Bar => path_object(
+                    symbol,
+                    vec![
+                        Coord::new(x + SAMPLE / 2.0, y - 1.6, 0),
+                        Coord::new(x + SAMPLE / 2.0, y + 1.6, 0),
+                    ],
                 ),
                 Sample::Point => {
                     let mut object = Object::new(ObjectKind::Point);

@@ -39,6 +39,11 @@
 //! the most services on, used for every feed), or taken from a relation's `interval` tag where a mapper
 //! has set one.
 //!
+//! Lines sharing a street are drawn side by side on it, in the order of
+//! their numbers, a bar across all of them at a stop: a bundle, never wider
+//! than `--bundle-width` pixels (12 by default), its lines drawn thinner
+//! where they would make it wider.
+//!
 //! `--max-headway N` leaves out the bus lines which run less often than once
 //! every N minutes in those hours, or not at all.
 //!
@@ -108,6 +113,12 @@ struct Args {
     /// kept. Train lines are not affected.
     #[arg(long, value_name = "MINUTES")]
     max_headway: Option<u32>,
+
+    /// The widest a bundle of bus or train lines sharing a street may be,
+    /// in carto pixels (0.28 mm each on the paper): wider, and all its lines
+    /// are drawn thinner. A bus line alone is 3 pixels wide, a train 4.5.
+    #[arg(long, value_name = "PIXELS", default_value_t = 12.0)]
+    bundle_width: f64,
 
     /// Add a legend under the map, explaining every symbol it uses.
     #[arg(long)]
@@ -314,7 +325,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     let style = carto_style_with_bus_lines(&looks);
     let mut conversion = convert(&data, &style, Some(bbox))
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
-    conversion.add_bus_lines(&style, &transit);
+    conversion.add_bus_lines(&style, &transit, &data, args.bundle_width);
     if args.legend {
         conversion.add_legend(&style, &transit);
     }
