@@ -431,3 +431,28 @@ fn two_bus_lines_on_one_street_are_drawn_side_by_side_with_one_bar() {
     // Their one stop is one bar across both.
     assert_eq!(names.iter().filter(|n| *n == "transit stop bar").count(), 1);
 }
+
+#[test]
+fn excluded_buses_are_left_out_of_those_selected() {
+    let dir = tempfile::tempdir().unwrap();
+    // From all the extract's buses, 13 and 14, leave out 13 — under either
+    // spelling of the option.
+    for option in ["--bus-exclude", "--bus_exclude"] {
+        osm_to_omap()
+            .args([BBOX, "--bus", "all", option, "13", SAMPLE])
+            .arg(dir.path().join("excluded.omap"))
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("bus 14 ("))
+            .stdout(predicates::str::contains("bus 13 (").not());
+    }
+    // Leaving out a line not selected says so.
+    osm_to_omap()
+        .args([BBOX, "--bus", "14", "--bus-exclude", "99", SAMPLE])
+        .arg(dir.path().join("unknown.omap"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "bus line 99 to leave out is not among those selected",
+        ));
+}

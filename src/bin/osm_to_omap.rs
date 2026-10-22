@@ -44,6 +44,9 @@
 //! than `--bundle-width` pixels (12 by default), its lines drawn thinner
 //! where they would make it wider.
 //!
+//! `--bus-exclude` leaves out some of the bus lines `--bus` selects —
+//! the night lines from `--bus all`, say.
+//!
 //! `--max-headway N` leaves out the bus lines which run less often than once
 //! every N minutes in those hours, or not at all.
 //!
@@ -89,6 +92,16 @@ struct Args {
     /// the map.
     #[arg(long, value_delimiter = ',')]
     bus: Vec<String>,
+
+    /// Leave out these bus lines from those `--bus` selects: e.g. `--bus all
+    /// --bus-exclude N1,N2,FBP`.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        alias = "bus_exclude",
+        value_name = "LINES"
+    )]
+    bus_exclude: Vec<String>,
 
     /// Take the lines from this GTFS feed (.zip or unpacked folder) before
     /// the OSM file's route relations. May be given several times: each line
@@ -168,7 +181,14 @@ fn run() -> Result<(), (ExitCode, String)> {
         all.dedup();
         Ok((all, true))
     };
-    let (bus_refs, all_buses) = every(&bus_refs, Mode::Bus)?;
+    let (mut bus_refs, all_buses) = every(&bus_refs, Mode::Bus)?;
+    let excluded = numbers(&args.bus_exclude);
+    for reference in &excluded {
+        if !bus_refs.contains(reference) {
+            eprintln!("Warning: bus line {reference} to leave out is not among those selected");
+        }
+    }
+    bus_refs.retain(|r| !excluded.contains(r));
     let (train_refs, all_trains) = every(&train_refs, Mode::Train)?;
     // The area is settled before the lines are, so that `all` keeps only
     // the lines which reach it.
