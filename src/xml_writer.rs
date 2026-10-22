@@ -122,7 +122,7 @@ pub fn qt_number(value: f64, significant: usize) -> String {
     if exponent >= 0 {
         let whole = (exponent + 1) as usize;
         for i in 0..whole {
-            text.push(digits.get(i).map_or('0', &digit));
+            text.push(digits.get(i).map_or('0', digit));
         }
         let rest: String = digits.iter().skip(whole).map(digit).collect();
         let rest = rest.trim_end_matches('0');
