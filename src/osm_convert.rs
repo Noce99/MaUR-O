@@ -562,7 +562,7 @@ impl Conversion {
         // its end.
         let mut cut: Vec<(bool, bool)> = Vec::new();
         for (l, line) in lines.iter().enumerate() {
-            for piece in &line.route {
+            for piece in line.route.iter().chain(&line.detours) {
                 for clipped in clip_polyline(piece, &bbox) {
                     routes.push(bundle::RouteInput {
                         line: l,

@@ -269,8 +269,10 @@ GTFS feed, the trips of the direction drawn that leave their first stop in
 those hours on one working day; from OpenStreetMap, a route's `interval` tag
 where it has one. These texts turn with the line, and are moved along it
 off stops, numbers and each other. A line is drawn once: the route of its main variant (the OSM relation
-with the most members, or the GTFS shape most trips follow), with the stops
-of that variant and of its main variant in the other direction. For Bologna,
+with the most members, or the GTFS shape most trips follow), plus the
+stretches where its main variant in the other direction runs more than 30 m
+away from it — the other half of a circular line, a branch, a one-way
+system's parallel street — with the stops of both. For Bologna,
 TPER publishes its network as GTFS on its
 [open data portal](https://solweb.tper.it/web/tools/open-data/open-data.aspx)
 (`gommagtfsbo` for the buses, `gtfsmex` for the Marconi Express; CC BY 3.0

@@ -11,10 +11,10 @@
 //! Both sources describe a line as several variants — the two directions,
 //! and the short runs and branches a timetable adds — and a map showing a
 //! line once wants one route and every stop it serves. So a line comes out
-//! of either reader as one [`BusLine`]: the route of its main variant, and
-//! the stops of that variant together with those of its main variant the
-//! other way, which on one-way streets stand on a parallel street rather
-//! than on the route itself.
+//! of either reader as one [`BusLine`]: the route of its main variant, the
+//! stretches where its main variant the other way runs elsewhere — the other
+//! half of a circular line, a one-way system's parallel street — and the
+//! stops of both.
 //!
 //! # OpenStreetMap
 //!
@@ -139,6 +139,11 @@ pub struct BusLine {
     /// The route of the main variant, as `(lon, lat)`: one piece where it is
     /// continuous, several where the source has gaps in it.
     pub route: Vec<Vec<(f64, f64)>>,
+    /// The stretches where the way back leaves [`BusLine::route`] — the
+    /// other half of a circular line, a branch, the parallel street of a
+    /// one-way system — each from where it leaves the route to where it
+    /// comes back, `(lon, lat)`.
+    pub detours: Vec<Vec<(f64, f64)>>,
     /// Every stop, each once for each way the line runs through it.
     pub stops: Vec<Stop>,
     /// The line's own colour, `#rrggbb`, where the source gives one.
@@ -207,6 +212,74 @@ fn directed(stops: &[(f64, f64)], route: &[Vec<(f64, f64)>]) -> Vec<Stop> {
             Stop { at, toward }
         })
         .collect()
+}
+
+/// How far from the route, in meters, the way back has to run to be a
+/// detour rather than the same street ([`BusLine::detours`]).
+const DETOUR: f64 = 30.0;
+
+/// Where `back` runs more than [`DETOUR`] meters from `route`, for longer
+/// than twice that: each such stretch with the points either side of it, so
+/// that it starts and ends on the route. `back` is looked at every 10
+/// meters, so that one long segment of it cutting a corner counts too.
+fn detours(route: &[Vec<(f64, f64)>], back: &[Vec<(f64, f64)>]) -> Vec<Vec<(f64, f64)>> {
+    let Some(&(_, lat)) = route.iter().chain(back).flatten().next() else {
+        return Vec::new();
+    };
+    // Meters east and north of nowhere in particular: near enough flat over
+    // a city.
+    let k = lat.to_radians().cos();
+    let meters = |(lon, lat): (f64, f64)| (lon * k * 111_320.0, lat * 111_320.0);
+    let segments: Vec<((f64, f64), (f64, f64))> = route
+        .iter()
+        .flat_map(|piece| piece.windows(2).map(|w| (meters(w[0]), meters(w[1]))))
+        .collect();
+    let away = |p: (f64, f64)| {
+        segments.iter().all(|&(a, b)| {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let length2 = dx * dx + dy * dy;
+            let t = if length2 > 0.0 {
+                (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / length2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (p.0 - a.0 - t * dx).hypot(p.1 - a.1 - t * dy) > DETOUR
+        })
+    };
+    let mut out = Vec::new();
+    for piece in back {
+        // Every 10 m along the piece, in degrees.
+        let mut samples = Vec::new();
+        for w in piece.windows(2) {
+            let (a, b) = (meters(w[0]), meters(w[1]));
+            let steps = ((b.0 - a.0).hypot(b.1 - a.1) / 10.0).ceil().max(1.0) as usize;
+            for i in 0..steps {
+                let t = i as f64 / steps as f64;
+                samples.push((
+                    w[0].0 + t * (w[1].0 - w[0].0),
+                    w[0].1 + t * (w[1].1 - w[0].1),
+                ));
+            }
+        }
+        samples.extend(piece.last());
+        let far: Vec<bool> = samples.iter().map(|&p| away(meters(p))).collect();
+        let mut i = 0;
+        while i < samples.len() {
+            if !far[i] {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < samples.len() && far[i] {
+                i += 1;
+            }
+            let stretch = &samples[start.saturating_sub(1)..(i + 1).min(samples.len())];
+            if (stretch.len() as f64 - 1.0) * 10.0 > 2.0 * DETOUR {
+                out.push(stretch.to_vec());
+            }
+        }
+    }
+    out
 }
 
 /// The hours of the day [`BusLine::headway`] averages over: from 10:00 to
@@ -419,11 +492,11 @@ pub fn lines_from_osm(data: &OsmData, references: &[String], mode: Mode) -> Vec<
                 });
             let route = relation_route(data, main);
             let mut stops = directed(&relation_stops(data, main), &route);
+            let mut detoured = Vec::new();
             if let Some(back) = back {
-                stops.extend(directed(
-                    &relation_stops(data, back),
-                    &relation_route(data, back),
-                ));
+                let back_route = relation_route(data, back);
+                stops.extend(directed(&relation_stops(data, back), &back_route));
+                detoured = detours(&route, &back_route);
             }
             let master = data.relations.iter().find(|r| {
                 r.tags.is("type", "route_master")
@@ -443,6 +516,7 @@ pub fn lines_from_osm(data: &OsmData, references: &[String], mode: Mode) -> Vec<
                 reference: reference.clone(),
                 name: main.tags.get("name").unwrap_or(reference).to_string(),
                 route,
+                detours: detoured,
                 stops: unique(stops),
                 color,
                 headway,
@@ -788,9 +862,11 @@ pub fn lines_from_gtfs(
         // has no direction 0.
         shapes.sort_by(|a, b| (a.1 != "0").cmp(&(b.1 != "0")).then(b.0.cmp(&a.0)));
     }
+    // Both directions': the way back's stops are headed along its own, and
+    // where it leaves the route drawn, it is drawn too.
     let needed_shapes: HashSet<&str> = main_shapes
         .values()
-        .filter_map(|s| s.first())
+        .flatten()
         .map(|(_, _, shape)| shape.as_str())
         .collect();
     let needed_trips: HashSet<&str> = main_shapes
@@ -906,12 +982,19 @@ pub fn lines_from_gtfs(
                     .collect();
                 line_stops.extend(directed(&at, &[shape_points(shape)]));
             }
+            let route = vec![route];
+            let detoured = shapes
+                .iter()
+                .filter(|(_, _, shape)| shape != main)
+                .flat_map(|(_, _, shape)| detours(&route, &[shape_points(shape)]))
+                .collect();
             Some(BusLine {
                 mode,
                 color: color_of.get(reference).cloned(),
                 reference: reference.clone(),
                 name: name_of.get(reference.as_str()).unwrap_or(&"").to_string(),
-                route: vec![route],
+                route,
+                detours: detoured,
                 stops: unique(line_stops),
                 headway,
             })
@@ -924,6 +1007,32 @@ pub fn lines_from_gtfs(
 mod tests {
     use super::*;
     use crate::osm::read_osm_str;
+
+    #[test]
+    fn the_way_back_is_drawn_only_where_it_leaves_the_route() {
+        // East along a street, about 800 m; back west along it, but for a
+        // block where it runs on a parallel street 100 m north, and 10 m
+        // off the street — the same street — for the rest.
+        let route = vec![vec![(11.0, 44.0), (11.01, 44.0)]];
+        let back = vec![vec![
+            (11.01, 44.0001),
+            (11.006, 44.0001),
+            (11.006, 44.0009),
+            (11.003, 44.0009),
+            (11.003, 44.0001),
+            (11.0, 44.0001),
+        ]];
+        let detoured = detours(&route, &back);
+        assert_eq!(detoured.len(), 1);
+        let stretch = &detoured[0];
+        // From the street, round the block, back to the street.
+        assert!(stretch.first().unwrap().1 < 44.0004 && stretch.last().unwrap().1 < 44.0004);
+        assert!(stretch.iter().any(|p| p.1 > 44.0008));
+        let (east, west) = (stretch.first().unwrap().0, stretch.last().unwrap().0);
+        assert!(east > 11.0055 && west < 11.0035, "{east} {west}");
+        // The same street both ways is no detour.
+        assert!(detours(&route, &[vec![(11.01, 44.0001), (11.0, 44.0001)]]).is_empty());
+    }
 
     #[test]
     fn csv_fields_keep_quoted_commas_and_doubled_quotes() {

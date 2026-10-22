@@ -287,7 +287,11 @@ fn run() -> Result<(), (ExitCode, String)> {
         .collect();
     // Of `all`, only the lines with some of their route or a stop on the map.
     let on_map = |line: &BusLine| {
-        line.route.iter().flatten().any(|&p| bbox.contains(p))
+        line.route
+            .iter()
+            .chain(&line.detours)
+            .flatten()
+            .any(|&p| bbox.contains(p))
             || line.stops.iter().any(|stop| bbox.contains(stop.at))
     };
     let transit: Vec<BusLine> = transit
