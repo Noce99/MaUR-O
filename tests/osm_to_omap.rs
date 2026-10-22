@@ -454,8 +454,18 @@ fn two_bus_lines_on_one_street_are_drawn_side_by_side_with_one_bar() {
     // The street runs east: 13, ranked first, on its left, the north, the
     // paper's y pointing down.
     assert!(a.1 < b.1, "13 at {a:?}, 14 at {b:?}");
-    // Their one stop is one bar across both.
+    // Their one stop is one bar across both, with one arrow beside it
+    // pointing east, the way both run.
     assert_eq!(names.iter().filter(|n| *n == "transit stop bar").count(), 1);
+    let arrows: Vec<&maur_o::map::Object> = map
+        .objects
+        .iter()
+        .zip(&names)
+        .filter(|(_, n)| *n == "transit stop arrow")
+        .map(|(o, _)| o)
+        .collect();
+    assert_eq!(arrows.len(), 1);
+    assert!(arrows[0].rotation.abs() < 0.1, "{}", arrows[0].rotation);
 }
 
 #[test]

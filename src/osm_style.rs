@@ -45,8 +45,9 @@ use std::collections::HashMap;
 use crate::bundle::WIDTH_FACTORS;
 use crate::bus::Mode;
 use crate::map::{
-    cap_style, fill_pattern_type, join_style, AreaSymbol, Color, CombinedSymbol, FillPattern,
-    LineSymbol, PointSymbol, Symbol, TextSymbol,
+    cap_style, coord_flag, fill_pattern_type, join_style, AreaSymbol, Color, CombinedSymbol, Coord,
+    Element, FillPattern, LineSymbol, Object, ObjectKind, PathObject, PointSymbol, Symbol,
+    TextSymbol,
 };
 use crate::osm::Tags;
 
@@ -670,6 +671,19 @@ pub fn line_width_px(mode: Mode) -> f64 {
     }
 }
 
+/// A stop circle of a bus or train line: the white dot's radius and the
+/// width of the ring around it, in carto pixels.
+pub fn stop_circle_px(mode: Mode) -> (f64, f64) {
+    match mode {
+        Mode::Bus => (2.4, 1.4),
+        Mode::Train => (3.2, 1.8),
+    }
+}
+
+/// The arrow beside a stop: a triangle this long and this wide at its base,
+/// in carto pixels.
+pub const ARROW_PX: (f64, f64) = (5.0, 4.0);
+
 /// A bus or train line, as far as its look goes: what kind of line, its
 /// number, and its colour as `#rrggbb`.
 #[derive(Clone, Debug, PartialEq)]
@@ -1012,10 +1026,7 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook], details: Details) -> Style 
     for line in lines {
         let key = format!("{} {}", line.mode.key(), line.reference);
         let width = line_width_px(line.mode);
-        let (stop_radius, ring) = match line.mode {
-            Mode::Bus => (2.4, 1.4),
-            Mode::Train => (3.2, 1.8),
-        };
+        let (stop_radius, ring) = stop_circle_px(line.mode);
         let route = b.stroke(&key, width, true);
         b.line(&key, vec![route]);
         // Thinner, for a bundle too wide at the full width: `bus 13 w2` is
@@ -1065,11 +1076,42 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook], details: Details) -> Style 
     }
 
     // A stop on a bundle: a white bar outlined in dark grey across it, with
-    // round ends, like a station on a transit map.
+    // round ends, like a station on a transit map. A stop of several lines
+    // off every bundle: a circle in the same colours. And beside either, a
+    // dark triangle pointing the way the buses stopping there run, drawn
+    // pointing right and turned.
     if !lines.is_empty() {
         let outline = b.stroke("stop bar outline", 2.4, true);
         let fill = b.stroke("bus stop", 1.6, true);
         b.line("transit stop bar", vec![outline, fill]);
+        let (radius, ring) = stop_circle_px(Mode::Bus);
+        let stop = PointSymbol {
+            name: "transit stop".to_string(),
+            inner_radius: px(radius),
+            inner_color: b.color("bus stop"),
+            outer_width: px(ring),
+            outer_color: b.color("stop bar outline"),
+            ..PointSymbol::new()
+        };
+        b.add("transit stop", Symbol::Point(stop));
+        let (length, width) = (px(ARROW_PX.0), px(ARROW_PX.1));
+        let mut triangle = Object::new(ObjectKind::Path(PathObject::default()));
+        triangle.coords = vec![
+            Coord::new(length / 2.0, 0.0, 0),
+            Coord::new(-length / 2.0, -width / 2.0, 0),
+            Coord::new(-length / 2.0, width / 2.0, 0),
+            Coord::new(length / 2.0, 0.0, coord_flag::CLOSE_POINT),
+        ];
+        let arrow = PointSymbol {
+            name: "transit stop arrow".to_string(),
+            is_rotatable: true,
+            elements: vec![Element {
+                symbol: Symbol::Area(b.fill("stop bar outline")),
+                object: triangle,
+            }],
+            ..PointSymbol::new()
+        };
+        b.add("transit stop arrow", Symbol::Point(arrow));
     }
 
     // The legend's title and captions.

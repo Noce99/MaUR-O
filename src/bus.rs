@@ -139,13 +139,74 @@ pub struct BusLine {
     /// The route of the main variant, as `(lon, lat)`: one piece where it is
     /// continuous, several where the source has gaps in it.
     pub route: Vec<Vec<(f64, f64)>>,
-    /// Every stop, as `(lon, lat)`, each once.
-    pub stops: Vec<(f64, f64)>,
+    /// Every stop, each once for each way the line runs through it.
+    pub stops: Vec<Stop>,
     /// The line's own colour, `#rrggbb`, where the source gives one.
     pub color: Option<String>,
     /// How many minutes apart its buses run, on average between
     /// [`HEADWAY_HOURS`], where the source says.
     pub headway: Option<f64>,
+}
+
+/// A stop of a line, and the way the line runs through it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stop {
+    /// Where it is, `(lon, lat)`.
+    pub at: (f64, f64),
+    /// Which way the buses stopping there run: a point a few meters ahead
+    /// of [`Stop::at`] along the route of the variant that stops there,
+    /// `(lon, lat)`. `None` where there is neither a route nor another stop
+    /// to tell.
+    pub toward: Option<(f64, f64)>,
+}
+
+/// How far ahead of a stop [`Stop::toward`] is, in degrees of latitude:
+/// about 10 m.
+const AHEAD: f64 = 0.0001;
+
+/// The stops of one variant, in the order it serves them, each with the way
+/// the variant runs there: along the closest stretch of its `route`, or
+/// where it has none, toward the next stop (from the one before, at the
+/// last).
+fn directed(stops: &[(f64, f64)], route: &[Vec<(f64, f64)>]) -> Vec<Stop> {
+    stops
+        .iter()
+        .enumerate()
+        .map(|(i, &at)| {
+            // Degrees of longitude are shorter than those of latitude.
+            let k = at.1.to_radians().cos();
+            let mut best: Option<(f64, (f64, f64))> = None;
+            for piece in route {
+                for w in piece.windows(2) {
+                    let (a, b) = (w[0], w[1]);
+                    let (dx, dy) = ((b.0 - a.0) * k, b.1 - a.1);
+                    let length2 = dx * dx + dy * dy;
+                    if length2 == 0.0 {
+                        continue;
+                    }
+                    let (px, py) = ((at.0 - a.0) * k, at.1 - a.1);
+                    let t = ((px * dx + py * dy) / length2).clamp(0.0, 1.0);
+                    let d = (px - t * dx).hypot(py - t * dy);
+                    if best.is_none_or(|(b, _)| d < b) {
+                        best = Some((d, (dx, dy)));
+                    }
+                }
+            }
+            let way = best.map(|(_, way)| way).or_else(|| {
+                let (from, to) = match (stops.get(i + 1), i.checked_sub(1)) {
+                    (Some(&next), _) => (at, next),
+                    (None, Some(previous)) => (stops[previous], at),
+                    (None, None) => return None,
+                };
+                Some(((to.0 - from.0) * k, to.1 - from.1))
+            });
+            let toward = way.and_then(|(dx, dy)| {
+                let length = dx.hypot(dy);
+                (length > 0.0).then(|| (at.0 + dx / length * AHEAD / k, at.1 + dy / length * AHEAD))
+            });
+            Stop { at, toward }
+        })
+        .collect()
 }
 
 /// The hours of the day [`BusLine::headway`] averages over: from 10:00 to
@@ -250,13 +311,14 @@ fn relation_route(data: &OsmData, relation: &Relation) -> Vec<Vec<(f64, f64)>> {
         .collect()
 }
 
-/// Every stop once: the same position twice, as two variants share a stop,
-/// is one stop.
-fn unique(stops: impl IntoIterator<Item = (f64, f64)>) -> Vec<(f64, f64)> {
+/// Every stop once: the same position twice the same way, as two variants
+/// share a stop, is one stop.
+fn unique(stops: impl IntoIterator<Item = Stop>) -> Vec<Stop> {
     let mut seen = HashSet::new();
+    let bits = |(x, y): (f64, f64)| (x.to_bits(), y.to_bits());
     stops
         .into_iter()
-        .filter(|&(lon, lat)| seen.insert((lon.to_bits(), lat.to_bits())))
+        .filter(|stop| seen.insert((bits(stop.at), stop.toward.map(bits))))
         .collect()
 }
 
@@ -355,9 +417,13 @@ pub fn lines_from_osm(data: &OsmData, references: &[String], mode: Mode) -> Vec<
                         .then(|| others.max_by_key(|r| r.members.len()))
                         .flatten()
                 });
-            let mut stops = relation_stops(data, main);
+            let route = relation_route(data, main);
+            let mut stops = directed(&relation_stops(data, main), &route);
             if let Some(back) = back {
-                stops.extend(relation_stops(data, back));
+                stops.extend(directed(
+                    &relation_stops(data, back),
+                    &relation_route(data, back),
+                ));
             }
             let master = data.relations.iter().find(|r| {
                 r.tags.is("type", "route_master")
@@ -376,7 +442,7 @@ pub fn lines_from_osm(data: &OsmData, references: &[String], mode: Mode) -> Vec<
                 mode,
                 reference: reference.clone(),
                 name: main.tags.get("name").unwrap_or(reference).to_string(),
-                route: relation_route(data, main),
+                route,
                 stops: unique(stops),
                 color,
                 headway,
@@ -821,8 +887,12 @@ pub fn lines_from_gtfs(
             let headway = starts
                 .get(&(reference.as_str(), direction.as_str()))
                 .map(|&count| f64::from(to - from) / f64::from(count));
-            let mut route = points.remove(main.as_str()).unwrap_or_default();
-            route.sort_by_key(|(seq, _)| *seq);
+            let shape_points = |shape: &str| {
+                let mut points = points.get(shape).cloned().unwrap_or_default();
+                points.sort_by_key(|(seq, _)| *seq);
+                points.into_iter().map(|(_, p)| p).collect::<Vec<_>>()
+            };
+            let route = shape_points(main);
             let mut line_stops = Vec::new();
             for (_, _, shape) in shapes {
                 let Some(trip) = trip_along.get(shape) else {
@@ -830,18 +900,18 @@ pub fn lines_from_gtfs(
                 };
                 let mut trip_stops = stops_of.get(trip.as_str()).cloned().unwrap_or_default();
                 trip_stops.sort_by_key(|(seq, _)| *seq);
-                line_stops.extend(
-                    trip_stops
-                        .iter()
-                        .filter_map(|(_, id)| position.get(id.as_str()).copied()),
-                );
+                let at: Vec<(f64, f64)> = trip_stops
+                    .iter()
+                    .filter_map(|(_, id)| position.get(id.as_str()).copied())
+                    .collect();
+                line_stops.extend(directed(&at, &[shape_points(shape)]));
             }
             Some(BusLine {
                 mode,
                 color: color_of.get(reference).cloned(),
                 reference: reference.clone(),
                 name: name_of.get(reference.as_str()).unwrap_or(&"").to_string(),
-                route: vec![route.into_iter().map(|(_, p)| p).collect()],
+                route: vec![route],
                 stops: unique(line_stops),
                 headway,
             })
@@ -912,10 +982,20 @@ mod tests {
         );
         assert_eq!(line.ends(), Some(((11.0, 44.0), (11.2, 44.1))));
         // Its own two stops and the one of the way back.
-        assert_eq!(
-            line.stops,
-            vec![(11.0, 44.0), (11.1, 44.05), (11.11, 44.06)]
-        );
+        let at: Vec<(f64, f64)> = line.stops.iter().map(|s| s.at).collect();
+        assert_eq!(at, vec![(11.0, 44.0), (11.1, 44.05), (11.11, 44.06)]);
+        // Each the way its own relation runs there: east, north, and west
+        // along the way back.
+        let sign = |d: f64| match d {
+            d if d > 0.0 => 1,
+            d if d < 0.0 => -1,
+            _ => 0,
+        };
+        let way = |i: usize| {
+            let (stop, toward) = (line.stops[i].at, line.stops[i].toward.unwrap());
+            (sign(toward.0 - stop.0), sign(toward.1 - stop.1))
+        };
+        assert_eq!([way(0), way(1), way(2)], [(1, 0), (0, 1), (-1, 0)]);
     }
 
     #[test]
@@ -996,7 +1076,16 @@ mod tests {
         assert_eq!(line.route, vec![vec![(11.0, 44.0), (11.1, 44.1)]]);
         // The busiest shape each way: main (2 trips) and back. The short
         // run's stop is not among them; s1 is shared.
-        assert_eq!(line.stops, vec![(11.0, 44.0), (11.1, 44.1), (11.11, 44.1)]);
+        let at: Vec<(f64, f64)> = line.stops.iter().map(|s| s.at).collect();
+        assert_eq!(
+            at,
+            vec![(11.0, 44.0), (11.1, 44.1), (11.11, 44.1), (11.0, 44.0)]
+        );
+        // The first stop twice: north-east on the way out, south-west on the
+        // way back, along each direction's own shape.
+        let (out, back) = (line.stops[0], line.stops[3]);
+        assert!(out.toward.is_some_and(|t| t.0 > 11.0 && t.1 > 44.0));
+        assert!(back.toward.is_some_and(|t| t.0 < 11.0 && t.1 < 44.0));
         // Direction 0 starts t1, t2 and t3 between 10 and 16 on a weekday;
         // t7 starts before 10 and t6 runs on Sundays: 360 minutes / 3.
         assert_eq!(line.headway, Some(120.0));

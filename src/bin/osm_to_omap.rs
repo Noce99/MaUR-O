@@ -55,6 +55,11 @@
 //! than `--bundle-width` pixels (12 by default), its lines drawn thinner
 //! where they would make it wider.
 //!
+//! Stops less than `--stop-merge` mm apart (3 by default) are drawn as one:
+//! on a bundle, typically the two sides of a street, one bar, with an arrow
+//! past the end on each stop's side pointing the way its buses run. A stop
+//! on no bundle is a circle, an arrow on the right of the way buses run.
+//!
 //! `--bus-exclude` leaves out some of the bus lines `--bus` selects —
 //! the night lines from `--bus all`, say.
 //!
@@ -150,6 +155,12 @@ struct Args {
     /// are drawn thinner. A bus line alone is 3 pixels wide, a train 4.5.
     #[arg(long, value_name = "PIXELS", default_value_t = 12.0)]
     bundle_width: f64,
+
+    /// How close two stops on one bundle (the two sides of a street, say),
+    /// or two stops off any, may be on the paper before they are drawn as
+    /// one, in mm.
+    #[arg(long, value_name = "MM", default_value_t = 3.0, alias = "stop_merge")]
+    stop_merge: f64,
 
     /// Add a legend under the map, explaining every symbol it uses.
     #[arg(long)]
@@ -277,7 +288,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     // Of `all`, only the lines with some of their route or a stop on the map.
     let on_map = |line: &BusLine| {
         line.route.iter().flatten().any(|&p| bbox.contains(p))
-            || line.stops.iter().any(|&p| bbox.contains(p))
+            || line.stops.iter().any(|stop| bbox.contains(stop.at))
     };
     let transit: Vec<BusLine> = transit
         .into_iter()
@@ -364,7 +375,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     let style = carto_style_with_bus_lines(&looks, details);
     let mut conversion = convert(&data, &style, Some(bbox))
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
-    conversion.add_bus_lines(&style, &transit, &data, args.bundle_width);
+    conversion.add_bus_lines(&style, &transit, &data, args.bundle_width, args.stop_merge);
     if args.legend {
         conversion.add_legend(&style, &transit);
     }

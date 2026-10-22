@@ -40,11 +40,13 @@
 //!
 //! # Stops
 //!
-//! A stop on a bundle is one bar across all of it ([`stop_bars`]), rather
+//! A stop on a bundle is one bar across all of it ([`stops`]), rather
 //! than a circle on each line: the stops of several lines at the same place
-//! are the same bar. A stop away from the route drawn — on the street a
-//! one-way system sends the line back along — has no bundle to cross, and
-//! is left to be drawn as before.
+//! are the same bar, and so are those a few mm apart along it, the two
+//! sides of a street. An arrow past either end says which way the buses
+//! stopping on that side run. A stop of the way back on a parallel street
+//! goes across whichever bundle runs there; one with no bundle at all is a
+//! circle, with an arrow on the right of the way buses run.
 
 use std::collections::{HashMap, HashSet};
 
@@ -157,6 +159,16 @@ pub struct Settings {
     pub stop_reach: f64,
     /// How far a stop's bar reaches past either side of the bundle.
     pub bar_overhang: f64,
+    /// How close two stops on a bundle, or two circles, may be before they
+    /// are drawn as one.
+    pub stop_merge: f64,
+    /// How far from the middle of its bundle a stop has to be to be on one
+    /// side of it rather than in the middle.
+    pub stop_side: f64,
+    /// How far past the end of a bar the middle of its arrow is.
+    pub arrow_gap: f64,
+    /// How long an arrow is.
+    pub arrow_length: f64,
 }
 
 /// One route to lay out: a stretch of one line, on the paper.
@@ -564,79 +576,255 @@ fn rounded(points: &[(f64, f64)], along: &[f64], reach: f64) -> Vec<(f64, f64)> 
         .collect()
 }
 
-/// A stop drawn as a bar across its bundle.
+/// A stop of a line on the paper, and the way the line runs through it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StopInput {
+    /// Where it is, in mm.
+    pub at: (f64, f64),
+    /// The unit direction the line runs in there, where known.
+    pub heading: Option<(f64, f64)>,
+}
+
+/// An arrow beside a stop, pointing the way the buses stopping there run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Arrow {
+    /// Its middle, in mm.
+    pub at: (f64, f64),
+    /// The unit direction it points in.
+    pub heading: (f64, f64),
+}
+
+/// Stops drawn as a bar across their bundle: those of every line there
+/// within [`Settings::stop_merge`] of each other along it, the two of a
+/// street's opposite sides among them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bar {
     /// Its two ends, in mm.
     pub ends: [(f64, f64); 2],
     /// Its middle, in mm.
     pub centre: (f64, f64),
+    /// An arrow past the end on the side of the street each stop is on,
+    /// along the bundle the way buses run there: two, pointing opposite
+    /// ways, for a pair of stops either side of the street.
+    pub arrows: Vec<Arrow>,
 }
 
-/// Where each line's stops go: the bars across their bundles, the stops of
-/// several lines at one place being one bar, and for each line its stops
-/// away from any route of its laid out (`stops_of[line]`, in mm), which
-/// have no bundle to cross. Also, for each line, the middles of the bars
-/// its own stops are.
-#[allow(clippy::type_complexity)]
-pub fn stop_bars(
+/// Stops with no bundle to cross, drawn as a circle: those of every line
+/// within [`Settings::stop_merge`] of each other.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Circle {
+    /// Its middle, in mm.
+    pub centre: (f64, f64),
+    /// The lines stopping there, each once, in order.
+    pub lines: Vec<usize>,
+    /// The unit directions the buses stopping there run in, each once: an
+    /// arrow goes on the right of each, as buses stop on the right.
+    pub headings: Vec<(f64, f64)>,
+}
+
+/// Where the stops go: the bars and the circles, and where each line's own
+/// stops ended up, in mm.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Stops {
+    /// The stops on bundles.
+    pub bars: Vec<Bar>,
+    /// The stops off every bundle.
+    pub circles: Vec<Circle>,
+    /// For each line, where its stops are drawn: the middle of the bar, or
+    /// the stop itself in a circle.
+    pub drawn_at: HashMap<usize, Vec<(f64, f64)>>,
+}
+
+/// One stop on a bundle, before the stops close together are merged.
+struct OnBundle {
+    /// The bundle's middle there, its direction, and half the bar's length.
+    centre: (f64, f64),
+    tangent: (f64, f64),
+    half: f64,
+    /// Which side of the bundle the stop is on: +1 to the right of
+    /// `tangent`, -1 to the left.
+    side: Option<f64>,
+    heading: Option<(f64, f64)>,
+}
+
+fn dot(a: (f64, f64), b: (f64, f64)) -> f64 {
+    a.0 * b.0 + a.1 * b.1
+}
+
+/// To the right of `t`: the paper's y points down.
+fn right_of(t: (f64, f64)) -> (f64, f64) {
+    (-t.1, t.0)
+}
+
+/// Lays out the stops of each line (`stops_of[line]`).
+///
+/// A stop within [`Settings::stop_reach`] of its line's own route goes on
+/// that route's bundle; one which is not — a stop of the way back, on a
+/// parallel street — on any other line's bundle there is; the rest are
+/// circles. Stops on one bundle less than [`Settings::stop_merge`] apart are
+/// one bar, as are circles that close.
+pub fn stops(
     routes: &[RouteInput],
     laid: &[Laid],
-    stops_of: &HashMap<usize, Vec<(f64, f64)>>,
+    stops_of: &HashMap<usize, Vec<StopInput>>,
     settings: &Settings,
-) -> (
-    Vec<Bar>,
-    HashMap<usize, Vec<(f64, f64)>>,
-    HashMap<usize, Vec<(f64, f64)>>,
-) {
-    let mut bars: Vec<(Option<usize>, Bar)> = Vec::new();
-    let mut away: HashMap<usize, Vec<(f64, f64)>> = HashMap::new();
-    let mut on_bars: HashMap<usize, Vec<(f64, f64)>> = HashMap::new();
-    for (&line, stops) in stops_of {
-        for &stop in stops {
-            // The nearest sample of the line's own routes.
-            let mut best: Option<(f64, usize, usize)> = None;
-            for (r, (route, l)) in routes.iter().zip(laid).enumerate() {
-                if route.line != line {
-                    continue;
-                }
-                for (i, c) in l.centre.iter().enumerate() {
-                    let d = (c.0 - stop.0).hypot(c.1 - stop.1);
-                    if d <= settings.stop_reach && best.is_none_or(|(b, _, _)| d < b) {
-                        best = Some((d, r, i));
+) -> Stops {
+    let reach = ((1.0 / settings.sample).ceil() as usize).max(1);
+    let mut bars: Vec<Vec<OnBundle>> = Vec::new();
+    let mut loose: Vec<Vec<(usize, StopInput)>> = Vec::new();
+    let mut drawn_at: HashMap<usize, Vec<(f64, f64)>> = HashMap::new();
+    let mut lines: Vec<usize> = stops_of.keys().copied().collect();
+    lines.sort_unstable();
+    for line in lines {
+        for &stop in &stops_of[&line] {
+            // The nearest sample of a route: the line's own, or any.
+            let nearest = |own: bool| {
+                let mut best: Option<(f64, usize, usize)> = None;
+                for (r, (route, l)) in routes.iter().zip(laid).enumerate() {
+                    if own && route.line != line {
+                        continue;
+                    }
+                    for (i, c) in l.centre.iter().enumerate() {
+                        let d = (c.0 - stop.at.0).hypot(c.1 - stop.at.1);
+                        if d <= settings.stop_reach && best.is_none_or(|(b, _, _)| d < b) {
+                            best = Some((d, r, i));
+                        }
                     }
                 }
-            }
-            let Some((_, r, i)) = best else {
-                away.entry(line).or_default().push(stop);
+                best
+            };
+            let Some((_, r, i)) = nearest(true).or_else(|| nearest(false)) else {
+                drawn_at.entry(line).or_default().push(stop.at);
+                let near = loose.iter_mut().find(|circle| {
+                    let first = circle[0].1.at;
+                    (first.0 - stop.at.0).hypot(first.1 - stop.at.1) < settings.stop_merge
+                });
+                match near {
+                    Some(circle) => circle.push((line, stop)),
+                    None => loose.push(vec![(line, stop)]),
+                }
                 continue;
             };
             let l = &laid[r];
-            let reach = ((1.0 / settings.sample).ceil() as usize).max(1);
-            let t = direction(&l.centre, i, reach);
-            let right = (-t.1, t.0);
+            let tangent = direction(&l.centre, i, reach);
+            let centre = l.centre[i];
             let half = l.bundle_width[i] / 2.0 + settings.bar_overhang;
-            let c = l.centre[i];
-            let bar = Bar {
-                ends: [
-                    (c.0 - half * right.0, c.1 - half * right.1),
-                    (c.0 + half * right.0, c.1 + half * right.1),
-                ],
-                centre: c,
+            // The side of the street the stop is on, or where it is on the
+            // middle of it, the right of the way buses run.
+            let offset = (stop.at.0 - centre.0, stop.at.1 - centre.1);
+            let lateral = dot(offset, right_of(tangent));
+            let side = if lateral.abs() > settings.stop_side {
+                Some(lateral.signum())
+            } else {
+                stop.heading.map(|h| dot(h, tangent).signum())
             };
-            on_bars.entry(line).or_default().push(c);
-            // One bar where another of the same bundle already is.
-            let segment = l.segment[i];
-            let merge = bars.iter().any(|(s, b)| {
-                *s == segment
-                    && (b.centre.0 - c.0).hypot(b.centre.1 - c.1) < settings.bar_overhang * 4.0
+            drawn_at.entry(line).or_default().push(centre);
+            let stop = OnBundle {
+                centre,
+                tangent,
+                half,
+                side,
+                heading: stop.heading,
+            };
+            // A bar of the same bundle close enough along it.
+            let near = bars.iter_mut().find(|bar| {
+                let first = &bar[0];
+                let d = (centre.0 - first.centre.0, centre.1 - first.centre.1);
+                dot(first.tangent, tangent).abs() > settings.max_angle.cos()
+                    && d.0.hypot(d.1) < settings.stop_merge
+                    && dot(d, right_of(first.tangent)).abs() < first.half.max(half)
             });
-            if !merge {
-                bars.push((segment, bar));
+            match near {
+                Some(bar) => bar.push(stop),
+                None => bars.push(vec![stop]),
             }
         }
     }
-    (bars.into_iter().map(|(_, b)| b).collect(), away, on_bars)
+
+    let mean = |points: &mut dyn Iterator<Item = (f64, f64)>| {
+        let (mut x, mut y, mut n) = (0.0, 0.0, 0.0);
+        for p in points {
+            x += p.0;
+            y += p.1;
+            n += 1.0;
+        }
+        (x / n, y / n)
+    };
+    let bars = bars
+        .into_iter()
+        .map(|stops| {
+            let tangent = stops[0].tangent;
+            let right = right_of(tangent);
+            let centre = mean(&mut stops.iter().map(|s| s.centre));
+            let half = stops.iter().map(|s| s.half).fold(0.0, f64::max);
+            let mut arrows: Vec<(f64, f64)> = Vec::new();
+            for stop in &stops {
+                let (Some(side), Some(heading)) = (stop.side, stop.heading) else {
+                    continue;
+                };
+                // Sides and directions as the bar's own tangent has them.
+                let side = side * dot(stop.tangent, tangent).signum();
+                let forward = dot(heading, tangent).signum();
+                if !arrows.contains(&(side, forward)) {
+                    arrows.push((side, forward));
+                }
+            }
+            let reach = half + settings.arrow_gap;
+            // Both ways on one side — a terminus, where buses arrive and
+            // leave from the same stop — side by side rather than one over
+            // the other.
+            let both = |side: f64| arrows.contains(&(side, 1.0)) && arrows.contains(&(side, -1.0));
+            let apart = |side: f64, forward: f64| {
+                if both(side) {
+                    forward * settings.arrow_length * 0.6
+                } else {
+                    0.0
+                }
+            };
+            Bar {
+                ends: [
+                    (centre.0 - half * right.0, centre.1 - half * right.1),
+                    (centre.0 + half * right.0, centre.1 + half * right.1),
+                ],
+                centre,
+                arrows: arrows
+                    .iter()
+                    .map(|&(side, forward)| Arrow {
+                        at: (
+                            centre.0 + side * reach * right.0 + apart(side, forward) * tangent.0,
+                            centre.1 + side * reach * right.1 + apart(side, forward) * tangent.1,
+                        ),
+                        heading: (forward * tangent.0, forward * tangent.1),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    let circles = loose
+        .into_iter()
+        .map(|stops| {
+            let mut lines: Vec<usize> = stops.iter().map(|(line, _)| *line).collect();
+            lines.sort_unstable();
+            lines.dedup();
+            let mut headings: Vec<(f64, f64)> = Vec::new();
+            for heading in stops.iter().filter_map(|(_, s)| s.heading) {
+                // Two ways less than a quarter turn apart are one way.
+                if headings.iter().all(|&h| dot(h, heading) < 0.7) {
+                    headings.push(heading);
+                }
+            }
+            Circle {
+                centre: mean(&mut stops.iter().map(|(_, s)| s.at)),
+                lines,
+                headings,
+            }
+        })
+        .collect();
+    Stops {
+        bars,
+        circles,
+        drawn_at,
+    }
 }
 
 /// `points` with every vertex left out that lies within `tolerance` mm of
@@ -693,6 +881,10 @@ mod tests {
             cap: 3.0,
             stop_reach: 3.0,
             bar_overhang: 0.3,
+            stop_merge: 3.0,
+            stop_side: 0.2,
+            arrow_gap: 0.5,
+            arrow_length: 1.0,
         }
     }
 
@@ -817,6 +1009,13 @@ mod tests {
         assert!(laid[0].segment.iter().all(Option::is_none));
     }
 
+    fn stop(at: (f64, f64), heading: (f64, f64)) -> StopInput {
+        StopInput {
+            at,
+            heading: Some(heading),
+        }
+    }
+
     #[test]
     fn the_stops_of_two_lines_at_one_place_are_one_bar_across_both() {
         let routes = vec![
@@ -824,21 +1023,127 @@ mod tests {
             route(1, 1, vec![(5.0, 0.0), (95.0, 0.0)]),
         ];
         let laid = lay_out(&street(), &routes, &settings());
-        let stops: HashMap<usize, Vec<(f64, f64)>> = [
-            (0, vec![(50.0, 0.4), (70.0, 25.0)]),
-            (1, vec![(50.1, -0.4)]),
+        let east = (1.0, 0.0);
+        let stops: HashMap<usize, Vec<StopInput>> = [
+            (0, vec![stop((50.0, 0.4), east), stop((70.0, 25.0), east)]),
+            (1, vec![stop((50.1, 0.4), east)]),
         ]
         .into_iter()
         .collect();
-        let (bars, away, on_bars) = stop_bars(&routes, &laid, &stops, &settings());
-        assert_eq!(bars.len(), 1);
+        let laid_out = super::stops(&routes, &laid, &stops, &settings());
+        assert_eq!(laid_out.bars.len(), 1);
         // Across both lines, and the overhang either side.
-        let [a, b] = bars[0].ends;
-        assert!(((a.1 - b.1).abs() - (2.0 + 0.6)).abs() < 1e-9, "{bars:?}");
+        let bar = &laid_out.bars[0];
+        let [a, b] = bar.ends;
+        assert!(((a.1 - b.1).abs() - (2.0 + 0.6)).abs() < 1e-9, "{bar:?}");
         assert!((a.0 - b.0).abs() < 1e-9);
-        // The stop far from the street is left as it was.
-        assert_eq!(away[&0], vec![(70.0, 25.0)]);
-        assert_eq!(on_bars[&1].len(), 1);
+        // One arrow, past the end on the stops' side (y down: south of the
+        // street, to the right of going east), pointing east.
+        assert_eq!(bar.arrows.len(), 1);
+        let arrow = bar.arrows[0];
+        assert_eq!(arrow.heading, east);
+        assert!((arrow.at.1 - (1.3 + 0.5)).abs() < 1e-9, "{arrow:?}");
+        // The stop far from the street is a circle.
+        assert_eq!(laid_out.circles.len(), 1);
+        assert_eq!(laid_out.circles[0].centre, (70.0, 25.0));
+        assert_eq!(laid_out.circles[0].lines, vec![0]);
+        assert_eq!(laid_out.drawn_at[&1].len(), 1);
+    }
+
+    #[test]
+    fn the_stops_either_side_of_a_street_are_one_bar_with_two_arrows() {
+        let routes = vec![route(0, 0, vec![(5.0, 0.0), (95.0, 0.0)])];
+        let laid = lay_out(&street(), &routes, &settings());
+        let stops: HashMap<usize, Vec<StopInput>> = [(
+            0,
+            vec![
+                stop((40.0, 0.6), (1.0, 0.0)),
+                stop((41.5, -0.6), (-1.0, 0.0)),
+                // Too far along to merge.
+                stop((60.0, 0.6), (1.0, 0.0)),
+            ],
+        )]
+        .into_iter()
+        .collect();
+        let laid_out = super::stops(&routes, &laid, &stops, &settings());
+        assert_eq!(laid_out.bars.len(), 2);
+        let pair = &laid_out.bars[0];
+        assert!((pair.centre.0 - 40.75).abs() < 1e-9, "{pair:?}");
+        let mut arrows: Vec<((f64, f64), f64)> = pair
+            .arrows
+            .iter()
+            .map(|a| (a.heading, a.at.1.signum()))
+            .collect();
+        arrows.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(arrows, vec![((-1.0, 0.0), -1.0), ((1.0, 0.0), 1.0)]);
+    }
+
+    #[test]
+    fn both_ways_at_one_stop_are_two_arrows_side_by_side() {
+        let routes = vec![route(0, 0, vec![(5.0, 0.0), (95.0, 0.0)])];
+        let laid = lay_out(&street(), &routes, &settings());
+        let stops: HashMap<usize, Vec<StopInput>> = [(
+            0,
+            vec![
+                stop((50.0, 0.6), (1.0, 0.0)),
+                stop((50.0, 0.6), (-1.0, 0.0)),
+            ],
+        )]
+        .into_iter()
+        .collect();
+        let laid_out = super::stops(&routes, &laid, &stops, &settings());
+        let arrows = &laid_out.bars[0].arrows;
+        assert_eq!(arrows.len(), 2);
+        // Both on the stop's side, each moved the way it points.
+        for arrow in arrows {
+            assert!(arrow.at.1 > 0.0);
+            assert!(((arrow.at.0 - 50.0) - 0.6 * arrow.heading.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn a_stop_off_its_own_route_goes_across_another_line_s_bundle() {
+        // Line 0 runs along the street; line 1 somewhere else, but stops on
+        // the street on its way back.
+        let routes = vec![
+            route(0, 0, vec![(5.0, 0.0), (95.0, 0.0)]),
+            route(1, 1, vec![(5.0, 40.0), (95.0, 40.0)]),
+        ];
+        let laid = lay_out(&street(), &routes, &settings());
+        let stops: HashMap<usize, Vec<StopInput>> = [
+            (1, vec![stop((30.0, -0.5), (-1.0, 0.0))]),
+            (0, vec![stop((80.0, 0.5), (1.0, 0.0))]),
+        ]
+        .into_iter()
+        .collect();
+        let laid_out = super::stops(&routes, &laid, &stops, &settings());
+        assert_eq!(laid_out.bars.len(), 2);
+        assert!(laid_out.circles.is_empty());
+        assert!((laid_out.drawn_at[&1][0].1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn close_circles_of_several_lines_are_one() {
+        let routes = vec![route(0, 0, vec![(5.0, 0.0), (95.0, 0.0)])];
+        let laid = lay_out(&street(), &routes, &settings());
+        let stops: HashMap<usize, Vec<StopInput>> = [
+            (0, vec![stop((50.0, 30.0), (0.0, 1.0))]),
+            (
+                1,
+                vec![
+                    stop((50.5, 30.5), (0.0, -1.0)),
+                    stop((50.2, 30.0), (0.1, 0.995)),
+                ],
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let laid_out = super::stops(&routes, &laid, &stops, &settings());
+        assert_eq!(laid_out.circles.len(), 1);
+        let circle = &laid_out.circles[0];
+        assert_eq!(circle.lines, vec![0, 1]);
+        // Down and up: the third is the first's way again.
+        assert_eq!(circle.headings, vec![(0.0, 1.0), (0.0, -1.0)]);
     }
 
     #[test]

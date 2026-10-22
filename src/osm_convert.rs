@@ -31,7 +31,7 @@ use crate::bundle;
 use crate::bus::{BusLine, Mode, HEADWAY_HOURS};
 use crate::map::{coord_flag, h_align, v_align, Coord, Object, ObjectKind, PathObject, TextObject};
 use crate::osm::{BBox, OsmData};
-use crate::osm_style::{line_width_px, Sample, Style, PIXEL_MM};
+use crate::osm_style::{line_width_px, stop_circle_px, Sample, Style, ARROW_PX, PIXEL_MM};
 use crate::xml_writer::{
     color_element, georeferencing_element, symbol_element, Georeference, MapFile,
 };
@@ -507,8 +507,11 @@ impl Conversion {
     /// their numbers, rather than one over the other: [`crate::bundle`]
     /// matches every route to `data`'s streets and tracks and lays the
     /// lines out, none of its bundles wider than `bundle_cap` carto pixels.
-    /// A stop on a bundle is one bar across it; one away from the route
-    /// drawn keeps its circle. Everything is clipped to the map's area, like
+    /// A stop on a bundle is one bar across it, and stops less than
+    /// `stop_merge` mm apart along it one bar too, with an arrow at the
+    /// end on each stop's side pointing the way its buses run; one with no
+    /// bundle to cross is a circle, with an arrow beside it. Everything is
+    /// clipped to the map's area, like
     /// the rest of it; a number goes only at an end which lies inside, or
     /// where the edge cuts the route.
     pub fn add_bus_lines(
@@ -517,6 +520,7 @@ impl Conversion {
         lines: &[BusLine],
         data: &OsmData,
         bundle_cap: f64,
+        stop_merge: f64,
     ) {
         let bbox = self.bbox;
         let mm = 1000.0 / f64::from(self.projection.georeference.scale);
@@ -532,6 +536,11 @@ impl Conversion {
             cap: bundle_cap * PIXEL_MM,
             stop_reach: 25.0 * mm,
             bar_overhang: PIXEL_MM,
+            stop_merge,
+            stop_side: 1.5 * mm,
+            // The bar's round end, a gap, and half the arrow's width.
+            arrow_gap: (1.2 + 0.8 + ARROW_PX.1 / 2.0) * PIXEL_MM,
+            arrow_length: ARROW_PX.0 * PIXEL_MM,
         };
         let network = transit_network(data, &bbox, &self.projection, 20.0 * mm);
 
@@ -590,35 +599,69 @@ impl Conversion {
             }
         }
 
-        // The stops: bars across the bundles, circles off them.
-        let stops_of: HashMap<usize, Vec<(f64, f64)>> = lines
+        // The stops: bars across the bundles, circles off them, and the
+        // arrows beside both.
+        let stops_of: HashMap<usize, Vec<bundle::StopInput>> = lines
             .iter()
             .enumerate()
             .map(|(l, line)| {
                 let inside = line
                     .stops
                     .iter()
-                    .filter(|&&p| bbox.contains(p))
-                    .map(|&p| self.projection.to_paper(p))
+                    .filter(|stop| bbox.contains(stop.at))
+                    .map(|stop| {
+                        let at = self.projection.to_paper(stop.at);
+                        let heading = stop.toward.and_then(|toward| {
+                            let ahead = self.projection.to_paper(toward);
+                            let (dx, dy) = (ahead.0 - at.0, ahead.1 - at.1);
+                            let length = dx.hypot(dy);
+                            (length > 0.0).then(|| (dx / length, dy / length))
+                        });
+                        bundle::StopInput { at, heading }
+                    })
                     .collect();
                 (l, inside)
             })
             .collect();
-        let (bars, away, on_bars) = bundle::stop_bars(&routes, &laid, &stops_of, &settings);
+        let laid_stops = bundle::stops(&routes, &laid, &stops_of, &settings);
+        let bars = &laid_stops.bars;
+        let mut arrows: Vec<bundle::Arrow> = Vec::new();
         if !bars.is_empty() {
             let bar = style.id("transit stop bar");
-            for b in &bars {
+            for b in bars {
                 let coords = b.ends.iter().map(|&(x, y)| Coord::new(x, y, 0)).collect();
                 self.objects.push(path_object(bar, coords));
                 self.counts.2 += 1;
+                arrows.extend(&b.arrows);
             }
         }
-        for (&l, stops) in &away {
-            let stop = style.id(&format!("{} stop", key_of(l)));
-            for &(x, y) in stops {
+        for circle in &laid_stops.circles {
+            // One line's own circle, or a neutral one shared by several.
+            let (symbol, mode) = match circle.lines[..] {
+                [l] => (style.id(&format!("{} stop", key_of(l))), lines[l].mode),
+                _ => (style.id("transit stop"), Mode::Bus),
+            };
+            let mut object = Object::new(ObjectKind::Point);
+            object.symbol_id = symbol;
+            object.coords = vec![Coord::new(circle.centre.0, circle.centre.1, 0)];
+            self.objects.push(object);
+            self.counts.2 += 1;
+            // On the right of the way the buses run, clear of the ring.
+            let (radius, ring) = stop_circle_px(mode);
+            let reach = (radius + ring + 0.8 + ARROW_PX.1 / 2.0) * PIXEL_MM;
+            arrows.extend(circle.headings.iter().map(|&(hx, hy)| bundle::Arrow {
+                at: (circle.centre.0 - hy * reach, circle.centre.1 + hx * reach),
+                heading: (hx, hy),
+            }));
+        }
+        if !arrows.is_empty() {
+            let symbol = style.id("transit stop arrow");
+            for arrow in &arrows {
                 let mut object = Object::new(ObjectKind::Point);
-                object.symbol_id = stop;
-                object.coords = vec![Coord::new(x, y, 0)];
+                object.symbol_id = symbol;
+                object.coords = vec![Coord::new(arrow.at.0, arrow.at.1, 0)];
+                // The paper's y points down; a rotation turns counter-clockwise.
+                object.rotation = (-arrow.heading.1).atan2(arrow.heading.0);
                 self.objects.push(object);
                 self.counts.2 += 1;
             }
@@ -705,10 +748,7 @@ impl Conversion {
             let text = headway_text(minutes);
             let symbol = style.id(&format!("{} headway", key_of(route.line)));
             let mut blocked = written.clone();
-            for stops in [on_bars.get(&route.line), away.get(&route.line)]
-                .into_iter()
-                .flatten()
-            {
+            if let Some(stops) = laid_stops.drawn_at.get(&route.line) {
                 blocked.extend(stops.iter().map(|&(x, y)| (x, y, HEADWAY_HALF + 1.5)));
             }
             for (x, y, rotation) in along(&laid[r].points, &blocked) {
@@ -831,6 +871,17 @@ impl Conversion {
                 "Fermata fuori dal percorso".to_string(),
                 String::new(),
             ));
+        }
+        if !lines.is_empty() {
+            for (key, caption) in [
+                ("transit stop", "Fermata di più linee fuori dal percorso"),
+                ("transit stop arrow", "Senso di marcia alla fermata"),
+            ] {
+                let id = style.id(key);
+                if used.contains(&id) {
+                    entries.push((id, Sample::Point, caption.to_string(), String::new()));
+                }
+            }
         }
         if let Some((label, reference)) = first_label {
             entries.push((

@@ -244,14 +244,21 @@ osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,1
 | `--date` | The day (`YYYYMMDD`) the GTFS headways are counted on. Defaults to the Wednesday the first feed runs the most services on — from `calendar.txt`, or from `calendar_dates.txt` for a feed that lists its days one by one. |
 | `--train` | Draw these train lines (also light rail, tram and monorail — e.g. `S1,S2A,MEX` for Bologna's suburban lines and the Marconi Express), from the OSM file's route relations: wider than a bus line, with larger stations, in the line's own colour where OSM gives one. |
 | `--bundle-width` | The widest a bundle of lines sharing a street may be, in carto pixels (0.28 mm each; default 12). Wider, and its lines are drawn thinner. |
+| `--stop-merge` | How close two stops may be on the paper, in mm, before they are drawn as one (default 3): the two sides of a street become one bar. |
 | `--legend` | Add a legend under the map (in Italian): a sample of every symbol the map actually uses with what it means, bus and train lines first with their names. |
 
 Lines sharing a street are drawn side by side on it, like on a transit map:
 every route is matched to OpenStreetMap's streets (or tracks, for trains),
 the lines on each stretch laid out across it in the order of their numbers,
 the band never wider than `--bundle-width`, and a stop drawn as one white
-bar across the whole band. A stop away from the route drawn (on the parallel
-street a one-way system sends the line back along) keeps a circle.
+bar across the whole band. A stop of the way back on a parallel street (where
+a one-way system sends the line) goes across whichever band runs there; one
+on no band at all is a circle, the line's own or, shared by several lines, a
+dark one. Stops closer than `--stop-merge` are one bar (or circle): beside
+it, a dark arrow on each stop's side of the street points the way the buses
+stopping there run, read from the direction the GTFS trip or the OSM route
+relation serving it travels, and at a terminus, where buses arrive and leave
+from one stop, two arrows side by side.
 
 Numbers of lines ending at the same terminus are stacked rather than drawn
 over one another. A line the edge of the map cuts gets its number there
