@@ -220,15 +220,15 @@ the top, so this is where to look first. For what each column means, see
 ### `osm_to_omap`
 
 Converts OpenStreetMap data into a Mapper map that looks like
-[openstreetmap.org](https://www.openstreetmap.org)'s Standard map at zoom 16:
-the symbol set (colours, road casings, path dashes, landcover, buildings,
+[openstreetmap.org](https://www.openstreetmap.org)'s Standard map at one of
+the zooms 13 to 17: the symbol set (colours, road casings, path dashes, landcover, buildings,
 water, railways, barriers, trees) is transcribed from
 [openstreetmap-carto](https://github.com/gravitystorm/openstreetmap-carto),
-one carto pixel being 0.28 mm on the paper. Labels and POI icons are not
-drawn.
+one carto pixel being 0.28 mm on the paper, along with what carto shows at
+that zoom and what it leaves out. Labels and POI icons are not drawn.
 
 ```
-osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...] [--gtfs feed.zip [--date YYYYMMDD]] [--max-headway N] [--train S1,S2A,MEX,...] [--legend] <osm-file> [omap-file]
+osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,19,...] [--gtfs feed.zip [--date YYYYMMDD]] [--max-headway N] [--train S1,S2A,MEX,...] [--legend] <osm-file> [omap-file]
 ```
 
 | Option | Meaning |
@@ -236,6 +236,7 @@ osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...] [--gtfs f
 | `<osm-file>` | OpenStreetMap XML, as the openstreetmap.org export, Overpass or `osmium` write it. |
 | `[omap-file]` | Output map. Defaults to the input name with `.omap`. |
 | `--bbox` | Only convert this area, in degrees. Without it the whole extract is converted. |
+| `--details` | How much the map shows, and at which scale (default `3`, see below). |
 | `--bus` | Draw these bus lines, by number (e.g. `13,19,27`): each in its own colour, its stops as circles, its number at both ends of the route. `all` draws every bus line of the GTFS feeds (or, with none, of the OSM file) that reaches the map. |
 | `--bus-exclude` | Leave out these bus lines from those `--bus` selects, e.g. `--bus all --bus-exclude N1,N2,FBP`. |
 | `--gtfs` | Take lines from this GTFS feed (`.zip` or unpacked folder) before the OSM file's own route relations. Repeatable: each line comes from the first feed that has it, e.g. TPER's bus network and its Marconi Express feed together. A line's own GTFS colour is kept for train lines (white, which TPER gives every bus, counts as none). |
@@ -274,14 +275,26 @@ osm_to_omap --bus all --train S1,S2A,MEX \
   --legend bologna.osm bologna.omap
 ```
 
-The map is georeferenced in the UTM zone of its centre, turned so that true
-north is up, at the scale where one zoom-16 pixel is 0.28 mm (about 1:6100 at
-Bologna's latitude). The tool prints the `map_to_image -r` resolution at which
-a rendering matches openstreetmap.org's own tiles pixel for pixel:
+`--details` picks one of carto's zooms, and draws it at a round scale near
+that zoom's own (at Bologna's latitude zoom 16 is about 1:6100):
+
+| `--details` | carto zoom | scale | shows, besides the main roads and landcover |
+| --- | --- | --- | --- |
+| `0` | 13 | 1:24 000 | residential streets, cycleways, tracks, railways |
+| `1` | 14 | 1:17 000 | buildings, footways, service roads, parking |
+| `2` | 15 | 1:10 000 | building and ground outlines, squares, path halos, city walls |
+| `3` | 16 | 1:5 000 | driveways and parking aisles, walls and fences, trees, platforms |
+| `4` | 17 | 1:2 500 | everything wider |
+
+Bus and train lines, stops and numbers are as large on the paper at every
+level. The map is georeferenced in the UTM zone of its centre, turned so
+that true north is up. The tool prints the `map_to_image -r` resolution at
+which one carto pixel is one pixel of the rendering, as on
+openstreetmap.org:
 
 ```bash
 osm_to_omap --bbox 11.3304,44.4848,11.3556,44.5028 bologna.osm piazza_maggiore.omap
-map_to_image -r 0.5869 -f 0 piazza_maggiore.omap
+map_to_image -r 0.7143 -f 0 piazza_maggiore.omap
 ```
 
 Exit codes: `0` success, `1` a usage error, `2` the OSM file or the GTFS

@@ -30,12 +30,12 @@ fn converts_and_reads_back_as_a_georeferenced_map() {
         .arg(&out)
         .assert()
         .success()
-        .stdout(predicates::str::contains("map scale 1:6085"))
+        .stdout(predicates::str::contains("map scale 1:5000"))
         .stdout(predicates::str::contains("EPSG:32632"))
-        .stdout(predicates::str::contains("map_to_image -r 0.5869"));
+        .stdout(predicates::str::contains("map_to_image -r 0.7143"));
 
     let (map, _warnings) = read_xml_map(&out).unwrap();
-    assert_eq!(map.scale_denominator, 6085);
+    assert_eq!(map.scale_denominator, 5000);
     let text = std::fs::read_to_string(&out).unwrap();
     assert!(text.contains("<parameter>32632</parameter>"));
     // Turned to true north: about 1.6° east of the zone's central meridian.
@@ -68,7 +68,7 @@ fn converts_and_reads_back_as_a_georeferenced_map() {
     ));
 
     // The footway runs from 11.3410 to 11.3450 and is cut at the box's
-    // edges, 0.0030° of longitude apart: about 238 m, 39 mm at 1:6085.
+    // edges, 0.0030° of longitude apart: about 238 m, 47.6 mm at 1:5000.
     let footway = map
         .objects
         .iter()
@@ -76,7 +76,33 @@ fn converts_and_reads_back_as_a_georeferenced_map() {
         .unwrap();
     let (first, last) = (footway.coords[0], *footway.coords.last().unwrap());
     let length = (last.x - first.x).hypot(last.y - first.y);
-    assert!((length - 39.1).abs() < 0.5, "{length} mm");
+    assert!((length - 47.6).abs() < 0.5, "{length} mm");
+}
+
+#[test]
+fn fewer_details_leave_out_what_carto_leaves_out_at_that_zoom() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("sample.omap");
+    osm_to_omap()
+        .arg(BBOX)
+        .args(["--details", "0"])
+        .arg(SAMPLE)
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("map scale 1:24000"));
+    let (map, _warnings) = read_xml_map(&out).unwrap();
+    assert_eq!(map.scale_denominator, 24_000);
+    // Zoom 13 has no building, footway or tree: the land and the street.
+    assert_eq!(symbol_names(&map), ["land", "highway residential"]);
+
+    osm_to_omap()
+        .arg(BBOX)
+        .args(["--details", "5"])
+        .arg(SAMPLE)
+        .arg(&out)
+        .assert()
+        .code(1);
 }
 
 #[test]
@@ -92,7 +118,7 @@ fn the_written_map_renders() {
         .success();
     Command::cargo_bin("map_to_image")
         .unwrap()
-        .args(["-r", "0.5869", "-f", "0"])
+        .args(["-r", "0.7143", "-f", "0"])
         .arg(&omap)
         .arg(&png)
         .assert()

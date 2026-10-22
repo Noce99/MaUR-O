@@ -1,18 +1,23 @@
 //! What OpenStreetMap features look like: a symbol set reproducing
 //! [openstreetmap-carto](https://github.com/gravitystorm/openstreetmap-carto),
-//! the "Standard" style of openstreetmap.org, at zoom 16, and the tag rules
-//! deciding which feature gets which symbol.
+//! the "Standard" style of openstreetmap.org, at one of the zooms 13 to 17,
+//! and the tag rules deciding which feature gets which symbol.
 //!
 //! # From pixels to millimetres
 //!
 //! Carto is written in pixels, for one zoom at a time, and a tile pixel is
 //! taken to be [`PIXEL_MM`] = 0.28 mm — the "standardized rendering pixel"
 //! of the OGC, which Mapnik's own scale denominators assume too. So a
-//! symbol here is carto's width in pixels times 0.28, and the map is drawn
-//! at the scale at which one zoom-16 pixel covers what it covers on the
-//! ground (see [`crate::osm_convert::zoom_scale`]). Rendered at the matching
-//! resolution, the map and a screenshot of openstreetmap.org line up pixel
-//! for pixel.
+//! symbol here is carto's width in pixels times 0.28.
+//!
+//! # Levels of detail
+//!
+//! [`Details`] picks the zoom: what carto shows there, how wide it draws it,
+//! and the scale the map is drawn at, a round one near the zoom's own (see
+//! [`Details::scale`]). Carto writes a width as a cascade of
+//! `[zoom >= n] { line-width: … }` overrides, and so do the tables below,
+//! with [`at`]; a feature carto starts drawing at some zoom is left out
+//! below it ([`Style::area_symbols`] and the other rules).
 //!
 //! # Drawing order
 //!
@@ -48,8 +53,67 @@ use crate::osm::Tags;
 /// The size of one carto pixel on the paper, in mm.
 pub const PIXEL_MM: f64 = 0.28;
 
-/// The zoom level whose look the symbol set reproduces.
-pub const ZOOM: u32 = 16;
+/// How much a map shows, as a level from 0 to [`Details::MAX`]: each
+/// level is carto at one zoom, 13 to 17, drawn at a scale of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Details(u8);
+
+impl Details {
+    /// The most detailed level.
+    pub const MAX: u8 = 4;
+
+    /// Each level's carto zoom and scale denominator, coarsest first.
+    const LEVELS: [(u32, i32); 5] = [
+        (13, 24_000),
+        (14, 17_000),
+        (15, 10_000),
+        (16, 5_000),
+        (17, 2_500),
+    ];
+
+    /// The level `level`, or `None` past [`Details::MAX`].
+    pub fn new(level: u8) -> Option<Details> {
+        (level <= Details::MAX).then_some(Details(level))
+    }
+
+    /// The level, from 0 to [`Details::MAX`].
+    pub fn level(self) -> u8 {
+        self.0
+    }
+
+    /// The carto zoom whose look the level reproduces.
+    pub fn zoom(self) -> u32 {
+        Details::LEVELS[usize::from(self.0)].0
+    }
+
+    /// The scale denominator the map is drawn at: 1:24 000, 1:17 000,
+    /// 1:10 000, 1:5 000 and 1:2 500. At Bologna's latitude each is the
+    /// zoom's own scale (the one at which a tile pixel is [`PIXEL_MM`] on
+    /// the paper) or somewhat larger, so that the map is a little less
+    /// crowded than the screen.
+    pub fn scale(self) -> i32 {
+        Details::LEVELS[usize::from(self.0)].1
+    }
+}
+
+impl Default for Details {
+    /// Level 3: zoom 16 at 1:5 000.
+    fn default() -> Details {
+        Details(3)
+    }
+}
+
+/// What carto sets at `zoom`, given as its cascade of `[zoom >= n]`
+/// overrides, `(n, value)` from the lowest zoom up: the last one at or below
+/// `zoom` holds, the first one below its own zoom.
+pub fn at(zoom: u32, steps: &[(u32, f64)]) -> f64 {
+    steps
+        .iter()
+        .rev()
+        .find(|(from, _)| *from <= zoom)
+        .unwrap_or(&steps[0])
+        .1
+}
 
 /// Carto pixels to mm.
 fn px(pixels: f64) -> f64 {
@@ -120,8 +184,8 @@ fn hsl(h: f64, s: f64, l: f64) -> String {
 /// The colour table, top of the map first: `(key, #rrggbb, opacity)`.
 ///
 /// The key is what the symbols below name a colour by; it doubles as the
-/// colour's name in the map file.
-fn palette() -> Vec<(&'static str, String, f64)> {
+/// colour's name in the map file. A few colours are darker at low `zoom`.
+fn palette(zoom: u32) -> Vec<(&'static str, String, f64)> {
     let c = |hex: &str| hex.to_string();
     let forest = "#add19e";
     let park = "#c8facc";
@@ -131,6 +195,15 @@ fn palette() -> Vec<(&'static str, String, f64)> {
     let place_of_worship = "#d0d0d0";
     let building = "#d9d0c9";
     let building_major = adjust(building, -0.10, 0.0);
+    // Buildings are filled darker, and unoutlined, at zoom 14.
+    let (building_fill, building_major_fill) = match zoom {
+        ..=14 => (
+            adjust(building, -0.04, 0.0),
+            adjust(&building_major, -0.10, 0.0),
+        ),
+        15 => (c(building), adjust(&building_major, -0.05, 0.0)),
+        _ => (c(building), building_major.clone()),
+    };
     vec![
         // The legend's own text, which lies outside the map.
         ("legend text", c("#000000"), 1.0),
@@ -191,8 +264,8 @@ fn palette() -> Vec<(&'static str, String, f64)> {
             1.0,
         ),
         ("building line", adjust(building, -0.15, 0.0), 1.0),
-        ("building major", building_major.clone(), 1.0),
-        ("building", c(building), 1.0),
+        ("building major", building_major_fill, 1.0),
+        ("building", building_fill, 1.0),
         // #bridge.
         ("bridge", c("#b8b8b8"), 1.0),
         // #water-areas and #water-lines.
@@ -249,166 +322,109 @@ fn palette() -> Vec<(&'static str, String, f64)> {
     ]
 }
 
-/// One road class at zoom 16: carto's total width (casing included) and
-/// casing width, both in pixels, and its colours.
+/// One road class: carto's total width (casing included) as its cascade
+/// of zooms, which casing width takes off either side for the fill, its
+/// colours, and the zoom it is first drawn at.
 struct Road {
     key: &'static str,
-    width: f64,
-    casing_width: f64,
+    from: u32,
+    width: &'static [(u32, f64)],
+    casing_width: Casing,
     casing: &'static str,
     fill: &'static str,
     tunnel_fill: &'static str,
 }
 
-/// Carto's road widths at zoom 16 (`roads.mss`: `@<class>-width-z16`, or
-/// the nearest lower zoom which defines one, and `@<kind>-casing-width-z16`).
+/// Which of carto's casing widths a road's fill is inset by.
+#[derive(Clone, Copy)]
+enum Casing {
+    /// `@major-casing-width-z*`: motorways, trunk and primary roads.
+    Major,
+    /// `@secondary-casing-width-z*`: secondary roads.
+    Secondary,
+    /// `@casing-width-z*`: everything else, links included.
+    Minor,
+}
+
+impl Casing {
+    fn width(self, zoom: u32) -> f64 {
+        at(
+            zoom,
+            match self {
+                Casing::Major => &[(13, 0.5), (14, 0.6), (15, 0.7), (17, 1.0)],
+                Casing::Secondary => &[(13, 0.35), (15, 0.7), (17, 1.0)],
+                Casing::Minor => &[(13, 0.5), (14, 0.55), (15, 0.6), (17, 0.8)],
+            },
+        )
+    }
+}
+
+/// Carto's roads (`roads.mss`: `@<class>-width-z*`, and the zoom its
+/// `#roads-casing` rule starts at).
 fn roads() -> Vec<Road> {
-    let road = |key, width, casing_width, casing, fill, tunnel_fill| Road {
-        key,
-        width,
-        casing_width,
-        casing,
-        fill,
-        tunnel_fill,
-    };
-    vec![
-        road(
-            "motorway",
-            10.0,
-            0.7,
-            "motorway casing",
-            "motorway fill",
-            "motorway tunnel fill",
-        ),
-        road(
-            "motorway_link",
-            7.8,
-            0.7,
-            "motorway casing",
-            "motorway fill",
-            "motorway tunnel fill",
-        ),
-        road(
-            "trunk",
-            10.0,
-            0.7,
-            "trunk casing",
-            "trunk fill",
-            "trunk tunnel fill",
-        ),
-        road(
-            "trunk_link",
-            7.8,
-            0.7,
-            "trunk casing",
-            "trunk fill",
-            "trunk tunnel fill",
-        ),
-        road(
-            "primary",
-            10.0,
-            0.7,
-            "primary casing",
-            "primary fill",
-            "primary tunnel fill",
-        ),
-        road(
-            "primary_link",
-            7.8,
-            0.7,
-            "primary casing",
-            "primary fill",
-            "primary tunnel fill",
-        ),
-        road(
-            "secondary",
-            10.0,
-            0.7,
-            "secondary casing",
-            "secondary fill",
-            "secondary tunnel fill",
-        ),
-        road(
+    const MAJOR: &[(u32, f64)] = &[(13, 6.0), (15, 10.0), (17, 18.0)];
+    const MAJOR_LINK: &[(u32, f64)] = &[(13, 4.0), (15, 7.8), (17, 12.0)];
+    const PRIMARY: &[(u32, f64)] = &[(13, 5.0), (15, 10.0), (17, 18.0)];
+    const SECONDARY: &[(u32, f64)] = &[(13, 5.0), (15, 9.0), (16, 10.0), (17, 18.0)];
+    const SECONDARY_LINK: &[(u32, f64)] = &[(13, 4.0), (15, 7.0), (17, 12.0)];
+    const TERTIARY: &[(u32, f64)] = &[(13, 4.0), (14, 5.0), (15, 9.0), (16, 10.0), (17, 18.0)];
+    const TERTIARY_LINK: &[(u32, f64)] = &[(13, 3.0), (15, 7.0), (17, 12.0)];
+    const RESIDENTIAL: &[(u32, f64)] = &[(13, 2.5), (14, 3.0), (15, 5.0), (16, 6.0), (17, 12.0)];
+    const LIVING_STREET: &[(u32, f64)] = &[(13, 2.0), (14, 3.0), (15, 5.0), (16, 6.0), (17, 12.0)];
+    const PEDESTRIAN: &[(u32, f64)] = &[(14, 3.0), (15, 5.0), (16, 6.0), (17, 12.0)];
+    const SERVICE: &[(u32, f64)] = &[(14, 2.0), (16, 3.5), (17, 7.0)];
+    const MINOR_SERVICE: &[(u32, f64)] = &[(16, 2.0), (17, 3.5)];
+    let motorway = ("motorway casing", "motorway fill", "motorway tunnel fill");
+    let trunk = ("trunk casing", "trunk fill", "trunk tunnel fill");
+    let primary = ("primary casing", "primary fill", "primary tunnel fill");
+    let secondary = (
+        "secondary casing",
+        "secondary fill",
+        "secondary tunnel fill",
+    );
+    let tertiary = ("tertiary casing", "minor fill", "minor tunnel fill");
+    let minor = ("minor casing", "minor fill", "minor tunnel fill");
+    let living = ("minor casing", "living street fill", "minor tunnel fill");
+    let pedestrian = ("pedestrian casing", "pedestrian fill", "minor tunnel fill");
+    let unknown = ("minor casing", "road fill", "minor tunnel fill");
+    [
+        ("motorway", 13, MAJOR, Casing::Major, motorway),
+        ("motorway_link", 13, MAJOR_LINK, Casing::Minor, motorway),
+        ("trunk", 13, MAJOR, Casing::Major, trunk),
+        ("trunk_link", 13, MAJOR_LINK, Casing::Minor, trunk),
+        ("primary", 13, PRIMARY, Casing::Major, primary),
+        ("primary_link", 13, MAJOR_LINK, Casing::Minor, primary),
+        ("secondary", 13, SECONDARY, Casing::Secondary, secondary),
+        (
             "secondary_link",
-            7.0,
-            0.7,
-            "secondary casing",
-            "secondary fill",
-            "secondary tunnel fill",
+            13,
+            SECONDARY_LINK,
+            Casing::Minor,
+            secondary,
         ),
-        road(
-            "tertiary",
-            10.0,
-            0.6,
-            "tertiary casing",
-            "minor fill",
-            "minor tunnel fill",
-        ),
-        road(
-            "tertiary_link",
-            7.0,
-            0.6,
-            "tertiary casing",
-            "minor fill",
-            "minor tunnel fill",
-        ),
-        road(
-            "residential",
-            6.0,
-            0.6,
-            "minor casing",
-            "minor fill",
-            "minor tunnel fill",
-        ),
-        road(
-            "unclassified",
-            6.0,
-            0.6,
-            "minor casing",
-            "minor fill",
-            "minor tunnel fill",
-        ),
-        road(
-            "living_street",
-            6.0,
-            0.6,
-            "minor casing",
-            "living street fill",
-            "minor tunnel fill",
-        ),
-        road(
-            "pedestrian",
-            6.0,
-            0.6,
-            "pedestrian casing",
-            "pedestrian fill",
-            "minor tunnel fill",
-        ),
-        road(
-            "road",
-            3.5,
-            0.6,
-            "minor casing",
-            "road fill",
-            "minor tunnel fill",
-        ),
-        road(
-            "service",
-            3.5,
-            0.6,
-            "minor casing",
-            "minor fill",
-            "minor tunnel fill",
-        ),
-        road(
-            "minor_service",
-            2.0,
-            0.6,
-            "minor casing",
-            "minor fill",
-            "minor tunnel fill",
-        ),
+        ("tertiary", 13, TERTIARY, Casing::Minor, tertiary),
+        ("tertiary_link", 13, TERTIARY_LINK, Casing::Minor, tertiary),
+        ("residential", 13, RESIDENTIAL, Casing::Minor, minor),
+        ("unclassified", 13, RESIDENTIAL, Casing::Minor, minor),
+        ("living_street", 13, LIVING_STREET, Casing::Minor, living),
+        ("pedestrian", 14, PEDESTRIAN, Casing::Minor, pedestrian),
+        ("road", 14, SERVICE, Casing::Minor, unknown),
+        ("service", 14, SERVICE, Casing::Minor, minor),
+        ("minor_service", 16, MINOR_SERVICE, Casing::Minor, minor),
     ]
+    .into_iter()
+    .map(
+        |(key, from, width, casing_width, (casing, fill, tunnel_fill))| Road {
+            key,
+            from,
+            width,
+            casing_width,
+            casing,
+            fill,
+            tunnel_fill,
+        },
+    )
+    .collect()
 }
 
 /// How a footway, cycleway or path is paved, as carto's `int_surface`
@@ -462,6 +478,30 @@ fn surface(tags: &Tags) -> Surface {
     }
 }
 
+/// Whether a path, a track or steps are closed to those they are for, as
+/// carto's `carto_highway_int_access` decides: the access tag for the
+/// path's own users where there is one, the general one otherwise.
+fn closed(highway: &str, tags: &Tags) -> bool {
+    let access = |mode: &str| {
+        tags.get(mode)
+            .filter(|v| *v != "unknown")
+            .or(tags.get("access"))
+    };
+    let value = match highway {
+        // A path promoted for its designated users is open to them.
+        "path" if tags.is("bicycle", "designated") || tags.is("horse", "designated") => None,
+        "footway" | "steps" | "path" => access("foot"),
+        "cycleway" => access("bicycle"),
+        "bridleway" => access("horse"),
+        "track" => tags.get("access"),
+        _ => return false,
+    };
+    matches!(
+        value,
+        Some("no" | "permit" | "private" | "agricultural" | "forestry" | "agricultural;forestry")
+    )
+}
+
 /// What a legend entry shows for a symbol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sample {
@@ -483,7 +523,12 @@ pub struct Style {
     pub colors: Vec<Color>,
     /// Every symbol, with the id objects refer to it by.
     pub symbols: Vec<(i32, Symbol)>,
+    /// The level of detail the symbols are drawn for.
+    pub details: Details,
     ids: HashMap<String, i32>,
+    /// The symbols carto only draws from some zoom on, by id: those whose
+    /// zoom is above the level's are left out.
+    from: HashMap<i32, u32>,
 }
 
 /// Builds [`Style`]: the colour keys resolved to priorities, and each symbol
@@ -506,6 +551,12 @@ impl Builder {
         let previous = self.style.ids.insert(key.to_string(), id);
         assert!(previous.is_none(), "symbol {key:?} defined twice");
         self.style.symbols.push((id, symbol));
+    }
+
+    /// Carto draws `key` from `zoom` on only.
+    fn from(&mut self, key: &str, zoom: u32) {
+        let id = self.style.ids[key];
+        self.style.from.insert(id, zoom);
     }
 
     /// A solid stroke `width` carto pixels wide.
@@ -579,9 +630,9 @@ impl Builder {
     }
 }
 
-/// Carto's look at zoom 16, as a symbol set.
-pub fn carto_style() -> Style {
-    carto_style_with_bus_lines(&[])
+/// Carto's look at the zoom of `details`, as a symbol set.
+pub fn carto_style(details: Details) -> Style {
+    carto_style_with_bus_lines(&[], details)
 }
 
 /// The colours bus lines are drawn in, one per line in the order they are
@@ -631,7 +682,8 @@ pub struct BusLook {
     pub color: String,
 }
 
-/// Carto's look at zoom 16, with bus and train lines drawn over everything.
+/// Carto's look at the zoom of `details`, with bus and train lines drawn over
+/// everything.
 ///
 /// Each line gets three symbols, keyed by its kind and number: `bus <n>` or
 /// `train <n>` for the route (a stroke in the line's colour, 3 px for a bus
@@ -640,8 +692,10 @@ pub struct BusLook {
 /// either end (white bold text on a blob of the line's colour, like the
 /// badge on the vehicle itself). The lines' colours go on top of the table,
 /// in the order the lines are given; above them the white of the stops, then
-/// every badge, then the labels' white.
-pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
+/// every badge, then the labels' white. They are as wide on the paper at
+/// every level of detail.
+pub fn carto_style_with_bus_lines(lines: &[BusLook], details: Details) -> Style {
+    let zoom = details.zoom();
     let mut entries: Vec<(String, String, f64)> = Vec::new();
     if !lines.is_empty() {
         entries.push(("bus label".to_string(), "#ffffff".to_string(), 1.0));
@@ -667,7 +721,7 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
         ));
     }
     entries.extend(
-        palette()
+        palette(zoom)
             .into_iter()
             .map(|(key, hex, opacity)| (key.to_string(), hex, opacity)),
     );
@@ -692,22 +746,24 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
         style: Style {
             colors,
             symbols: Vec::new(),
+            details,
             ids: HashMap::new(),
+            from: HashMap::new(),
         },
     };
 
-    // Landcover (landcover.mss). Outlines at zoom 16 where carto has them.
+    // Landcover (landcover.mss). Outlines where carto has them at this zoom:
+    // the faint ones of built-up land and farmland from zoom 16, those of
+    // smaller grounds from zoom 15.
+    let faint = |line| (zoom >= 16).then_some((line, 0.5));
+    let thin = |line, width| (zoom >= 15).then_some((line, width));
     b.area("land", "land", None);
-    b.area(
-        "residential",
-        "residential",
-        Some(("residential line", 0.5)),
-    );
-    b.area("retail", "retail", Some(("retail line", 0.5)));
-    b.area("commercial", "commercial", Some(("commercial line", 0.5)));
-    b.area("industrial", "industrial", Some(("industrial line", 0.5)));
-    b.area("farmland", "farmland", Some(("farmland line", 0.5)));
-    b.area("farmyard", "farmyard", Some(("farmyard line", 0.5)));
+    b.area("residential", "residential", faint("residential line"));
+    b.area("retail", "retail", faint("retail line"));
+    b.area("commercial", "commercial", faint("commercial line"));
+    b.area("industrial", "industrial", faint("industrial line"));
+    b.area("farmland", "farmland", faint("farmland line"));
+    b.area("farmyard", "farmyard", faint("farmyard line"));
     for key in [
         "garages",
         "construction",
@@ -727,24 +783,27 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
     ] {
         b.area(key, key, None);
     }
+    b.from("platform", 16);
     b.area("leisure", "leisure", None);
-    b.area("playground", "leisure", Some(("leisure line", 0.3)));
-    b.area("pitch", "pitch", Some(("pitch line", 0.5)));
-    b.area("parking", "parking", Some(("parking line", 0.3)));
+    b.area("playground", "leisure", thin("leisure line", 0.3));
+    b.area("pitch", "pitch", thin("pitch line", 0.5));
+    b.area("parking", "parking", thin("parking line", 0.3));
+    b.from("parking", 14);
     b.area(
         "place of worship",
         "place of worship",
-        Some(("place of worship line", 0.3)),
+        thin("place of worship line", 0.3),
     );
     b.area(
         "pedestrian area",
         "pedestrian area fill",
         Some(("pedestrian area casing", 1.0)),
     );
+    b.from("pedestrian area", 15);
 
     // Military land (#landuse-overlay): a faint red tint, carto's
     // military_red_hatch.svg — 45° lines a pixel wide, 8 pixels apart
-    // horizontally — and a 2 pixel outline.
+    // horizontally — and an outline, 1 pixel wide below zoom 15 and 2 from it.
     let mut military = b.fill("military");
     military.name = "military".to_string();
     military.patterns.push(FillPattern {
@@ -755,7 +814,7 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
         line_width: px(std::f64::consts::FRAC_1_SQRT_2),
         ..FillPattern::default()
     });
-    let outline = b.stroke("military line", 2.0, true);
+    let outline = b.stroke("military line", at(zoom, &[(13, 1.0), (15, 2.0)]), true);
     b.add(
         "military",
         Builder::combined(
@@ -764,89 +823,110 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
         ),
     );
 
-    // Buildings (buildings.mss).
-    b.area("building", "building", Some(("building line", 0.75)));
+    // Buildings (buildings.mss), from zoom 14, outlined from zoom 15.
+    b.area("building", "building", thin("building line", 0.75));
     b.area(
         "building major",
         "building major",
-        Some(("building major line", 0.75)),
+        thin("building major line", 0.75),
     );
+    b.from("building", 14);
+    b.from("building major", 14);
 
     // Roads (roads.mss): the casing the full width, the fill inset by the
     // casing width on either side. A tunnel's casing is dashed, its fill
     // lighter.
     for road in roads() {
-        let casing = b.stroke(road.casing, road.width, true);
-        let fill = b.stroke(road.fill, road.width - 2.0 * road.casing_width, true);
-        b.line(&format!("highway {}", road.key), vec![casing, fill]);
+        let width = at(zoom, road.width);
+        let fill_width = width - 2.0 * road.casing_width.width(zoom);
+        let key = format!("highway {}", road.key);
+        let casing = b.stroke(road.casing, width, true);
+        let fill = b.stroke(road.fill, fill_width, true);
+        b.line(&key, vec![casing, fill]);
+        b.from(&key, road.from);
 
-        let casing = b.dashed("tunnel casing", road.width, false, 4.0, 2.0);
-        let fill = b.stroke(road.tunnel_fill, road.width - 2.0 * road.casing_width, true);
-        b.line(&format!("highway {} tunnel", road.key), vec![casing, fill]);
+        let key = format!("highway {} tunnel", road.key);
+        let casing = b.dashed("tunnel casing", width, false, 4.0, 2.0);
+        let fill = b.stroke(road.tunnel_fill, fill_width, true);
+        b.line(&key, vec![casing, fill]);
+        b.from(&key, road.from);
     }
 
-    // Paths: a faint white halo two pixels wider, then the dashed line.
-    let footway = |b: &Builder, dash, gap| {
-        vec![
-            b.stroke("path halo", 1.3 + 2.0, true),
-            b.dashed("footway", 1.3, true, dash, gap),
-        ]
-    };
-    // Carto's unknown-surface pattern is 1,4,2,3: one dash and gap each
-    // side of 1.5 and 3.5 averages it.
-    let parts = footway(&b, 3.0, 3.5);
-    b.line("footway paved", parts);
-    let parts = footway(&b, 1.0, 4.0);
-    b.line("footway unpaved", parts);
-    let parts = footway(&b, 1.5, 3.5);
-    b.line("footway", parts);
-    let cycleway = |b: &Builder, dash, gap| {
-        vec![
-            b.stroke("path halo", 0.9 + 2.0, true),
-            b.dashed("cycleway", 0.9, true, dash, gap),
-        ]
-    };
-    let parts = cycleway(&b, 3.0, 3.5);
-    b.line("cycleway paved", parts);
-    let parts = cycleway(&b, 1.0, 4.0);
-    b.line("cycleway unpaved", parts);
-    let parts = cycleway(&b, 1.5, 3.5);
-    b.line("cycleway", parts);
-    let parts = vec![
-        b.stroke("path halo", 1.2 + 2.0, true),
-        b.dashed("bridleway", 1.2, false, 4.0, 2.0),
-    ];
-    b.line("bridleway", parts);
-    let parts = vec![
-        b.stroke("path halo", 3.0 + 2.0, true),
-        b.dashed("footway", 3.0, false, 2.0, 1.0),
-    ];
-    b.line("steps", parts);
-    for (key, dash) in [
-        ("track", Some((5.0, 4.0))),
-        ("track grade1", None),
-        ("track grade2", Some((11.0, 4.0))),
-        ("track grade3", Some((7.0, 5.0))),
-        ("track grade4", Some((4.0, 6.0))),
-        ("track grade5", Some((2.0, 8.0))),
-    ] {
-        let width = if key == "track grade1" || key == "track grade2" {
-            0.75
+    // Paths: from zoom 15 a faint white halo two pixels wider, then the
+    // dashed line; below it, the line alone, dotted whatever the surface.
+    let path = |b: &Builder, color: &str, width: f64, round: bool, dash: (f64, f64)| {
+        let line = b.dashed(color, width, round, dash.0, dash.1);
+        if zoom >= 15 {
+            vec![b.stroke("path halo", width + 2.0, true), line]
         } else {
-            1.5
+            vec![line]
+        }
+    };
+    // Carto's unknown-surface patterns, 1,3,2,4 and 1,4,2,3, have one dash
+    // and gap each side of 1.5 and 3.5 on average.
+    let (paved, unknown, unpaved) = match zoom {
+        ..=14 => ((1.0, 3.0), (1.0, 3.0), (1.0, 3.0)),
+        15 => ((2.0, 3.5), (1.5, 3.5), (1.0, 4.0)),
+        16 => ((3.0, 3.5), (1.5, 3.5), (1.0, 4.0)),
+        _ => ((3.0, 3.0), (1.5, 3.5), (1.0, 4.0)),
+    };
+    let width = at(zoom, &[(14, 0.7), (15, 1.0), (16, 1.3)]);
+    for (key, dash) in [
+        ("footway paved", paved),
+        ("footway unpaved", unpaved),
+        ("footway", unknown),
+    ] {
+        let parts = path(&b, "footway", width, true, dash);
+        b.line(key, parts);
+        b.from(key, 14);
+    }
+    let width = at(zoom, &[(13, 0.7), (15, 0.9)]);
+    for (key, dash) in [
+        ("cycleway paved", paved),
+        ("cycleway unpaved", unpaved),
+        ("cycleway", unknown),
+    ] {
+        let parts = path(&b, "cycleway", width, true, dash);
+        b.line(key, parts);
+    }
+    let width = at(zoom, &[(13, 0.3), (15, 1.2)]);
+    let parts = path(&b, "bridleway", width, false, (4.0, 2.0));
+    b.line("bridleway", parts);
+    let width = at(zoom, &[(14, 0.7), (15, 3.0)]);
+    let parts = path(&b, "footway", width, false, (2.0, 1.0));
+    b.line("steps", parts);
+    b.from("steps", 14);
+    // A track's dashes are shorter below zoom 15, and every grade as thin.
+    let low = zoom < 15;
+    for (key, dash, high_dash) in [
+        ("track", Some((5.0, 4.0)), Some((5.0, 4.0))),
+        ("track grade1", None, None),
+        ("track grade2", Some((8.8, 3.2)), Some((11.0, 4.0))),
+        ("track grade3", Some((5.6, 4.0)), Some((7.0, 5.0))),
+        ("track grade4", Some((3.2, 4.8)), Some((4.0, 6.0))),
+        ("track grade5", Some((1.6, 6.4)), Some((2.0, 8.0))),
+    ] {
+        let width = match key {
+            _ if low => 0.5,
+            "track grade1" | "track grade2" => 0.75,
+            _ => 1.5,
         };
-        let line = match dash {
-            Some((dash, gap)) => b.dashed("track", width, true, dash, gap),
-            None => b.stroke("track", width, true),
+        let parts = match if low { dash } else { high_dash } {
+            Some(dash) => path(&b, "track", width, true, dash),
+            None if low => vec![b.stroke("track", width, true)],
+            None => vec![
+                b.stroke("path halo", width + 2.0, true),
+                b.stroke("track", width, true),
+            ],
         };
-        let parts = vec![b.stroke("path halo", width + 2.0, true), line];
         b.line(key, parts);
     }
 
     // Railways: a grey line with a white dash down the middle.
+    let rail_dash = if zoom >= 15 { (8.0, 9.0) } else { (8.0, 8.0) };
     let parts = vec![
         b.stroke("rail", 3.0, false),
-        b.dashed("rail light", 1.0, false, 8.0, 9.0),
+        b.dashed("rail light", 1.0, false, rail_dash.0, rail_dash.1),
     ];
     b.line("rail", parts);
     let parts = vec![
@@ -856,51 +936,77 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook]) -> Style {
     b.line("rail service", parts);
     let parts = vec![b.dashed("rail tunnel", 3.0, false, 5.0, 2.0)];
     b.line("rail tunnel", parts);
-    let parts = vec![b.stroke("light rail", 2.0, false)];
+    let width = at(zoom, &[(13, 1.5), (14, 2.0)]);
+    let parts = vec![b.stroke("light rail", width, false)];
     b.line("light rail", parts);
-    let parts = vec![b.stroke("tram", 1.5, false)];
+    let width = at(zoom, &[(13, 0.75), (14, 1.0), (15, 1.5), (17, 2.0)]);
+    let parts = vec![b.stroke("tram", width, false)];
     b.line("tram", parts);
-    let parts = vec![b.dashed("tram", 1.5, false, 5.0, 3.0)];
+    let parts = vec![b.dashed("tram", width, false, 5.0, 3.0)];
     b.line("tram tunnel", parts);
-    let parts = vec![b.stroke("tram", 0.5, false)];
+    let width = at(zoom, &[(15, 0.5), (17, 1.0)]);
+    let parts = vec![b.stroke("tram", width, false)];
     b.line("tram service", parts);
+    b.from("tram service", 15);
     let parts = vec![
         b.stroke("path halo", 4.0, true),
         b.dashed("monorail", 3.0, true, 2.0, 3.0),
     ];
     b.line("monorail", parts);
+    b.from("monorail", 14);
 
-    // Waterways (water.mss).
-    // A canal is a stream 1.4 times as wide; a ditch is a stream's zoom-14
-    // width until zoom 17.
+    // Waterways (water.mss). A canal is a stream 1.4 times as wide; a ditch
+    // is a stream until zoom 14, and no wider until zoom 17.
+    let stream = at(
+        zoom,
+        &[(13, 1.4), (14, 2.0), (15, 2.5), (16, 3.0), (17, 3.5)],
+    );
     for (key, width) in [
-        ("river", 8.0),
-        ("canal", 3.0 * 1.4),
-        ("stream", 3.0),
-        ("ditch", 2.0),
+        (
+            "river",
+            at(
+                zoom,
+                &[(13, 3.0), (14, 4.5), (15, 6.0), (16, 8.0), (17, 10.0)],
+            ),
+        ),
+        ("canal", stream * 1.4),
+        ("stream", stream),
+        ("ditch", at(zoom, &[(13, 1.4), (14, 2.0), (17, 3.0)])),
     ] {
         let parts = vec![b.stroke("water", width, true)];
         b.line(key, parts);
     }
 
-    // Barriers (landcover.mss, #barriers).
+    // Barriers (landcover.mss, #barriers): city walls from zoom 15, with a
+    // wall's line down the middle from zoom 17, the others from zoom 16.
     let parts = vec![b.stroke("barrier", 0.4, false)];
     b.line("barrier", parts);
-    let parts = vec![b.stroke("hedge", 1.5, false)];
+    b.from("barrier", 16);
+    let parts = vec![b.stroke("hedge", at(zoom, &[(16, 1.5), (17, 2.0)]), false)];
     b.line("hedge", parts);
-    let parts = vec![b.stroke("city wall", 1.0, false)];
+    b.from("hedge", 16);
+    let width = at(zoom, &[(15, 1.0), (16, 1.5), (17, 2.0)]);
+    let mut parts = vec![b.stroke("city wall", width, false)];
+    if zoom >= 17 {
+        parts.push(b.stroke("barrier", 0.4, false));
+    }
     b.line("city wall", parts);
+    b.from("city wall", 15);
 
-    // Trees (amenity-points.mss, #trees): a 2.5 px dot, a 2.5 px line.
-    let parts = vec![b.stroke("tree", 2.5, true)];
+    // Trees (amenity-points.mss, #trees), from zoom 16: a dot, a line, 2.5
+    // px wide and 5 from zoom 17.
+    let width = at(zoom, &[(16, 2.5), (17, 5.0)]);
+    let parts = vec![b.stroke("tree", width, true)];
     b.line("tree row", parts);
     let tree = PointSymbol {
         name: "tree".to_string(),
-        inner_radius: px(2.5) / 2.0,
+        inner_radius: px(width) / 2.0,
         inner_color: b.color("tree"),
         ..PointSymbol::new()
     };
     b.add("tree", Symbol::Point(tree));
+    b.from("tree row", 16);
+    b.from("tree", 16);
 
     // Bus and train lines: the route, the stops and the number at either end.
     for line in lines {
@@ -1157,6 +1263,13 @@ impl Style {
         Some(caption.to_string())
     }
 
+    /// Whether carto draws the symbol with this id at the level's zoom.
+    fn shown(&self, id: i32) -> bool {
+        self.from
+            .get(&id)
+            .is_none_or(|&from| self.details.zoom() >= from)
+    }
+
     /// The symbol the whole map is laid on: carto's land colour.
     pub fn background(&self) -> i32 {
         self.id("land")
@@ -1213,7 +1326,7 @@ impl Style {
                 "playground" | "fitness_station" => "playground",
                 "pitch" | "track" => "pitch",
                 "sports_centre" | "stadium" | "dog_park" | "recreation_ground" => "leisure",
-                "swimming_pool" => "water",
+                "swimming_pool" if self.details.zoom() >= 14 => "water",
                 _ => "",
             });
         }
@@ -1254,6 +1367,7 @@ impl Style {
         keys.into_iter()
             .filter(|k| !k.is_empty())
             .map(|k| self.id(k))
+            .filter(|&id| self.shown(id))
             .collect()
     }
 
@@ -1322,11 +1436,16 @@ impl Style {
         if tags.is("natural", "tree_row") {
             out.push(self.id("tree row"));
         }
+        out.retain(|&id| self.shown(id));
         out
     }
 
     /// The symbol for a road or path, as carto groups `highway` values.
     fn highway_key(&self, highway: &str, tags: &Tags, tunnel: bool) -> Option<String> {
+        // A path closed to those it is for waits until zoom 15.
+        if self.details.zoom() < 15 && closed(highway, tags) {
+            return None;
+        }
         let by_surface = |base: &str| match surface(tags) {
             Surface::Paved => format!("{base} paved"),
             Surface::Unpaved => format!("{base} unpaved"),
@@ -1369,11 +1488,12 @@ impl Style {
 
     /// The point symbols a tagged node is drawn with.
     pub fn point_symbols(&self, tags: &Tags) -> Vec<i32> {
+        let mut out = Vec::new();
         if tags.is("natural", "tree") {
-            vec![self.id("tree")]
-        } else {
-            Vec::new()
+            out.push(self.id("tree"));
         }
+        out.retain(|&id| self.shown(id));
+        out
     }
 }
 
@@ -1412,7 +1532,7 @@ mod tests {
 
     #[test]
     fn every_casing_is_drawn_below_every_road_fill() {
-        let style = carto_style();
+        let style = carto_style(Details::default());
         let priority = |name: &str| style.colors.iter().position(|c| c.name == name).unwrap();
         let lowest_fill = ["motorway fill", "minor fill", "pedestrian fill"]
             .iter()
@@ -1431,7 +1551,7 @@ mod tests {
 
     #[test]
     fn a_road_fill_is_inset_by_its_casing_on_both_sides() {
-        let style = carto_style();
+        let style = carto_style(Details::default());
         let (_, Symbol::Combined(residential)) =
             &style.symbols[style.id("highway residential") as usize]
         else {
@@ -1450,8 +1570,93 @@ mod tests {
     }
 
     #[test]
+    fn the_last_step_of_a_cascade_at_or_below_the_zoom_holds() {
+        let steps = [(13, 2.5), (15, 5.0), (17, 12.0)];
+        assert_eq!(at(13, &steps), 2.5);
+        assert_eq!(at(14, &steps), 2.5);
+        assert_eq!(at(16, &steps), 5.0);
+        assert_eq!(at(18, &steps), 12.0);
+        // Below the first step, the first one.
+        assert_eq!(at(12, &steps), 2.5);
+    }
+
+    #[test]
+    fn each_level_is_a_carto_zoom_at_a_scale_of_its_own() {
+        let levels: Vec<(u32, i32)> = (0..=Details::MAX)
+            .map(|level| Details::new(level).unwrap())
+            .map(|d| (d.zoom(), d.scale()))
+            .collect();
+        assert_eq!(
+            levels,
+            [
+                (13, 24_000),
+                (14, 17_000),
+                (15, 10_000),
+                (16, 5_000),
+                (17, 2_500)
+            ]
+        );
+        assert_eq!(Details::new(5), None);
+        assert_eq!(Details::default().zoom(), 16);
+    }
+
+    #[test]
+    fn a_feature_shows_from_the_zoom_carto_starts_drawing_it_at() {
+        let style = |level| carto_style(Details::new(level).unwrap());
+        let line = |level, pairs: &[(&str, &str)]| style(level).line_symbols(&tags(pairs));
+        let area = |level, pairs: &[(&str, &str)]| style(level).area_symbols(&tags(pairs), false);
+        let footway = [("highway", "footway")];
+        let private = [("highway", "footway"), ("access", "private")];
+        let driveway = [("highway", "service"), ("service", "driveway")];
+        let building = [("building", "yes")];
+        let fence = [("barrier", "fence")];
+
+        assert!(line(0, &footway).is_empty());
+        assert_eq!(line(1, &footway).len(), 1);
+        // Closed to walkers, a footway waits for zoom 15.
+        assert!(line(1, &private).is_empty());
+        assert_eq!(line(2, &private).len(), 1);
+        assert!(line(2, &driveway).is_empty());
+        assert_eq!(line(3, &driveway).len(), 1);
+        assert!(area(0, &building).is_empty());
+        assert_eq!(area(1, &building).len(), 1);
+        assert!(line(2, &fence).is_empty());
+        assert_eq!(line(3, &fence).len(), 1);
+        // Trees from zoom 16.
+        assert!(style(2)
+            .point_symbols(&tags(&[("natural", "tree")]))
+            .is_empty());
+        assert_eq!(
+            style(3).point_symbols(&tags(&[("natural", "tree")])).len(),
+            1
+        );
+        // A residential road everywhere.
+        for level in 0..=Details::MAX {
+            assert_eq!(line(level, &[("highway", "residential")]).len(), 1);
+        }
+    }
+
+    #[test]
+    fn roads_widen_with_the_zoom() {
+        let casing_width = |level| {
+            let style = carto_style(Details::new(level).unwrap());
+            match style.symbol(style.id("highway residential")) {
+                Some(Symbol::Combined(road)) => match &road.owned_parts[0] {
+                    Symbol::Line(casing) => casing.line_width / PIXEL_MM,
+                    _ => panic!("a road's parts are lines"),
+                },
+                _ => panic!("a road is a combined symbol"),
+            }
+        };
+        let widths: Vec<f64> = (0..=Details::MAX).map(casing_width).collect();
+        for (width, carto) in widths.iter().zip([2.5, 3.0, 5.0, 6.0, 12.0]) {
+            assert!((width - carto).abs() < 1e-9, "{widths:?}");
+        }
+    }
+
+    #[test]
     fn tags_pick_symbols_the_way_carto_groups_them() {
-        let style = carto_style();
+        let style = carto_style(Details::default());
         let line = |pairs: &[(&str, &str)]| style.line_symbols(&tags(pairs));
         let area = |pairs: &[(&str, &str)]| style.area_symbols(&tags(pairs), false);
 

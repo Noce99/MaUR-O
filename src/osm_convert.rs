@@ -11,9 +11,9 @@
 //! tiles are north-up, and away from a zone's central meridian the two
 //! differ by a degree or two. That turn is the map's grivation.
 //!
-//! The scale is the one at which a zoom-16 tile pixel of openstreetmap.org
-//! is [`osm_style::PIXEL_MM`](crate::osm_style::PIXEL_MM) on the paper, at
-//! the map's own latitude ([`zoom_scale`]): about 1:6100 in Bologna.
+//! The scale is the one of the style's level of detail
+//! ([`Details::scale`](crate::osm_style::Details::scale)): 1:5 000 by
+//! default.
 //!
 //! # Clipping
 //!
@@ -31,7 +31,7 @@ use crate::bundle;
 use crate::bus::{BusLine, Mode, HEADWAY_HOURS};
 use crate::map::{coord_flag, h_align, v_align, Coord, Object, ObjectKind, PathObject, TextObject};
 use crate::osm::{BBox, OsmData};
-use crate::osm_style::{line_width_px, Sample, Style, PIXEL_MM, ZOOM};
+use crate::osm_style::{line_width_px, Sample, Style, PIXEL_MM};
 use crate::xml_writer::{
     color_element, georeferencing_element, symbol_element, Georeference, MapFile,
 };
@@ -81,17 +81,6 @@ pub fn utm(zone: u32, (lon, lat): (f64, f64)) -> (f64, f64) {
         500_000.0 + UTM_K0 * big_a * easting,
         UTM_K0 * big_a * northing,
     )
-}
-
-/// The scale denominator at which one openstreetmap.org tile pixel at
-/// `zoom` is [`PIXEL_MM`] on the paper, at latitude `lat`.
-///
-/// A Web Mercator pixel covers `2πR cos(lat) / (256 · 2^zoom)` meters of
-/// ground, `R` being the sphere the projection is defined on.
-pub fn zoom_scale(lat: f64, zoom: u32) -> f64 {
-    let meters_per_pixel = 2.0 * std::f64::consts::PI * WGS84_A * lat.to_radians().cos()
-        / (256.0 * f64::from(1u32 << zoom));
-    meters_per_pixel / (PIXEL_MM / 1000.0)
 }
 
 /// Degrees on the earth to millimetres on the paper.
@@ -502,8 +491,8 @@ impl Conversion {
     }
 
     /// The resolution, in pixels per meter on the ground, at which a
-    /// rendering of the map matches openstreetmap.org's own tiles pixel for
-    /// pixel.
+    /// rendering of the map draws one carto pixel as one pixel, as
+    /// openstreetmap.org's own tiles do.
     pub fn tile_resolution(&self) -> f64 {
         1000.0 / (f64::from(self.scale()) * PIXEL_MM)
     }
@@ -1014,7 +1003,7 @@ pub fn convert(data: &OsmData, style: &Style, bbox: Option<BBox>) -> Result<Conv
         .or_else(|| data.extent())
         .ok_or("the extract holds nothing to convert")?;
     let (center_lon, center_lat) = bbox.center();
-    let scale = zoom_scale(center_lat, ZOOM).round() as i32;
+    let scale = style.details.scale();
     let projection = Projection::new((center_lon, center_lat), scale);
     let paper = |p: (f64, f64)| {
         let (x, y) = projection.to_paper(p);
@@ -1192,12 +1181,6 @@ mod tests {
         assert_eq!(utm_zone(11.34), 32);
         assert_eq!(utm_zone(12.01), 33);
         assert_eq!(utm_zone(-0.1), 30);
-    }
-
-    #[test]
-    fn zoom_16_in_bologna_is_about_1_to_6100() {
-        let scale = zoom_scale(44.4938, 16);
-        assert!((scale - 6085.0).abs() < 2.0, "{scale}");
     }
 
     #[test]

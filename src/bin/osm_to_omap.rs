@@ -1,8 +1,9 @@
 //! Turns OpenStreetMap data into an OpenOrienteering Mapper map that looks
-//! like openstreetmap.org's own Standard map at zoom 16.
+//! like openstreetmap.org's own Standard map.
 //!
 //! ```text
-//! osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--bus 13,19,...]
+//! osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4]
+//!             [--bus 13,19,...]
 //!             [--train S1,S2A,MEX,...] [--gtfs feed.zip ... [--date YYYYMMDD]]
 //!             [--legend]
 //!             <osm-file> [omap-file]
@@ -15,11 +16,21 @@
 //! stretch the map far past it (see `OsmData::extent`). The output defaults
 //! to the input's name with `.omap`.
 //!
+//! `--details` picks how much the map shows, and at which scale: carto at
+//! one zoom, a pixel of it 0.28 mm on the paper.
+//!
+//! | level | carto zoom | scale |
+//! |---|---|---|
+//! | 0 | 13 | 1:24 000 |
+//! | 1 | 14 | 1:17 000 |
+//! | 2 | 15 | 1:10 000 |
+//! | 3 (default) | 16 | 1:5 000 |
+//! | 4 | 17 | 1:2 500 |
+//!
 //! The map is georeferenced in the UTM zone of its centre, turned so that
-//! true north is up, at the scale where one zoom-16 tile pixel is 0.28 mm on
-//! the paper. The resolution printed at the end is the `-r` to give
-//! `map_to_image` for a rendering that matches openstreetmap.org's tiles
-//! pixel for pixel.
+//! true north is up. The resolution printed at the end is the `-r` to give
+//! `map_to_image` for a rendering with one pixel to a carto pixel, as on
+//! openstreetmap.org.
 //!
 //! `--bus` draws bus lines over the map, each in its own colour: its route,
 //! its stops as circles and its number at both ends. `--train` does the same
@@ -67,14 +78,14 @@ use maur_o::bus::{
 };
 use maur_o::osm::{read_osm, BBox};
 use maur_o::osm_convert::convert;
-use maur_o::osm_style::{carto_style_with_bus_lines, line_color, BusLook};
+use maur_o::osm_style::{carto_style_with_bus_lines, line_color, BusLook, Details};
 
 #[derive(Parser)]
 #[command(
     name = "osm_to_omap",
     version,
     about = "Converts OpenStreetMap data (.osm) into an OpenOrienteering Mapper map drawn \
-             like openstreetmap.org's Standard style at zoom 16."
+             like openstreetmap.org's Standard style."
 )]
 struct Args {
     /// The OpenStreetMap XML file to convert.
@@ -86,6 +97,13 @@ struct Args {
     /// Only convert this area: min_lon,min_lat,max_lon,max_lat in degrees.
     #[arg(long, value_parser = BBox::parse, allow_hyphen_values = true)]
     bbox: Option<BBox>,
+
+    /// How much the map shows: 0 is carto's zoom 13 at 1:24000, 1 zoom 14
+    /// at 1:17000, 2 zoom 15 at 1:10000, 3 zoom 16 at 1:5000, 4 zoom 17 at
+    /// 1:2500.
+    #[arg(long, default_value_t = 3, value_name = "0-4",
+          value_parser = clap::value_parser!(u8).range(0..=i64::from(Details::MAX)))]
+    details: u8,
 
     /// Draw these bus lines, by number: e.g. 13,19,27. `all` draws every bus
     /// line of the GTFS feeds (or, with none, of the OSM file) which reaches
@@ -342,7 +360,8 @@ fn run() -> Result<(), (ExitCode, String)> {
         })
         .collect();
 
-    let style = carto_style_with_bus_lines(&looks);
+    let details = Details::new(args.details).expect("clap checks the range");
+    let style = carto_style_with_bus_lines(&looks, details);
     let mut conversion = convert(&data, &style, Some(bbox))
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     conversion.add_bus_lines(&style, &transit, &data, args.bundle_width);
@@ -387,7 +406,7 @@ fn run() -> Result<(), (ExitCode, String)> {
         );
     }
     println!(
-        "To match openstreetmap.org's tiles: map_to_image -r {:.4} {}",
+        "One pixel to a carto pixel, as on openstreetmap.org: map_to_image -r {:.4} {}",
         conversion.tile_resolution(),
         omap_file.display()
     );
