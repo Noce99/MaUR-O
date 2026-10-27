@@ -453,8 +453,7 @@ pub fn along(points: &[(f64, f64)], blocked: &[(f64, f64, f64)]) -> Vec<(f64, f6
 }
 
 /// How far in from the edge of the map, in mm along the line, the number of
-/// a route the edge cuts is written; and the step it moves further in by,
-/// up to eight times, to stay clear of the others.
+/// a route the edge cuts belongs.
 const EXIT_STEP: f64 = 5.0;
 
 /// Whether a point lies on the edge of `bbox`, as a route cut by
@@ -467,10 +466,179 @@ fn on_edge((lon, lat): (f64, f64), bbox: &BBox) -> bool {
         || close(lat, bbox.max_lat)
 }
 
-/// How far apart, in mm on the paper, two line numbers have to be not to
-/// overlap: about a badge's height, and the width of a short one.
+/// How large a line's number is on the paper, in mm, badge and all: about
+/// 2.2 mm a character, and the badge's margin; 4.4 mm high.
+fn label_size(text: &str) -> (f64, f64) {
+    (text.chars().count() as f64 * 2.2 + 2.2, LABEL_HEIGHT)
+}
+
+/// How high a line's number is, badge and all, in mm on the paper.
 const LABEL_HEIGHT: f64 = 4.4;
+
+/// How wide a short line's number is, in mm: what a headway keeps clear of
+/// one by.
 const LABEL_WIDTH: f64 = 8.0;
+
+/// How far from where it belongs a line's number may go to find room, in
+/// mm, and in which steps.
+const LABEL_REACH: f64 = 25.0;
+const LABEL_STEP: f64 = 0.75;
+
+/// What a line's number has to keep clear of — every line, stop and arrow
+/// drawn, as dots of some radius, and the numbers already placed — and the
+/// map's frame it has to stay inside, all in mm on the paper.
+struct Clutter {
+    /// The dots, by the [`CLUTTER_CELL`]-mm square they are in.
+    cells: HashMap<(i32, i32), Dots>,
+    /// The numbers placed, as `(min x, min y, max x, max y)`.
+    boxes: Vec<(f64, f64, f64, f64)>,
+    /// The corners of the map, in order round it.
+    frame: Vec<(f64, f64)>,
+}
+
+/// What a number over another counts as, in dots of line covered: a number
+/// rather covers a stretch of line than one it cannot be read under.
+const LABEL_OVER_LABEL: usize = 1000;
+
+/// Dots, as `(x, y, radius)` in mm.
+type Dots = Vec<(f64, f64, f64)>;
+
+/// The side of a [`Clutter`] cell, in mm.
+const CLUTTER_CELL: f64 = 4.0;
+
+/// The widest a [`Clutter`] dot may be, in mm: what a box is looked round
+/// by for dots reaching into it.
+const CLUTTER_RADIUS: f64 = 1.5;
+
+impl Clutter {
+    fn new(frame: Vec<(f64, f64)>) -> Clutter {
+        Clutter {
+            cells: HashMap::new(),
+            boxes: Vec::new(),
+            frame,
+        }
+    }
+
+    fn cell(x: f64, y: f64) -> (i32, i32) {
+        (
+            (x / CLUTTER_CELL).floor() as i32,
+            (y / CLUTTER_CELL).floor() as i32,
+        )
+    }
+
+    fn dot(&mut self, (x, y): (f64, f64), radius: f64) {
+        let radius = radius.min(CLUTTER_RADIUS);
+        self.cells
+            .entry(Clutter::cell(x, y))
+            .or_default()
+            .push((x, y, radius));
+    }
+
+    /// A line `radius` wide either side: a dot every half mm along it.
+    fn line(&mut self, points: &[(f64, f64)], radius: f64) {
+        for w in points.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let steps = ((b.0 - a.0).hypot(b.1 - a.1) / 0.5).ceil().max(1.0) as usize;
+            for i in 0..steps {
+                let t = i as f64 / steps as f64;
+                self.dot((a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1)), radius);
+            }
+        }
+        if let Some(&last) = points.last() {
+            self.dot(last, radius);
+        }
+    }
+
+    /// How much a box `(min x, min y, max x, max y)` would cover: the dots
+    /// it overlaps, and [`LABEL_OVER_LABEL`] for each number, or
+    /// `usize::MAX` where it is not all inside the frame. Counting stops at
+    /// `enough`.
+    fn covers(&self, b: (f64, f64, f64, f64), enough: usize) -> usize {
+        let inside = |(x, y): (f64, f64)| {
+            let n = self.frame.len();
+            let sides: Vec<f64> = (0..n)
+                .map(|i| {
+                    let (p, q) = (self.frame[i], self.frame[(i + 1) % n]);
+                    (q.0 - p.0) * (y - p.1) - (q.1 - p.1) * (x - p.0)
+                })
+                .collect();
+            sides.iter().all(|&s| s >= 0.0) || sides.iter().all(|&s| s <= 0.0)
+        };
+        if ![(b.0, b.1), (b.2, b.1), (b.2, b.3), (b.0, b.3)]
+            .into_iter()
+            .all(inside)
+        {
+            return usize::MAX;
+        }
+        let mut count = LABEL_OVER_LABEL
+            * self
+                .boxes
+                .iter()
+                .filter(|o| o.0 < b.2 && b.0 < o.2 && o.1 < b.3 && b.1 < o.3)
+                .count();
+        let (lo, hi) = (
+            Clutter::cell(b.0 - CLUTTER_RADIUS, b.1 - CLUTTER_RADIUS),
+            Clutter::cell(b.2 + CLUTTER_RADIUS, b.3 + CLUTTER_RADIUS),
+        );
+        for cx in lo.0..=hi.0 {
+            for cy in lo.1..=hi.1 {
+                for &(x, y, r) in self.cells.get(&(cx, cy)).into_iter().flatten() {
+                    if count >= enough {
+                        return count;
+                    }
+                    let dx = (b.0 - x).max(x - b.2).max(0.0);
+                    let dy = (b.1 - y).max(y - b.3).max(0.0);
+                    if dx.hypot(dy) < r {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Where a number `size` large goes for `anchor`: centred on it where
+    /// that is clear, otherwise the nearest spot round it, out to
+    /// [`LABEL_REACH`], that covers nothing; where there is none, the one
+    /// covering least. The number is then in the way of the next.
+    fn place(&mut self, anchor: (f64, f64), size: (f64, f64)) -> (f64, f64) {
+        let (hw, hh) = (size.0 / 2.0, size.1 / 2.0);
+        let at = |c: (f64, f64)| (c.0 - hw, c.1 - hh, c.0 + hw, c.1 + hh);
+        let mut best: Option<(usize, (f64, f64))> = None;
+        let rings = (LABEL_REACH / LABEL_STEP) as usize;
+        'search: for ring in 0..=rings {
+            let radius = ring as f64 * LABEL_STEP;
+            // More directions further out, about one every step of the way
+            // round.
+            let around = if ring == 0 {
+                1
+            } else {
+                (std::f64::consts::TAU * radius / LABEL_STEP).ceil() as usize
+            };
+            for k in 0..around {
+                let angle = std::f64::consts::TAU * k as f64 / around as f64;
+                let c = (
+                    anchor.0 + radius * angle.cos(),
+                    anchor.1 + radius * angle.sin(),
+                );
+                let enough = best.map_or(usize::MAX, |(n, _)| n);
+                let n = self.covers(at(c), enough);
+                if best.is_none_or(|(b, _)| n < b) {
+                    best = Some((n, c));
+                }
+                if n == 0 {
+                    break 'search;
+                }
+            }
+        }
+        let c = best.map_or(anchor, |(_, c)| c);
+        let b = at(c);
+        // A little room round it.
+        self.boxes
+            .push((b.0 - 0.3, b.1 - 0.3, b.2 + 0.3, b.3 + 0.3));
+        c
+    }
+}
 
 /// What [`convert`] makes of an extract.
 pub struct Conversion {
@@ -561,9 +729,18 @@ impl Conversion {
         // For each stretch: whether the edge of the map cuts its start and
         // its end.
         let mut cut: Vec<(bool, bool)> = Vec::new();
+        // For each stretch: whether it is of the line's own route, rather
+        // than of the way back where it leaves it.
+        let mut on_route: Vec<bool> = Vec::new();
         for (l, line) in lines.iter().enumerate() {
-            for piece in line.route.iter().chain(&line.detours) {
+            let pieces = line
+                .route
+                .iter()
+                .map(|p| (p, true))
+                .chain(line.detours.iter().map(|p| (p, false)));
+            for (piece, own) in pieces {
                 for clipped in clip_polyline(piece, &bbox) {
+                    on_route.push(own);
                     routes.push(bundle::RouteInput {
                         line: l,
                         rank: rank_of[&l],
@@ -667,11 +844,40 @@ impl Conversion {
             }
         }
 
-        // The numbers at the termini: the ends of a line's drawn route the
-        // edge of the map does not cut.
+        // The numbers, each as near where it belongs as it can be without
+        // covering a line, a stop, an arrow or another number.
+        let corners = [
+            (bbox.min_lon, bbox.min_lat),
+            (bbox.max_lon, bbox.min_lat),
+            (bbox.max_lon, bbox.max_lat),
+            (bbox.min_lon, bbox.max_lat),
+        ];
+        let mut clutter = Clutter::new(
+            corners
+                .iter()
+                .map(|&p| self.projection.to_paper(p))
+                .collect(),
+        );
+        for (route, l) in routes.iter().zip(&laid) {
+            clutter.line(&l.points, route.width / 2.0 + 0.2);
+        }
+        for bar in bars {
+            clutter.line(&bar.ends, 0.5);
+        }
+        for circle in &laid_stops.circles {
+            clutter.dot(circle.centre, 1.3);
+        }
+        for arrow in &arrows {
+            clutter.dot(arrow.at, 0.8);
+        }
         let mut placed: Vec<(f64, f64)> = Vec::new();
+
+        // At the termini: the ends of a line's own route the edge of the
+        // map does not cut.
         for (l, line) in lines.iter().enumerate() {
-            let own: Vec<usize> = (0..routes.len()).filter(|&r| routes[r].line == l).collect();
+            let own: Vec<usize> = (0..routes.len())
+                .filter(|&r| routes[r].line == l && on_route[r])
+                .collect();
             let (Some(&first), Some(&last)) = (own.first(), own.last()) else {
                 continue;
             };
@@ -687,47 +893,31 @@ impl Conversion {
                 }
             }
             let label = style.id(&format!("{} label", key_of(l)));
-            for (x, mut y) in ends {
-                // Lines ending at the same terminus — every train at the
-                // central station — stack their numbers downwards rather
-                // than print them over one another.
-                while placed.iter().any(|&(px, py): &(f64, f64)| {
-                    (px - x).abs() < LABEL_WIDTH && (py - y).abs() < LABEL_HEIGHT
-                }) {
-                    y += LABEL_HEIGHT;
-                }
+            for end in ends {
+                let (x, y) = clutter.place(end, label_size(&line.reference));
                 placed.push((x, y));
                 self.push_label(label, &line.reference, x, y);
             }
         }
 
-        // A route cut by the edge of the map gets its number just inside the
-        // edge, on the line itself: as close to the edge as is clear of the
-        // numbers already written, moving inwards along it.
+        // Where the edge of the map cuts a route: a little way in along it.
         for (r, route) in routes.iter().enumerate() {
             let paper = &laid[r].points;
+            let reference = &lines[route.line].reference;
             let label = style.id(&format!("{} label", key_of(route.line)));
+            let length: f64 = paper
+                .windows(2)
+                .map(|p| (p[1].0 - p[0].0).hypot(p[1].1 - p[0].1))
+                .sum();
             for (at_start, is_cut) in [(true, cut[r].0), (false, cut[r].1)] {
                 if !is_cut {
                     continue;
                 }
-                let length: f64 = paper
-                    .windows(2)
-                    .map(|p| (p[1].0 - p[0].0).hypot(p[1].1 - p[0].1))
-                    .sum();
-                let spot = (1..=8)
-                    .map(|i| f64::from(i) * EXIT_STEP)
-                    .take_while(|&d| d < length)
-                    .map(|d| point_along(paper, if at_start { d } else { length - d }))
-                    .find(|&(x, y)| {
-                        placed.iter().all(|&(px, py)| {
-                            (px - x).abs() >= LABEL_WIDTH || (py - y).abs() >= LABEL_HEIGHT
-                        })
-                    });
-                if let Some((x, y)) = spot {
-                    placed.push((x, y));
-                    self.push_label(label, &lines[route.line].reference, x, y);
-                }
+                let d = EXIT_STEP.min(length / 2.0);
+                let anchor = point_along(paper, if at_start { d } else { length - d });
+                let (x, y) = clutter.place(anchor, label_size(reference));
+                placed.push((x, y));
+                self.push_label(label, reference, x, y);
             }
         }
 

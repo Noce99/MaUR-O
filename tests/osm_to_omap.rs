@@ -348,11 +348,25 @@ fn a_train_line_keeps_its_own_colour_and_is_not_a_bus() {
         land.iter().map(|c| c.x).fold(f64::INFINITY, f64::min),
         land.iter().map(|c| c.x).fold(f64::NEG_INFINITY, f64::max),
     );
-    // About 5 mm in from each edge, along the line.
+    // Near each edge, inside, where it is 5 mm in along the line — but
+    // off the line itself.
     let mut xs: Vec<f64> = labels.iter().map(|&(x, _)| x).collect();
     xs.sort_by(f64::total_cmp);
-    assert!((xs[0] - west - 5.0).abs() < 0.5, "{xs:?}, west edge {west}");
-    assert!((east - xs[1] - 5.0).abs() < 0.5, "{xs:?}, east edge {east}");
+    assert!(
+        xs[0] > west && xs[0] - west < 5.0 + 12.0,
+        "{xs:?}, west {west}"
+    );
+    assert!(
+        east > xs[1] && east - xs[1] < 5.0 + 12.0,
+        "{xs:?}, east {east}"
+    );
+    let line = names.iter().position(|n| n == "train MEX").unwrap();
+    for &(x, y) in &labels {
+        for c in &map.objects[line].coords {
+            let off = ((c.x - x).abs() - 2.4).max((c.y - y).abs() - 2.2);
+            assert!(off > 0.0, "the number at {x},{y} covers the line");
+        }
+    }
 }
 
 #[test]

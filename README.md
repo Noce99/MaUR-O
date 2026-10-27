@@ -261,10 +261,10 @@ stopping there run, read from the direction the GTFS trip or the OSM route
 relation serving it travels, and at a terminus, where buses arrive and leave
 from one stop, two arrows side by side.
 
-Numbers of lines ending at the same terminus are stacked rather than drawn
-over one another. A line the edge of the map cuts gets its number there
-too, just inside the edge on the line itself, moved further in where
-another number is already in the way. Along each bus line, every 120 mm or so, is written how
+A line's number goes beside its terminus, and beside the line just inside
+the edge where the edge of the map cuts it: in the nearest spot that covers
+no line, stop, arrow or other number, up to 25 mm away (or, where there is
+none, the one covering least, never another number if it can help it). Along each bus line, every 120 mm or so, is written how
 often it runs — `ogni 8 min` — on average between 10:00 and 16:00: from a
 GTFS feed, the trips of the direction drawn that leave their first stop in
 those hours on one day (`--day`, a working day by default); from OpenStreetMap, a route's `interval` tag
