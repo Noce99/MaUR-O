@@ -238,7 +238,7 @@ fn a_bus_line_from_a_gtfs_feed() {
 }
 
 #[test]
-fn a_date_with_no_service_gives_no_headway() {
+fn a_line_not_running_that_date_is_left_out() {
     osm_to_omap()
         .args([
             BBOX,
@@ -254,7 +254,48 @@ fn a_date_with_no_service_gives_no_headway() {
         .assert()
         .success()
         .stdout(predicates::str::contains(
-            "bus 13 (#e6194b): 3 stops, West, East",
+            "Left out 1 lines not running on 20260110: 13",
+        ))
+        .stdout(predicates::str::contains("bus 13 (").not());
+}
+
+#[test]
+fn a_day_and_a_date_do_not_go_together() {
+    osm_to_omap()
+        .args([
+            BBOX,
+            "--bus",
+            "13",
+            "--gtfs",
+            "tests/data/gtfs_sample",
+            "--day",
+            "sunday",
+            "--date",
+            "20260110",
+            SAMPLE,
+        ])
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn a_day_the_feed_has_no_service_on_is_reported() {
+    osm_to_omap()
+        .args([
+            BBOX,
+            "--bus",
+            "13",
+            "--gtfs",
+            "tests/data/gtfs_sample",
+            "--day",
+            "sunday",
+            SAMPLE,
+        ])
+        .arg(tempfile::tempdir().unwrap().path().join("sunday.omap"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "no sunday with service in the GTFS feed",
         ));
 }
 

@@ -39,9 +39,11 @@
 //! [`BusLine::headway`] is the minutes between two buses of the line, on
 //! average over the middle of the day ([`HEADWAY_HOURS`], 10:00 to 16:00):
 //! the trips of the direction drawn that leave their first stop in those
-//! hours, on one service day (a Wednesday the feed runs, unless a date is
-//! asked for), spread over the six hours. OpenStreetMap has no timetables:
-//! a relation's `interval` tag, where a mapper has set one, is all it says.
+//! hours, on one service day (by default a Wednesday the feed runs, or the
+//! Saturday or Sunday of [`Day`], or a date asked for), spread over the six
+//! hours. A line with no trip at all that day does not run then, and is
+//! told apart ([`GtfsLines::idle`]). OpenStreetMap has no timetables: a
+//! relation's `interval` tag, where a mapper has set one, is all it says.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -280,6 +282,41 @@ fn detours(route: &[Vec<(f64, f64)>], back: &[Vec<(f64, f64)>]) -> Vec<Vec<(f64,
         }
     }
     out
+}
+
+/// The kind of day the GTFS headways are counted on: a working day, a
+/// Saturday, or a Sunday — which stands for the holidays too, as Italian
+/// timetables run them alike.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Day {
+    /// Monday to Friday, looked for on a Wednesday.
+    #[default]
+    Weekday,
+    /// A Saturday.
+    Saturday,
+    /// A Sunday or a holiday.
+    Sunday,
+}
+
+impl Day {
+    /// The day of the week a typical such day is looked for on.
+    fn weekday(self) -> chrono::Weekday {
+        match self {
+            Day::Weekday => chrono::Weekday::Wed,
+            Day::Saturday => chrono::Weekday::Sat,
+            Day::Sunday => chrono::Weekday::Sun,
+        }
+    }
+
+    /// The kind of day `date` (`YYYYMMDD`) is, by its day of the week.
+    pub fn of(date: &str) -> Option<Day> {
+        let day = chrono::NaiveDate::parse_from_str(date, "%Y%m%d").ok()?;
+        Some(match chrono::Datelike::weekday(&day) {
+            chrono::Weekday::Sat => Day::Saturday,
+            chrono::Weekday::Sun => Day::Sunday,
+            _ => Day::Weekday,
+        })
+    }
 }
 
 /// The hours of the day [`BusLine::headway`] averages over: from 10:00 to
@@ -636,6 +673,10 @@ type Sequenced<T> = Vec<(u64, T)>;
 pub struct GtfsLines {
     /// The lines, in the order asked for.
     pub lines: Vec<BusLine>,
+    /// The lines of the feed asked for which run no trip at all on
+    /// [`GtfsLines::date`], in the order asked for: read like the others,
+    /// but not to be drawn on a map of that day.
+    pub idle: Vec<BusLine>,
     /// The day the lines' headways were counted on, `YYYYMMDD`: `None` where
     /// the feed has no calendar to pick one from.
     pub date: Option<String>,
@@ -691,13 +732,16 @@ fn services_on(
     Ok(services)
 }
 
-/// The Wednesday the feed runs the most services on, `YYYYMMDD`: a plain
-/// working day, clear of the Monday and Friday variants and of holidays.
+/// The `day` the feed runs the most services on, `YYYYMMDD`: for a working
+/// day a Wednesday, clear of the Monday and Friday variants and of
+/// holidays; a Saturday or a Sunday clear of the reduced service of a
+/// holiday season.
 ///
-/// The Wednesdays looked at are those `calendar.txt`'s date ranges span,
-/// and those `calendar_dates.txt` adds a service on — which is all a feed
-/// that lists its days one by one, with no `calendar.txt`, has.
-fn typical_weekday(
+/// The days looked at are those `calendar.txt`'s date ranges span, and
+/// those `calendar_dates.txt` adds a service on — which is all a feed that
+/// lists its days one by one, with no `calendar.txt`, has.
+fn typical_day(
+    day: Day,
     calendar: Option<&Table>,
     exceptions: Option<&Table>,
 ) -> Result<Option<String>, String> {
@@ -735,9 +779,9 @@ fn typical_weekday(
     days.dedup();
 
     let mut best: Option<(usize, String)> = None;
-    for day in days {
-        if chrono::Datelike::weekday(&day) == chrono::Weekday::Wed {
-            let date = day.format("%Y%m%d").to_string();
+    for each in days {
+        if chrono::Datelike::weekday(&each) == day.weekday() {
+            let date = each.format("%Y%m%d").to_string();
             let count = services_on(&date, calendar, exceptions)?.len();
             if count > 0 && best.as_ref().is_none_or(|(most, _)| count > *most) {
                 best = Some((count, date));
@@ -760,13 +804,15 @@ fn minutes(time: &str) -> Option<u32> {
 /// number the feed has no route for is left out.
 ///
 /// The headways are counted on `date` (`YYYYMMDD`), or where none is given
-/// on the Wednesday the feed runs the most services on. The lines come back
+/// on the typical `day` the feed runs the most services on; a line with no
+/// trip that day comes back among the idle ones. The lines come back
 /// as lines of kind `mode`, in the colour the feed gives them where it gives
 /// one other than white.
 pub fn lines_from_gtfs(
     path: &Path,
     references: &[String],
     date: Option<&str>,
+    day: Day,
     mode: Mode,
 ) -> Result<GtfsLines, String> {
     let mut feed = Feed::open(path)?;
@@ -776,7 +822,7 @@ pub fn lines_from_gtfs(
     let exceptions = feed.optional_table("calendar_dates.txt")?;
     let date = match date {
         Some(date) => Some(date.to_string()),
-        None => typical_weekday(calendar.as_ref(), exceptions.as_ref())?,
+        None => typical_day(day, calendar.as_ref(), exceptions.as_ref())?,
     };
     let running = match &date {
         Some(date) => services_on(date, calendar.as_ref(), exceptions.as_ref())?,
@@ -999,8 +1045,16 @@ pub fn lines_from_gtfs(
                 headway,
             })
         })
+        .collect::<Vec<_>>();
+    // With no day to go by, every line counts as running.
+    let runs: HashSet<&str> = running_trips
+        .values()
+        .map(|(reference, _)| reference.as_str())
         .collect();
-    Ok(GtfsLines { lines, date })
+    let (lines, idle) = lines
+        .into_iter()
+        .partition(|line| date.is_none() || runs.contains(line.reference.as_str()));
+    Ok(GtfsLines { lines, idle, date })
 }
 
 #[cfg(test)]
@@ -1175,7 +1229,14 @@ mod tests {
             "service_id,date,exception_type\nwk,20260107,2\n",
         );
 
-        let read = lines_from_gtfs(dir.path(), &["13".to_string()], None, Mode::Bus).unwrap();
+        let read = lines_from_gtfs(
+            dir.path(),
+            &["13".to_string()],
+            None,
+            Day::Weekday,
+            Mode::Bus,
+        )
+        .unwrap();
         // The first Wednesday the weekday service runs.
         assert_eq!(read.date.as_deref(), Some("20260114"));
         let lines = read.lines;
@@ -1199,10 +1260,40 @@ mod tests {
         // t7 starts before 10 and t6 runs on Sundays: 360 minutes / 3.
         assert_eq!(line.headway, Some(120.0));
 
-        // On the 7th the weekday service is off: no trip, no headway.
-        let off =
-            lines_from_gtfs(dir.path(), &["13".to_string()], Some("20260107"), Mode::Bus).unwrap();
-        assert_eq!(off.lines[0].headway, None);
+        // On the 7th the weekday service is off: line 13 does not run.
+        let off = lines_from_gtfs(
+            dir.path(),
+            &["13".to_string()],
+            Some("20260107"),
+            Day::Weekday,
+            Mode::Bus,
+        )
+        .unwrap();
+        assert!(off.lines.is_empty());
+        assert_eq!(off.idle[0].reference, "13");
+
+        // On a Sunday only t6 runs, at 12:00: 360 minutes / 1. Line 19
+        // runs no trip then.
+        let sunday = lines_from_gtfs(
+            dir.path(),
+            &["13".to_string(), "19".to_string()],
+            None,
+            Day::Sunday,
+            Mode::Bus,
+        )
+        .unwrap();
+        assert_eq!(sunday.date.as_deref(), Some("20260111"));
+        assert_eq!(sunday.lines.len(), 1);
+        assert_eq!(sunday.lines[0].headway, Some(360.0));
+        assert_eq!(sunday.idle[0].reference, "19");
+    }
+
+    #[test]
+    fn a_date_is_the_kind_of_day_its_day_of_the_week_is() {
+        assert_eq!(Day::of("20261021"), Some(Day::Weekday));
+        assert_eq!(Day::of("20261024"), Some(Day::Saturday));
+        assert_eq!(Day::of("20261025"), Some(Day::Sunday));
+        assert_eq!(Day::of("2026-10-25"), None);
     }
 
     #[test]
@@ -1236,7 +1327,14 @@ mod tests {
             "service_id,date,exception_type\nwed,20261021,1\nthu,20261022,1\n",
         );
 
-        let read = lines_from_gtfs(dir.path(), &["MEX".to_string()], None, Mode::Train).unwrap();
+        let read = lines_from_gtfs(
+            dir.path(),
+            &["MEX".to_string()],
+            None,
+            Day::Weekday,
+            Mode::Train,
+        )
+        .unwrap();
         assert_eq!(read.date.as_deref(), Some("20261021"));
         let line = &read.lines[0];
         assert_eq!(line.mode, Mode::Train);

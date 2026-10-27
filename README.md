@@ -228,7 +228,7 @@ one carto pixel being 0.28 mm on the paper, along with what carto shows at
 that zoom and what it leaves out. Labels and POI icons are not drawn.
 
 ```
-osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,19,...] [--gtfs feed.zip [--date YYYYMMDD]] [--max-headway N] [--train S1,S2A,MEX,...] [--legend] <osm-file> [omap-file]
+osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,19,...] [--gtfs feed.zip [--day weekday|saturday|sunday | --date YYYYMMDD]] [--max-headway N] [--train S1,S2A,MEX,...] [--legend] <osm-file> [omap-file]
 ```
 
 | Option | Meaning |
@@ -241,7 +241,8 @@ osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,1
 | `--bus-exclude` | Leave out these bus lines from those `--bus` selects, e.g. `--bus all --bus-exclude N1,N2,FBP`. |
 | `--gtfs` | Take lines from this GTFS feed (`.zip` or unpacked folder) before the OSM file's own route relations. Repeatable: each line comes from the first feed that has it, e.g. TPER's bus network and its Marconi Express feed together. A line's own GTFS colour is kept for train lines (white, which TPER gives every bus, counts as none). |
 | `--max-headway` | Leave out the bus lines that run less often than once every this many minutes between 10:00 and 16:00 (the "ogni N min" on the map), and those from a GTFS feed with no trips then at all. E.g. `--bus all --max-headway 15` keeps the frequent urban network. |
-| `--date` | The day (`YYYYMMDD`) the GTFS headways are counted on. Defaults to the Wednesday the first feed runs the most services on — from `calendar.txt`, or from `calendar_dates.txt` for a feed that lists its days one by one. |
+| `--day` | The kind of day the GTFS headways are counted on: `weekday` (the default), `saturday` or `sunday` (which holidays run like). The day taken is the one of that kind — a Wednesday for `weekday` — the first feed runs the most services on, from `calendar.txt`, or from `calendar_dates.txt` for a feed that lists its days one by one. GTFS lines with no trip at all that day are left out, and the legend says whose frequencies it gives (`feriali`, `il sabato`, `festivi`). |
+| `--date` | The exact day (`YYYYMMDD`) the GTFS headways are counted on, instead of `--day`. |
 | `--train` | Draw these train lines (also light rail, tram and monorail — e.g. `S1,S2A,MEX` for Bologna's suburban lines and the Marconi Express), from the OSM file's route relations: wider than a bus line, with larger stations, in the line's own colour where OSM gives one. |
 | `--bundle-width` | The widest a bundle of lines sharing a street may be, in carto pixels (0.28 mm each; default 12). Wider, and its lines are drawn thinner. |
 | `--stop-merge` | How close two stops may be on the paper, in mm, before they are drawn as one (default 3): the two sides of a street become one bar. |
@@ -266,7 +267,7 @@ too, just inside the edge on the line itself, moved further in where
 another number is already in the way. Along each bus line, every 120 mm or so, is written how
 often it runs — `ogni 8 min` — on average between 10:00 and 16:00: from a
 GTFS feed, the trips of the direction drawn that leave their first stop in
-those hours on one working day; from OpenStreetMap, a route's `interval` tag
+those hours on one day (`--day`, a working day by default); from OpenStreetMap, a route's `interval` tag
 where it has one. These texts turn with the line, and are moved along it
 off stops, numbers and each other. A line is drawn once: the route of its main variant (the OSM relation
 with the most members, or the GTFS shape most trips follow), plus the

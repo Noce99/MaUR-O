@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::bundle;
-use crate::bus::{BusLine, Mode, HEADWAY_HOURS};
+use crate::bus::{BusLine, Day, Mode, HEADWAY_HOURS};
 use crate::map::{coord_flag, h_align, v_align, Coord, Object, ObjectKind, PathObject, TextObject};
 use crate::osm::{BBox, OsmData};
 use crate::osm_style::{line_width_px, stop_circle_px, Sample, Style, ARROW_PX, PIXEL_MM};
@@ -792,8 +792,9 @@ impl Conversion {
     /// would hide the legend's own samples along with the map. The bus and
     /// train lines come first, each with its name from `lines`, then an
     /// entry for their stops and one for the numbers at their ends; then
-    /// everything else, in the order the style defines it.
-    pub fn add_legend(&mut self, style: &Style, lines: &[BusLine]) {
+    /// everything else, in the order the style defines it. The frequencies
+    /// are said to be those of `day`.
+    pub fn add_legend(&mut self, style: &Style, lines: &[BusLine], day: Day) {
         let background = style.background();
         let Some(land) = self.objects.iter().find(|o| o.symbol_id == background) else {
             return;
@@ -896,8 +897,14 @@ impl Conversion {
                 headway,
                 Sample::Text,
                 format!(
-                    "Frequenza media {}–{} feriali",
-                    HEADWAY_HOURS.0, HEADWAY_HOURS.1
+                    "Frequenza media {}–{} {}",
+                    HEADWAY_HOURS.0,
+                    HEADWAY_HOURS.1,
+                    match day {
+                        Day::Weekday => "feriali",
+                        Day::Saturday => "il sabato",
+                        Day::Sunday => "festivi",
+                    }
                 ),
                 text,
             ));

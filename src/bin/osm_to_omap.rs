@@ -4,7 +4,8 @@
 //! ```text
 //! osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4]
 //!             [--bus 13,19,...]
-//!             [--train S1,S2A,MEX,...] [--gtfs feed.zip ... [--date YYYYMMDD]]
+//!             [--train S1,S2A,MEX,...]
+//!             [--gtfs feed.zip ... [--day weekday|saturday|sunday | --date YYYYMMDD]]
 //!             [--legend]
 //!             <osm-file> [omap-file]
 //! ```
@@ -46,9 +47,10 @@
 //!
 //! Along each line, every so often, is written how many minutes apart its
 //! buses run between 10:00 and 16:00: counted from the GTFS timetable on one
-//! working day (`--date`, or by default the Wednesday the first feed runs
-//! the most services on, used for every feed), or taken from a relation's `interval` tag where a mapper
-//! has set one.
+//! day (`--date`, or the `--day` the first feed runs the most services on —
+//! by default a Wednesday — used for every feed), or taken from a
+//! relation's `interval` tag where a mapper has set one. A GTFS line with no
+//! trip at all that day is left out: the map shows that day's network.
 //!
 //! Lines sharing a street are drawn side by side on it, in the order of
 //! their numbers, a bar across all of them at a stop: a bundle, never wider
@@ -79,7 +81,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use maur_o::bus::{
-    gtfs_references, lines_from_gtfs, lines_from_osm, osm_references, BusLine, Mode, HEADWAY_HOURS,
+    gtfs_references, lines_from_gtfs, lines_from_osm, osm_references, BusLine, Day, Mode,
+    HEADWAY_HOURS,
 };
 use maur_o::osm::{read_osm, BBox};
 use maur_o::osm_convert::convert;
@@ -133,9 +136,15 @@ struct Args {
     gtfs: Vec<PathBuf>,
 
     /// The day to count the GTFS headways on, YYYYMMDD. Defaults to the
-    /// Wednesday the first feed runs the most services on.
+    /// typical `--day` the first feed runs the most services on.
     #[arg(long, requires = "gtfs")]
     date: Option<String>,
+
+    /// The kind of day to count the GTFS headways on: a working day (a
+    /// Wednesday), a Saturday, or a Sunday (which holidays run like). GTFS
+    /// lines with no trip that day are left out.
+    #[arg(long, value_enum, requires = "gtfs", conflicts_with = "date")]
+    day: Option<Day>,
 
     /// Draw these train lines (and light rail, tram, monorail), by number:
     /// e.g. S1,S2A,MEX. `all` draws every one which reaches the map.
@@ -229,6 +238,9 @@ fn run() -> Result<(), (ExitCode, String)> {
     // every feed's headways, so that they are counted on the same day.
     let mut headway_date = args.date.clone();
     let mut found: Vec<BusLine> = Vec::new();
+    // The lines a feed has but runs no trip of that day: found, so that no
+    // other source stands in for them, but not drawn.
+    let mut idle: Vec<(Mode, String)> = Vec::new();
     let has = |found: &[BusLine], mode: Mode, reference: &str| {
         found
             .iter()
@@ -245,17 +257,32 @@ fn run() -> Result<(), (ExitCode, String)> {
             break;
         }
         let references: Vec<String> = missing.iter().map(|(r, _)| r.clone()).collect();
-        let read = lines_from_gtfs(feed, &references, headway_date.as_deref(), Mode::Bus)
+        let day = args.day.unwrap_or_default();
+        let read = lines_from_gtfs(feed, &references, headway_date.as_deref(), day, Mode::Bus)
             .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
         if headway_date.is_none() {
             headway_date = read.date;
         }
-        for mut line in read.lines {
+        for (mut line, runs) in read
+            .lines
+            .into_iter()
+            .map(|l| (l, true))
+            .chain(read.idle.into_iter().map(|l| (l, false)))
+        {
             if let Some((_, mode)) = missing.iter().find(|(r, _)| *r == line.reference) {
                 line.mode = *mode;
+                if !runs {
+                    idle.push((line.mode, line.reference.clone()));
+                }
                 found.push(line);
             }
         }
+    }
+    if let (Some(day), None, false) = (args.day, &headway_date, args.gtfs.is_empty()) {
+        eprintln!(
+            "Warning: no {} with service in the GTFS feed: no headways counted",
+            format!("{day:?}").to_lowercase()
+        );
     }
     // The lines a timetable stands behind: those whose missing headway
     // means they do not run in the middle of the day at all.
@@ -323,6 +350,19 @@ fn run() -> Result<(), (ExitCode, String)> {
             }
         }
     }
+    // Not the lines which do not run that day.
+    let (transit, resting): (Vec<BusLine>, Vec<BusLine>) = transit
+        .into_iter()
+        .partition(|line| !idle.contains(&(line.mode, line.reference.clone())));
+    if !resting.is_empty() {
+        let numbers: Vec<&str> = resting.iter().map(|l| l.reference.as_str()).collect();
+        println!(
+            "Left out {} lines not running on {}: {}",
+            resting.len(),
+            headway_date.as_deref().unwrap_or("that day"),
+            numbers.join(", ")
+        );
+    }
     // The cap on how seldom a bus may run.
     let transit: Vec<BusLine> = match args.max_headway {
         None => transit,
@@ -381,7 +421,12 @@ fn run() -> Result<(), (ExitCode, String)> {
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     conversion.add_bus_lines(&style, &transit, &data, args.bundle_width, args.stop_merge);
     if args.legend {
-        conversion.add_legend(&style, &transit);
+        // The kind of day the headways were counted on, an exact date's own.
+        let day = match &headway_date {
+            Some(date) if args.date.is_some() => Day::of(date).unwrap_or_default(),
+            _ => args.day.unwrap_or_default(),
+        };
+        conversion.add_legend(&style, &transit, day);
     }
     conversion
         .write(&style, &omap_file)
