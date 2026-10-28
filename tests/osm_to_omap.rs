@@ -547,3 +547,119 @@ fn excluded_buses_are_left_out_of_those_selected() {
             "bus line 99 to leave out is not among those selected",
         ));
 }
+
+#[test]
+fn maps_draws_each_maps_area_and_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let list = dir.path().join("aree.csv");
+    std::fs::write(
+        &list,
+        "map_number,map_name,latitude,longitude\n\
+         1,Dentro,44.4930,11.3420\n\
+         1,Dentro,44.4940,11.3420\n\
+         1,Dentro,44.4940,11.3440\n\
+         1,Dentro,44.4930,11.3440\n\
+         2,Lontano,45.0,12.0\n\
+         2,Lontano,45.1,12.0\n\
+         2,Lontano,45.1,12.1\n",
+    )
+    .unwrap();
+    let out = dir.path().join("maps.omap");
+    osm_to_omap()
+        .args([BBOX, "--maps"])
+        .arg(&list)
+        .args(["--legend", SAMPLE])
+        .arg(&out)
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "map 2 - Lontano has no area on the map",
+        ));
+
+    let (map, _) = read_xml_map(&out).unwrap();
+    let symbol_name = |o: &maur_o::map::Object| match &map.symbols[o.symbol_index.unwrap()] {
+        Symbol::Combined(s) => s.name.clone(),
+        Symbol::Text(s) => s.name.clone(),
+        _ => String::new(),
+    };
+    let areas = map
+        .objects
+        .iter()
+        .filter(|o| symbol_name(o) == "1 - Dentro")
+        .count();
+    // The area on the map, and its sample in the legend.
+    assert_eq!(areas, 2);
+    let name = map
+        .objects
+        .iter()
+        .find(|o| symbol_name(o) == "1 - Dentro name")
+        .unwrap();
+    assert!(matches!(&name.kind, ObjectKind::Text(t) if t.text == "1 - Dentro"));
+    let texts: Vec<String> = map
+        .objects
+        .iter()
+        .filter_map(|o| match &o.kind {
+            ObjectKind::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(texts.iter().any(|t| t == "Area 1 - Dentro"), "{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("Lontano")));
+}
+
+#[test]
+fn a_maps_list_that_cannot_be_read_exits_with_2() {
+    osm_to_omap()
+        .args(["--maps", "no/such/list.csv", SAMPLE])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn maps_takes_the_colours_of_a_csv_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let list = dir.path().join("aree.csv");
+    std::fs::write(
+        &list,
+        "map_id,map_number,map_name,area,vertex,latitude,longitude,\
+         stroke_color,stroke_alpha,fill_color,fill_alpha\n\
+         7,1,Dentro,1,1,44.4930,11.3420,#0d6efd,1,#dc3545,0.25\n\
+         7,1,Dentro,1,2,44.4940,11.3420,#0d6efd,1,#dc3545,0.25\n\
+         7,1,Dentro,1,3,44.4940,11.3440,#0d6efd,1,#dc3545,0.25\n\
+         7,1,Dentro,1,4,44.4930,11.3440,#0d6efd,1,#dc3545,0.25\n",
+    )
+    .unwrap();
+    let out = dir.path().join("maps.omap");
+    osm_to_omap()
+        .args([BBOX, "--maps"])
+        .arg(&list)
+        .arg(SAMPLE)
+        .arg(&out)
+        .assert()
+        .success();
+
+    let (map, _) = read_xml_map(&out).unwrap();
+    let color = |name: &str| {
+        map.colors
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no colour {name}"))
+            .clone()
+    };
+    let rgb = |c: &maur_o::map::Color| {
+        (
+            (c.rgb.0 * 255.0).round() as u8,
+            (c.rgb.1 * 255.0).round() as u8,
+            (c.rgb.2 * 255.0).round() as u8,
+        )
+    };
+    assert_eq!(rgb(&color("map 0")), (0x0d, 0x6e, 0xfd));
+    assert_eq!(rgb(&color("map 0 name")), (0x0d, 0x6e, 0xfd));
+    let fill = color("map 0 fill");
+    assert_eq!(rgb(&fill), (0xdc, 0x35, 0x45));
+    assert!((fill.opacity - 0.25).abs() < 1e-6);
+    assert!(map
+        .objects
+        .iter()
+        .any(|o| matches!(&o.kind, ObjectKind::Text(t) if t.text == "1 - Dentro")));
+}

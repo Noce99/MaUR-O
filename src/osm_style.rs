@@ -49,6 +49,7 @@ use crate::map::{
     Element, FillPattern, LineSymbol, Object, ObjectKind, PathObject, PointSymbol, Symbol,
     TextSymbol,
 };
+use crate::map_areas::MapArea;
 use crate::osm::Tags;
 
 /// The size of one carto pixel on the paper, in mm.
@@ -696,6 +697,17 @@ pub struct BusLook {
     pub color: String,
 }
 
+/// The colours the areas of an event's maps are drawn in where the list
+/// gives none, one per map in the order they are listed, starting over
+/// after the last: dark enough for their names to read, and apart from
+/// carto's own.
+pub const MAP_AREA_COLORS: [&str; 8] = [
+    "#c2185b", "#1a237e", "#e65100", "#4a148c", "#006064", "#b71c1c", "#33691e", "#3e2723",
+];
+
+/// How wide the outline of a map's area is drawn, in carto pixels.
+pub const MAP_AREA_OUTLINE_PX: f64 = 3.0;
+
 /// Carto's look at the zoom of `details`, with bus and train lines drawn over
 /// everything.
 ///
@@ -709,8 +721,42 @@ pub struct BusLook {
 /// every badge, then the labels' white. They are as wide on the paper at
 /// every level of detail.
 pub fn carto_style_with_bus_lines(lines: &[BusLook], details: Details) -> Style {
+    carto_style_with_overlays(lines, &[], details)
+}
+
+/// How large a map's name is written, in carto pixels.
+pub const MAP_NAME_PX: f64 = 18.0;
+
+/// How opaque the tint inside a map's area is where the list says nothing.
+pub const MAP_AREA_FILL_ALPHA: f64 = 0.15;
+
+/// [`carto_style_with_bus_lines`], with the areas of an event's maps over
+/// it too, in the order given.
+///
+/// Each map gets two symbols, keyed by its place in the list: `map <i>` for
+/// its area (an outline in the map's stroke colour over a tint of its fill
+/// colour, where the list gives none the map's colour of
+/// [`MAP_AREA_COLORS`] and a faint tint of it) and `map <i> name` for its
+/// name (bold text in the stroke colour, opaque, haloed in white). The
+/// names are on top of everything, then the outlines, over the bus lines;
+/// the tints under the bus lines, over the rest of the map.
+pub fn carto_style_with_overlays(lines: &[BusLook], maps: &[MapArea], details: Details) -> Style {
     let zoom = details.zoom();
     let mut entries: Vec<(String, String, f64)> = Vec::new();
+    let stroke = |i: usize| match &maps[i].stroke {
+        Some(color) => (color.hex.clone(), color.alpha),
+        None => (MAP_AREA_COLORS[i % MAP_AREA_COLORS.len()].to_string(), 1.0),
+    };
+    for i in 0..maps.len() {
+        entries.push((format!("map {i} name"), stroke(i).0, 1.0));
+    }
+    if !maps.is_empty() {
+        entries.push(("map name halo".to_string(), "#ffffff".to_string(), 1.0));
+    }
+    for i in 0..maps.len() {
+        let (hex, alpha) = stroke(i);
+        entries.push((format!("map {i}"), hex, alpha));
+    }
     if !lines.is_empty() {
         entries.push(("bus label".to_string(), "#ffffff".to_string(), 1.0));
     }
@@ -733,6 +779,13 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook], details: Details) -> Style 
             line.color.clone(),
             1.0,
         ));
+    }
+    for (i, map) in maps.iter().enumerate() {
+        let (hex, alpha) = match &map.fill {
+            Some(color) => (color.hex.clone(), color.alpha),
+            None => (stroke(i).0, MAP_AREA_FILL_ALPHA),
+        };
+        entries.push((format!("map {i} fill"), hex, alpha));
     }
     entries.extend(
         palette(zoom)
@@ -1114,6 +1167,32 @@ pub fn carto_style_with_bus_lines(lines: &[BusLook], details: Details) -> Style 
         b.add("transit stop arrow", Symbol::Point(arrow));
     }
 
+    // The areas of an event's maps: the outline over a faint tint, and the
+    // name written inside.
+    for (i, map) in maps.iter().enumerate() {
+        let name = &map.name;
+        let key = format!("map {i}");
+        let fill = b.fill(&format!("{key} fill"));
+        let outline = b.stroke(&key, MAP_AREA_OUTLINE_PX, true);
+        b.add(
+            &key,
+            Builder::combined(name, vec![Symbol::Area(fill), Symbol::Line(outline)]),
+        );
+        let label = TextSymbol {
+            name: format!("{name} name"),
+            font_family: "Noto Sans".to_string(),
+            font_size: px(MAP_NAME_PX),
+            bold: true,
+            color: b.color(&format!("{key} name")),
+            framing: true,
+            framing_color: b.color("map name halo"),
+            framing_mode: 1,
+            framing_line_half_width: px(1.5),
+            ..TextSymbol::default()
+        };
+        b.add(&format!("{key} name"), Symbol::Text(label));
+    }
+
     // The legend's title and captions.
     let legend_text = |name: &str, size: f64, bold: bool| TextSymbol {
         name: name.to_string(),
@@ -1192,6 +1271,13 @@ impl Style {
         let key = self.key(id)?;
         if key == "land" || key.starts_with("legend ") {
             return None;
+        }
+        // A map's area, by the map's own name; not its name written inside.
+        if let Some(rest) = key.strip_prefix("map ") {
+            return match (rest.parse::<usize>(), self.symbol(id)?) {
+                (Ok(_), Symbol::Combined(c)) => Some(format!("Area {}", c.name)),
+                _ => None,
+            };
         }
         for mode in ["bus", "train"] {
             if let Some(reference) = key.strip_prefix(mode).and_then(|k| k.strip_prefix(' ')) {

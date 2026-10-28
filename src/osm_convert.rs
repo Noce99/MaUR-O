@@ -30,8 +30,11 @@ use std::path::Path;
 use crate::bundle;
 use crate::bus::{BusLine, Day, Mode, HEADWAY_HOURS};
 use crate::map::{coord_flag, h_align, v_align, Coord, Object, ObjectKind, PathObject, TextObject};
+use crate::map_areas::MapArea;
 use crate::osm::{BBox, OsmData};
-use crate::osm_style::{line_width_px, stop_circle_px, Sample, Style, ARROW_PX, PIXEL_MM};
+use crate::osm_style::{
+    line_width_px, stop_circle_px, Sample, Style, ARROW_PX, MAP_NAME_PX, PIXEL_MM,
+};
 use crate::xml_writer::{
     color_element, georeferencing_element, symbol_element, Georeference, MapFile,
 };
@@ -974,6 +977,118 @@ impl Conversion {
         self.counts.2 += 1;
     }
 
+    /// Adds the areas of an event's maps over the map: each map's areas
+    /// with the symbol `map <i>`, and its name with `map <i> name` once (see
+    /// [`carto_style_with_overlays`](crate::osm_style::carto_style_with_overlays)).
+    /// Clipped to the map's area like the rest of it.
+    ///
+    /// A name goes inside one of its map's areas wherever it fits there
+    /// whole, as far from every map's outline as it can, level or turned
+    /// along a long thin area; where it fits nowhere inside, beside the area,
+    /// just outside it, clear of the other maps' areas, of the names already
+    /// placed and of the map's edge.
+    ///
+    /// Returns the names of the maps with no area on the map at all, which
+    /// are left out.
+    pub fn add_map_areas(&mut self, style: &Style, maps: &[MapArea]) -> Vec<String> {
+        let mut missing = Vec::new();
+        // Each map's areas on the paper, clipped.
+        let mut drawn: Vec<(usize, Vec<Ring>)> = Vec::new();
+        for (i, map) in maps.iter().enumerate() {
+            let area_symbol = style.id(&format!("map {i}"));
+            let polygons: Vec<Vec<(f64, f64)>> = map
+                .polygons
+                .iter()
+                .flat_map(|polygon| clip_rings(vec![polygon.clone()], &self.bbox))
+                .map(|ring| ring.iter().map(|&p| self.projection.to_paper(p)).collect())
+                .collect();
+            if polygons.is_empty() {
+                missing.push(map.name.clone());
+                continue;
+            }
+            for ring in &polygons {
+                let last = ring.len() - 1;
+                let coords = ring
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &(x, y))| {
+                        let flags = if j == last {
+                            coord_flag::CLOSE_POINT
+                        } else {
+                            0
+                        };
+                        Coord::new(x, y, flags)
+                    })
+                    .collect();
+                self.objects.push(path_object(area_symbol, coords));
+                self.counts.0 += 1;
+            }
+            drawn.push((i, polygons));
+        }
+
+        let frame: Vec<(f64, f64)> = [
+            (self.bbox.min_lon, self.bbox.min_lat),
+            (self.bbox.max_lon, self.bbox.min_lat),
+            (self.bbox.max_lon, self.bbox.max_lat),
+            (self.bbox.min_lon, self.bbox.max_lat),
+            (self.bbox.min_lon, self.bbox.min_lat),
+        ]
+        .iter()
+        .map(|&p| self.projection.to_paper(p))
+        .collect();
+        let outlines: Vec<&[(f64, f64)]> = drawn
+            .iter()
+            .flat_map(|(_, rings)| rings.iter().map(|r| r.as_slice()))
+            .collect();
+        // The names which fit inside their areas first, then the others
+        // round them.
+        let mut placed: Vec<NameBox> = Vec::new();
+        let mut names: Vec<Option<NameBox>> = vec![None; drawn.len()];
+        for inside in [true, false] {
+            for (k, (i, rings)) in drawn.iter().enumerate() {
+                if names[k].is_some() {
+                    continue;
+                }
+                let others: Vec<&[(f64, f64)]> = drawn
+                    .iter()
+                    .filter(|(j, _)| j != i)
+                    .flat_map(|(_, rings)| rings.iter().map(|r| r.as_slice()))
+                    .collect();
+                let around = Around {
+                    outlines: &outlines,
+                    others: &others,
+                    placed: &placed,
+                    frame: &frame,
+                };
+                let size = map_name_size(&maps[*i].name);
+                let found = if inside {
+                    place_inside(rings, size, &around)
+                } else {
+                    Some(place_beside(rings, size, &around))
+                };
+                if let Some(name) = found {
+                    placed.push(name.clone());
+                    names[k] = Some(name);
+                }
+            }
+        }
+        for ((i, _), name) in drawn.iter().zip(names) {
+            let name = name.expect("every name placed");
+            let mut object = Object::new(ObjectKind::Text(TextObject {
+                text: maps[*i].name.clone(),
+                h_align: h_align::HCENTER,
+                v_align: v_align::VCENTER,
+                box_size: None,
+            }));
+            object.symbol_id = style.id(&format!("map {i} name"));
+            object.coords = vec![Coord::new(name.center.0, name.center.1, 0)];
+            object.rotation = name.rotation;
+            self.objects.push(object);
+            self.counts.2 += 1;
+        }
+        missing
+    }
+
     /// Adds a legend under the map: a sample of every symbol the map uses,
     /// each with what it means, in columns as wide as the map allows.
     ///
@@ -1404,6 +1519,354 @@ fn legend_name(name: &str, reference: &str) -> String {
     }
 }
 
+/// The area a closed ring encloses, whichever way round it runs.
+fn ring_area(ring: &[(f64, f64)]) -> f64 {
+    ring.windows(2)
+        .map(|w| w[0].0 * w[1].1 - w[1].0 * w[0].1)
+        .sum::<f64>()
+        .abs()
+        / 2.0
+}
+
+/// Whether `p` is inside the closed `ring`.
+fn inside_ring((x, y): (f64, f64), ring: &[(f64, f64)]) -> bool {
+    let mut inside = false;
+    for w in ring.windows(2) {
+        let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+        if (y0 > y) != (y1 > y) && x < x0 + (y - y0) / (y1 - y0) * (x1 - x0) {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+/// How far `p` is from the nearest side of the closed `ring`.
+fn distance_to_ring(p: (f64, f64), ring: &[(f64, f64)]) -> f64 {
+    ring.windows(2)
+        .map(|w| {
+            let (a, b) = (w[0], w[1]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let length = dx * dx + dy * dy;
+            let t = if length > 0.0 {
+                (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / length).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            ((p.0 - a.0 - t * dx).powi(2) + (p.1 - a.1 - t * dy).powi(2)).sqrt()
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// A closed ring on the paper, in mm.
+type Ring = Vec<(f64, f64)>;
+
+/// How large a map's name is on the paper, in mm, halo and all: about
+/// 0.6 of the font's size a character, bold, and as high as the font.
+fn map_name_size(text: &str) -> (f64, f64) {
+    let size = MAP_NAME_PX * PIXEL_MM;
+    (text.chars().count() as f64 * 0.6 * size + 1.0, size)
+}
+
+/// How far, in mm, a map's name is kept from any map's outline inside an
+/// area, at the least; and how far outside an area its name goes.
+const NAME_CLEARANCE: f64 = 0.5;
+const NAME_GAP: f64 = 1.0;
+
+/// Where a map's name goes: its middle, its size in mm, and its rotation
+/// in radians counter-clockwise, as Mapper's.
+#[derive(Clone, Debug)]
+struct NameBox {
+    center: (f64, f64),
+    size: (f64, f64),
+    rotation: f64,
+}
+
+impl NameBox {
+    /// The box's edge, a point every millimetre or closer, and its middle.
+    fn points(&self) -> Vec<(f64, f64)> {
+        // The paper's y points down; a rotation turns counter-clockwise.
+        let (sin, cos) = self.rotation.sin_cos();
+        let along = (cos, -sin);
+        let across = (sin, cos);
+        let (w, h) = (self.size.0 / 2.0, self.size.1 / 2.0);
+        let at = |u: f64, v: f64| {
+            (
+                self.center.0 + u * along.0 + v * across.0,
+                self.center.1 + u * along.1 + v * across.1,
+            )
+        };
+        let mut points = vec![self.center];
+        let steps = |length: f64| (length.ceil() as usize).max(1);
+        let (n, m) = (steps(2.0 * w), steps(2.0 * h));
+        for k in 0..=n {
+            let u = -w + 2.0 * w * k as f64 / n as f64;
+            points.push(at(u, -h));
+            points.push(at(u, h));
+        }
+        for k in 1..m {
+            let v = -h + 2.0 * h * k as f64 / m as f64;
+            points.push(at(-w, v));
+            points.push(at(w, v));
+        }
+        points
+    }
+
+    /// The box as a closed ring.
+    fn ring(&self) -> Vec<(f64, f64)> {
+        let (sin, cos) = self.rotation.sin_cos();
+        let (along, across) = ((cos, -sin), (sin, cos));
+        let (w, h) = (self.size.0 / 2.0, self.size.1 / 2.0);
+        let at = |u: f64, v: f64| {
+            (
+                self.center.0 + u * along.0 + v * across.0,
+                self.center.1 + u * along.1 + v * across.1,
+            )
+        };
+        vec![at(-w, -h), at(w, -h), at(w, h), at(-w, h), at(-w, -h)]
+    }
+
+    /// Whether this box and `other` overlap.
+    fn overlaps(&self, other: &NameBox) -> bool {
+        let (mine, theirs) = (self.ring(), other.ring());
+        self.points().iter().any(|&p| inside_ring(p, &theirs))
+            || other.points().iter().any(|&p| inside_ring(p, &mine))
+    }
+}
+
+/// What a map's name keeps clear of: every map's outline, the other maps'
+/// areas, the names already placed, and the edge of the map.
+struct Around<'a> {
+    outlines: &'a [&'a [(f64, f64)]],
+    others: &'a [&'a [(f64, f64)]],
+    placed: &'a [NameBox],
+    frame: &'a [(f64, f64)],
+}
+
+impl Around<'_> {
+    /// How far each of `points` is from the nearest outline.
+    fn distances(&self, points: &[(f64, f64)]) -> Vec<f64> {
+        points
+            .iter()
+            .map(|&p| {
+                self.outlines
+                    .iter()
+                    .map(|r| distance_to_ring(p, r))
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .collect()
+    }
+
+    /// How close the nearest outline is to any of `points`.
+    fn clearance(&self, points: &[(f64, f64)]) -> f64 {
+        self.distances(points)
+            .into_iter()
+            .fold(f64::INFINITY, f64::min)
+    }
+}
+
+/// The direction of a ring's longest extent, as a rotation that writes a
+/// name along it the right way up.
+fn long_axis(ring: &[(f64, f64)]) -> f64 {
+    // The first vertex once, not again at the end.
+    let ring = &ring[..ring.len() - 1];
+    let n = ring.len() as f64;
+    let (mx, my) = ring
+        .iter()
+        .fold((0.0, 0.0), |(x, y), p| (x + p.0 / n, y + p.1 / n));
+    let (mut xx, mut xy, mut yy) = (0.0, 0.0, 0.0);
+    for &(x, y) in ring {
+        let (dx, dy) = (x - mx, y - my);
+        xx += dx * dx;
+        xy += dx * dy;
+        yy += dy * dy;
+    }
+    let angle = 0.5 * (2.0 * xy).atan2(xx - yy);
+    // That angle is the paper's, y down: a rotation the other way round,
+    // kept within a quarter turn of level.
+    let mut rotation = -angle;
+    if rotation > std::f64::consts::FRAC_PI_2 {
+        rotation -= std::f64::consts::PI;
+    } else if rotation <= -std::f64::consts::FRAC_PI_2 {
+        rotation += std::f64::consts::PI;
+    }
+    rotation
+}
+
+/// A name of `size` inside one of `rings`, wholly, clear of every outline
+/// by [`NAME_CLEARANCE`] at the least and as far from them as it can be —
+/// and between places as clear as each other, the one farthest from them
+/// on average, or nearest the middle of the area — over no name already placed: level where it fits so, or else turned
+/// along the area. `None` where it fits in none.
+fn place_inside(rings: &[Vec<(f64, f64)>], size: (f64, f64), around: &Around) -> Option<NameBox> {
+    // How clear of the outlines a name at `center` is, where it fits, and
+    // how good a place that is: the clearer the better, then the farther
+    // on average, then the nearer the middle of the area's box.
+    let fit = |ring: &[(f64, f64)], middle: (f64, f64), center: (f64, f64), rotation: f64| {
+        let name = NameBox {
+            center,
+            size,
+            rotation,
+        };
+        let points = name.points();
+        if !points.iter().all(|&p| inside_ring(p, ring))
+            || around.placed.iter().any(|other| other.overlaps(&name))
+        {
+            return None;
+        }
+        let distances = around.distances(&points);
+        let clear = distances.iter().copied().fold(f64::INFINITY, f64::min);
+        let mean = distances.iter().sum::<f64>() / distances.len() as f64;
+        let off = (center.0 - middle.0).hypot(center.1 - middle.1);
+        Some((clear, clear + 0.01 * mean - 0.0001 * off))
+    };
+    let mut best: [Option<(f64, NameBox)>; 2] = [None, None];
+    for ring in rings {
+        let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
+        let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for &(x, y) in ring.iter() {
+            (min_x, max_x) = (min_x.min(x), max_x.max(x));
+            (min_y, max_y) = (min_y.min(y), max_y.max(y));
+        }
+        // Too small for the name whichever way it is turned.
+        if (max_x - min_x).hypot(max_y - min_y) < size.0 {
+            continue;
+        }
+        let middle = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+        let axis = long_axis(ring);
+        for (k, rotation) in [0.0, axis].into_iter().enumerate() {
+            if k == 1 && axis.abs() < 10f64.to_radians() {
+                continue;
+            }
+            // A grid over the ring, then finer and finer round the best
+            // point of it.
+            const STEPS: usize = 40;
+            let mut step = (
+                (max_x - min_x) / STEPS as f64,
+                (max_y - min_y) / STEPS as f64,
+            );
+            let mut found: Option<((f64, f64), (f64, f64))> = None;
+            for i in 0..=STEPS {
+                for j in 0..=STEPS {
+                    let center = (min_x + step.0 * i as f64, min_y + step.1 * j as f64);
+                    if let Some(fits) = fit(ring, middle, center, rotation) {
+                        if found.is_none_or(|(_, (_, score))| fits.1 > score) {
+                            found = Some((center, fits));
+                        }
+                    }
+                }
+            }
+            let Some((mut center, (mut clear, mut score))) = found else {
+                continue;
+            };
+            for _ in 0..4 {
+                step = (step.0 / 2.0, step.1 / 2.0);
+                for i in -2..=2 {
+                    for j in -2..=2 {
+                        let at = (
+                            center.0 + step.0 * f64::from(i),
+                            center.1 + step.1 * f64::from(j),
+                        );
+                        if let Some((c, sc)) = fit(ring, middle, at, rotation) {
+                            if sc > score {
+                                (center, clear, score) = (at, c, sc);
+                            }
+                        }
+                    }
+                }
+            }
+            if clear >= NAME_CLEARANCE && best[k].as_ref().is_none_or(|(c, _)| clear > *c) {
+                let name = NameBox {
+                    center,
+                    size,
+                    rotation,
+                };
+                best[k] = Some((clear, name));
+            }
+        }
+    }
+    // Level, unless it only just fits so and turned it fits far better.
+    match best {
+        [Some((level, name)), Some((turned, _))]
+            if level >= 2.0 * NAME_CLEARANCE || level >= turned =>
+        {
+            Some(name)
+        }
+        [_, Some((_, name))] | [Some((_, name)), None] => Some(name),
+        [None, None] => None,
+    }
+}
+
+/// A level name of `size` beside `rings`, just outside them: the first
+/// side, of above, below, right, left and then the corners and the
+/// directions between, where it is clear of the other maps' areas and
+/// outlines, of the names already placed and of the map's edge, or else
+/// the one with the least in the way.
+fn place_beside(rings: &[Vec<(f64, f64)>], size: (f64, f64), around: &Around) -> NameBox {
+    let largest = rings
+        .iter()
+        .max_by(|a, b| ring_area(a).total_cmp(&ring_area(b)))
+        .expect("an area on the map");
+    let n = largest.len() as f64 - 1.0;
+    let origin = largest[..largest.len() - 1]
+        .iter()
+        .fold((0.0, 0.0), |(x, y), p| (x + p.0 / n, y + p.1 / n));
+    let reach = largest
+        .iter()
+        .map(|p| (p.0 - origin.0).hypot(p.1 - origin.1))
+        .fold(0.0, f64::max)
+        + size.0
+        + NAME_GAP;
+    // Up first: the paper's y points down.
+    let directions: Vec<f64> = [90.0, 270.0, 0.0, 180.0, 45.0, 135.0, 315.0, 225.0]
+        .into_iter()
+        .chain((0..8).map(|k| 22.5 + 45.0 * f64::from(k)))
+        .collect();
+    let mut best: Option<(usize, NameBox)> = None;
+    for degrees in directions {
+        let (sin, cos) = f64::to_radians(degrees).sin_cos();
+        let direction = (cos, -sin);
+        // Out from the middle until clear of the map's own areas.
+        let mut distance = 0.0;
+        let name = loop {
+            let name = NameBox {
+                center: (
+                    origin.0 + direction.0 * distance,
+                    origin.1 + direction.1 * distance,
+                ),
+                size,
+                rotation: 0.0,
+            };
+            let points = name.points();
+            let clear = points.iter().all(|&p| {
+                rings
+                    .iter()
+                    .all(|r| !inside_ring(p, r) && distance_to_ring(p, r) >= NAME_GAP)
+            });
+            if clear || distance > reach {
+                break name;
+            }
+            distance += 0.25;
+        };
+        let points = name.points();
+        let in_way = points
+            .iter()
+            .filter(|&&p| {
+                around.others.iter().any(|r| inside_ring(p, r))
+                    || around.clearance(&[p]) < NAME_CLEARANCE
+                    || !inside_ring(p, around.frame)
+            })
+            .count()
+            + 1000 * around.placed.iter().filter(|o| o.overlaps(&name)).count();
+        if in_way == 0 {
+            return name;
+        }
+        if best.as_ref().is_none_or(|(w, _)| in_way < *w) {
+            best = Some((in_way, name));
+        }
+    }
+    best.expect("some direction").1
+}
+
 fn path_object(symbol: i32, coords: Vec<Coord>) -> Object {
     let mut object = Object::new(ObjectKind::Path(PathObject::default()));
     object.symbol_id = symbol;
@@ -1414,6 +1877,82 @@ fn path_object(symbol: i32, coords: Vec<Coord>) -> Object {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rectangle as a closed ring, on the paper.
+    fn rectangle(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<(f64, f64)> {
+        vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+    }
+
+    #[test]
+    fn a_map_name_goes_inside_an_area_it_fits_in_level() {
+        let area = rectangle(0.0, 0.0, 100.0, 60.0);
+        let frame = rectangle(-500.0, -500.0, 500.0, 500.0);
+        let outlines = [area.as_slice()];
+        let around = Around {
+            outlines: &outlines,
+            others: &[],
+            placed: &[],
+            frame: &frame,
+        };
+        let name = place_inside(std::slice::from_ref(&area), (30.0, 5.0), &around).unwrap();
+        assert_eq!(name.rotation, 0.0);
+        // As far from the outline as it can be: in the middle.
+        assert!((name.center.0 - 50.0).abs() < 1.0, "{name:?}");
+        assert!((name.center.1 - 30.0).abs() < 1.0, "{name:?}");
+    }
+
+    #[test]
+    fn a_map_name_turns_along_a_long_thin_area() {
+        // A strip 100 mm long and 8 wide, at 45°.
+        let (c, s) = (
+            std::f64::consts::FRAC_1_SQRT_2,
+            std::f64::consts::FRAC_1_SQRT_2,
+        );
+        let at = |u: f64, v: f64| (u * c - v * s, u * s + v * c);
+        let strip = vec![
+            at(0.0, 0.0),
+            at(100.0, 0.0),
+            at(100.0, 8.0),
+            at(0.0, 8.0),
+            at(0.0, 0.0),
+        ];
+        let frame = rectangle(-500.0, -500.0, 500.0, 500.0);
+        let outlines = [strip.as_slice()];
+        let around = Around {
+            outlines: &outlines,
+            others: &[],
+            placed: &[],
+            frame: &frame,
+        };
+        let name = place_inside(std::slice::from_ref(&strip), (30.0, 5.0), &around).unwrap();
+        // Down to the right on the paper, its y pointing down: turned
+        // clockwise, a negative rotation.
+        assert!(
+            (name.rotation + std::f64::consts::FRAC_PI_4).abs() < 0.01,
+            "{name:?}"
+        );
+    }
+
+    #[test]
+    fn a_map_name_too_long_for_its_area_goes_beside_it_clear_of_the_others() {
+        let small = rectangle(0.0, 0.0, 10.0, 10.0);
+        // Another map's area right above the small one.
+        let other = rectangle(-50.0, -40.0, 60.0, -2.0);
+        let frame = rectangle(-500.0, -500.0, 500.0, 500.0);
+        let outlines = [small.as_slice(), other.as_slice()];
+        let others = [other.as_slice()];
+        let around = Around {
+            outlines: &outlines,
+            others: &others,
+            placed: &[],
+            frame: &frame,
+        };
+        assert!(place_inside(std::slice::from_ref(&small), (30.0, 5.0), &around).is_none());
+        let name = place_beside(std::slice::from_ref(&small), (30.0, 5.0), &around);
+        // Not above, where the other area is: below, just clear of it.
+        assert!(name.center.1 > 10.0 && name.center.1 < 16.0, "{name:?}");
+        assert!(name.points().iter().all(|&p| !inside_ring(p, &small)));
+    }
 
     #[test]
     fn utm_matches_a_reference_point_mapper_wrote() {

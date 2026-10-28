@@ -6,6 +6,7 @@
 //!             [--bus 13,19,...]
 //!             [--train S1,S2A,MEX,...]
 //!             [--gtfs feed.zip ... [--day weekday|saturday|sunday | --date YYYYMMDD]]
+//!             [--maps areas.csv]
 //!             [--legend]
 //!             <osm-file> [omap-file]
 //! ```
@@ -68,12 +69,18 @@
 //! `--max-headway N` leaves out the bus lines which run less often than once
 //! every N minutes in those hours, or not at all.
 //!
+//! `--maps` draws the areas of an event's maps over everything, from a CSV
+//! table of their vertices and colours (see `maur_o::map_areas`): each
+//! map's outline over a tint, in the colours the table gives, and its name
+//! — inside the area wherever it fits whole, level or along a long thin
+//! area, and just beside it where it does not.
+//!
 //! `--legend` adds a legend under the map, in Italian: a sample of every
 //! symbol the map uses with what it means, the bus and train lines first.
 //!
-//! Exit codes: 0 success, 1 usage error, 2 the OSM file or the GTFS feed
-//! could not be read, or held nothing to convert, 4 the map could not be
-//! written.
+//! Exit codes: 0 success, 1 usage error, 2 the OSM file, the GTFS feed or
+//! the list of maps could not be read, or held nothing to convert, 4 the
+//! map could not be written.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -84,9 +91,10 @@ use maur_o::bus::{
     gtfs_references, lines_from_gtfs, lines_from_osm, osm_references, BusLine, Day, Mode,
     HEADWAY_HOURS,
 };
+use maur_o::map_areas::read_map_areas;
 use maur_o::osm::{read_osm, BBox};
 use maur_o::osm_convert::convert;
-use maur_o::osm_style::{carto_style_with_bus_lines, line_color, BusLook, Details};
+use maur_o::osm_style::{carto_style_with_overlays, line_color, BusLook, Details};
 
 #[derive(Parser)]
 #[command(
@@ -171,6 +179,13 @@ struct Args {
     #[arg(long, value_name = "MM", default_value_t = 3.0, alias = "stop_merge")]
     stop_merge: f64,
 
+    /// Draw the areas of these maps, each with its name: a CSV table, one
+    /// vertex a row, with columns map_id, map_number, map_name, area,
+    /// vertex, latitude, longitude, stroke_color, stroke_alpha, fill_color
+    /// and fill_alpha (map_name, latitude and longitude needed).
+    #[arg(long, value_name = "FILE", alias = "areas")]
+    maps: Option<PathBuf>,
+
     /// Add a legend under the map, explaining every symbol it uses.
     #[arg(long)]
     legend: bool,
@@ -193,6 +208,12 @@ fn run() -> Result<(), (ExitCode, String)> {
         .unwrap_or_else(|| args.osm_file.with_extension("omap"));
 
     let data = read_osm(&args.osm_file).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+    let maps = match &args.maps {
+        Some(path) => {
+            read_map_areas(path).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?
+        }
+        None => Vec::new(),
+    };
     let numbers = |list: &[String]| -> Vec<String> {
         list.iter()
             .map(|r| r.trim().to_string())
@@ -416,10 +437,14 @@ fn run() -> Result<(), (ExitCode, String)> {
         .collect();
 
     let details = Details::new(args.details).expect("clap checks the range");
-    let style = carto_style_with_bus_lines(&looks, details);
+    let map_names: Vec<String> = maps.iter().map(|m| m.name.clone()).collect();
+    let style = carto_style_with_overlays(&looks, &maps, details);
     let mut conversion = convert(&data, &style, Some(bbox))
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     conversion.add_bus_lines(&style, &transit, &data, args.bundle_width, args.stop_merge);
+    for name in conversion.add_map_areas(&style, &maps) {
+        eprintln!("Warning: map {name} has no area on the map, left out");
+    }
     if args.legend {
         // The kind of day the headways were counted on, an exact date's own.
         let day = match &headway_date {
@@ -445,6 +470,9 @@ fn run() -> Result<(), (ExitCode, String)> {
         bbox.max_lat,
     );
     println!("{areas} areas, {lines} lines, {points} points");
+    if !maps.is_empty() {
+        println!("Maps: {}", map_names.join(", "));
+    }
     if let Some(date) = &headway_date {
         println!(
             "Headways: trips leaving between {}:00 and {}:00 on {date}",

@@ -18,7 +18,8 @@
 //! openstreetmap.org's own map, and [`osm_convert`] makes a whole Mapper map
 //! out of the two — with, where asked, bus and train lines over it, which
 //! [`bus`] reads from the same data or from a GTFS feed, and [`bundle`]
-//! lays out side by side where they share a street.
+//! lays out side by side where they share a street, and the areas of an
+//! event's maps, which [`map_areas`] reads from a list.
 //!
 //! # Drawing a map
 //!
@@ -68,6 +69,7 @@ pub mod bus;
 pub mod differences;
 pub mod geometry;
 pub mod map;
+pub mod map_areas;
 pub mod naming;
 pub mod osm;
 pub mod osm_convert;

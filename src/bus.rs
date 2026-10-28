@@ -564,7 +564,7 @@ pub fn lines_from_osm(data: &OsmData, references: &[String], mode: Mode) -> Vec<
 
 /// The fields of one CSV line, as GTFS writes them: comma separated, a field
 /// in double quotes where it holds a comma, a quote doubled inside one.
-fn csv_fields(line: &str) -> Vec<String> {
+pub(crate) fn csv_fields(line: &str) -> Vec<String> {
     let mut fields = Vec::new();
     let mut field = String::new();
     let mut quoted = false;
