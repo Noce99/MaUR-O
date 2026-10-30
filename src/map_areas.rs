@@ -222,21 +222,23 @@ pub fn parse_map_areas(text: &str) -> Result<Vec<MapArea>, String> {
 }
 
 /// Draws every map of `maps` in `hex` alone, whatever colours the list
-/// gave: the outline opaque, the tint inside `fill_alpha` opaque. A forbidden
-/// zone's lines are as opaque as its outline.
-pub fn single_color(maps: &mut [MapArea], hex: &str, fill_alpha: f64) {
+/// gave: the outline opaque, the tint inside `fill_alpha` opaque. The
+/// forbidden zones, the start and the finish, in `course` instead, opaque,
+/// to stand out as a course's overprint does.
+pub fn single_color(maps: &mut [MapArea], hex: &str, fill_alpha: f64, course: &str) {
     for map in maps {
+        let (hex, fill_alpha) = match map.kind {
+            MapKind::Area => (hex, fill_alpha),
+            _ => (course, 1.0),
+        };
         map.stroke = Some(MapColor {
             hex: hex.to_string(),
             alpha: 1.0,
         });
-        map.fill = match map.kind {
-            MapKind::Forbidden => map.stroke.clone(),
-            _ => Some(MapColor {
-                hex: hex.to_string(),
-                alpha: fill_alpha,
-            }),
-        };
+        map.fill = Some(MapColor {
+            hex: hex.to_string(),
+            alpha: fill_alpha,
+        });
     }
 }
 
@@ -334,7 +336,11 @@ map_id,map_number,map_name,area,vertex,latitude,longitude,stroke_color,stroke_al
     fn single_color_drops_the_lists_colours() {
         let mut maps = parse_map_areas(CSV).unwrap();
         maps[1].kind = MapKind::Forbidden;
-        single_color(&mut maps, "#000000", 0.15);
+        maps.push(MapArea {
+            kind: MapKind::Start,
+            ..maps[0].clone()
+        });
+        single_color(&mut maps, "#000000", 0.15, "#a626ff");
         let black = |alpha| {
             Some(MapColor {
                 hex: "#000000".to_string(),
@@ -343,8 +349,15 @@ map_id,map_number,map_name,area,vertex,latitude,longitude,stroke_color,stroke_al
         };
         assert_eq!(maps[0].stroke, black(1.0));
         assert_eq!(maps[0].fill, black(0.15));
-        assert_eq!(maps[1].stroke, black(1.0));
-        assert_eq!(maps[1].fill, black(1.0));
+        // A forbidden zone and the start in the course's colour.
+        let purple = Some(MapColor {
+            hex: "#a626ff".to_string(),
+            alpha: 1.0,
+        });
+        for map in &maps[1..] {
+            assert_eq!(map.stroke, purple);
+            assert_eq!(map.fill, purple);
+        }
     }
 
     #[test]

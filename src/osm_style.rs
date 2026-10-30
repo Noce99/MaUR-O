@@ -705,6 +705,11 @@ pub const MAP_AREA_COLORS: [&str; 8] = [
     "#c2185b", "#1a237e", "#e65100", "#4a148c", "#006064", "#b71c1c", "#33691e", "#3e2723",
 ];
 
+/// The purple a course is overprinted in, as in Mapper's ISOM symbol sets:
+/// the forbidden zones, the start and the finish with
+/// `--areas-single-color`.
+pub const COURSE_PURPLE: &str = "#a626ff";
+
 /// How wide the outline of a map's area is drawn, in carto pixels.
 pub const MAP_AREA_OUTLINE_PX: f64 = 3.0;
 
@@ -765,7 +770,8 @@ pub const MAP_AREA_FILL_ALPHA: f64 = 0.15;
 /// A forbidden zone gets `forbidden <i>`, drawn like carto's military land:
 /// 45° lines in its fill colour, and the outline. The start gets `start <i>`,
 /// ISOM's triangle, and the finish `finish <i>`, its two circles, both in
-/// the stroke colour and over the bus lines (see [`map_key`]).
+/// the stroke colour (see [`map_key`]). Their colours are above every
+/// other, the maps' names included, as a course's overprint is.
 pub fn carto_style_with_overlays(lines: &[BusLook], maps: &[MapArea], details: Details) -> Style {
     let zoom = details.zoom();
     let mut entries: Vec<(String, String, f64)> = Vec::new();
@@ -773,14 +779,30 @@ pub fn carto_style_with_overlays(lines: &[BusLook], maps: &[MapArea], details: D
         Some(color) => (color.hex.clone(), color.alpha),
         None => (MAP_AREA_COLORS[i % MAP_AREA_COLORS.len()].to_string(), 1.0),
     };
+    let fill = |i: usize| match &maps[i].fill {
+        Some(color) => (color.hex.clone(), color.alpha),
+        // The lines of a forbidden zone as strong as its outline.
+        None if maps[i].kind == MapKind::Forbidden => stroke(i),
+        None => (stroke(i).0, MAP_AREA_FILL_ALPHA),
+    };
     let named = |i: usize| maps[i].kind == MapKind::Area;
+    // The forbidden zones, the start and the finish over everything, like a
+    // course's overprint: the lines inside a zone too.
+    for (i, map) in maps.iter().enumerate().filter(|&(i, _)| !named(i)) {
+        let (hex, alpha) = stroke(i);
+        entries.push((map_key(map, i), hex, alpha));
+        if map.kind == MapKind::Forbidden {
+            let (hex, alpha) = fill(i);
+            entries.push((format!("{} fill", map_key(map, i)), hex, alpha));
+        }
+    }
     for i in (0..maps.len()).filter(|&i| named(i)) {
         entries.push((format!("map {i} name"), stroke(i).0, 1.0));
     }
     if (0..maps.len()).any(named) {
         entries.push(("map name halo".to_string(), "#ffffff".to_string(), 1.0));
     }
-    for (i, map) in maps.iter().enumerate() {
+    for (i, map) in maps.iter().enumerate().filter(|&(i, _)| named(i)) {
         let (hex, alpha) = stroke(i);
         entries.push((map_key(map, i), hex, alpha));
     }
@@ -807,13 +829,8 @@ pub fn carto_style_with_overlays(lines: &[BusLook], maps: &[MapArea], details: D
             1.0,
         ));
     }
-    for (i, map) in maps.iter().enumerate().filter(|(_, m)| !m.kind.is_point()) {
-        let (hex, alpha) = match &map.fill {
-            Some(color) => (color.hex.clone(), color.alpha),
-            // The lines of a forbidden zone as strong as its outline.
-            None if map.kind == MapKind::Forbidden => stroke(i),
-            None => (stroke(i).0, MAP_AREA_FILL_ALPHA),
-        };
+    for (i, map) in maps.iter().enumerate().filter(|&(i, _)| named(i)) {
+        let (hex, alpha) = fill(i);
         entries.push((format!("{} fill", map_key(map, i)), hex, alpha));
     }
     entries.extend(
@@ -1763,6 +1780,35 @@ mod tests {
         let unique: std::collections::HashSet<&String> = colors.iter().collect();
         assert_eq!(unique.len(), 200);
         assert_eq!(hsl(0.0, 1.0, 0.5), "#ff0000");
+    }
+
+    #[test]
+    fn the_forbidden_zones_start_and_finish_are_above_every_colour() {
+        let map = |kind| MapArea {
+            name: format!("{kind:?}"),
+            kind,
+            polygons: Vec::new(),
+            stroke: None,
+            fill: None,
+        };
+        let maps = [
+            map(MapKind::Area),
+            map(MapKind::Forbidden),
+            map(MapKind::Start),
+            map(MapKind::Finish),
+        ];
+        let bus = BusLook {
+            mode: Mode::Bus,
+            reference: "13".to_string(),
+            color: "#ff0000".to_string(),
+        };
+        let style = carto_style_with_overlays(&[bus], &maps, Details::default());
+        let names: Vec<&str> = style.colors.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names[..4],
+            ["forbidden 1", "forbidden 1 fill", "start 2", "finish 3"]
+        );
+        assert_eq!(names[4], "map 0 name");
     }
 
     #[test]

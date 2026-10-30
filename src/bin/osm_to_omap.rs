@@ -77,7 +77,8 @@
 //! are zones the runners may not enter, hatched like carto's military land;
 //! `start` and `finish` are a point each, ISOM's triangle and double circle.
 //! `--areas-single-color` draws them all in black instead, the tints a faint
-//! black, whatever colours the table gives.
+//! black, whatever colours the table gives; the forbidden zones, the start
+//! and the finish in a course's purple.
 //!
 //! `--legend` adds a legend under the map, in Italian: a sample of every
 //! symbol the map uses with what it means, the bus and train lines first.
@@ -99,7 +100,7 @@ use maur_o::map_areas::{read_map_areas, single_color};
 use maur_o::osm::{read_osm, BBox};
 use maur_o::osm_convert::convert;
 use maur_o::osm_style::{
-    carto_style_with_overlays, line_color, BusLook, Details, MAP_AREA_FILL_ALPHA,
+    carto_style_with_overlays, line_color, BusLook, Details, COURSE_PURPLE, MAP_AREA_FILL_ALPHA,
 };
 
 #[derive(Parser)]
@@ -194,7 +195,8 @@ struct Args {
     maps: Option<PathBuf>,
 
     /// Draw every area of --maps in black, the outlines opaque and the
-    /// insides a faint black, ignoring the colours the table gives.
+    /// insides a faint black, ignoring the colours the table gives; the
+    /// forbidden zones, the start and the finish in a course's purple.
     #[arg(long, alias = "maps-single-color", requires = "maps")]
     areas_single_color: bool,
 
@@ -227,7 +229,7 @@ fn run() -> Result<(), (ExitCode, String)> {
         None => Vec::new(),
     };
     if args.areas_single_color {
-        single_color(&mut maps, "#000000", MAP_AREA_FILL_ALPHA);
+        single_color(&mut maps, "#000000", MAP_AREA_FILL_ALPHA, COURSE_PURPLE);
     }
     let numbers = |list: &[String]| -> Vec<String> {
         list.iter()
