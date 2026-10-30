@@ -228,7 +228,7 @@ one carto pixel being 0.28 mm on the paper, along with what carto shows at
 that zoom and what it leaves out. Labels and POI icons are not drawn.
 
 ```
-osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,19,...] [--gtfs feed.zip [--day weekday|saturday|sunday | --date YYYYMMDD]] [--max-headway N] [--train S1,S2A,MEX,...] [--maps areas.csv] [--legend] <osm-file> [omap-file]
+osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,19,...] [--gtfs feed.zip [--day weekday|saturday|sunday | --date YYYYMMDD]] [--max-headway N] [--train S1,S2A,MEX,...] [--maps areas.csv [--areas-single-color]] [--legend] <osm-file> [omap-file]
 ```
 
 | Option | Meaning |
@@ -247,6 +247,7 @@ osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,1
 | `--bundle-width` | The widest a bundle of lines sharing a street may be, in carto pixels (0.28 mm each; default 12). Wider, and its lines are drawn thinner. |
 | `--stop-merge` | How close two stops may be on the paper, in mm, before they are drawn as one (default 3): the two sides of a street become one bar. |
 | `--maps` | Draw the areas of an event's maps over everything, from a CSV table with one vertex a row: `map_id,map_number,map_name,area,vertex,latitude,longitude,stroke_color,stroke_alpha,fill_color,fill_alpha,kind` (only `map_name`, `latitude` and `longitude` are required; a map without colours is given one). Each map gets two symbols: one for its area (the outline over a tint) and one for its name. The name goes inside the area wherever it fits whole, turned along a long thin area if needed, and otherwise just beside the area, clear of the other maps and names. `kind` is `area` (the default), `forbidden` — a zone out of bounds, drawn like carto's military land: 45° hatching in its fill colour inside its outline, with no name on the map — or `start` / `finish`, a single point each, drawn as ISOM's triangle and double circle (7 mm) in the stroke colour. Forbidden zones, start and finish appear in the legend by their `map_name`. |
+| `--areas-single-color` | Draw every area of `--maps` in black — opaque outlines, names, start and finish, a faint black tint inside (forbidden zones' hatching opaque) — ignoring the colours in the table. |
 | `--legend` | Add a legend under the map (in Italian): a sample of every symbol the map actually uses with what it means, bus and train lines first with their names. |
 
 Lines sharing a street are drawn side by side on it, like on a transit map:

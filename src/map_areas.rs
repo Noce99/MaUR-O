@@ -221,6 +221,25 @@ pub fn parse_map_areas(text: &str) -> Result<Vec<MapArea>, String> {
     Ok(maps)
 }
 
+/// Draws every map of `maps` in `hex` alone, whatever colours the list
+/// gave: the outline opaque, the tint inside `fill_alpha` opaque. A forbidden
+/// zone's lines are as opaque as its outline.
+pub fn single_color(maps: &mut [MapArea], hex: &str, fill_alpha: f64) {
+    for map in maps {
+        map.stroke = Some(MapColor {
+            hex: hex.to_string(),
+            alpha: 1.0,
+        });
+        map.fill = match map.kind {
+            MapKind::Forbidden => map.stroke.clone(),
+            _ => Some(MapColor {
+                hex: hex.to_string(),
+                alpha: fill_alpha,
+            }),
+        };
+    }
+}
+
 /// Reads the list of maps in the file at `path`.
 pub fn read_map_areas(path: &Path) -> Result<Vec<MapArea>, String> {
     let text = std::fs::read_to_string(path)
@@ -309,6 +328,23 @@ map_id,map_number,map_name,area,vertex,latitude,longitude,stroke_color,stroke_al
         assert_eq!(maps[1].polygons[0].len(), 4);
         assert_eq!(maps[2].polygons, vec![vec![(11.299989, 44.495204)]]);
         assert_eq!(maps[1].fill.as_ref().unwrap().alpha, 1.0);
+    }
+
+    #[test]
+    fn single_color_drops_the_lists_colours() {
+        let mut maps = parse_map_areas(CSV).unwrap();
+        maps[1].kind = MapKind::Forbidden;
+        single_color(&mut maps, "#000000", 0.15);
+        let black = |alpha| {
+            Some(MapColor {
+                hex: "#000000".to_string(),
+                alpha,
+            })
+        };
+        assert_eq!(maps[0].stroke, black(1.0));
+        assert_eq!(maps[0].fill, black(0.15));
+        assert_eq!(maps[1].stroke, black(1.0));
+        assert_eq!(maps[1].fill, black(1.0));
     }
 
     #[test]

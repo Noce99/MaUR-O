@@ -6,7 +6,7 @@
 //!             [--bus 13,19,...]
 //!             [--train S1,S2A,MEX,...]
 //!             [--gtfs feed.zip ... [--day weekday|saturday|sunday | --date YYYYMMDD]]
-//!             [--maps areas.csv]
+//!             [--maps areas.csv [--areas-single-color]]
 //!             [--legend]
 //!             <osm-file> [omap-file]
 //! ```
@@ -76,6 +76,8 @@
 //! area, and just beside it where it does not. Rows of `kind` `forbidden`
 //! are zones the runners may not enter, hatched like carto's military land;
 //! `start` and `finish` are a point each, ISOM's triangle and double circle.
+//! `--areas-single-color` draws them all in black instead, the tints a faint
+//! black, whatever colours the table gives.
 //!
 //! `--legend` adds a legend under the map, in Italian: a sample of every
 //! symbol the map uses with what it means, the bus and train lines first.
@@ -93,10 +95,12 @@ use maur_o::bus::{
     gtfs_references, lines_from_gtfs, lines_from_osm, osm_references, BusLine, Day, Mode,
     HEADWAY_HOURS,
 };
-use maur_o::map_areas::read_map_areas;
+use maur_o::map_areas::{read_map_areas, single_color};
 use maur_o::osm::{read_osm, BBox};
 use maur_o::osm_convert::convert;
-use maur_o::osm_style::{carto_style_with_overlays, line_color, BusLook, Details};
+use maur_o::osm_style::{
+    carto_style_with_overlays, line_color, BusLook, Details, MAP_AREA_FILL_ALPHA,
+};
 
 #[derive(Parser)]
 #[command(
@@ -189,6 +193,11 @@ struct Args {
     #[arg(long, value_name = "FILE", alias = "areas")]
     maps: Option<PathBuf>,
 
+    /// Draw every area of --maps in black, the outlines opaque and the
+    /// insides a faint black, ignoring the colours the table gives.
+    #[arg(long, alias = "maps-single-color", requires = "maps")]
+    areas_single_color: bool,
+
     /// Add a legend under the map, explaining every symbol it uses.
     #[arg(long)]
     legend: bool,
@@ -211,12 +220,15 @@ fn run() -> Result<(), (ExitCode, String)> {
         .unwrap_or_else(|| args.osm_file.with_extension("omap"));
 
     let data = read_osm(&args.osm_file).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
-    let maps = match &args.maps {
+    let mut maps = match &args.maps {
         Some(path) => {
             read_map_areas(path).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?
         }
         None => Vec::new(),
     };
+    if args.areas_single_color {
+        single_color(&mut maps, "#000000", MAP_AREA_FILL_ALPHA);
+    }
     let numbers = |list: &[String]| -> Vec<String> {
         list.iter()
             .map(|r| r.trim().to_string())

@@ -732,3 +732,42 @@ fn maps_draws_the_forbidden_zones_the_start_and_the_finish() {
         );
     }
 }
+
+#[test]
+fn areas_single_color_draws_every_area_in_black() {
+    let dir = tempfile::tempdir().unwrap();
+    let list = dir.path().join("aree.csv");
+    std::fs::write(
+        &list,
+        "map_id,map_number,map_name,area,vertex,latitude,longitude,\
+         stroke_color,stroke_alpha,fill_color,fill_alpha\n\
+         7,1,Dentro,1,1,44.4930,11.3420,#0d6efd,1,#dc3545,0.25\n\
+         7,1,Dentro,1,2,44.4940,11.3420,#0d6efd,1,#dc3545,0.25\n\
+         7,1,Dentro,1,3,44.4940,11.3440,#0d6efd,1,#dc3545,0.25\n",
+    )
+    .unwrap();
+    let out = dir.path().join("maps.omap");
+    osm_to_omap()
+        .args([BBOX, "--areas"])
+        .arg(&list)
+        .args(["--areas-single-color", SAMPLE])
+        .arg(&out)
+        .assert()
+        .success();
+
+    let (map, _) = read_xml_map(&out).unwrap();
+    let color = |name: &str| map.colors.iter().find(|c| c.name == name).unwrap().clone();
+    for name in ["map 0", "map 0 name", "map 0 fill"] {
+        assert_eq!(color(name).rgb, (0.0, 0.0, 0.0), "{name}");
+    }
+    assert_eq!(color("map 0").opacity, 1.0);
+    assert!((color("map 0 fill").opacity - 0.15).abs() < 1e-6);
+}
+
+#[test]
+fn areas_single_color_needs_a_list_of_maps() {
+    osm_to_omap()
+        .args(["--areas-single-color", SAMPLE])
+        .assert()
+        .code(1);
+}
