@@ -30,10 +30,10 @@ use std::path::Path;
 use crate::bundle;
 use crate::bus::{BusLine, Day, Mode, HEADWAY_HOURS};
 use crate::map::{coord_flag, h_align, v_align, Coord, Object, ObjectKind, PathObject, TextObject};
-use crate::map_areas::MapArea;
+use crate::map_areas::{MapArea, MapKind};
 use crate::osm::{BBox, OsmData};
 use crate::osm_style::{
-    line_width_px, stop_circle_px, Sample, Style, ARROW_PX, MAP_NAME_PX, PIXEL_MM,
+    line_width_px, map_key, stop_circle_px, Sample, Style, ARROW_PX, MAP_NAME_PX, PIXEL_MM,
 };
 use crate::xml_writer::{
     color_element, georeferencing_element, symbol_element, Georeference, MapFile,
@@ -988,14 +988,33 @@ impl Conversion {
     /// just outside it, clear of the other maps' areas, of the names already
     /// placed and of the map's edge.
     ///
+    /// A forbidden zone is drawn the same, its name left out, and the start
+    /// and the finish are points.
+    ///
     /// Returns the names of the maps with no area on the map at all, which
-    /// are left out.
+    /// are left out, and of the start or finish off it.
     pub fn add_map_areas(&mut self, style: &Style, maps: &[MapArea]) -> Vec<String> {
         let mut missing = Vec::new();
-        // Each map's areas on the paper, clipped.
+        // Each map's areas on the paper, clipped; the forbidden zones' too,
+        // for the names to keep clear of.
         let mut drawn: Vec<(usize, Vec<Ring>)> = Vec::new();
+        let mut forbidden: Vec<Ring> = Vec::new();
         for (i, map) in maps.iter().enumerate() {
-            let area_symbol = style.id(&format!("map {i}"));
+            let area_symbol = style.id(&map_key(map, i));
+            if map.kind.is_point() {
+                let at = map.polygons[0][0];
+                if !self.bbox.contains(at) {
+                    missing.push(map.name.clone());
+                    continue;
+                }
+                let (x, y) = self.projection.to_paper(at);
+                let mut object = Object::new(ObjectKind::Point);
+                object.symbol_id = area_symbol;
+                object.coords = vec![Coord::new(x, y, 0)];
+                self.objects.push(object);
+                self.counts.2 += 1;
+                continue;
+            }
             let polygons: Vec<Vec<(f64, f64)>> = map
                 .polygons
                 .iter()
@@ -1023,7 +1042,11 @@ impl Conversion {
                 self.objects.push(path_object(area_symbol, coords));
                 self.counts.0 += 1;
             }
-            drawn.push((i, polygons));
+            if map.kind == MapKind::Forbidden {
+                forbidden.extend(polygons);
+            } else {
+                drawn.push((i, polygons));
+            }
         }
 
         let frame: Vec<(f64, f64)> = [
@@ -1038,7 +1061,9 @@ impl Conversion {
         .collect();
         let outlines: Vec<&[(f64, f64)]> = drawn
             .iter()
-            .flat_map(|(_, rings)| rings.iter().map(|r| r.as_slice()))
+            .flat_map(|(_, rings)| rings.iter())
+            .chain(&forbidden)
+            .map(|r| r.as_slice())
             .collect();
         // The names which fit inside their areas first, then the others
         // round them.
@@ -1052,7 +1077,9 @@ impl Conversion {
                 let others: Vec<&[(f64, f64)]> = drawn
                     .iter()
                     .filter(|(j, _)| j != i)
-                    .flat_map(|(_, rings)| rings.iter().map(|r| r.as_slice()))
+                    .flat_map(|(_, rings)| rings.iter())
+                    .chain(&forbidden)
+                    .map(|r| r.as_slice())
                     .collect();
                 let around = Around {
                     outlines: &outlines,

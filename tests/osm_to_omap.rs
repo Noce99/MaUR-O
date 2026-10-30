@@ -663,3 +663,72 @@ fn maps_takes_the_colours_of_a_csv_list() {
         .iter()
         .any(|o| matches!(&o.kind, ObjectKind::Text(t) if t.text == "1 - Dentro")));
 }
+
+#[test]
+fn maps_draws_the_forbidden_zones_the_start_and_the_finish() {
+    let dir = tempfile::tempdir().unwrap();
+    let list = dir.path().join("aree.csv");
+    std::fs::write(
+        &list,
+        "map_id,map_number,map_name,area,vertex,latitude,longitude,\
+         stroke_color,stroke_alpha,fill_color,fill_alpha,kind\n\
+         7,1,Dentro,1,1,44.4930,11.3420,#0d6efd,1,#0d6efd,0.15,area\n\
+         7,1,Dentro,1,2,44.4940,11.3420,#0d6efd,1,#0d6efd,0.15,area\n\
+         7,1,Dentro,1,3,44.4940,11.3430,#0d6efd,1,#0d6efd,0.15,area\n\
+         ,,Zone vietate,1,1,44.4930,11.3435,#a626ff,1,#a626ff,1,forbidden\n\
+         ,,Zone vietate,1,2,44.4940,11.3435,#a626ff,1,#a626ff,1,forbidden\n\
+         ,,Zone vietate,1,3,44.4940,11.3440,#a626ff,1,#a626ff,1,forbidden\n\
+         ,,Partenza,,,44.4932,11.3425,#212529,1,#212529,1,start\n\
+         ,,Arrivo,,,44.4933,11.3426,#212529,1,#212529,1,finish\n",
+    )
+    .unwrap();
+    let out = dir.path().join("maps.omap");
+    osm_to_omap()
+        .args([BBOX, "--maps"])
+        .arg(&list)
+        .args(["--legend", SAMPLE])
+        .arg(&out)
+        .assert()
+        .success();
+
+    let (map, _) = read_xml_map(&out).unwrap();
+    let symbol_of = |o: &maur_o::map::Object| &map.symbols[o.symbol_index.unwrap()];
+    let zones: Vec<_> = map
+        .objects
+        .iter()
+        .filter(|o| matches!(symbol_of(o), Symbol::Combined(s) if s.name == "Zone vietate"))
+        .collect();
+    // On the map, and in the legend.
+    assert_eq!(zones.len(), 2);
+    let Symbol::Combined(zone) = symbol_of(zones[0]) else {
+        unreachable!()
+    };
+    assert!(zone
+        .owned_parts
+        .iter()
+        .any(|p| matches!(p, Symbol::Area(a) if !a.patterns.is_empty())));
+    for name in ["Partenza", "Arrivo"] {
+        assert!(map
+            .objects
+            .iter()
+            .any(|o| matches!(o.kind, ObjectKind::Point)
+                && matches!(symbol_of(o), Symbol::Point(p) if p.name == name)));
+    }
+    let texts: Vec<String> = map
+        .objects
+        .iter()
+        .filter_map(|o| match &o.kind {
+            ObjectKind::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .collect();
+    // Only the map's name written on it; the others in the legend.
+    assert_eq!(texts.iter().filter(|t| *t == "1 - Dentro").count(), 1);
+    for caption in ["Zone vietate", "Partenza", "Arrivo"] {
+        assert_eq!(
+            texts.iter().filter(|t| *t == caption).count(),
+            1,
+            "{texts:?}"
+        );
+    }
+}

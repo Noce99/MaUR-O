@@ -49,7 +49,7 @@ use crate::map::{
     Element, FillPattern, LineSymbol, Object, ObjectKind, PathObject, PointSymbol, Symbol,
     TextSymbol,
 };
-use crate::map_areas::MapArea;
+use crate::map_areas::{MapArea, MapKind};
 use crate::osm::Tags;
 
 /// The size of one carto pixel on the paper, in mm.
@@ -708,6 +708,27 @@ pub const MAP_AREA_COLORS: [&str; 8] = [
 /// How wide the outline of a map's area is drawn, in carto pixels.
 pub const MAP_AREA_OUTLINE_PX: f64 = 3.0;
 
+/// How long a side of the start's triangle is, in carto pixels: 7 mm, as in
+/// ISOM.
+pub const START_SIDE_PX: f64 = 25.0;
+
+/// How wide the finish's outer circle is across, in carto pixels: 7 mm, the
+/// inner one 5 mm, as in ISOM.
+pub const FINISH_DIAMETER_PX: f64 = 25.0;
+
+/// The key of the symbol the `i`-th entry of the list of maps is drawn with:
+/// `map <i>` for a map's areas, `forbidden <i>`, `start <i>` or
+/// `finish <i>` for the others. Its colours go by the same key.
+pub fn map_key(map: &MapArea, i: usize) -> String {
+    let kind = match map.kind {
+        MapKind::Area => "map",
+        MapKind::Forbidden => "forbidden",
+        MapKind::Start => "start",
+        MapKind::Finish => "finish",
+    };
+    format!("{kind} {i}")
+}
+
 /// Carto's look at the zoom of `details`, with bus and train lines drawn over
 /// everything.
 ///
@@ -740,6 +761,11 @@ pub const MAP_AREA_FILL_ALPHA: f64 = 0.15;
 /// name (bold text in the stroke colour, opaque, haloed in white). The
 /// names are on top of everything, then the outlines, over the bus lines;
 /// the tints under the bus lines, over the rest of the map.
+///
+/// A forbidden zone gets `forbidden <i>`, drawn like carto's military land:
+/// 45° lines in its fill colour, and the outline. The start gets `start <i>`,
+/// ISOM's triangle, and the finish `finish <i>`, its two circles, both in
+/// the stroke colour and over the bus lines (see [`map_key`]).
 pub fn carto_style_with_overlays(lines: &[BusLook], maps: &[MapArea], details: Details) -> Style {
     let zoom = details.zoom();
     let mut entries: Vec<(String, String, f64)> = Vec::new();
@@ -747,15 +773,16 @@ pub fn carto_style_with_overlays(lines: &[BusLook], maps: &[MapArea], details: D
         Some(color) => (color.hex.clone(), color.alpha),
         None => (MAP_AREA_COLORS[i % MAP_AREA_COLORS.len()].to_string(), 1.0),
     };
-    for i in 0..maps.len() {
+    let named = |i: usize| maps[i].kind == MapKind::Area;
+    for i in (0..maps.len()).filter(|&i| named(i)) {
         entries.push((format!("map {i} name"), stroke(i).0, 1.0));
     }
-    if !maps.is_empty() {
+    if (0..maps.len()).any(named) {
         entries.push(("map name halo".to_string(), "#ffffff".to_string(), 1.0));
     }
-    for i in 0..maps.len() {
+    for (i, map) in maps.iter().enumerate() {
         let (hex, alpha) = stroke(i);
-        entries.push((format!("map {i}"), hex, alpha));
+        entries.push((map_key(map, i), hex, alpha));
     }
     if !lines.is_empty() {
         entries.push(("bus label".to_string(), "#ffffff".to_string(), 1.0));
@@ -780,12 +807,14 @@ pub fn carto_style_with_overlays(lines: &[BusLook], maps: &[MapArea], details: D
             1.0,
         ));
     }
-    for (i, map) in maps.iter().enumerate() {
+    for (i, map) in maps.iter().enumerate().filter(|(_, m)| !m.kind.is_point()) {
         let (hex, alpha) = match &map.fill {
             Some(color) => (color.hex.clone(), color.alpha),
+            // The lines of a forbidden zone as strong as its outline.
+            None if map.kind == MapKind::Forbidden => stroke(i),
             None => (stroke(i).0, MAP_AREA_FILL_ALPHA),
         };
-        entries.push((format!("map {i} fill"), hex, alpha));
+        entries.push((format!("{} fill", map_key(map, i)), hex, alpha));
     }
     entries.extend(
         palette(zoom)
@@ -1171,7 +1200,75 @@ pub fn carto_style_with_overlays(lines: &[BusLook], maps: &[MapArea], details: D
     // name written inside.
     for (i, map) in maps.iter().enumerate() {
         let name = &map.name;
-        let key = format!("map {i}");
+        let key = map_key(map, i);
+        match map.kind {
+            MapKind::Area => {}
+            MapKind::Forbidden => {
+                // Carto's military_red_hatch.svg, its lines a pixel wide.
+                let mut hatch = AreaSymbol {
+                    name: name.clone(),
+                    ..AreaSymbol::new()
+                };
+                hatch.patterns.push(FillPattern {
+                    pattern_type: fill_pattern_type::LINE,
+                    angle: std::f64::consts::FRAC_PI_4,
+                    line_spacing: px(8.0 / std::f64::consts::SQRT_2),
+                    line_color: b.color(&format!("{key} fill")),
+                    line_width: px(1.0),
+                    ..FillPattern::default()
+                });
+                let outline = b.stroke(&key, MAP_AREA_OUTLINE_PX, true);
+                b.add(
+                    &key,
+                    Builder::combined(name, vec![Symbol::Area(hatch), Symbol::Line(outline)]),
+                );
+                continue;
+            }
+            MapKind::Start => {
+                // Pointing up, its middle on the point.
+                let side = px(START_SIDE_PX);
+                let (half, height) = (side / 2.0, side * 3f64.sqrt() / 2.0);
+                let mut triangle = Object::new(ObjectKind::Path(PathObject::default()));
+                triangle.coords = vec![
+                    Coord::new(0.0, -height * 2.0 / 3.0, 0),
+                    Coord::new(half, height / 3.0, 0),
+                    Coord::new(-half, height / 3.0, 0),
+                    Coord::new(0.0, -height * 2.0 / 3.0, coord_flag::CLOSE_POINT),
+                ];
+                let start = PointSymbol {
+                    name: name.clone(),
+                    elements: vec![Element {
+                        symbol: Symbol::Line(b.stroke(&key, MAP_AREA_OUTLINE_PX, false)),
+                        object: triangle,
+                    }],
+                    ..PointSymbol::new()
+                };
+                b.add(&key, Symbol::Point(start));
+                continue;
+            }
+            MapKind::Finish => {
+                let width = px(MAP_AREA_OUTLINE_PX);
+                // A ring of `diameter` across, measured to its middle.
+                let ring = |diameter: f64| PointSymbol {
+                    inner_radius: px(diameter) / 2.0 - width / 2.0,
+                    outer_width: width,
+                    outer_color: b.color(&key),
+                    ..PointSymbol::new()
+                };
+                let mut inner = Object::new(ObjectKind::Point);
+                inner.coords = vec![Coord::new(0.0, 0.0, 0)];
+                let finish = PointSymbol {
+                    name: name.clone(),
+                    elements: vec![Element {
+                        symbol: Symbol::Point(ring(FINISH_DIAMETER_PX * 5.0 / 7.0)),
+                        object: inner,
+                    }],
+                    ..ring(FINISH_DIAMETER_PX)
+                };
+                b.add(&key, Symbol::Point(finish));
+                continue;
+            }
+        }
         let fill = b.fill(&format!("{key} fill"));
         let outline = b.stroke(&key, MAP_AREA_OUTLINE_PX, true);
         b.add(
@@ -1278,6 +1375,16 @@ impl Style {
                 (Ok(_), Symbol::Combined(c)) => Some(format!("Area {}", c.name)),
                 _ => None,
             };
+        }
+        // A forbidden zone, the start and the finish, by their own names.
+        for kind in ["forbidden ", "start ", "finish "] {
+            if let Some(Ok(_)) = key.strip_prefix(kind).map(str::parse::<usize>) {
+                return match self.symbol(id)? {
+                    Symbol::Combined(c) => Some(c.name.clone()),
+                    Symbol::Point(p) => Some(p.name.clone()),
+                    _ => None,
+                };
+            }
         }
         for mode in ["bus", "train"] {
             if let Some(reference) = key.strip_prefix(mode).and_then(|k| k.strip_prefix(' ')) {

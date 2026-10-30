@@ -1,14 +1,19 @@
 //! The areas of an event's maps, read from a CSV table, to be drawn over an
-//! OpenStreetMap conversion: each map's outline and its name.
+//! OpenStreetMap conversion: each map's outline and its name, the zones
+//! forbidden to the runners, and where the start and the finish are.
 //!
 //! The list is a CSV table, one vertex a row, latitude and longitude in
 //! decimal degrees (WGS 84), the colours to draw each map in alongside:
 //!
 //! ```text
-//! map_id,map_number,map_name,area,vertex,latitude,longitude,stroke_color,stroke_alpha,fill_color,fill_alpha
-//! 32,1,Orti,1,1,44.495792,11.300521,#0d6efd,1,#0d6efd,0.15
-//! 32,1,Orti,1,2,44.495148,11.29983,#0d6efd,1,#0d6efd,0.15
+//! map_id,map_number,map_name,area,vertex,latitude,longitude,stroke_color,stroke_alpha,fill_color,fill_alpha,kind
+//! 32,1,Orti,1,1,44.495792,11.300521,#0d6efd,1,#0d6efd,0.15,area
+//! 32,1,Orti,1,2,44.495148,11.29983,#0d6efd,1,#0d6efd,0.15,area
 //! ...
+//! ,,Zone vietate,1,1,44.512038,11.311477,#a626ff,1,#a626ff,1,forbidden
+//! ...
+//! ,,Partenza,,,44.495204,11.299989,#212529,1,#212529,1,start
+//! ,,Arrivo,,,44.495178,11.30005,#212529,1,#212529,1,finish
 //! ```
 //!
 //! `map_name`, `latitude` and `longitude` are needed; every other column
@@ -17,6 +22,10 @@
 //! vertices are taken in the order of `vertex` within each `area`. A map
 //! with a `map_number` is called `<number> - <name>`. A map with no colour,
 //! or none that reads, is given one.
+//!
+//! `kind` says what a row is part of: a map's `area` (where there is no
+//! `kind`, or one this does not know), a `forbidden` zone, or the `start` or
+//! the `finish`, a single point each.
 //!
 //! An area's last vertex joins its first.
 
@@ -34,13 +43,45 @@ pub struct MapColor {
     pub alpha: f64,
 }
 
+/// What an entry of the list is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapKind {
+    /// A map's areas, with its name written in.
+    Area,
+    /// Zones the runners may not enter.
+    Forbidden,
+    /// Where the race starts: a point.
+    Start,
+    /// Where it finishes: a point.
+    Finish,
+}
+
+impl MapKind {
+    /// The kind a CSV row's `kind` names; [`MapKind::Area`] for any other.
+    fn parse(text: &str) -> MapKind {
+        match text.to_ascii_lowercase().as_str() {
+            "forbidden" => MapKind::Forbidden,
+            "start" => MapKind::Start,
+            "finish" => MapKind::Finish,
+            _ => MapKind::Area,
+        }
+    }
+
+    /// Whether it is a single point rather than areas.
+    pub fn is_point(self) -> bool {
+        matches!(self, MapKind::Start | MapKind::Finish)
+    }
+}
+
 /// One map of the list: its name, its areas, and the colours it asks for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapArea {
     /// The name as it is written on the map, e.g. `"1 - Orti"`.
     pub name: String,
+    /// What it is.
+    pub kind: MapKind,
     /// Each area as a closed ring of `(lon, lat)`, the first vertex repeated
-    /// at the end.
+    /// at the end; for a start or a finish, the one point alone.
     pub polygons: Vec<Vec<(f64, f64)>>,
     /// The outline's colour, and the name's; `None` for one of the style's.
     pub stroke: Option<MapColor>,
@@ -92,8 +133,10 @@ pub fn parse_map_areas(text: &str) -> Result<Vec<MapArea>, String> {
             "" => name.to_string(),
             n => format!("{n} - {name}"),
         };
+        let kind = MapKind::parse(field("kind"));
+        // Without a map_id, a start and a finish of the same name apart.
         let key = match field("map_id") {
-            "" => label.clone(),
+            "" => format!("{kind:?} {label}"),
             id => id.to_string(),
         };
         let degrees = |name: &str| {
@@ -117,6 +160,7 @@ pub fn parse_map_areas(text: &str) -> Result<Vec<MapArea>, String> {
                     key,
                     MapArea {
                         name: label,
+                        kind,
                         polygons: Vec::new(),
                         stroke: color("stroke_color", "stroke_alpha"),
                         fill: color("fill_color", "fill_alpha"),
@@ -155,6 +199,12 @@ pub fn parse_map_areas(text: &str) -> Result<Vec<MapArea>, String> {
         })
         .collect();
     for map in &mut maps {
+        if map.kind.is_point() {
+            // The first point given, should there be more.
+            map.polygons.truncate(1);
+            map.polygons[0].truncate(1);
+            continue;
+        }
         for polygon in &mut map.polygons {
             if polygon.len() < 3 {
                 return Err(format!(
@@ -230,6 +280,35 @@ map_id,map_number,map_name,area,vertex,latitude,longitude,stroke_color,stroke_al
             assert_eq!(ring.first(), ring.last());
         }
         assert_eq!(maps[1].polygons[1].len(), 4);
+    }
+
+    #[test]
+    fn reads_forbidden_zones_and_the_start_and_finish() {
+        let csv = "\
+map_id,map_number,map_name,area,vertex,latitude,longitude,stroke_color,stroke_alpha,fill_color,fill_alpha,kind
+32,1,Orti,1,1,44.495792,11.300521,#0d6efd,1,#0d6efd,0.15,area
+32,1,Orti,1,2,44.495148,11.29983,#0d6efd,1,#0d6efd,0.15,area
+32,1,Orti,1,3,44.494842,11.300366,#0d6efd,1,#0d6efd,0.15,area
+,,Zone vietate,1,1,44.512038,11.311477,#a626ff,1,#a626ff,1,forbidden
+,,Zone vietate,1,2,44.514272,11.312764,#a626ff,1,#a626ff,1,forbidden
+,,Zone vietate,1,3,44.513523,11.315553,#a626ff,1,#a626ff,1,forbidden
+,,Partenza,,,44.495204,11.299989,#212529,1,#212529,1,start
+,,Arrivo,,,44.495178,11.30005,#212529,1,#212529,1,finish
+";
+        let maps = parse_map_areas(csv).unwrap();
+        let kinds: Vec<(&str, MapKind)> = maps.iter().map(|m| (m.name.as_str(), m.kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                ("1 - Orti", MapKind::Area),
+                ("Zone vietate", MapKind::Forbidden),
+                ("Partenza", MapKind::Start),
+                ("Arrivo", MapKind::Finish),
+            ]
+        );
+        assert_eq!(maps[1].polygons[0].len(), 4);
+        assert_eq!(maps[2].polygons, vec![vec![(11.299989, 44.495204)]]);
+        assert_eq!(maps[1].fill.as_ref().unwrap().alpha, 1.0);
     }
 
     #[test]

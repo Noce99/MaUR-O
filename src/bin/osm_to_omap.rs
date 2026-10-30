@@ -73,7 +73,9 @@
 //! table of their vertices and colours (see `maur_o::map_areas`): each
 //! map's outline over a tint, in the colours the table gives, and its name
 //! — inside the area wherever it fits whole, level or along a long thin
-//! area, and just beside it where it does not.
+//! area, and just beside it where it does not. Rows of `kind` `forbidden`
+//! are zones the runners may not enter, hatched like carto's military land;
+//! `start` and `finish` are a point each, ISOM's triangle and double circle.
 //!
 //! `--legend` adds a legend under the map, in Italian: a sample of every
 //! symbol the map uses with what it means, the bus and train lines first.
@@ -181,8 +183,9 @@ struct Args {
 
     /// Draw the areas of these maps, each with its name: a CSV table, one
     /// vertex a row, with columns map_id, map_number, map_name, area,
-    /// vertex, latitude, longitude, stroke_color, stroke_alpha, fill_color
-    /// and fill_alpha (map_name, latitude and longitude needed).
+    /// vertex, latitude, longitude, stroke_color, stroke_alpha, fill_color,
+    /// fill_alpha and kind (map_name, latitude and longitude needed; kind
+    /// area, forbidden, start or finish).
     #[arg(long, value_name = "FILE", alias = "areas")]
     maps: Option<PathBuf>,
 
