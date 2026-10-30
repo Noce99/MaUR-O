@@ -7,6 +7,7 @@
 //!             [--train S1,S2A,MEX,...]
 //!             [--gtfs feed.zip ... [--day weekday|saturday|sunday | --date YYYYMMDD]]
 //!             [--maps areas.csv [--areas-single-color]]
+//!             [--drinking-water]
 //!             [--legend]
 //!             <osm-file> [omap-file]
 //! ```
@@ -79,6 +80,10 @@
 //! `--areas-single-color` draws them all in black instead, the tints a faint
 //! black, whatever colours the table gives; the forbidden zones, the start
 //! and the finish in a course's purple.
+//!
+//! `--drinking-water` marks where there is water to drink — drinking
+//! fountains, water points, taps and springs tagged `drinking_water=yes` —
+//! with ISOM's refreshment point, a glass in a course's purple.
 //!
 //! `--legend` adds a legend under the map, in Italian: a sample of every
 //! symbol the map uses with what it means, the bus and train lines first.
@@ -199,6 +204,11 @@ struct Args {
     /// forbidden zones, the start and the finish in a course's purple.
     #[arg(long, alias = "maps-single-color", requires = "maps")]
     areas_single_color: bool,
+
+    /// Mark the drinking water sources with a purple glass, ISOM's
+    /// refreshment point.
+    #[arg(long)]
+    drinking_water: bool,
 
     /// Add a legend under the map, explaining every symbol it uses.
     #[arg(long)]
@@ -455,7 +465,7 @@ fn run() -> Result<(), (ExitCode, String)> {
 
     let details = Details::new(args.details).expect("clap checks the range");
     let map_names: Vec<String> = maps.iter().map(|m| m.name.clone()).collect();
-    let style = carto_style_with_overlays(&looks, &maps, details);
+    let style = carto_style_with_overlays(&looks, &maps, args.drinking_water, details);
     let mut conversion = convert(&data, &style, Some(bbox))
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     conversion.add_bus_lines(&style, &transit, &data, args.bundle_width, args.stop_merge);

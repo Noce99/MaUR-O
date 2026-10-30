@@ -771,3 +771,42 @@ fn areas_single_color_needs_a_list_of_maps() {
         .assert()
         .code(1);
 }
+
+#[test]
+fn drinking_water_marks_the_fountains_with_a_glass() {
+    let dir = tempfile::tempdir().unwrap();
+    let osm = dir.path().join("water.osm");
+    std::fs::write(
+        &osm,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <bounds minlat="44.4925" minlon="11.3415" maxlat="44.4945" maxlon="11.3445"/>
+  <node id="1" lat="44.4930" lon="11.3420"><tag k="amenity" v="drinking_water"/></node>
+  <node id="2" lat="44.4935" lon="11.3425">
+    <tag k="man_made" v="water_tap"/><tag k="drinking_water" v="yes"/>
+  </node>
+  <node id="3" lat="44.4940" lon="11.3430"><tag k="amenity" v="fountain"/></node>
+</osm>
+"#,
+    )
+    .unwrap();
+    let out = dir.path().join("water.omap");
+    let glasses = |water: bool| {
+        let mut command = osm_to_omap();
+        if water {
+            command.arg("--drinking-water");
+        }
+        command.arg(&osm).arg(&out).assert().success();
+        let (map, _) = read_xml_map(&out).unwrap();
+        map.objects
+            .iter()
+            .filter(|o| {
+                matches!(&map.symbols[o.symbol_index.unwrap()],
+                    Symbol::Point(p) if p.name == "drinking water")
+            })
+            .count()
+    };
+    assert_eq!(glasses(false), 0);
+    // The fountain and the tap, not the ornamental fountain.
+    assert_eq!(glasses(true), 2);
+}

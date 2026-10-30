@@ -721,6 +721,17 @@ pub const START_SIDE_PX: f64 = 25.0;
 /// inner one 5 mm, as in ISOM.
 pub const FINISH_DIAMETER_PX: f64 = 25.0;
 
+/// Whether a node is somewhere to drink: a drinking fountain or a water
+/// point, unless tagged not drinkable, or anything tagged
+/// `drinking_water=yes` — a tap, a spring, a fountain.
+pub fn is_drinking_water(tags: &Tags) -> bool {
+    match tags.get("drinking_water") {
+        Some("yes") => true,
+        Some("no") => false,
+        _ => tags.is("amenity", "drinking_water") || tags.is("amenity", "water_point"),
+    }
+}
+
 /// The key of the symbol the `i`-th entry of the list of maps is drawn with:
 /// `map <i>` for a map's areas, `forbidden <i>`, `start <i>` or
 /// `finish <i>` for the others. Its colours go by the same key.
@@ -747,7 +758,7 @@ pub fn map_key(map: &MapArea, i: usize) -> String {
 /// every badge, then the labels' white. They are as wide on the paper at
 /// every level of detail.
 pub fn carto_style_with_bus_lines(lines: &[BusLook], details: Details) -> Style {
-    carto_style_with_overlays(lines, &[], details)
+    carto_style_with_overlays(lines, &[], false, details)
 }
 
 /// How large a map's name is written, in carto pixels.
@@ -772,7 +783,16 @@ pub const MAP_AREA_FILL_ALPHA: f64 = 0.15;
 /// ISOM's triangle, and the finish `finish <i>`, its two circles, both in
 /// the stroke colour (see [`map_key`]). Their colours are above every
 /// other, the maps' names included, as a course's overprint is.
-pub fn carto_style_with_overlays(lines: &[BusLook], maps: &[MapArea], details: Details) -> Style {
+///
+/// With `drinking_water`, the places to drink (see [`is_drinking_water`])
+/// get `drinking water`: ISOM's refreshment point, a glass, in
+/// [`COURSE_PURPLE`] above everything.
+pub fn carto_style_with_overlays(
+    lines: &[BusLook],
+    maps: &[MapArea],
+    drinking_water: bool,
+    details: Details,
+) -> Style {
     let zoom = details.zoom();
     let mut entries: Vec<(String, String, f64)> = Vec::new();
     let stroke = |i: usize| match &maps[i].stroke {
@@ -786,6 +806,9 @@ pub fn carto_style_with_overlays(lines: &[BusLook], maps: &[MapArea], details: D
         None => (stroke(i).0, MAP_AREA_FILL_ALPHA),
     };
     let named = |i: usize| maps[i].kind == MapKind::Area;
+    if drinking_water {
+        entries.push(("drinking water".to_string(), COURSE_PURPLE.to_string(), 1.0));
+    }
     // The forbidden zones, the start and the finish over everything, like a
     // course's overprint: the lines inside a zone too.
     for (i, map) in maps.iter().enumerate().filter(|&(i, _)| !named(i)) {
@@ -1213,6 +1236,57 @@ pub fn carto_style_with_overlays(lines: &[BusLook], maps: &[MapArea], details: D
         b.add("transit stop arrow", Symbol::Point(arrow));
     }
 
+    // A place to drink: ISOM 2017-2's 713 Refreshment point, a glass, its
+    // rim an ellipse; in mm on the paper, y down.
+    if drinking_water {
+        let line = |points: &[(f64, f64, i32)]| {
+            let mut object = Object::new(ObjectKind::Path(PathObject::default()));
+            object.coords = points
+                .iter()
+                .map(|&(x, y, flags)| Coord::new(x, y, flags))
+                .collect();
+            Element {
+                symbol: Symbol::Line(LineSymbol {
+                    color: b.color("drinking water"),
+                    line_width: 0.4,
+                    ..LineSymbol::default()
+                }),
+                object,
+            }
+        };
+        let curve = coord_flag::CURVE_START;
+        let glass = PointSymbol {
+            name: "drinking water".to_string(),
+            elements: vec![
+                line(&[(-1.34, -1.395, 0), (-0.82, 1.38, 0)]),
+                line(&[(1.34, -1.395, 0), (0.82, 1.38, 0)]),
+                line(&[
+                    (0.0, -1.77, curve),
+                    (0.6, -1.77, 0),
+                    (1.2, -1.62, 0),
+                    (1.34, -1.395, curve),
+                    (1.2, -1.17, 0),
+                    (0.6, -1.02, 0),
+                    (0.0, -1.02, curve),
+                    (-0.6, -1.02, 0),
+                    (-1.2, -1.17, 0),
+                    (-1.34, -1.395, curve),
+                    (-1.2, -1.62, 0),
+                    (-0.6, -1.77, 0),
+                    (0.0, -1.77, 0),
+                ]),
+                line(&[
+                    (-0.82, 1.38, curve),
+                    (-0.68, 1.68, 0),
+                    (0.68, 1.68, 0),
+                    (0.82, 1.38, 0),
+                ]),
+            ],
+            ..PointSymbol::new()
+        };
+        b.add("drinking water", Symbol::Point(glass));
+    }
+
     // The areas of an event's maps: the outline over a faint tint, and the
     // name written inside.
     for (i, map) in maps.iter().enumerate() {
@@ -1510,6 +1584,7 @@ impl Style {
             "city wall" => "Mura cittadine",
             "tree row" => "Filare di alberi",
             "tree" => "Albero",
+            "drinking water" => "Acqua potabile",
             _ => return None,
         };
         Some(caption.to_string())
@@ -1744,6 +1819,11 @@ impl Style {
         if tags.is("natural", "tree") {
             out.push(self.id("tree"));
         }
+        if let Some(&id) = self.ids.get("drinking water") {
+            if is_drinking_water(tags) {
+                out.push(id);
+            }
+        }
         out.retain(|&id| self.shown(id));
         out
     }
@@ -1783,6 +1863,22 @@ mod tests {
     }
 
     #[test]
+    fn drinking_water_is_a_purple_glass_over_everything_when_asked() {
+        let fountain = tags(&[("amenity", "drinking_water")]);
+        assert!(carto_style(Details::default())
+            .point_symbols(&fountain)
+            .is_empty());
+        let style = carto_style_with_overlays(&[], &[], true, Details::default());
+        assert_eq!(style.point_symbols(&fountain), [style.id("drinking water")]);
+        assert_eq!(style.colors[0].name, "drinking water");
+        let tap = tags(&[("man_made", "water_tap"), ("drinking_water", "yes")]);
+        assert!(is_drinking_water(&tap));
+        let not = tags(&[("amenity", "drinking_water"), ("drinking_water", "no")]);
+        assert!(!is_drinking_water(&not));
+        assert!(!is_drinking_water(&tags(&[("amenity", "fountain")])));
+    }
+
+    #[test]
     fn the_forbidden_zones_start_and_finish_are_above_every_colour() {
         let map = |kind| MapArea {
             name: format!("{kind:?}"),
@@ -1802,7 +1898,7 @@ mod tests {
             reference: "13".to_string(),
             color: "#ff0000".to_string(),
         };
-        let style = carto_style_with_overlays(&[bus], &maps, Details::default());
+        let style = carto_style_with_overlays(&[bus], &maps, false, Details::default());
         let names: Vec<&str> = style.colors.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names[..4],
