@@ -9,6 +9,7 @@ use std::path::Path;
 
 use tiny_skia::{Pixmap, Transform};
 
+use crate::geometry::Rect;
 use crate::renderer::Renderer;
 use crate::xml_reader::read_xml_map;
 
@@ -53,6 +54,20 @@ pub struct Rendering {
 /// Renders `map_file` at `resolution` pixels per meter on the ground, with a
 /// white frame of `frame` meters on each side.
 pub fn render_map(map_file: &Path, resolution: f64, frame: f64) -> Result<Rendering, Error> {
+    render_map_window(map_file, resolution, frame, None)
+}
+
+/// Like [`render_map`], but when `window` is given only that rectangle of
+/// the map is drawn — in map coordinates, mm on the paper as Mapper stores
+/// them (`y` pointing down) — and `frame` is ignored. The image's top-left
+/// pixel corner is then exactly the window's top-left corner, so a point of
+/// the map is found in the image from its coordinates alone.
+pub fn render_map_window(
+    map_file: &Path,
+    resolution: f64,
+    frame: f64,
+    window: Option<Rect>,
+) -> Result<Rendering, Error> {
     let (map, warnings) = read_xml_map(map_file)
         .map_err(|e| Error::Read(format!("Failed to load {}: {}", map_file.display(), e)))?;
 
@@ -68,14 +83,22 @@ pub fn render_map(map_file: &Path, resolution: f64, frame: f64) -> Result<Render
     // empty map, the extent is a null rect at the origin, i.e. the frame
     // alone determines the size of the image.
     let frame_mm = frame * mm_per_meter;
-    let extent = renderer
-        .extent()
-        .adjusted(-frame_mm, -frame_mm, frame_mm, frame_mm);
+    let extent = match window {
+        Some(window) => window,
+        None => renderer
+            .extent()
+            .adjusted(-frame_mm, -frame_mm, frame_mm, frame_mm),
+    };
 
     let width = (extent.width() * pixel_per_mm).round();
     let height = (extent.height() * pixel_per_mm).round();
     if width <= 0.0 || height <= 0.0 {
         return Err(Error::Geometry("The requested image is empty.".to_string()));
+    }
+    if width > u32::MAX as f64 || height > u32::MAX as f64 {
+        return Err(Error::Geometry(format!(
+            "The requested image of {width}x{height} pixels is too large."
+        )));
     }
     let (width, height) = (width as u32, height as u32);
 

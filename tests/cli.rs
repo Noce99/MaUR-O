@@ -76,3 +76,68 @@ fn invalid_resolution() {
         .assert()
         .failure();
 }
+
+/// A window is drawn on its own, at the map's resolution: 4 mm on the paper at
+/// 1:10000 are 40 meters, i.e. 120 pixels at the default 3 pixels per meter.
+#[test]
+fn window() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("window.png");
+    map_to_image()
+        .args(["--window", "-1,-1,3,3"])
+        .arg("tests/data/shapes.xmap")
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("120x120 pixels, 40x40 meters"));
+}
+
+/// A window that is not four numbers with right > left and bottom > top is a
+/// usage error.
+#[test]
+fn invalid_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("invalid.png");
+    for window in [
+        "1,2,3",
+        "0,0,4,4,",
+        "a,b,c,d",
+        "4,0,0,4",
+        "0,4,4,0",
+        "nan,0,1,1",
+    ] {
+        map_to_image()
+            .args(["--window", window])
+            .arg("tests/data/shapes.xmap")
+            .arg(&out)
+            .assert()
+            .code(1);
+    }
+}
+
+/// The frame has no meaning for a window, so asking for both is a usage error.
+#[test]
+fn window_and_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("invalid.png");
+    map_to_image()
+        .args(["--window", "0,0,4,4", "--frame=10"])
+        .arg("tests/data/shapes.xmap")
+        .arg(&out)
+        .assert()
+        .code(1);
+}
+
+/// A window too large for any image fails with the geometry exit code.
+#[test]
+fn huge_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("huge.png");
+    map_to_image()
+        .args(["--window", "0,0,1e9,1e9"])
+        .arg("tests/data/shapes.xmap")
+        .arg(&out)
+        .assert()
+        .code(3)
+        .stderr(predicates::str::contains("too large"));
+}

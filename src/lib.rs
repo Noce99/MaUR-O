@@ -25,7 +25,8 @@
 //!
 //! [`render::render_map`] is the entire pipeline in one call — read the file,
 //! build the renderables, rasterize them — and is what the `map_to_image`
-//! tool is built on:
+//! tool is built on. [`render::render_map_window`] does the same for one
+//! rectangle of the map, given in map coordinates, instead of all of it:
 //!
 //! ```no_run
 //! use std::path::Path;

@@ -96,7 +96,7 @@ fallback is what runs.
 Renders a single map to a raster image.
 
 ```
-map_to_image [-r px-per-meter] [-f meters] <map-file> [image-file]
+map_to_image [-r px-per-meter] [-f meters | -w left,top,right,bottom] <map-file> [image-file]
 ```
 
 | Argument | Meaning |
@@ -105,6 +105,7 @@ map_to_image [-r px-per-meter] [-f meters] <map-file> [image-file]
 | `[image-file]` | Where to write the image. The file suffix (`.png`, `.bmp`, `.tif`, `.jpg`) selects the format; defaults to the map file's name with a `.png` suffix. |
 | `-r, --resolution <N>` | Pixels per meter on the ground (default `3`). |
 | `-f, --frame <N>` | Width of the white frame added on every side, in meters on the ground (default `50`). |
+| `-w, --window <L,T,R,B>` | Render only this rectangle of the map, in map coordinates (mm on the paper, `y` down, as Mapper stores them), instead of the whole map. Cannot be combined with `--frame`. The image's top-left corner is the window's, so a map point's pixel is known exactly. |
 
 This is the tool to reach for to just look at a map:
 
@@ -115,6 +116,18 @@ cargo build --release
 
 ![A forest orienteering map rendered by map_to_image](mds/assets/forest_sample.png)
 *`maps/forest_sample.omap` rendered by `map_to_image`.*
+
+To look closely at one part of a map, or to draw something over the image
+at known positions, render a window instead. Here a square of 20 by 20 mm on
+the paper (200 by 200 m at 1:10000), whose top-left pixel is map point
+`(85, 40)`:
+
+```bash
+./target/release/map_to_image -r 10 -w 85,40,105,60 maps/forest_sample.omap closeup.png
+```
+
+A map point `(x, y)` lands at pixel `((x - left), (y - top))` times
+`resolution × scale / 1000` pixels per mm.
 
 It prints the image size, the ground size, and the map scale it read, and
 exits non-zero if the map cannot be read (2), its geometry cannot be built
