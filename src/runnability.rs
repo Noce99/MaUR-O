@@ -319,9 +319,10 @@ fn lines_last(shapes: &mut [Shape]) {
         match (a_line, b_line) {
             (true, false) => std::cmp::Ordering::Greater,
             (false, true) => std::cmp::Ordering::Less,
-            (true, true) => a
+            // Descending speed: the slowest line is drawn last and wins.
+            (true, true) => b
                 .speed
-                .partial_cmp(&b.speed)
+                .partial_cmp(&a.speed)
                 .unwrap_or(std::cmp::Ordering::Equal),
             (false, false) => std::cmp::Ordering::Equal,
         }

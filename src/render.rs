@@ -184,5 +184,17 @@ pub fn save_pixmap(pixmap: &Pixmap, path: &Path) -> Result<(), String> {
     // background), so it is numerically identical to straight RGBA here.
     let image = image::RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixmap.data().to_vec())
         .ok_or_else(|| "invalid pixel buffer".to_string())?;
+    // JPEG has no alpha channel, and the encoder refuses RGBA outright
+    // rather than dropping it -- leaving an empty file behind.
+    let is_jpeg = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
+    if is_jpeg {
+        return image::DynamicImage::ImageRgba8(image)
+            .to_rgb8()
+            .save(path)
+            .map_err(|e| e.to_string());
+    }
     image.save(path).map_err(|e| e.to_string())
 }

@@ -158,11 +158,8 @@ fn map_suffix(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     MAP_SUFFIXES
         .iter()
-        .find(|suffix| {
-            name.len() > suffix.len()
-                && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-        })
-        .map(|suffix| name[name.len() - suffix.len()..].to_string())
+        .find_map(|suffix| maur_o::naming::split_suffix_ignore_case(name, suffix))
+        .map(|(_, suffix)| suffix.to_string())
 }
 
 /// Collects every map under `folder`, subfolders included.

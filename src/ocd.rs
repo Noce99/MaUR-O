@@ -164,8 +164,10 @@ fn decode_cp1252(bytes: &[u8]) -> String {
 /// Decodes UTF-16, little end first, replacing anything malformed.
 fn decode_utf16le(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&c| u16::from_le_bytes(c))
         .collect();
     String::from_utf16_lossy(&units)
 }
@@ -203,6 +205,19 @@ fn xml_escape(s: &str) -> String {
 
 // ---------------------------------------------------------------------------
 // Numbers
+
+/// Whether `count` items of `item_size` bytes starting at `off` all lie in a
+/// file of `len` bytes (with `off` 0 meaning "no such block", as everywhere
+/// in the format).
+///
+/// The multiplication is checked: the count is the file's own, and on a
+/// 32-bit target (the wasm build) a large one wraps round to a small size
+/// that would pass a plain bounds check.
+fn items_in_bounds(off: usize, count: usize, item_size: usize, len: usize) -> bool {
+    count
+        .checked_mul(item_size)
+        .is_some_and(|size| off > 0 && off.saturating_add(size) <= len)
+}
 
 /// Rounds a half up, towards positive infinity.
 ///
@@ -1898,7 +1913,11 @@ impl Import<'_> {
                 coords_off = pos + 40;
             }
         }
-        if !self.in_bounds(coords_off, num_items * 8) {
+        // `num_items` is the file's own u32: on a 32-bit target (the wasm
+        // build) `num_items * 8` can wrap round to something small enough to
+        // pass the bounds check, and the coordinate buffer sized from it then
+        // overflows its capacity. A count that does not fit is out of bounds.
+        if !items_in_bounds(coords_off, num_items, 8, self.bytes.len()) {
             return Ok(None);
         }
 
@@ -2296,5 +2315,28 @@ impl Import<'_> {
         let mut notes = self.param_strings(11);
         notes.extend(self.param_strings(1061));
         normalize_newlines(&notes.concat())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::items_in_bounds;
+
+    #[test]
+    fn an_item_count_too_large_to_multiply_is_out_of_bounds() {
+        // What a hostile u32 count becomes on a 32-bit target: a size that
+        // wraps. Here the count is made big enough to wrap on any target.
+        let count = usize::MAX / 8 + 2;
+        assert!(count.wrapping_mul(8) < 100, "the test count must wrap");
+        assert!(!items_in_bounds(10, count, 8, 1000));
+    }
+
+    #[test]
+    fn items_are_in_bounds_exactly_up_to_the_end_of_the_file() {
+        assert!(items_in_bounds(10, 2, 8, 26));
+        assert!(!items_in_bounds(10, 2, 8, 25));
+        assert!(items_in_bounds(10, 0, 8, 10));
+        // Offset 0 is the format's "no block here".
+        assert!(!items_in_bounds(0, 1, 8, 1000));
     }
 }

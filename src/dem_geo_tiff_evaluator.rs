@@ -257,8 +257,7 @@ fn read_transform(decoder: &mut Decoder<std::fs::File>) -> Result<AffineTransfor
         .map_err(|e| e.to_string())?;
     if scale.len() < 2 || tie.len() < 5 {
         return Err(
-            "ModelPixelScaleTag/ModelTiepointTag too short to be real georeferencing"
-                .to_string(),
+            "ModelPixelScaleTag/ModelTiepointTag too short to be real georeferencing".to_string(),
         );
     }
     if scale[0] == 0.0 || scale[1] == 0.0 {
@@ -441,7 +440,7 @@ pub struct Evaluation {
 /// through `prediction`'s own transform -- whatever that transform is, so
 /// the two files' pixel sizes, origins and rotations may all differ freely
 /// -- and left `f64::NAN` where `prediction` does not cover it at all (see
-/// [`bilinear_sample`]'s own doc comment). There is deliberately no upfront
+/// `bilinear_sample`'s own doc comment). There is deliberately no upfront
 /// intersection-of-two-rectangles step: that only works when both rasters
 /// are axis-aligned, and two *differently* rotated rectangles intersect in
 /// a general polygon, not a rectangle.
@@ -687,7 +686,7 @@ pub fn write_histogram_png(evaluation: &Evaluation, path: &Path) -> Result<(), S
     } else {
         1.0
     };
-    let mut counts = vec![0u32; HISTOGRAM_BINS];
+    let mut counts = [0u32; HISTOGRAM_BINS];
     for &err in &evaluation.signed_error {
         if err.is_nan() {
             continue;
@@ -746,7 +745,12 @@ mod tests {
         }
     }
 
-    fn rotated_transform(origin_x: f64, origin_y: f64, px_size: f64, degrees: f64) -> AffineTransform {
+    fn rotated_transform(
+        origin_x: f64,
+        origin_y: f64,
+        px_size: f64,
+        degrees: f64,
+    ) -> AffineTransform {
         let (sin, cos) = degrees.to_radians().sin_cos();
         AffineTransform {
             origin_x,
@@ -776,6 +780,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn rotated_raster(
         width: usize,
         height: usize,
@@ -815,13 +820,24 @@ mod tests {
         assert_eq!(parse_geo_key_directory(&[1, 1, 0, 0]), CrsKey::Unspecified);
     }
 
-    fn write_tiepoint_tiff(path: &Path, width: u32, height: u32, values: &[f32], origin: (f64, f64), px_size: f64, epsg: u16) {
+    fn write_tiepoint_tiff(
+        path: &Path,
+        width: u32,
+        height: u32,
+        values: &[f32],
+        origin: (f64, f64),
+        px_size: f64,
+        epsg: u16,
+    ) {
         let file = std::fs::File::create(path).unwrap();
         let mut encoder = TiffEncoder::new(file).unwrap();
         let mut image = encoder.new_image::<Gray32Float>(width, height).unwrap();
         image
             .encoder()
-            .write_tag(Tag::Unknown(MODEL_PIXEL_SCALE_TAG), &[px_size, px_size, 0.0][..])
+            .write_tag(
+                Tag::Unknown(MODEL_PIXEL_SCALE_TAG),
+                &[px_size, px_size, 0.0][..],
+            )
             .unwrap();
         image
             .encoder()
@@ -844,7 +860,15 @@ mod tests {
     fn reads_a_tiepoint_style_geotiff() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gt.tif");
-        write_tiepoint_tiff(&path, 2, 2, &[1.0, 2.0, 3.0, 4.0], (1000.0, 2000.0), 5.0, 3006);
+        write_tiepoint_tiff(
+            &path,
+            2,
+            2,
+            &[1.0, 2.0, 3.0, 4.0],
+            (1000.0, 2000.0),
+            5.0,
+            3006,
+        );
 
         let g = read(&path).unwrap();
         assert_eq!((g.width, g.height), (2, 2));
@@ -884,7 +908,10 @@ mod tests {
         let mut image = encoder.new_image::<Gray32Float>(2, 2).unwrap();
         image
             .encoder()
-            .write_tag(Tag::Unknown(MODEL_TRANSFORMATION_TAG), &transform_matrix[..])
+            .write_tag(
+                Tag::Unknown(MODEL_TRANSFORMATION_TAG),
+                &transform_matrix[..],
+            )
             .unwrap();
         image
             .encoder()
@@ -930,7 +957,10 @@ mod tests {
         let mut image = encoder.new_image::<Gray32Float>(2, 2).unwrap();
         image
             .encoder()
-            .write_tag(Tag::Unknown(MODEL_TRANSFORMATION_TAG), &transform_matrix[..])
+            .write_tag(
+                Tag::Unknown(MODEL_TRANSFORMATION_TAG),
+                &transform_matrix[..],
+            )
             .unwrap();
         image
             .encoder()
@@ -942,7 +972,10 @@ mod tests {
         image.write_data(&[1.0f32, 2.0, 3.0, 4.0]).unwrap();
 
         let g = read(&path).unwrap();
-        assert!(g.transform.row_x.abs() > 0.1, "expected a real rotation term");
+        assert!(
+            g.transform.row_x.abs() > 0.1,
+            "expected a real rotation term"
+        );
         // Round-trips through the raster's own (now rotated) transform.
         let (x, y) = g.transform.pixel_to_world(0.0, 0.0);
         let (col, row) = g.transform.world_to_pixel(x, y);
@@ -962,7 +995,10 @@ mod tests {
             .unwrap();
         image
             .encoder()
-            .write_tag(Tag::Unknown(MODEL_TIEPOINT_TAG), &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0][..])
+            .write_tag(
+                Tag::Unknown(MODEL_TIEPOINT_TAG),
+                &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0][..],
+            )
             .unwrap();
         image
             .encoder()
@@ -1000,7 +1036,11 @@ mod tests {
         let gt = raster(6, 6, vec![50.0; 36], 0.0, 0.0, 1.0, 3006);
         let pred = raster(6, 6, vec![45.0; 36], -2.0, 2.0, 2.0, 3006);
         let result = evaluate(&gt, &pred).unwrap();
-        assert!((result.best_constant - 5.0).abs() < 1e-9, "{}", result.best_constant);
+        assert!(
+            (result.best_constant - 5.0).abs() < 1e-9,
+            "{}",
+            result.best_constant
+        );
         assert!(result.mse < 1e-9);
         assert_eq!(result.valid_pixel_count, 36);
     }
@@ -1031,7 +1071,11 @@ mod tests {
         let gt = rotated_raster(4, 4, vec![50.0; 16], 0.0, 0.0, 1.0, 7.1, 3006);
         let pred = rotated_raster(4, 4, vec![45.0; 16], 0.0, 0.0, 1.0, 7.100001, 3006);
         let result = evaluate(&gt, &pred).unwrap();
-        assert!((result.best_constant - 5.0).abs() < 1e-6, "{}", result.best_constant);
+        assert!(
+            (result.best_constant - 5.0).abs() < 1e-6,
+            "{}",
+            result.best_constant
+        );
         assert!(result.mse < 1e-9);
         assert!(result.valid_pixel_count > 0);
     }

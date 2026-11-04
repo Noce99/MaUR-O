@@ -137,6 +137,16 @@ fn circle_exit(a: Coord<f64>, b: Coord<f64>, c: Coord<f64>, r: f64, t_min: f64) 
         .find(|&t| t >= t_min && t <= 1.0)
 }
 
+/// The fewest chords [`resample_equal_chords`] divides a closed ring into.
+///
+/// Four is the least that works on a round ring: the walk steps from point
+/// to point along circles of radius `p / n` (`p` the perimeter), and on a
+/// circle no point is farther than its diameter `p / π` from the start, so
+/// with `n <= 3` the first circle is never left and the walk emits nothing.
+/// A ring folded tightly enough can still defeat four, which is what the
+/// fall-back to the unresampled ring is for.
+pub const MIN_RING_SEGMENTS: usize = 4;
+
 /// Resamples a `LineString` so consecutive `Coord`s are `step` apart. An
 /// open input's last segment is excepted and may come out shorter, kept as
 /// whatever remainder is left. A closed input has no such segment to absorb
@@ -152,6 +162,11 @@ fn circle_exit(a: Coord<f64>, b: Coord<f64>, c: Coord<f64>, r: f64, t_min: f64) 
 /// - Whatever closing segment is left is checked against half of that
 ///   shrunk `step`: too short to stand on its own, it is merged into the
 ///   preceding segment instead of kept as its own near-zero one.
+/// - A ring is never divided into fewer than [`MIN_RING_SEGMENTS`] chords,
+///   so a ring shorter than a few `step`s (a small knoll) keeps its shape
+///   instead of collapsing to a single point; should the walk still come
+///   out with fewer than three distinct points, the ring is returned as it
+///   was.
 ///
 /// See Appendix 1 of `Contours-to-Raster.md`.
 pub fn resample_equal_chords(ls: &LineString<f64>, step: f64) -> LineString<f64> {
@@ -164,7 +179,7 @@ pub fn resample_equal_chords(ls: &LineString<f64>, step: f64) -> LineString<f64>
     let closed = pts.len() > 2 && pts[0] == *pts.last().unwrap();
     let step = if closed {
         let perimeter: f64 = pts.windows(2).map(|w| dist(w[0], w[1])).sum();
-        let n = (perimeter / step).round().max(1.0);
+        let n = (perimeter / step).round().max(MIN_RING_SEGMENTS as f64);
         perimeter / n
     } else {
         step
@@ -219,6 +234,12 @@ pub fn resample_equal_chords(ls: &LineString<f64>, step: f64) -> LineString<f64>
             } else {
                 out.push(last);
             }
+        }
+        // A ring needs three distinct points plus its closing one; anything
+        // less is no longer the ring it was, and downstream (rasterization,
+        // gravity, the enclosure test) would treat it as a point or a line.
+        if out.len() < 4 {
+            return ls.clone();
         }
     } else if *out.last().unwrap() != last {
         out.push(last);
@@ -437,6 +458,31 @@ mod tests {
         let lens: Vec<f64> = resampled.0.windows(2).map(|w| dist(w[0], w[1])).collect();
         let min = lens.iter().cloned().fold(f64::INFINITY, f64::min);
         assert!(min > 2.4, "a segment came out too short: {:?}", lens);
+    }
+
+    #[test]
+    fn resample_keeps_a_small_ring_a_ring() {
+        // A knoll-sized ring: circles of perimeter 3 to 17 units against a
+        // step of 5, which used to collapse to a single point (no point of a
+        // ring that small is a whole step from its start).
+        for radius in [0.5, 1.0, 2.0, 2.7] {
+            let ring: Vec<Coord<f64>> = (0..=64)
+                .map(|i| {
+                    let a = std::f64::consts::TAU * f64::from(i % 64) / 64.0;
+                    c(radius * a.cos(), radius * a.sin())
+                })
+                .collect();
+            let resampled = resample_equal_chords(&LineString::new(ring), 5.0);
+            let pts = &resampled.0;
+            assert!(pts.len() >= 4, "radius {radius}: only {} points", pts.len());
+            assert_eq!(pts.first(), pts.last(), "radius {radius}: not closed");
+            let distinct = pts[..pts.len() - 1]
+                .iter()
+                .enumerate()
+                .filter(|(i, p)| pts[..*i].iter().all(|q| dist(*q, **p) > 1e-9))
+                .count();
+            assert!(distinct >= 3, "radius {radius}: {distinct} distinct points");
+        }
     }
 
     #[test]

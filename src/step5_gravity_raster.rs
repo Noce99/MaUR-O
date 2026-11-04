@@ -3,7 +3,7 @@
 //! precursor to [`crate::step5_elevation_raster`]'s per-pixel altitude:
 //! instead of a scalar elevation, every in-bound Contour Raster pixel gets a
 //! 2D downhill direction, built the same way -- an Elevation Fill Rain Drop
-//! Production's own track ([`crate::step3_rain_drop::elevation_fill_drop_track`])
+//! Production's own track (`crate::step3_rain_drop::elevation_fill_drop_track`)
 //! seeds every pixel it passes through with its own (constant, since a track
 //! is a single straight segment) direction, weighted by `1.0 / track_len^2`
 //! -- a steeper distance decay than elevation's own `1.0 / track_len`,
@@ -52,8 +52,12 @@ impl VecAccum {
     }
 
     fn mean(&self) -> Option<(f64, f64)> {
-        (self.weight_total > 0.0)
-            .then(|| (self.sum.0 / self.weight_total, self.sum.1 / self.weight_total))
+        (self.weight_total > 0.0).then(|| {
+            (
+                self.sum.0 / self.weight_total,
+                self.sum.1 / self.weight_total,
+            )
+        })
     }
 }
 
@@ -72,10 +76,14 @@ pub struct GravityRaster {
 impl GravityRaster {
     /// The pixel `(x, y)`'s own un-normalized weighted-mean direction, or
     /// `None` if it never got one. Left un-normalized rather than returning a
-    /// unit vector -- see [`VecAccum`]'s own doc comment on why the raw
+    /// unit vector -- see `VecAccum`'s own doc comment on why the raw
     /// magnitude matters to a caller.
     pub fn get(&self, x: usize, y: usize) -> Option<(f64, f64)> {
-        self.grid.get(y).and_then(|row| row.get(x)).copied().flatten()
+        self.grid
+            .get(y)
+            .and_then(|row| row.get(x))
+            .copied()
+            .flatten()
     }
 
     /// Builds a [`GravityRaster`] directly from a `grid`, bypassing
@@ -89,7 +97,11 @@ impl GravityRaster {
         width: usize,
         height: usize,
     ) -> Self {
-        GravityRaster { grid, width, height }
+        GravityRaster {
+            grid,
+            width,
+            height,
+        }
     }
 }
 
@@ -189,7 +201,11 @@ pub fn resolve(contours: &[Contour], raster: &mut ContourRaster, config: &Config
         .collect();
     let grid = gaussian_smooth(&grid, config.gravity_gaussian_kernel_size);
 
-    GravityRaster { grid, width, height }
+    GravityRaster {
+        grid,
+        width,
+        height,
+    }
 }
 
 /// Gaussian-smooths `grid`'s own direction field: every pixel that already
@@ -333,7 +349,10 @@ mod tests {
         // `step5_elevation_raster`'s own "midway" test uses, just with
         // neither contour given an `elevation_height` at all: unlike
         // `step5_elevation_raster`, direction needs none.
-        let contours = vec![contour_with_gravity(10.0, -1.0), contour_with_gravity(0.0, -1.0)];
+        let contours = vec![
+            contour_with_gravity(10.0, -1.0),
+            contour_with_gravity(0.0, -1.0),
+        ];
         let mut raster = raster_for(&contours);
         let mut config = default_config();
         config.sources_per_contour_segment = 1;
@@ -342,8 +361,14 @@ mod tests {
         let (px, py) = raster.to_px(c(0.0, 5.0));
         let (vx, vy) = result.get(px as usize, py as usize).unwrap();
         let mag = vx.hypot(vy);
-        assert!(mag > 0.5, "expected a confidently-downhill vector, got magnitude {mag}");
-        assert!(vy < 0.0, "expected the pixel's own direction to point downhill (-y), got {vy}");
+        assert!(
+            mag > 0.5,
+            "expected a confidently-downhill vector, got magnitude {mag}"
+        );
+        assert!(
+            vy < 0.0,
+            "expected the pixel's own direction to point downhill (-y), got {vy}"
+        );
     }
 
     #[test]
@@ -370,7 +395,11 @@ mod tests {
 
         let result = resolve(&contours, &mut raster, &default_config());
 
-        assert_eq!(result.get(0, 0), None, "the raster's own border is out of bound");
+        assert_eq!(
+            result.get(0, 0),
+            None,
+            "the raster's own border is out of bound"
+        );
     }
 
     #[test]
@@ -383,7 +412,10 @@ mod tests {
         // gap-filling spreading it sideways, column by column, same as
         // `step5_elevation_raster`'s own gap-filling test reaches a hilltop's
         // interior no drop's own track could.
-        let contours = vec![contour_with_gravity(10.0, -1.0), contour_with_gravity(0.0, -1.0)];
+        let contours = vec![
+            contour_with_gravity(10.0, -1.0),
+            contour_with_gravity(0.0, -1.0),
+        ];
         let mut raster = raster_for(&contours);
         let mut config = default_config();
         config.sources_per_contour_segment = 1;

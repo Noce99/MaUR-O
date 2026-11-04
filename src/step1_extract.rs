@@ -105,7 +105,7 @@ pub struct Step1Result {
     pub pre_growing_flying_ends: Vec<Coord<f64>>,
     /// One closed outline per Flying End [`run_growing_close_search`] gave a
     /// turn to (every one with a well-defined forward direction -- see
-    /// [`flying_end_direction`] -- whether or not that turn found anything):
+    /// `flying_end_direction` -- whether or not that turn found anything):
     /// the search cone actually used for that turn, captured at the moment
     /// of the turn, before anything about it is resolved -- apex at the
     /// Flying End's own position, opening along its own forward direction,
@@ -146,9 +146,9 @@ pub struct Step1Result {
 
 /// One integration step's own flying-end position (the vectors' shared
 /// tail, *before* the step) and the four separate force contributions
-/// [`growing_forces`] computes there ([Appendix 5](6aa1e4f7-8b2d-4c6a-9f1e-2d8b4a6c9f3e)),
+/// `growing_forces` computes there ([Appendix 5](6aa1e4f7-8b2d-4c6a-9f1e-2d8b4a6c9f3e)),
 /// before they are summed into the step's actual net force
-/// ([`GrowingStepForces::total`]) -- kept only for `--create_svg`'s
+/// (`GrowingStepForces::total`) -- kept only for `--create_svg`'s
 /// `02_..._step1_growing_seeking.svg`/`03_..._step1_growing_matching.svg`
 /// visualization.
 #[derive(Clone, Copy, Debug)]
@@ -1336,14 +1336,14 @@ fn collect_obvious_end_matches(
 /// passes of its own.
 ///
 /// **Discovery**: first, every obviously-close pair of Flying Ends is
-/// recorded regardless of direction ([`collect_obvious_end_matches`],
+/// recorded regardless of direction (`collect_obvious_end_matches`,
 /// `config.obvious_to_close_contour_distance`). Then, for every Flying End
-/// in [`collect_flying_ends`]'s own list, its own single best (closest
+/// in `collect_flying_ends`'s own list, its own single best (closest
 /// valid) cone-based match is found -- another Flying End first
-/// ([`best_end_candidate`]); if that found nothing, an out-of-bound pixel
-/// ([`best_ob_pixel_candidate`]); if that found nothing either, a
-/// high-density pixel ([`best_high_density_pixel_candidate`]) -- and
-/// recorded as a [`CloseSearchCandidate`], nothing resolved yet. This is a
+/// (`best_end_candidate`); if that found nothing, an out-of-bound pixel
+/// (`best_ob_pixel_candidate`); if that found nothing either, a
+/// high-density pixel (`best_high_density_pixel_candidate`) -- and
+/// recorded as a `CloseSearchCandidate`, nothing resolved yet. This is a
 /// snapshot: every Flying End is searched against the *original*, still
 /// fully unresolved set, not against whatever an earlier Flying End in the
 /// list may have already claimed. A Flying End can end up with more than
@@ -1355,30 +1355,30 @@ fn collect_obvious_end_matches(
 /// first, regardless of which Flying End it happened to be discovered from
 /// -- so a Flying End's own merely-okay match can never pre-empt a
 /// genuinely closer one recorded elsewhere just because of discovery order.
-/// A Flying-End match closes this contour into a ring ([`close_contour`]) if
+/// A Flying-End match closes this contour into a ring (`close_contour`) if
 /// the candidate is this same contour's own other end, or splices the two
-/// contours together ([`merge_contours`]) otherwise -- resolving both ends
+/// contours together (`merge_contours`) otherwise -- resolving both ends
 /// at once, exactly like Matching's own merge check. A landing match (either
 /// pixel kind) resolves that one end directly onto it, the same
 /// append-resample-redraw tail an ordinary integration step's own landing
-/// uses ([`finalize_contour_ls`]). Either way, every other still-unapplied
+/// uses (`finalize_contour_ls`). Either way, every other still-unapplied
 /// candidate referencing either Flying End just resolved is skipped when
 /// its own turn comes up (`resolved`, indexed by each Flying End's own
 /// stable discovery-pass position -- never itself remapped) rather than
 /// re-searched; a merge additionally remaps every remaining candidate's own
 /// `FlyingEnd` field(s) onto the merged contour's new shape
-/// ([`CloseSearchCandidate::remap`]), the same way [`merge_contours`] keeps
+/// (`CloseSearchCandidate::remap`), the same way `merge_contours` keeps
 /// its own `pending` list correct. Either way that Flying End skips both
 /// Seeking and Matching entirely; a Flying End with no recorded candidate,
 /// or whose only one got skipped, is left untouched, to be picked up again
-/// by [`run_growing_seeking`]'s own fresh [`collect_flying_ends`] call.
+/// by [`run_growing_seeking`]'s own fresh `collect_flying_ends` call.
 ///
 /// Unlike Seeking/Matching, nothing here is a partial, still-flying step --
 /// every resolution is atomic, so no `TEMPORARY_CONTOUR` bookkeeping is
 /// needed.
 ///
 /// Sets `result.close_search_cones` to one outline per Flying End discovery
-/// gave a well-defined forward direction to (see [`search_cone_outline`]),
+/// gave a well-defined forward direction to (see `search_cone_outline`),
 /// captured during discovery, before anything is resolved -- purely for
 /// `--create_svg`'s benefit.
 pub fn run_growing_close_search(result: &mut Step1Result, config: &Config) {
@@ -1470,11 +1470,7 @@ pub fn run_growing_close_search(result: &mut Step1Result, config: &Config) {
     for i in 0..candidates.len() {
         match candidates[i] {
             CloseSearchCandidate::End {
-                a_idx,
-                a,
-                b_idx,
-                b,
-                ..
+                a_idx, a, b_idx, b, ..
             } => {
                 if resolved[a_idx] || resolved[b_idx] {
                     continue;
@@ -2264,7 +2260,7 @@ pub struct GrowingMatchState {
 }
 
 /// Step 1's Growing Process (see the doc), Phase 1 (`SeekingOutOfBound` --
-/// see [`GrowingPhase`]): every Flying End gets up to
+/// see `GrowingPhase`): every Flying End gets up to
 /// `growing_oob_seeking_max_steps` steps entirely on its own -- no merging,
 /// no closing, `contours`/`grown` never change length here, so tracking each
 /// end's own step count by its (stable) `(contour_idx, is_start)` is safe
@@ -2386,7 +2382,7 @@ pub fn run_growing_seeking(
 }
 
 /// Step 1's Growing Process (see the doc), Phase 2 (`MatchingEnds` -- see
-/// [`GrowingPhase`]): the full process for whatever [`run_growing_seeking`]
+/// `GrowingPhase`): the full process for whatever [`run_growing_seeking`]
 /// (Phase 1) didn't resolve on its own within its own budget. Flying Ends
 /// are still round-robin, never in parallel: every still-pending one gets
 /// exactly one integration step, then the whole list is cycled through
@@ -2485,7 +2481,7 @@ pub fn run_growing(result: &mut Step1Result, config: &Config) -> Vec<String> {
 ///
 /// Fitting a circle right when a Heavy Object's intersection is first found,
 /// in [`extract`], could only ever see that contour's own raw, pre-growing
-/// fragment: right near an open dangling end, [`point_offset`] cannot reach
+/// fragment: right near an open dangling end, `point_offset` cannot reach
 /// past it, so the fit runs on a handful of points, noise-sensitive by
 /// construction. If the Growing Process's own Matching phase later stitches
 /// that fragment to another one end to end, the two readings -- each taken
@@ -2723,7 +2719,10 @@ mod tests {
         // fixture has nothing to merge/close, so calling it right away,
         // without running the Growing Process first, is enough.
         let heavy_object_warnings = resolve_heavy_object_gravity(&mut result, &config);
-        assert!(heavy_object_warnings.is_empty(), "{heavy_object_warnings:?}");
+        assert!(
+            heavy_object_warnings.is_empty(),
+            "{heavy_object_warnings:?}"
+        );
         assert_eq!(
             result.point_definers.len(),
             1,
@@ -3509,10 +3508,17 @@ mod tests {
 
         let growing_warnings = run_growing(&mut result, &config);
         assert!(growing_warnings.is_empty(), "{growing_warnings:?}");
-        assert_eq!(result.contours.len(), 1, "A and B must merge into one contour");
+        assert_eq!(
+            result.contours.len(),
+            1,
+            "A and B must merge into one contour"
+        );
 
         let heavy_object_warnings = resolve_heavy_object_gravity(&mut result, &config);
-        assert!(heavy_object_warnings.is_empty(), "{heavy_object_warnings:?}");
+        assert!(
+            heavy_object_warnings.is_empty(),
+            "{heavy_object_warnings:?}"
+        );
         assert_eq!(
             result.point_definers.len(),
             2,
@@ -3827,7 +3833,10 @@ mod tests {
         assert_eq!(result.grown_by_growing_process, vec![true]);
         let landing = *result.contours[0].lwg.ls.0.last().unwrap();
         let (px, py) = result.raster.to_px(landing);
-        assert_eq!(result.raster.get(px, py), crate::contour_raster::HIGH_DENSITY);
+        assert_eq!(
+            result.raster.get(px, py),
+            crate::contour_raster::HIGH_DENSITY
+        );
     }
 
     #[test]
@@ -3892,7 +3901,11 @@ mod tests {
 
         run_growing_close_search(&mut result, &config);
 
-        assert_eq!(result.contours.len(), 2, "0.0 disables Close Search outright");
+        assert_eq!(
+            result.contours.len(),
+            2,
+            "0.0 disables Close Search outright"
+        );
         assert_eq!(result.grown_by_growing_process, vec![false, false]);
     }
 
@@ -4888,7 +4901,10 @@ mod tests {
         );
 
         let (floored_x, floored_y) = step_displacement(1.0);
-        assert!(floored_y.abs() < 1e-9, "the floor must not change direction");
+        assert!(
+            floored_y.abs() < 1e-9,
+            "the floor must not change direction"
+        );
         assert!(
             (floored_x - 1.0).abs() < 1e-9,
             "matching_min_force(1.0) * grow_time_step(1.0) must move exactly 1.0m \
@@ -5188,7 +5204,12 @@ mod tests {
         // pixels from before that final shift would be left behind. They
         // must not be: nothing gets written until each end's own final
         // shape is known.
-        let ls = LineString::new(vec![c(5.0, 10.0), c(5.0, 30.0), c(25.0, 30.0), c(25.0, 10.0)]);
+        let ls = LineString::new(vec![
+            c(5.0, 10.0),
+            c(5.0, 30.0),
+            c(25.0, 30.0),
+            c(25.0, 10.0),
+        ]);
         let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 40, 40);
         raster.write_contour(0, &ls);
         // Seal the interior first: the "staple" is open at the bottom, so

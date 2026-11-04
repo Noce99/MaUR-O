@@ -25,7 +25,9 @@ fn contours() {
         .stdout(predicates::str::contains("2 contours"))
         .stdout(predicates::str::contains("1 slope line(s)"))
         .stdout(predicates::str::contains("1 closed hill(s)"))
-        .stdout(predicates::str::contains("elevation resolved for 2/2 contours"));
+        .stdout(predicates::str::contains(
+            "elevation resolved for 2/2 contours",
+        ));
 }
 
 /// `--create_svg` writes into this run's own `contours_to_raster_<timestamp>`

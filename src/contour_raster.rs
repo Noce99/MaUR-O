@@ -876,7 +876,8 @@ mod tests {
     fn walk_growing_integration_step_only_claims_undefined_and_no_contour_in_bound_pixels() {
         let mut r = raster();
         r.grid[1][1] = NO_CONTOUR_IN_BOUND;
-        let outcome = r.walk_growing_integration_step(Coord { x: 0.5, y: 1.5 }, Coord { x: 2.5, y: 1.5 });
+        let outcome =
+            r.walk_growing_integration_step(Coord { x: 0.5, y: 1.5 }, Coord { x: 2.5, y: 1.5 });
         assert_eq!(r.get(0, 1), TEMPORARY_CONTOUR); // was UNDEFINED
         assert_eq!(r.get(1, 1), TEMPORARY_CONTOUR); // was NO_CONTOUR_IN_BOUND
         assert_eq!(r.get(2, 1), TEMPORARY_CONTOUR); // was UNDEFINED
@@ -896,9 +897,14 @@ mod tests {
         let mut r = raster();
         r.grid[1][3] = OUT_OF_BOUND;
         r.grid[1][5] = HIGH_DENSITY;
-        let outcome = r.walk_growing_integration_step(Coord { x: 0.5, y: 1.5 }, Coord { x: 8.5, y: 1.5 });
+        let outcome =
+            r.walk_growing_integration_step(Coord { x: 0.5, y: 1.5 }, Coord { x: 8.5, y: 1.5 });
         match outcome {
-            StepWalkOutcome::Landed { hit, center, before } => {
+            StepWalkOutcome::Landed {
+                hit,
+                center,
+                before,
+            } => {
                 assert_eq!(hit, StepHit::OutOfBound);
                 assert_eq!(center, r.pixel_center(3, 1));
                 assert!(before.iter().any(|&(x, y, _)| (x, y) == (0, 1)));
@@ -917,7 +923,8 @@ mod tests {
     fn walk_growing_integration_step_reports_a_conflict_without_overwriting_it() {
         let mut r = raster();
         r.write_contour(0, &ls(&[(3.5, 1.5), (3.6, 1.5)])); // a real contour pixel at (3, 1)
-        let outcome = r.walk_growing_integration_step(Coord { x: 0.5, y: 1.5 }, Coord { x: 5.5, y: 1.5 });
+        let outcome =
+            r.walk_growing_integration_step(Coord { x: 0.5, y: 1.5 }, Coord { x: 5.5, y: 1.5 });
         let steps = match outcome {
             StepWalkOutcome::Clear(steps) => steps,
             StepWalkOutcome::Landed { .. } => panic!("expected a clear step"),

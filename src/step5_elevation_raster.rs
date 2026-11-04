@@ -4,7 +4,7 @@
 //! `elevation_height`, running a Gravity-Guided Elevation Fill drop downhill
 //! from every contour to spread a distance-weighted value into every pixel
 //! along its own (possibly bent) path to its next lower neighbor (see
-//! [`gravity_guided_drop_track`]), and filling whatever is left with an
+//! `gravity_guided_drop_track`), and filling whatever is left with an
 //! iterative 8-connected front propagation. See [`resolve`] for the full
 //! pipeline and [`write_tiff`] for turning the result into the actual file.
 //!
@@ -169,7 +169,11 @@ impl ElevationRaster {
     /// The elevation value at pixel `(x, y)`, or `None` if it never got
     /// one.
     pub fn get(&self, x: usize, y: usize) -> Option<f64> {
-        self.grid.get(y).and_then(|row| row.get(x)).copied().flatten()
+        self.grid
+            .get(y)
+            .and_then(|row| row.get(x))
+            .copied()
+            .flatten()
     }
 }
 
@@ -357,11 +361,7 @@ pub fn resolve(
     }
 
     let filled_after_gap_fill = count_defined(&accum, &in_bound);
-    let total_in_bound: u64 = in_bound
-        .iter()
-        .flatten()
-        .filter(|&&b| b)
-        .count() as u64;
+    let total_in_bound: u64 = in_bound.iter().flatten().filter(|&&b| b).count() as u64;
 
     let grid: Vec<Vec<Option<f64>>> = accum
         .into_iter()
@@ -370,7 +370,11 @@ pub fn resolve(
     let grid = gaussian_smooth(&grid, config.elevation_gaussian_kernel_size);
 
     Step5Result {
-        e2v: ElevationRaster { grid, width, height },
+        e2v: ElevationRaster {
+            grid,
+            width,
+            height,
+        },
         filled_by_rain,
         filled_by_gap_fill: filled_after_gap_fill - filled_by_rain,
         still_undefined: total_in_bound - filled_after_gap_fill,
@@ -463,7 +467,12 @@ const GDAL_NODATA_TAG: u16 = 42113;
 /// `pixel_center`'s own `+ 0.5`). `None` outside the raster's own footprint
 /// or wherever all four surrounding pixels are themselves `None`; falls back
 /// to the nearer single pixel when only some of the four are.
-fn sample_e2v_bilinear(e2v: &ElevationRaster, origin: Coord<f64>, px_size: f64, local: Coord<f64>) -> Option<f64> {
+fn sample_e2v_bilinear(
+    e2v: &ElevationRaster,
+    origin: Coord<f64>,
+    px_size: f64,
+    local: Coord<f64>,
+) -> Option<f64> {
     let fx = (local.x - origin.x) / px_size - 0.5;
     let fy = (local.y - origin.y) / px_size - 0.5;
     if fx < -0.5 || fy < -0.5 || fx > e2v.width as f64 - 0.5 || fy > e2v.height as f64 - 0.5 {
@@ -476,13 +485,21 @@ fn sample_e2v_bilinear(e2v: &ElevationRaster, origin: Coord<f64>, px_size: f64, 
     let tx = (fx - c0 as f64).clamp(0.0, 1.0);
     let ty = (fy - r0 as f64).clamp(0.0, 1.0);
 
-    match (e2v.get(c0, r0), e2v.get(c1, r0), e2v.get(c0, r1), e2v.get(c1, r1)) {
+    match (
+        e2v.get(c0, r0),
+        e2v.get(c1, r0),
+        e2v.get(c0, r1),
+        e2v.get(c1, r1),
+    ) {
         (Some(v00), Some(v01), Some(v10), Some(v11)) => {
             let top = v00 + (v01 - v00) * tx;
             let bottom = v10 + (v11 - v10) * tx;
             Some(top + (bottom - top) * ty)
         }
-        _ => e2v.get(if tx < 0.5 { c0 } else { c1 }, if ty < 0.5 { r0 } else { r1 }),
+        _ => e2v.get(
+            if tx < 0.5 { c0 } else { c1 },
+            if ty < 0.5 { r0 } else { r1 },
+        ),
     }
 }
 
@@ -544,7 +561,11 @@ pub fn write_tiff(
             let mut data = Vec::with_capacity(e2v.width * e2v.height);
             for y in 0..e2v.height {
                 for x in 0..e2v.width {
-                    data.push(e2v.get(x, y).map(|v| (v * equidistance) as f32).unwrap_or(f32::NAN));
+                    data.push(
+                        e2v.get(x, y)
+                            .map(|v| (v * equidistance) as f32)
+                            .unwrap_or(f32::NAN),
+                    );
                 }
             }
             (e2v.width, e2v.height, data)
@@ -633,7 +654,7 @@ fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
 /// Writes `e2v` as a human-readable, hypsometric-colored PNG -- unlike
 /// [`write_tiff`]'s own actual data, this is a `--create_svg` diagnostic
 /// only, meant to be looked at directly rather than loaded back into a GIS
-/// tool. Every pixel with a value is colored by [`terrain_color`], scaled so
+/// tool. Every pixel with a value is colored by `terrain_color`, scaled so
 /// this run's own lowest E2V value maps to the bottom of the colormap and
 /// its own highest to the top (a run with only one distinct value colors
 /// every pixel at the colormap's own low end, rather than dividing by
@@ -700,8 +721,8 @@ mod tests {
         let mut a = Accum::default();
         a.add(0.0, 1.0); // e.g. a long track (small 1.0 / track_len weight)
         a.add(10.0, 9.0); // e.g. a short track (large 1.0 / track_len weight)
-        // A plain average would land on 5.0; the weighted mean must land
-        // much closer to the higher-weight (shorter-track) reading instead.
+                          // A plain average would land on 5.0; the weighted mean must land
+                          // much closer to the higher-weight (shorter-track) reading instead.
         let mean = a.mean().unwrap();
         assert!(
             (mean - 9.0).abs() < 1e-9,
@@ -711,7 +732,10 @@ mod tests {
 
     #[test]
     fn gaussian_smooth_is_a_no_op_at_kernel_size_one() {
-        let grid = vec![vec![Some(3.0), None, Some(1.0)], vec![None, Some(-2.0), None]];
+        let grid = vec![
+            vec![Some(3.0), None, Some(1.0)],
+            vec![None, Some(-2.0), None],
+        ];
         assert_eq!(gaussian_smooth(&grid, 1), grid);
         assert_eq!(gaussian_smooth(&grid, 0), grid);
     }
@@ -830,7 +854,11 @@ mod tests {
     /// against the exact same `contours`/`raster`/`config` the elevation
     /// call itself then uses, the same way `src/bin/contours_to_raster.rs`
     /// chains the two.
-    fn gravity_for(contours: &[Contour], raster: &mut ContourRaster, config: &Config) -> GravityRaster {
+    fn gravity_for(
+        contours: &[Contour],
+        raster: &mut ContourRaster,
+        config: &Config,
+    ) -> GravityRaster {
         crate::step5_gravity_raster::resolve(contours, raster, config)
     }
 
@@ -887,7 +915,10 @@ mod tests {
         let (v1x, v1y) = (turn.x - path[0].x, turn.y - path[0].y);
         let (v2x, v2y) = (end.x - turn.x, end.y - turn.y);
         let cross = v1x * v2y - v1y * v2x;
-        assert!(cross.abs() > 1.0, "expected a genuine bend, not a straight line: cross={cross}");
+        assert!(
+            cross.abs() > 1.0,
+            "expected a genuine bend, not a straight line: cross={cross}"
+        );
     }
 
     #[test]
@@ -943,9 +974,14 @@ mod tests {
         // Appendix 4's own stepped walk reports the step's raw endpoint as
         // the landing spot, not the precise crossing point, so this is more
         // robust than assuming a hand-picked coordinate is close enough.
-        let (hit, _, end) =
-            crate::step3_rain_drop::elevation_fill_drop_track(&mut raster, 0, c(0.0, 10.0), (0.0, -1.0), &config)
-                .unwrap();
+        let (hit, _, end) = crate::step3_rain_drop::elevation_fill_drop_track(
+            &mut raster,
+            0,
+            c(0.0, 10.0),
+            (0.0, -1.0),
+            &config,
+        )
+        .unwrap();
         assert_eq!(hit, StepHit::HighDensity);
 
         let gravity = gravity_for(&contours, &mut raster, &config);
@@ -1055,7 +1091,11 @@ mod tests {
         let gravity = gravity_for(&contours, &mut raster, &config);
         let result = resolve(&contours, &raster, &gravity, &config);
 
-        assert_eq!(result.e2v.get(0, 0), None, "the raster's own border is out of bound");
+        assert_eq!(
+            result.e2v.get(0, 0),
+            None,
+            "the raster's own border is out of bound"
+        );
     }
 
     #[test]
@@ -1213,7 +1253,9 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(
-            decoder.get_tag_ascii_string(Tag::Unknown(GDAL_NODATA_TAG)).unwrap(),
+            decoder
+                .get_tag_ascii_string(Tag::Unknown(GDAL_NODATA_TAG))
+                .unwrap(),
             "nan"
         );
     }
@@ -1246,6 +1288,8 @@ mod tests {
             epsg: 3006,
             ref_point_x: 322500.0,
             ref_point_y: 6397500.0,
+            map_ref_point_x: 0.0,
+            map_ref_point_y: 0.0,
             grivation: 7.1,
             grivation_specified: true,
             auxiliary_scale_factor: 1.000014,
@@ -1257,7 +1301,9 @@ mod tests {
 
         let file = std::fs::File::open(&path).unwrap();
         let mut decoder = tiff::decoder::Decoder::new(file).unwrap();
-        let keys = decoder.get_tag_u16_vec(Tag::Unknown(GEO_KEY_DIRECTORY_TAG)).unwrap();
+        let keys = decoder
+            .get_tag_u16_vec(Tag::Unknown(GEO_KEY_DIRECTORY_TAG))
+            .unwrap();
         assert_eq!(keys, geotiff::geo_key_directory(3006));
 
         // A plain axis-aligned ModelPixelScale/ModelTiepoint pair, not a
@@ -1283,18 +1329,27 @@ mod tests {
         )
         .unwrap();
 
-        let scale = decoder.get_tag_f64_vec(Tag::Unknown(MODEL_PIXEL_SCALE_TAG)).unwrap();
+        let scale = decoder
+            .get_tag_f64_vec(Tag::Unknown(MODEL_PIXEL_SCALE_TAG))
+            .unwrap();
         assert_eq!(scale, vec![expected.px_size, expected.px_size, 0.0]);
 
-        let tiepoint = decoder.get_tag_f64_vec(Tag::Unknown(MODEL_TIEPOINT_TAG)).unwrap();
+        let tiepoint = decoder
+            .get_tag_f64_vec(Tag::Unknown(MODEL_TIEPOINT_TAG))
+            .unwrap();
         assert_eq!(
             tiepoint,
             vec![0.0, 0.0, 0.0, expected.origin.x, expected.origin.y, 0.0]
         );
 
-        assert_eq!(decoder.dimensions().unwrap(), (expected.width as u32, expected.height as u32));
         assert_eq!(
-            decoder.get_tag_ascii_string(Tag::Unknown(GDAL_NODATA_TAG)).unwrap(),
+            decoder.dimensions().unwrap(),
+            (expected.width as u32, expected.height as u32)
+        );
+        assert_eq!(
+            decoder
+                .get_tag_ascii_string(Tag::Unknown(GDAL_NODATA_TAG))
+                .unwrap(),
             "nan"
         );
     }
@@ -1321,6 +1376,8 @@ mod tests {
             epsg: 3006,
             ref_point_x: 322500.0,
             ref_point_y: 6397500.0,
+            map_ref_point_x: 0.0,
+            map_ref_point_y: 0.0,
             grivation: 7.1,
             grivation_specified: true,
             auxiliary_scale_factor: 1.000014,
@@ -1339,8 +1396,12 @@ mod tests {
         // A naive axis-aligned reader (origin + ModelPixelScale only, no
         // shear) must reconstruct exactly the same footprint a
         // rotation-aware one would -- there is none left to disagree about.
-        let scale = decoder.get_tag_f64_vec(Tag::Unknown(MODEL_PIXEL_SCALE_TAG)).unwrap();
-        let tiepoint = decoder.get_tag_f64_vec(Tag::Unknown(MODEL_TIEPOINT_TAG)).unwrap();
+        let scale = decoder
+            .get_tag_f64_vec(Tag::Unknown(MODEL_PIXEL_SCALE_TAG))
+            .unwrap();
+        let tiepoint = decoder
+            .get_tag_f64_vec(Tag::Unknown(MODEL_TIEPOINT_TAG))
+            .unwrap();
         assert!(scale[0] > 0.0 && scale[1] > 0.0);
         // The reference point (map origin) must fall strictly inside the
         // axis-aligned bounding box the file declares, confirming the

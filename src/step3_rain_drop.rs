@@ -2,7 +2,7 @@
 //! engine: source placement, stepping, and the Cold/Hot/Reverse Cold
 //! evaporation rules. Step 3 (this file's original purpose) uses the Cold
 //! variants to resolve every contour Step 2 left without a gravity
-//! direction, then the Reverse Cold variants (see [`simulate_reverse_pass`])
+//! direction, then the Reverse Cold variants (see `simulate_reverse_pass`)
 //! as a fallback for whatever the Cold passes still leave undefined; Step 1's
 //! own flood-fill sub-step uses the Hot variants (see
 //! [`flood_fill_from_contour`]) to mark reachable "no contour, in bound"
@@ -142,13 +142,13 @@ pub struct Step3Result {
 /// alone: both run to completion first (the anti rain pass sourced only from
 /// contours that already had gravity *before* the rain pass, deliberately
 /// not the possibly-larger set the rain pass's own votes could go on to
-/// resolve -- see [`simulate_pass`]), so a contour crossed by both ends up
+/// resolve -- see `simulate_pass`), so a contour crossed by both ends up
 /// judged on their combined tally rather than whichever pass reached it
 /// first. If anything is still undefined after that, a Reverse Cold Rain and
 /// Reverse Cold Anti Rain Drop Production pass (see
-/// [`simulate_reverse_pass`]) runs from every such contour as a fallback,
+/// `simulate_reverse_pass`) runs from every such contour as a fallback,
 /// using `line_definers` (Jumps) as an extra source of votes alongside
-/// whatever contours have gravity by that point. [`finalize_votes`] turns
+/// whatever contours have gravity by that point. `finalize_votes` turns
 /// accumulated votes into gravity once after the Cold passes and again after
 /// the Reverse Cold ones, so a contour already resolved by the first call is
 /// simply skipped by the second.
@@ -484,6 +484,7 @@ fn simulate_reverse_pass(
 /// which it actually cast each vote (all three always empty for a Hot or
 /// Reverse Cold drop, though a Reverse Cold drop's own final position is
 /// still whatever hit it voted from).
+#[allow(clippy::too_many_arguments)]
 fn simulate_one_drop(
     contours: &mut [Contour],
     raster: &mut ContourRaster,

@@ -123,6 +123,8 @@ fn a_georeferenced_map_says_where_it_is_and_which_way_it_points() {
             epsg: 3006,
             ref_point_x: 322500.0,
             ref_point_y: 6397500.0,
+            map_ref_point_x: 0.0,
+            map_ref_point_y: 0.0,
             grivation: 7.1,
             grivation_specified: true,
             auxiliary_scale_factor: 1.0,

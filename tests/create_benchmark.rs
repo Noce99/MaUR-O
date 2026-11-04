@@ -348,3 +348,31 @@ fn a_renderer_which_cannot_be_run_is_reported_before_anything_is_made() {
         .stderr(predicates::str::contains("cannot run"));
     assert!(!archive.exists());
 }
+
+/// A file whose name is not ASCII is looked at like any other. Its suffix is
+/// compared by byte length, and `Café.pdf` against `.omap` would cut the
+/// name inside the `é`; that once panicked before any map was built.
+#[test]
+fn a_file_with_a_non_ascii_name_is_no_reason_to_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let renderer = stub_renderer(dir.path());
+    let source = dir.path().join("suite");
+    map(&source, "01 Café.omap", "café");
+    map(&source, "Café.pdf", "not a map");
+    let archive = dir.path().join("suite.zip");
+
+    create_benchmark()
+        .arg(&renderer)
+        .arg(&source)
+        .arg("-o")
+        .arg(&archive)
+        .assert()
+        .success();
+
+    let names = entries(&archive);
+    assert!(
+        names.contains(&"suite/maps/000__Café.omap".to_string()),
+        "{names:?}"
+    );
+    assert!(!names.iter().any(|n| n.ends_with(".pdf")), "{names:?}");
+}

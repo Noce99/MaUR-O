@@ -20,7 +20,7 @@
 //!
 //! | Layer | Meaning | Color |
 //! | --- | --- | --- |
-//! | out-of-bound area | the whole `OUT_OF_BOUND` region, traced into a handful of rings rather than one square per pixel (see [`oob_area`]) | black |
+//! | out-of-bound area | the whole `OUT_OF_BOUND` region, traced into a handful of rings rather than one square per pixel (see `oob_area`) | black |
 //! | grid | the raster's pixel grid | gray |
 //! | pixel | a non-zero Contour Raster pixel | brown |
 //! | contour (raw) | a pre-linearization (still-curved) contour | red |
@@ -33,7 +33,7 @@
 //! | unresolved slope line arrows | the same, for a Slope Line that found no contour to read | orange |
 //! | slope line search circles | a Slope Line's own `slope_lines_contours_search_radius` ring | red if resolved, orange if not |
 //! | contour gravity arrows | gravity direction along a gravity-defined contour | yellow |
-//! | vote reading circles | Step 2 only -- a ring around every position that cast a Heavy Object/Jump vote (see [`vote_reading_points`]) | dark green |
+//! | vote reading circles | Step 2 only -- a ring around every position that cast a Heavy Object/Jump vote (see `vote_reading_points`) | dark green |
 //! | rain drop points | one recorded rain drop step | blue |
 //! | anti rain drop points | one recorded anti rain drop step | red |
 //! | drop trails | a drop's full path, source to evaporation, thin | gray |
@@ -86,12 +86,12 @@
 //!
 //! After Step 4: `08_<map_name>_step5_gravity.svg`, Step 5's own per-pixel
 //! Gravity Direction sub-step ([`crate::step5_gravity_raster`]) -- the same
-//! grid/pixel/heavy-object picture Steps 1-2 draw (see [`base_layers`]),
+//! grid/pixel/heavy-object picture Steps 1-2 draw (see `base_layers`),
 //! plus one segment per pixel, tail at its own center, showing the per-pixel
 //! downhill direction that sub-step resolved, colored red (intense) to blue
 //! (weak) by its own magnitude (a pixel whose own contributing readings
 //! nearly cancel out gets no segment at all -- see
-//! [`GRAVITY_DIRECTION_MIN_MAGNITUDE`]).
+//! `GRAVITY_DIRECTION_MIN_MAGNITUDE`).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -1189,9 +1189,9 @@ fn resolved_layers<'a>(
 /// The same as [`write_step1_growing_svg`], plus a gravity arrow along every
 /// contour Step 2 (or Step 1's direct evidence) has already resolved, plus
 /// (this file only, not [`write_step3_rain_svg`]/[`write_step3_anti_rain_svg`]
-/// even though both also call [`resolved_layers`]) a dark green ring around
+/// even though both also call `resolved_layers`) a dark green ring around
 /// every position that contributed a Heavy Object or Jump reading to Step 2's
-/// vote (see [`vote_reading_points`]), so the evidence behind a
+/// vote (see `vote_reading_points`), so the evidence behind a
 /// vote-resolved contour -- or a warning about evidence Step 2 overruled --
 /// can be judged by eye. `04_<map_name>_step2.svg`.
 pub fn step2_svg_string(result: &Step1Result) -> String {
@@ -1276,14 +1276,14 @@ fn gravity_direction_segments(
     buckets.into_iter().map(MultiLineString::new).collect()
 }
 
-/// Step 5's own Gravity Direction sub-step, visualized: [`base_layers`] (the
+/// Step 5's own Gravity Direction sub-step, visualized: `base_layers` (the
 /// raster grid, brown contour pixels, green high-density area, pink heavy
 /// object area -- the same picture `00_..._step1.svg` through
 /// `04_..._step2.svg` already draw), plus one segment per pixel showing
 /// [`crate::step5_gravity_raster::resolve`]'s own per-pixel gravity
-/// direction, colored by its own magnitude -- [`RED`] for the most
-/// confidently-decided pixels, fading to [`BLUE`] for the least (see
-/// [`gravity_direction_segments`]). Diagnostic only for now -- there is no
+/// direction, colored by its own magnitude -- `RED` for the most
+/// confidently-decided pixels, fading to `BLUE` for the least (see
+/// `gravity_direction_segments`). Diagnostic only for now -- there is no
 /// TIFF or further use of `gravity` yet, unlike Step 5's own altitude
 /// ([`crate::step5_elevation_raster`]). `08_<map_name>_step5_gravity.svg`.
 pub fn step5_gravity_svg_string(result: &Step1Result, gravity: &GravityRaster) -> String {
@@ -1570,7 +1570,7 @@ fn step4_overlay_svg(contours: &[Contour], step4: &Step4Result) -> String {
 /// `07_<map_name>_step4.svg`: the same base layer as
 /// `06_<map_name>_step3_anti_rain.svg` (grid, pixels, polygons, both
 /// contour-line layers) -- no rain-drop-path layers, no gravity arrows -- with
-/// every contour redrawn on top per [`step4_overlay_svg`]: gradient-colored
+/// every contour redrawn on top per `step4_overlay_svg`: gradient-colored
 /// by `elevation_height` (blue lowest to red highest) with a numeric label,
 /// gray for one Step 4 leaves without a height; a gray line per `T` edge
 /// (parent centroid to child centroid); and a black square on every
@@ -1618,7 +1618,7 @@ fn contours_function_curve(config: &Config) -> LineString<f64> {
 }
 
 /// Writes `<map_name>_contours_function.svg`: a plain 2D plot of
-/// [`contour_force_magnitude`]'s own potential-well curve (Appendix 5) --
+/// `contour_force_magnitude`'s own potential-well curve (Appendix 5) --
 /// not a map, so no grid/pixels/out-of-bound layer, and its axes are the
 /// function's own domain/range rather than ground positions. The curve is
 /// drawn maroon, matching `02_<map_name>_step1_growing_seeking.svg`/

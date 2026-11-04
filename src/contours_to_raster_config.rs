@@ -316,7 +316,7 @@ impl Config {
         Config::parse(&text, &path.display().to_string())
     }
 
-    /// The shipped default config ([`SHIPPED_CONFIG`], embedded at compile
+    /// The shipped default config (`SHIPPED_CONFIG`, embedded at compile
     /// time), for callers with no filesystem access (e.g. wasm) that have no
     /// need to tune the algorithm's own thirty-five parameters. Panics if
     /// the embedded file is malformed, which would mean this crate itself

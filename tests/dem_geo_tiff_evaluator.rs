@@ -34,7 +34,10 @@ fn write_dem(
     let mut image = encoder.new_image::<Gray32Float>(width, height).unwrap();
     image
         .encoder()
-        .write_tag(Tag::Unknown(MODEL_PIXEL_SCALE_TAG), &[px_size, px_size, 0.0][..])
+        .write_tag(
+            Tag::Unknown(MODEL_PIXEL_SCALE_TAG),
+            &[px_size, px_size, 0.0][..],
+        )
         .unwrap();
     image
         .encoder()
@@ -85,7 +88,12 @@ fn scores_two_identical_resolution_dems_into_a_timestamped_run_folder() {
         .to_string_lossy()
         .starts_with("dem_evaluation_"));
 
-    for name in ["metrics.txt", "error_abs.png", "error_signed.png", "error_histogram.png"] {
+    for name in [
+        "metrics.txt",
+        "error_abs.png",
+        "error_signed.png",
+        "error_histogram.png",
+    ] {
         let f = run_dir.join(name);
         assert!(f.exists(), "expected {} to exist", f.display());
     }

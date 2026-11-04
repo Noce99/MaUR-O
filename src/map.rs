@@ -775,6 +775,7 @@ impl Default for TextSymbol {
 
 /// A resolved part of a [`CombinedSymbol`], filled in by
 /// [`Map::resolve_references`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PartRef {
     /// The part names a symbol the file does not contain, and draws nothing.
     None,
@@ -1059,6 +1060,13 @@ pub struct Georeferencing {
     pub ref_point_x: f64,
     /// The northing of the reference point, in the projected CRS.
     pub ref_point_y: f64,
+    /// Where that reference point is on the paper, in mm: Mapper's
+    /// `map_ref_point`, the file's `<georeferencing><ref_point>` (as opposed
+    /// to the projected one inside `<projected_crs>`). `(0, 0)` where the
+    /// file gives none, which is what Mapper itself assumes then.
+    pub map_ref_point_x: f64,
+    /// See [`map_ref_point_x`](Self::map_ref_point_x).
+    pub map_ref_point_y: f64,
     /// The angle between grid north and map north, in degrees.
     pub grivation: f64,
     /// Whether the file actually said so.
@@ -1084,6 +1092,8 @@ impl Default for Georeferencing {
             epsg: 0,
             ref_point_x: 0.0,
             ref_point_y: 0.0,
+            map_ref_point_x: 0.0,
+            map_ref_point_y: 0.0,
             grivation: 0.0,
             grivation_specified: false,
             auxiliary_scale_factor: 1.0,
@@ -1173,8 +1183,70 @@ impl Map {
             }
         }
 
+        self.break_part_cycles();
+
         for object in &mut self.objects {
             object.symbol_index = by_id.get(&object.symbol_id).copied();
+        }
+    }
+
+    /// Cuts every shared part that would make a combined symbol contain
+    /// itself, directly or through a chain of other combined symbols.
+    ///
+    /// A file can say so -- a combined symbol listing its own id as a part,
+    /// or an OCD area whose border is an area whose border is the first --
+    /// and everything that looks through combinations ([`symbol_leaves`], the
+    /// renderer) recurses, so a cycle left in would overflow the stack. The
+    /// part closing the cycle draws nothing instead, which is all a symbol
+    /// made of itself could ever draw.
+    ///
+    /// An iterative depth-first search, so a long (acyclic) chain of
+    /// combinations does not overflow the stack here either.
+    fn break_part_cycles(&mut self) {
+        const UNVISITED: u8 = 0;
+        const ON_STACK: u8 = 1;
+        const DONE: u8 = 2;
+        let n = self.symbols.len();
+        let mut state = vec![UNVISITED; n];
+        // (symbol index, index of the next part to look at)
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        for root in 0..n {
+            if state[root] != UNVISITED {
+                continue;
+            }
+            state[root] = ON_STACK;
+            stack.push((root, 0));
+            while let Some(&mut (node, ref mut next)) = stack.last_mut() {
+                let target = match &self.symbols[node] {
+                    Symbol::Combined(c) if *next < c.parts.len() => Some(c.parts[*next]),
+                    _ => None,
+                };
+                let Some(part) = target else {
+                    state[node] = DONE;
+                    stack.pop();
+                    continue;
+                };
+                let part_index = *next;
+                *next += 1;
+                let PartRef::Shared(child) = part else {
+                    continue;
+                };
+                if child >= n {
+                    continue;
+                }
+                match state[child] {
+                    ON_STACK => {
+                        if let Symbol::Combined(c) = &mut self.symbols[node] {
+                            c.parts[part_index] = PartRef::None;
+                        }
+                    }
+                    UNVISITED => {
+                        state[child] = ON_STACK;
+                        stack.push((child, 0));
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 }

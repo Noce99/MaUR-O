@@ -224,11 +224,8 @@ fn run() -> Result<(), (ExitCode, String)> {
         // `config` -- unlike every other --create_svg file, so it is written
         // here rather than alongside the map-derived step it would
         // otherwise belong to.
-        write_contours_function_svg(
-            &step_svg_path(&output_path, "contours_function"),
-            &config,
-        )
-        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        write_contours_function_svg(&step_svg_path(&output_path, "contours_function"), &config)
+            .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
     }
 
     let mut step1 = step1_extract::extract(&map, &config)
@@ -408,8 +405,12 @@ fn run() -> Result<(), (ExitCode, String)> {
         // gravity itself already left undefined.
         write_final_svg(&step_svg_path(&output_path, "final"), &step1)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
-        write_step4_svg(&numbered_svg_path(&output_path, "07", "step4"), &step1, &step4)
-            .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        write_step4_svg(
+            &numbered_svg_path(&output_path, "07", "step4"),
+            &step1,
+            &step4,
+        )
+        .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
         write_step5_gravity_svg(
             &numbered_svg_path(&output_path, "08", "step5_gravity"),
             &step1,

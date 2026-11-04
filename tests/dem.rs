@@ -19,7 +19,7 @@ fn flat_ground_is_shaded_evenly() {
     assert_eq!(shaded.valid_count, 40 * 30);
     assert_eq!(shaded.rgba.len(), 40 * 30 * 4);
     let first = &shaded.rgba[..4];
-    for pixel in shaded.rgba.chunks_exact(4) {
+    for pixel in shaded.rgba.as_chunks::<4>().0 {
         assert_eq!(pixel, first, "flat ground should be one shade");
         assert_eq!(pixel[3], 255);
     }
@@ -70,7 +70,7 @@ fn a_model_with_nothing_in_it_says_so_rather_than_dividing_by_it() {
     let heights = vec![f32::NAN; 10 * 10];
     let shaded = hillshade(&heights, 10, 10, CELL_M, &Hillshade::default());
     assert_eq!(shaded.valid_count, 0);
-    assert!(shaded.rgba.chunks_exact(4).all(|p| p[3] == 0));
+    assert!(shaded.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 0));
 }
 
 #[test]

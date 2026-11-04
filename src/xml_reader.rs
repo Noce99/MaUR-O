@@ -32,6 +32,11 @@ enum Ev<'a> {
     Eof,
 }
 
+/// The highest colour priority believed as a colour-table index. Real
+/// symbol sets have a few dozen colours; this leaves room for any of them
+/// while keeping the table a few megabytes at worst.
+const MAX_COLOR_PRIORITY: i32 = 65_535;
+
 struct Xml<'a> {
     reader: Reader<&'a [u8]>,
     pending_end: bool,
@@ -100,12 +105,21 @@ impl<'a> Xml<'a> {
     /// whitespace-only runs (unlike `next()`), for text objects. Mirrors
     /// `QXmlStreamReader::readElementText()`.
     fn read_text_content(&mut self) -> Result<String, String> {
+        // A self-closing element (`<text/>`) was handed out by `next()` as a
+        // Start with its End still owed: it has no content, and the raw
+        // reader's next event already belongs to whatever follows it.
+        if self.pending_end {
+            self.pending_end = false;
+            return Ok(String::new());
+        }
         let mut text = String::new();
         loop {
             match self.reader.read_event().map_err(|e| e.to_string())? {
                 Event::Text(t) => text.push_str(&t.unescape().map_err(|e| e.to_string())?),
                 Event::CData(t) => text.push_str(&String::from_utf8_lossy(&t.into_inner())),
-                Event::Start(_) | Event::Empty(_) => {
+                // An unexpected empty child is complete in itself: nothing to skip.
+                Event::Empty(_) => {}
+                Event::Start(_) => {
                     // Not expected in this format; skip the unexpected child
                     // rather than misreading its text as our own.
                     let mut depth = 0i32;
@@ -382,8 +396,16 @@ impl<'a> XmlMapReader<'a> {
         };
 
         let mut handler =
-            |this: &mut Self, name: &str, _start: &BytesStart| -> Result<bool, String> {
+            |this: &mut Self, name: &str, start: &BytesStart| -> Result<bool, String> {
                 match name {
+                    // The reference point on the paper, in mm. The one inside
+                    // `<projected_crs>` below is the same point on the ground.
+                    "ref_point" => {
+                        georeferencing.map_ref_point_x = attr_double(start, "x", 0.0);
+                        georeferencing.map_ref_point_y = attr_double(start, "y", 0.0);
+                        this.xml.skip_current()?;
+                        Ok(true)
+                    }
                     "projected_crs" => {
                         this.read_children(&mut |this: &mut Self,
                                                  name: &str,
@@ -470,7 +492,17 @@ impl<'a> XmlMapReader<'a> {
                     };
                 }
 
-                if priority < 0 {
+                if priority > MAX_COLOR_PRIORITY {
+                    // The table is indexed by priority, so believing an
+                    // absurd one means allocating that many colours: a
+                    // file saying 2000000000 would abort the reader.
+                    this.warn(format!(
+                        "Color '{}' has priority {priority}, more than {MAX_COLOR_PRIORITY}: \
+                         it is drawn below every other color instead.",
+                        color.name
+                    ));
+                    this.map.colors.push(color);
+                } else if priority < 0 {
                     this.map.colors.push(color);
                 } else {
                     let idx = priority as usize;

@@ -3,7 +3,7 @@
 //! contour at height `0`, by repeatedly running a Hot Rain Drop Production
 //! and a Hot Anti Rain Drop Production (Elevation/Anti Elevation
 //! Proliferation) from whichever leaf of **T** still has unexplored progeny
-//! -- see [`resolve`] for the full loop and [`Tree`] for the data structure
+//! -- see [`resolve`] for the full loop and `Tree` for the data structure
 //! backing it.
 //!
 //! Every "choose randomly" in the doc (the root contour, and a tie-break
@@ -20,7 +20,9 @@ use geo::{Coord, Euclidean, Length};
 use crate::contour_geometry::{local_tangent, nearest_index};
 use crate::contour_raster::ContourRaster;
 use crate::contours_to_raster_config::Config;
-use crate::gravity_model::{contour_gravity_side, lwg_gravity_side, vector_on_side, Contour, LineWithGravity};
+use crate::gravity_model::{
+    contour_gravity_side, lwg_gravity_side, vector_on_side, Contour, LineWithGravity,
+};
 use crate::step3_rain_drop::{hot_drop_evaporation_contour, placed_sources};
 
 /// One node of [`Tree`]: its parent (`None` for the root), its own children,
@@ -66,7 +68,11 @@ impl Tree {
                 depth,
             },
         );
-        self.nodes.get_mut(&parent_idx).unwrap().children.push(child_idx);
+        self.nodes
+            .get_mut(&parent_idx)
+            .unwrap()
+            .children
+            .push(child_idx);
     }
 
     /// Whether `node` is a descendant of `ancestor` -- walks `node`'s own
@@ -334,7 +340,10 @@ fn elevation_proliferation(
                 at.x, at.y
             )
         });
-        votes.entry(hit_idx).or_default().add(acc, weight, drop_path);
+        votes
+            .entry(hit_idx)
+            .or_default()
+            .add(acc, weight, drop_path);
     }
 
     let mut children_added = 0u64;
@@ -373,7 +382,10 @@ fn elevation_proliferation(
                     // contour this call is running on. Void the eviction
                     // (hit_idx is left exactly as it was) and warn instead of
                     // corrupting the tree.
-                    let at = representative_path.last().copied().unwrap_or(Coord { x: f64::NAN, y: f64::NAN });
+                    let at = representative_path.last().copied().unwrap_or(Coord {
+                        x: f64::NAN,
+                        y: f64::NAN,
+                    });
                     let relation = if hit_idx == c_idx {
                         format!("{hit_idx} and {c_idx} are the same contour")
                     } else {
@@ -421,7 +433,7 @@ pub struct Step4Result {
     /// `elevation_height`, naming its own length in meters, the same
     /// convention Step 3 uses for a contour it drops, plus one per near-tied
     /// vote and one per voided cycle-forming eviction (see
-    /// [`elevation_proliferation`]).
+    /// `elevation_proliferation`).
     pub warnings: Vec<String>,
     /// Every `(parent_contour_idx, child_contour_idx)` edge of `T`, as far as
     /// it got built.
@@ -436,9 +448,13 @@ pub struct Step4Result {
 /// dropped (still gravity-undefined -- see the doc's own note on why, added
 /// alongside this rewrite), grows `T` from an arbitrary gravity-defined root
 /// contour at height `0` by repeatedly proliferating whichever leaf
-/// [`next_proliferator_selection`] returns, and reports whatever contour is
+/// `next_proliferator_selection` returns, and reports whatever contour is
 /// still without an `elevation_height` once no leaf is left to proliferate.
-pub fn resolve(contours: &mut [Contour], raster: &mut ContourRaster, config: &Config) -> Step4Result {
+pub fn resolve(
+    contours: &mut [Contour],
+    raster: &mut ContourRaster,
+    config: &Config,
+) -> Step4Result {
     for (idx, c) in contours.iter().enumerate() {
         if c.lwg.gravity_dx.is_none() {
             raster.clear_contour(idx as u64);
@@ -460,10 +476,24 @@ pub fn resolve(contours: &mut [Contour], raster: &mut ContourRaster, config: &Co
     contours[root_idx].elevation_height = Some(0.0);
 
     while let Some(c_idx) = next_proliferator_selection(&tree, contours) {
-        let rain_children =
-            elevation_proliferation(c_idx, false, contours, raster, &mut tree, config, &mut warnings);
-        let anti_children =
-            elevation_proliferation(c_idx, true, contours, raster, &mut tree, config, &mut warnings);
+        let rain_children = elevation_proliferation(
+            c_idx,
+            false,
+            contours,
+            raster,
+            &mut tree,
+            config,
+            &mut warnings,
+        );
+        let anti_children = elevation_proliferation(
+            c_idx,
+            true,
+            contours,
+            raster,
+            &mut tree,
+            config,
+            &mut warnings,
+        );
         if rain_children == 0 && anti_children == 0 {
             contours[c_idx].empty_progeny = true;
         }
@@ -642,7 +672,10 @@ mod tests {
         };
         let verdict = decide_vote(&vote, &config).unwrap();
         assert!(verdict.accordance, "the larger side still wins");
-        assert!(verdict.near_tie, "a 0.2 margin must not clear a 0.5 minimum");
+        assert!(
+            verdict.near_tie,
+            "a 0.2 margin must not clear a 0.5 minimum"
+        );
     }
 
     #[test]
@@ -957,7 +990,11 @@ mod tests {
         // contours, their elevation_height values, the accordance/discordance
         // verdict, and the expected value that triggered the eviction
         // attempt -- not just "1" and "0" somewhere in the text.
-        assert_eq!(warnings.len(), 1, "expected exactly one warning: {warnings:?}");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one warning: {warnings:?}"
+        );
         let warning = &warnings[0];
         assert!(
             warning.contains("Anti Elevation Proliferation from contour 1"),

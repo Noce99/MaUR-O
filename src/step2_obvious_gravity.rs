@@ -170,8 +170,10 @@ pub fn resolve(
     let mut resolved_by_vote = 0u64;
     let mut warnings = Vec::new();
     for (i, vote) in votes.iter().enumerate() {
-        let Some(side) = vote.resolve(config.step2_vote_min_total_weight, config.step2_vote_min_margin)
-        else {
+        let Some(side) = vote.resolve(
+            config.step2_vote_min_total_weight,
+            config.step2_vote_min_margin,
+        ) else {
             continue;
         };
         match contour_gravity_side(&contours[i]) {

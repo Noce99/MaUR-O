@@ -10,13 +10,12 @@
 //! with a ground-meter scale and a north-is-up flip (`ContourRaster`'s own
 //! ground meters keep the map's paper convention of `y` growing *downward*,
 //! same as `Point`'s own doc comment already says), then a translation to
-//! the projected reference point. It assumes the file's own `map_ref_point`
-//! is `(0, 0)` -- the only value this crate's `xml_reader` ever reads one
-//! as, since it does not parse a top-level `<georeferencing><ref_point>`
-//! distinct from `<projected_crs><ref_point>` -- which is also exactly what
-//! makes `ContourRaster`'s own ground-meter coordinates (`paper_mm *
-//! meters_per_mm`, no offset: see `step1_extract::extract`) already sit in
-//! Mapper's own "map coordinate" frame with nothing left to shift.
+//! the projected reference point. `ContourRaster`'s own ground-meter
+//! coordinates are `paper_mm * meters_per_mm` with no offset (see
+//! `step1_extract::extract`), so the file's own `map_ref_point` (the
+//! top-level `<georeferencing><ref_point>`, in paper mm, as opposed to the
+//! projected one inside `<projected_crs>`) is scaled the same way and
+//! subtracted first, exactly where Mapper's transform does.
 //!
 //! [`model_transformation`] builds the full pixel-corner-to-projected affine
 //! [`ground_to_projected`] alone can't express (a raster pixel, not a bare
@@ -68,10 +67,26 @@ pub fn ground_to_projected(georef: &Georeferencing, local: Coord<f64>) -> Option
     let grivation = georef.grivation.to_radians();
     let (sin_g, cos_g) = grivation.sin_cos();
     let s = georef.auxiliary_scale_factor;
+    let (ref_x, ref_y) = map_ref_point_ground(georef);
+    let (lx, ly) = (local.x - ref_x, local.y - ref_y);
     Some(Coord {
-        x: s * (local.x * cos_g - local.y * sin_g) + georef.ref_point_x,
-        y: -s * (local.x * sin_g + local.y * cos_g) + georef.ref_point_y,
+        x: s * (lx * cos_g - ly * sin_g) + georef.ref_point_x,
+        y: -s * (lx * sin_g + ly * cos_g) + georef.ref_point_y,
     })
+}
+
+/// The map reference point (on the paper, in mm) in the same unscaled
+/// ground meters as a `local` coordinate: `paper_mm * scale / 1000`.
+///
+/// Mapper's transform translates by `-map_ref_point` *before* scaling, so
+/// this is what has to come off `local` before the rotation and the
+/// auxiliary scale factor apply.
+fn map_ref_point_ground(georef: &Georeferencing) -> (f64, f64) {
+    let meters_per_mm = f64::from(georef.scale) / 1000.0;
+    (
+        georef.map_ref_point_x * meters_per_mm,
+        georef.map_ref_point_y * meters_per_mm,
+    )
 }
 
 /// Inverse of [`ground_to_projected`]: a point in `georef`'s own projected
@@ -92,9 +107,10 @@ pub fn projected_to_ground(georef: &Georeferencing, projected: Coord<f64>) -> Op
     let s = georef.auxiliary_scale_factor;
     let dx = (projected.x - georef.ref_point_x) / s;
     let dy = (georef.ref_point_y - projected.y) / s;
+    let (ref_x, ref_y) = map_ref_point_ground(georef);
     Some(Coord {
-        x: cos_g * dx + sin_g * dy,
-        y: -sin_g * dx + cos_g * dy,
+        x: cos_g * dx + sin_g * dy + ref_x,
+        y: -sin_g * dx + cos_g * dy + ref_y,
     })
 }
 
@@ -330,6 +346,8 @@ mod tests {
             epsg: 3006,
             ref_point_x: 322500.0,
             ref_point_y: 6397500.0,
+            map_ref_point_x: 0.0,
+            map_ref_point_y: 0.0,
             grivation: 7.1,
             grivation_specified: true,
             auxiliary_scale_factor: 1.000014,
@@ -352,6 +370,35 @@ mod tests {
         let p = ground_to_projected(&georef, c(0.0, 0.0)).unwrap();
         assert!((p.x - georef.ref_point_x).abs() < 1e-9);
         assert!((p.y - georef.ref_point_y).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_map_reference_point_lands_on_the_projected_one() {
+        // Mapper ties the paper point `map_ref_point` (mm) to the projected
+        // `ref_point`; the paper origin is only that point when the file says
+        // (0, 0). At 1:15000 a paper offset of (12, -8) mm is (180, -120)
+        // ground meters, which must come back out exactly there.
+        let georef = Georeferencing {
+            map_ref_point_x: 12.0,
+            map_ref_point_y: -8.0,
+            ..skatas_georef()
+        };
+        let p = ground_to_projected(&georef, c(180.0, -120.0)).unwrap();
+        assert!((p.x - georef.ref_point_x).abs() < 1e-6, "{p:?}");
+        assert!((p.y - georef.ref_point_y).abs() < 1e-6, "{p:?}");
+
+        // And the paper origin is no longer on the reference point.
+        let origin = ground_to_projected(&georef, c(0.0, 0.0)).unwrap();
+        assert!((origin.x - georef.ref_point_x).abs() > 100.0);
+
+        // The inverse undoes it, offset included.
+        let local = c(37.0, -12.0);
+        let back =
+            projected_to_ground(&georef, ground_to_projected(&georef, local).unwrap()).unwrap();
+        assert!(
+            (back.x - local.x).abs() < 1e-6 && (back.y - local.y).abs() < 1e-6,
+            "{back:?}"
+        );
     }
 
     #[test]
@@ -477,8 +524,8 @@ mod tests {
             grivation: 0.0,
             ..skatas_georef()
         };
-        let raster = resample_north_up(10, 10, c(0.0, 0.0), 1.0, |local| local.x as f32, &georef)
-            .unwrap();
+        let raster =
+            resample_north_up(10, 10, c(0.0, 0.0), 1.0, |local| local.x as f32, &georef).unwrap();
         assert_eq!(raster.width, 10);
         assert_eq!(raster.height, 10);
         assert!(raster.data.iter().all(|v| v.is_finite()));
