@@ -586,8 +586,9 @@ fn info_text(
         "The reference images are what the renderer above drew, at the resolution and the \
          frame above. They are ground truth for those two settings and for no others: a run \
          at another resolution, or with another frame, makes images of another size, and \
-         then every pixel differs. Whatever is measured against this archive has to be run \
-         with the same -r and the same -f.",
+         then every pixel differs. benchmark reads both from this file, so a run of it \
+         always draws at them; anything else measured against this archive has to use \
+         the same resolution and the same frame.",
     ];
     text.push('\n');
     for paragraph in paragraphs {
@@ -793,12 +794,9 @@ fn run() -> Result<ExitCode, String> {
     );
     println!();
     println!("Archive in {}", archive.display());
-    println!(
-        "Run it with: benchmark -r {} -f {} {}",
-        args.resolution,
-        args.frame,
-        archive.display()
-    );
+    // No -r or -f: benchmark has neither, and reads both from the
+    // archive's own info.txt, written above.
+    println!("Run it with: benchmark {}", archive.display());
     Ok(if failures.is_empty() {
         ExitCode::SUCCESS
     } else {

@@ -1,4 +1,5 @@
-//! Extracts elevation-gravity information from an .omap's contours and
+//! Extracts elevation-gravity information from a map's contours (`.omap`,
+//! `.xmap`, or OCAD `.ocd`, converted on the way in) and
 //! writes it out as a raster -- `Contours-to-Raster.md`'s Steps 1 through 5.
 //!
 //! ```text
@@ -37,23 +38,23 @@ use maur_o::contours_to_raster_svg::{
     write_step1_growing_svg, write_step1_svg, write_step2_svg, write_step3_anti_rain_svg,
     write_step3_rain_svg, write_step4_svg, write_step5_gravity_svg,
 };
+use maur_o::render::read_map_file;
 use maur_o::step1_extract;
 use maur_o::step2_obvious_gravity;
 use maur_o::step3_rain_drop;
 use maur_o::step4_elevation;
 use maur_o::step5_elevation_raster;
 use maur_o::step5_gravity_raster;
-use maur_o::xml_reader::read_xml_map;
 
 #[derive(Parser)]
 #[command(
     name = "contours_to_raster",
     version,
-    about = "Extracts elevation-gravity information from an .omap's contours and writes it out as \
+    about = "Extracts elevation-gravity information from a map's contours and writes it out as \
              an elevation TIFF (Contours-to-Raster.md, Steps 1-5)."
 )]
 struct Args {
-    /// The .omap file to read.
+    /// The map to read: Mapper's `.omap`/`.xmap`, or OCAD's `.ocd`.
     map_file: PathBuf,
 
     /// The file name the elevation TIFF is written as, and what the
@@ -207,8 +208,10 @@ fn run() -> Result<(), (ExitCode, String)> {
         .unwrap_or_else(|| default_output_name(&args.map_file));
     let output_path = run_dir.join(&output_name);
 
+    // Either format the crate reads: an OCAD `.ocd` is converted on the way
+    // in, the same as `map_to_image` does.
     let (map, read_warnings) =
-        read_xml_map(&args.map_file).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+        read_map_file(&args.map_file).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     for warning in &read_warnings {
         eprintln!("Warning: {warning}");
     }

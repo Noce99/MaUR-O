@@ -508,6 +508,79 @@ impl ContourRaster {
         hit
     }
 
+    /// Like [`Self::first_hit_along_step`], but also where along the step
+    /// the hit is: the point where the segment `prev -> next` enters the
+    /// hit pixel (`prev` itself if it starts inside it).
+    ///
+    /// A drop that evaporates part-way through a step did not travel the
+    /// rest of it: anything that paints or blends along the track (Step 5)
+    /// has to stop here, not at `next`, or it writes the hit contour's
+    /// value onto pixels up to a whole step past the contour.
+    pub fn first_hit_point_along_step(
+        &self,
+        prev: Coord<f64>,
+        next: Coord<f64>,
+        exclude_contour_idx: u64,
+    ) -> Option<(StepHit, Coord<f64>)> {
+        let mut found = None;
+        walk_pixels(self.origin, self.px_size, prev, next, |x, y| {
+            let val = self.get(x, y);
+            let hit = if val == OUT_OF_BOUND {
+                StepHit::OutOfBound
+            } else if val == HIGH_DENSITY {
+                StepHit::HighDensity
+            } else if val < CONTOUR_0_MATRIX_VALUE {
+                return true;
+            } else {
+                let contour_idx = (val - CONTOUR_0_MATRIX_VALUE) as u64;
+                if contour_idx == exclude_contour_idx {
+                    return true;
+                }
+                StepHit::Contour(contour_idx)
+            };
+            found = Some((hit, (x, y)));
+            false
+        });
+        let (hit, (x, y)) = found?;
+        Some((hit, self.segment_entry_into_pixel(prev, next, x, y)))
+    }
+
+    /// Where the segment `prev -> next` first enters pixel `(x, y)`'s box:
+    /// the standard slab intersection, clamped to the segment, so `prev`
+    /// itself when it already lies inside.
+    fn segment_entry_into_pixel(
+        &self,
+        prev: Coord<f64>,
+        next: Coord<f64>,
+        x: i64,
+        y: i64,
+    ) -> Coord<f64> {
+        let lo = Coord {
+            x: self.origin.x + x as f64 * self.px_size,
+            y: self.origin.y + y as f64 * self.px_size,
+        };
+        let hi = Coord {
+            x: lo.x + self.px_size,
+            y: lo.y + self.px_size,
+        };
+        let d = Coord {
+            x: next.x - prev.x,
+            y: next.y - prev.y,
+        };
+        let mut t_enter = 0.0f64;
+        for (p, d, lo, hi) in [(prev.x, d.x, lo.x, hi.x), (prev.y, d.y, lo.y, hi.y)] {
+            if d != 0.0 {
+                let (a, b) = ((lo - p) / d, (hi - p) / d);
+                t_enter = t_enter.max(a.min(b));
+            }
+        }
+        let t = t_enter.clamp(0.0, 1.0);
+        Coord {
+            x: prev.x + t * d.x,
+            y: prev.y + t * d.y,
+        }
+    }
+
     /// Every pixel the straight segment `prev -> next` touches (Appendix
     /// 4's own walk), with no notion of a hit to stop early at. Step 5's own
     /// Elevation Fill Rain Drop Production already knows, from its own
@@ -1096,6 +1169,47 @@ mod tests {
             ),
             Some(StepHit::OutOfBound)
         );
+    }
+
+    #[test]
+    fn first_hit_point_along_step_is_where_the_step_enters_the_hit_pixel() {
+        let mut r = ContourRaster::new(Coord { x: 0.0, y: 0.0 }, 1.0, 20, 20);
+        r.write_contour(
+            3,
+            &LineString::new(vec![Coord { x: 10.5, y: 0.5 }, Coord { x: 10.5, y: 19.5 }]),
+        );
+        // Eastward and westward along a row, and diagonally.
+        let cases = [
+            ((2.5, 5.5), (12.5, 5.5), (10.0, 5.5)),
+            ((17.5, 5.5), (8.5, 5.5), (11.0, 5.5)),
+            ((7.0, 2.0), (13.0, 8.0), (10.0, 5.0)),
+        ];
+        for (from, to, want) in cases {
+            let (hit, at) = r
+                .first_hit_point_along_step(
+                    Coord {
+                        x: from.0,
+                        y: from.1,
+                    },
+                    Coord { x: to.0, y: to.1 },
+                    u64::MAX,
+                )
+                .unwrap();
+            assert_eq!(hit, StepHit::Contour(3));
+            assert!(
+                (at.x - want.0).abs() < 1e-9 && (at.y - want.1).abs() < 1e-9,
+                "{from:?}: {at:?}"
+            );
+        }
+        // Starting inside the hit pixel: the start itself.
+        let (_, at) = r
+            .first_hit_point_along_step(
+                Coord { x: 10.7, y: 5.5 },
+                Coord { x: 14.0, y: 5.5 },
+                u64::MAX,
+            )
+            .unwrap();
+        assert_eq!(at, Coord { x: 10.7, y: 5.5 });
     }
 
     #[test]

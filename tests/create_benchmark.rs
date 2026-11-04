@@ -376,3 +376,45 @@ fn a_file_with_a_non_ascii_name_is_no_reason_to_stop() {
     );
     assert!(!names.iter().any(|n| n.ends_with(".pdf")), "{names:?}");
 }
+
+/// The command it prints for running the archive is one `benchmark`
+/// accepts. It used to print `benchmark -r X -f Y archive`, and `benchmark`
+/// has neither flag: it reads both settings from the archive's info.txt.
+#[test]
+fn the_command_it_suggests_for_the_archive_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let renderer = stub_renderer(dir.path());
+    let source = dir.path().join("suite");
+    map(&source, "a.omap", "a");
+    let archive = dir.path().join("suite.zip");
+
+    let output = create_benchmark()
+        .arg(&renderer)
+        .arg(&source)
+        .arg("-o")
+        .arg(&archive)
+        .args(["-r", "5", "-f", "10"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let suggested = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Run it with: benchmark "))
+        .unwrap_or_else(|| panic!("no suggestion in:\n{stdout}"));
+    assert_eq!(suggested, archive.display().to_string());
+
+    // The stub's images are not PNGs, so only the names are checked; what
+    // matters is that the command line is accepted.
+    Command::cargo_bin("benchmark")
+        .unwrap()
+        .arg("--results")
+        .arg(dir.path().join("Results"))
+        .arg("--names-only")
+        .arg(suggested)
+        .assert()
+        .success();
+
+    let info = contents(&archive, "suite/info.txt");
+    assert!(!info.contains("-r "), "{info}");
+}

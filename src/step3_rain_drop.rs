@@ -712,7 +712,7 @@ pub(crate) fn hot_drop_evaporation_contour(
 /// `source` in direction `dir`, returning what it evaporated on -- a
 /// [`StepHit::Contour`] or a [`StepHit::HighDensity`], the caller's own
 /// fallback-elevation case (Step 5) -- together with the drop's own straight
-/// track (`source`, then the point it evaporated at). `None` for a drop that
+/// track (`source`, then the point where its last step met the hit). `None` for a drop that
 /// instead leaves the map ([`StepHit::OutOfBound`], a no-op per the doc:
 /// nothing it touched gets written). Unlike [`hot_drop_evaporation_contour`],
 /// the caller has no use for every intermediate step position: since a
@@ -739,7 +739,15 @@ pub(crate) fn elevation_fill_drop_track(
     );
     match drop.final_hit {
         Some(hit @ (StepHit::Contour(_) | StepHit::HighDensity)) => {
-            let end = *drop.path.last()?;
+            // The drop's own path ends a whole step on, at the end of the
+            // step it evaporated during; the track ends where that step met
+            // the hit, so nothing past the contour gets the contour's value.
+            let [.., prev, next] = drop.path[..] else {
+                return None;
+            };
+            let end = raster
+                .first_hit_point_along_step(prev, next, u64::MAX)
+                .map_or(next, |(_, at)| at);
             Some((hit, source, end))
         }
         _ => None,

@@ -106,8 +106,8 @@ pub struct DemFromContoursResult {
 /// progressively-mutated state, exactly as the CLI does. `false` skips all
 /// of it, at no extra cost over the pre-existing behavior.
 ///
-/// Returns an error (from Step 1's extraction, or Step 2/Step 3's own
-/// gravity-conflict checks) exactly where the CLI binary would exit
+/// Returns an error (from [`Config::validate`], Step 1's extraction, or
+/// Step 2/Step 3's own gravity-conflict checks) exactly where the CLI binary would exit
 /// non-zero for the same reason.
 pub fn compute(
     map: &Map,
@@ -116,6 +116,11 @@ pub fn compute(
     debug_svg: bool,
     progress: &mut dyn FnMut(&str, &str),
 ) -> Result<DemFromContoursResult, String> {
+    // A config built field by field (o-mnia's adapter does) never went
+    // through `Config::parse`'s own check.
+    config
+        .validate()
+        .map_err(|e| format!("invalid contours-to-raster config: {e}"))?;
     let mut debug_svgs: Vec<(String, String)> = Vec::new();
     if debug_svg {
         debug_svgs.push((

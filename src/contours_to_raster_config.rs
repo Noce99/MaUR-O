@@ -332,6 +332,7 @@ impl Config {
     /// in hand and have no filesystem to read a path from).
     pub fn parse(text: &str, source_name: &str) -> Result<Config, String> {
         let mut values: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+        let mut lines: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for (line_no, raw_line) in text.lines().enumerate() {
             let line = raw_line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -357,6 +358,19 @@ impl Config {
                     line_no + 1
                 )
             })?;
+            if let Some(first) = lines.insert(key, line_no + 1) {
+                return Err(format!(
+                    "{source_name}:{}: {key:?} is given twice (first on line {first})",
+                    line_no + 1
+                ));
+            }
+            if INTEGER_KEYS.contains(&key) && !(parsed >= 0.0 && parsed.fract() == 0.0) {
+                return Err(format!(
+                    "{source_name}:{}: {key:?} is a count and must be a whole number of 0 or \
+                     more, not {value:?}",
+                    line_no + 1
+                ));
+            }
             values.insert(key, parsed);
         }
 
@@ -366,7 +380,7 @@ impl Config {
             }
         }
 
-        Ok(Config {
+        let config = Config {
             bezier_linearization_step: values[&"bezier_linearization_step"],
             contours_step: values[&"contours_step"],
             rasterization_px_size: values[&"rasterization_px_size"],
@@ -405,9 +419,212 @@ impl Config {
                 [&"growing_visualization_push_pull_vectors_scale"],
             gravity_gaussian_kernel_size: values[&"gravity_gaussian_kernel_size"] as usize,
             elevation_gaussian_kernel_size: values[&"elevation_gaussian_kernel_size"] as usize,
-        })
+        };
+        config
+            .validate()
+            .map_err(|e| format!("{source_name}: {e}"))?;
+        Ok(config)
+    }
+
+    /// Checks that every parameter is one the algorithm can run with, naming
+    /// the first one that is not.
+    ///
+    /// [`Config::parse`] calls this, but a caller that builds or edits a
+    /// `Config` field by field (o-mnia's wasm adapter does) bypasses
+    /// parsing, which is why [`crate::dem_from_contours::compute`] calls it
+    /// as well. Without it a bad value does not fail cleanly but deep inside
+    /// a step: a `rasterization_px_size` of 0 asks for a raster of
+    /// `usize::MAX` pixels, a `contours_step` of 0 trips an assertion, a
+    /// `contour_force_equilibrium` of 0 divides 0 by 0 -- each an abort in
+    /// wasm.
+    ///
+    /// The ranges are what the code needs, not what is sensible: tuning is
+    /// still the caller's business.
+    pub fn validate(&self) -> Result<(), String> {
+        let floats: [(&str, f64, Range); 29] = [
+            (
+                "bezier_linearization_step",
+                self.bezier_linearization_step,
+                Range::Positive,
+            ),
+            ("contours_step", self.contours_step, Range::Positive),
+            (
+                "rasterization_px_size",
+                self.rasterization_px_size,
+                Range::Positive,
+            ),
+            (
+                "heavy_object_width",
+                self.heavy_object_width,
+                Range::NonNegative,
+            ),
+            (
+                "heavy_object_growing",
+                self.heavy_object_growing,
+                Range::NonNegative,
+            ),
+            (
+                "slope_lines_contours_search_radius",
+                self.slope_lines_contours_search_radius,
+                Range::NonNegative,
+            ),
+            (
+                "step2_vote_min_total_weight",
+                self.step2_vote_min_total_weight,
+                Range::NonNegative,
+            ),
+            (
+                "step2_vote_min_margin",
+                self.step2_vote_min_margin,
+                Range::NonNegative,
+            ),
+            ("rain_drop_step", self.rain_drop_step, Range::Positive),
+            (
+                "undefined_gravity_vote_threshold",
+                self.undefined_gravity_vote_threshold,
+                Range::Any,
+            ),
+            (
+                "elevation_vote_min_total_weight",
+                self.elevation_vote_min_total_weight,
+                Range::NonNegative,
+            ),
+            (
+                "elevation_vote_min_margin",
+                self.elevation_vote_min_margin,
+                Range::NonNegative,
+            ),
+            ("growing_enabled", self.growing_enabled, Range::Any),
+            (
+                "obvious_to_close_contour_distance",
+                self.obvious_to_close_contour_distance,
+                Range::NonNegative,
+            ),
+            ("searching_fov", self.searching_fov, Range::NonNegative),
+            (
+                "searching_distance",
+                self.searching_distance,
+                Range::NonNegative,
+            ),
+            (
+                "contour_force_window",
+                self.contour_force_window,
+                Range::NonNegative,
+            ),
+            (
+                "attraction_force_window",
+                self.attraction_force_window,
+                Range::NonNegative,
+            ),
+            (
+                "contour_force_max_repulsion",
+                self.contour_force_max_repulsion,
+                Range::Any,
+            ),
+            (
+                "contour_force_equilibrium",
+                self.contour_force_equilibrium,
+                Range::Positive,
+            ),
+            (
+                "contour_force_max_attraction",
+                self.contour_force_max_attraction,
+                Range::Any,
+            ),
+            (
+                "contour_force_second_equilibrium",
+                self.contour_force_second_equilibrium,
+                Range::Positive,
+            ),
+            ("out_of_bound_force", self.out_of_bound_force, Range::Any),
+            (
+                "density_region_force",
+                self.density_region_force,
+                Range::Any,
+            ),
+            ("flying_end_force", self.flying_end_force, Range::Any),
+            (
+                "flying_end_merge_distance",
+                self.flying_end_merge_distance,
+                Range::NonNegative,
+            ),
+            (
+                "matching_min_force",
+                self.matching_min_force,
+                Range::NonNegative,
+            ),
+            ("grow_time_step", self.grow_time_step, Range::Positive),
+            (
+                "growing_visualization_push_pull_vectors_scale",
+                self.growing_visualization_push_pull_vectors_scale,
+                Range::NonNegative,
+            ),
+        ];
+        for (key, value, range) in floats {
+            let ok = value.is_finite()
+                && match range {
+                    Range::Positive => value > 0.0,
+                    Range::NonNegative => value >= 0.0,
+                    Range::Any => true,
+                };
+            if !ok {
+                let wanted = match range {
+                    Range::Positive => "a finite number greater than 0",
+                    Range::NonNegative => "a finite number of 0 or more",
+                    Range::Any => "a finite number",
+                };
+                return Err(format!("{key:?} must be {wanted}, not {value}"));
+            }
+        }
+        if self.contour_force_second_equilibrium <= self.contour_force_equilibrium {
+            return Err(format!(
+                "\"contour_force_second_equilibrium\" ({}) must be greater than \
+                 \"contour_force_equilibrium\" ({})",
+                self.contour_force_second_equilibrium, self.contour_force_equilibrium
+            ));
+        }
+        for (key, size) in [
+            (
+                "gravity_gaussian_kernel_size",
+                self.gravity_gaussian_kernel_size,
+            ),
+            (
+                "elevation_gaussian_kernel_size",
+                self.elevation_gaussian_kernel_size,
+            ),
+        ] {
+            // A window centred on its pixel has an odd side; 0 and 1 mean
+            // no smoothing at all.
+            if size > 1 && size % 2 == 0 {
+                return Err(format!(
+                    "{key:?} must be odd (or 0/1 for no smoothing), not {size}"
+                ));
+            }
+        }
+        Ok(())
     }
 }
+
+/// What [`Config::validate`] accepts for one floating-point parameter.
+#[derive(Clone, Copy)]
+enum Range {
+    /// Finite and greater than 0: a step, a size, an equilibrium.
+    Positive,
+    /// Finite and 0 or more: a distance, a window, a threshold.
+    NonNegative,
+    /// Finite, of either sign: a force, a switch.
+    Any,
+}
+
+/// The keys whose field is a count, so whose value must be a whole number.
+const INTEGER_KEYS: &[&str] = &[
+    "circumference_fitting_points_number",
+    "sources_per_contour_segment",
+    "rain_drop_starting_voting_hysteresis",
+    "growing_oob_seeking_max_steps",
+    "gravity_gaussian_kernel_size",
+    "elevation_gaussian_kernel_size",
+];
 
 #[cfg(test)]
 mod tests {
@@ -515,5 +732,81 @@ elevation_gaussian_kernel_size = 5
             err.contains("contours_step") && err.contains("not_a_number"),
             "{err}"
         );
+    }
+
+    /// `FULL` with `line` (`key = old`) replaced by `key = new`.
+    fn with(key: &str, new: &str) -> String {
+        let old = FULL
+            .lines()
+            .find(|l| l.starts_with(&format!("{key} =")))
+            .unwrap_or_else(|| panic!("{key} is not in FULL"));
+        FULL.replace(old, &format!("{key} = {new}"))
+    }
+
+    #[test]
+    fn values_the_algorithm_cannot_run_with_are_refused_by_name() {
+        // Each of these used to parse fine and then abort deep in a step: a
+        // raster of usize::MAX pixels, a failed assertion, a 0/0, an
+        // infinite or NaN coordinate.
+        for (key, value) in [
+            ("rasterization_px_size", "0"),
+            ("rasterization_px_size", "-1"),
+            ("contours_step", "0"),
+            ("rain_drop_step", "nan"),
+            ("bezier_linearization_step", "inf"),
+            ("contour_force_equilibrium", "0"),
+            ("grow_time_step", "-0.1"),
+            ("searching_distance", "-3"),
+            ("out_of_bound_force", "nan"),
+            // Not above the first equilibrium.
+            ("contour_force_second_equilibrium", "2.5"),
+            // Even: no pixel at the centre of the window.
+            ("gravity_gaussian_kernel_size", "4"),
+        ] {
+            let err = Config::parse(&with(key, value), "test").unwrap_err();
+            assert!(err.contains(key), "{key} = {value}: {err}");
+        }
+    }
+
+    #[test]
+    fn counts_must_be_whole_and_not_negative() {
+        for value in ["2.7", "-1"] {
+            let err =
+                Config::parse(&with("sources_per_contour_segment", value), "test").unwrap_err();
+            assert!(
+                err.contains("sources_per_contour_segment"),
+                "{value}: {err}"
+            );
+        }
+        // 0 and 1 are both "no smoothing", and are fine.
+        for value in ["0", "1"] {
+            Config::parse(&with("elevation_gaussian_kernel_size", value), "test").unwrap();
+        }
+    }
+
+    #[test]
+    fn a_key_given_twice_is_an_error_naming_both_lines() {
+        let text = format!("{FULL}contours_step = 6.0\n");
+        let err = Config::parse(&text, "test").unwrap_err();
+        assert!(
+            err.contains("contours_step") && err.contains("twice"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_config_edited_field_by_field_is_checked_too() {
+        // What o-mnia's adapter does: no parsing involved.
+        let mut config = Config::default_shipped();
+        config.validate().unwrap();
+        config.rasterization_px_size = 0.0;
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("rasterization_px_size"), "{err}");
+
+        let map = crate::map::Map::new();
+        let err = crate::dem_from_contours::compute(&map, &config, 5.0, false, &mut |_, _| {})
+            .err()
+            .expect("compute must refuse an invalid config");
+        assert!(err.contains("rasterization_px_size"), "{err}");
     }
 }

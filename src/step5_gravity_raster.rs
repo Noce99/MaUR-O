@@ -231,7 +231,13 @@ fn gaussian_smooth(
     if kernel_size <= 1 {
         return grid.to_vec();
     }
-    let radius = (kernel_size / 2) as i64;
+    // (k - 1) / 2, as the spec says: a window of side k centred on its
+    // pixel. k / 2 gave an even k a window one pixel wider on every side.
+    let radius = ((kernel_size - 1) / 2) as i64;
+    if radius == 0 {
+        // k = 2: nothing but the pixel itself, and a zero sigma below.
+        return grid.to_vec();
+    }
     let sigma = radius as f64 / 3.0;
 
     let mut smoothed = vec![vec![None; width]; height];
@@ -478,5 +484,21 @@ mod tests {
             sx1 > -1.0 && sx1 < 0.0,
             "expected pixel 1 to lean toward its neighbor's 1.0 without reaching it, got {sx1}"
         );
+    }
+
+    #[test]
+    fn gaussian_window_has_radius_half_of_kernel_size_minus_one() {
+        // One pixel pointing north on a field pointing east: see the same
+        // test in `step5_elevation_raster`.
+        let mut grid = vec![vec![Some((1.0, 0.0)); 7]; 7];
+        grid[3][3] = Some((0.0, 1.0));
+        let smoothed = gaussian_smooth(&grid, 4);
+        assert!(
+            smoothed[3][4].unwrap().1 > 0.0,
+            "the next pixel is in the window"
+        );
+        assert_eq!(smoothed[3][5], Some((1.0, 0.0)), "two pixels away is not");
+        assert!(gaussian_smooth(&grid, 5)[3][5].unwrap().1 > 0.0);
+        assert_eq!(gaussian_smooth(&grid, 2), grid);
     }
 }

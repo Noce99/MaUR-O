@@ -91,10 +91,12 @@ impl Accum {
 /// already covers nearly every in-bound pixel) or a genuine zero vector.
 ///
 /// Returns `None` for that no-op case, for leaving the map
-/// ([`StepHit::OutOfBound`]), or for running out its own
-/// [`MAX_GRAVITY_GUIDED_STEPS`] budget without evaporating meaningfully;
-/// otherwise the hit and the drop's own whole path (source to evaporation,
-/// every intermediate step included) -- unlike
+/// ([`StepHit::OutOfBound`]), for going round in circles (back on a pixel it
+/// had already left, or not leaving its pixel in as many steps as it takes
+/// to cross one), or for running out its own [`MAX_GRAVITY_GUIDED_STEPS`]
+/// budget without evaporating meaningfully; otherwise the hit and the
+/// drop's own whole path (source to the point where it met the hit, every
+/// intermediate step included) -- unlike
 /// `step3_rain_drop::elevation_fill_drop_track`'s own two endpoints, a bent
 /// path needs every vertex, since [`resolve`] must walk it leg by leg to
 /// find each pixel's own true along-path distance.
@@ -109,11 +111,35 @@ fn gravity_guided_drop_track(
     let mut pos = source;
     let mut path = vec![pos];
     let mut steps = 0u64;
+    // A drop following the gravity field downhill never comes back to a
+    // pixel it has left: one that does is circling or oscillating -- a
+    // closed depression, or a valley floor where the smoothed field flips
+    // -- and would otherwise run out the whole step budget, growing its
+    // path all the while. Steps short enough to stay within one pixel are
+    // allowed, but only as many as it takes to cross one.
+    let mut visited: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    let mut current_pixel = raster.to_px(pos);
+    let mut steps_in_pixel = 0u64;
+    let max_steps_in_pixel =
+        (raster.px_size * std::f64::consts::SQRT_2 / config.rain_drop_step).ceil() as u64 + 1;
 
     loop {
         let (px, py) = raster.to_px(pos);
         if px < 0 || py < 0 || px as usize >= raster.width || py as usize >= raster.height {
             return None; // off the grid entirely: a no-op, same as StepHit::OutOfBound
+        }
+        if (px, py) == current_pixel {
+            steps_in_pixel += 1;
+            if steps_in_pixel > max_steps_in_pixel {
+                return None; // not getting out of this pixel: stuck
+            }
+        } else {
+            visited.insert(current_pixel);
+            if !visited.insert((px, py)) {
+                return None; // back on a pixel it already left: going round in circles
+            }
+            current_pixel = (px, py);
+            steps_in_pixel = 1;
         }
         let Some((gx, gy)) = gravity.get(px as usize, py as usize) else {
             return None; // an unreached pocket has no direction to follow: a no-op
@@ -128,18 +154,21 @@ fn gravity_guided_drop_track(
             x: pos.x + dir.0 * config.rain_drop_step,
             y: pos.y + dir.1 * config.rain_drop_step,
         };
-        let hit = raster.first_hit_along_step(pos, next, u64::MAX);
+        let hit = raster.first_hit_point_along_step(pos, next, u64::MAX);
         let evaporate = match hit {
             None => false,
-            Some(StepHit::OutOfBound) | Some(StepHit::HighDensity) => true,
-            Some(StepHit::Contour(hit_idx)) => {
+            Some((StepHit::OutOfBound | StepHit::HighDensity, _)) => true,
+            Some((StepHit::Contour(hit_idx), _)) => {
                 !(hit_idx == source_contour_idx && steps < hysteresis)
             }
         };
 
-        if evaporate {
-            path.push(next);
-            return match hit.expect("evaporate is only ever true alongside a real hit") {
+        if let (true, Some((hit, at))) = (evaporate, hit) {
+            // The track ends where it met the hit, not a whole step past
+            // it: Step 5 blends the hit contour's height along the track,
+            // and the pixels beyond the contour are not on the way to it.
+            path.push(at);
+            return match hit {
                 StepHit::OutOfBound => None,
                 h => Some((h, path)),
             };
@@ -405,7 +434,13 @@ fn gaussian_smooth(grid: &[Vec<Option<f64>>], kernel_size: usize) -> Vec<Vec<Opt
     if kernel_size <= 1 {
         return grid.to_vec();
     }
-    let radius = (kernel_size / 2) as i64;
+    // (k - 1) / 2, as the spec says: a window of side k centred on its
+    // pixel. k / 2 gave an even k a window one pixel wider on every side.
+    let radius = ((kernel_size - 1) / 2) as i64;
+    if radius == 0 {
+        // k = 2: nothing but the pixel itself, and a zero sigma below.
+        return grid.to_vec();
+    }
     let sigma = radius as f64 / 3.0;
 
     let mut smoothed = vec![vec![None; width]; height];
@@ -1412,5 +1447,103 @@ mod tests {
         let min_y = max_y - scale[1] * decoder.dimensions().unwrap().1 as f64;
         assert!(min_x <= georef.ref_point_x && georef.ref_point_x <= max_x);
         assert!(min_y <= georef.ref_point_y && georef.ref_point_y <= max_y);
+    }
+
+    #[test]
+    fn gaussian_window_has_radius_half_of_kernel_size_minus_one() {
+        // One raised pixel on a flat 7x7 field. A 4-wide kernel is radius
+        // (4 - 1) / 2 = 1: the neighbour two pixels away must not move. It
+        // did, when the radius was 4 / 2 = 2 -- a 5x5 window.
+        let mut grid = vec![vec![Some(0.0); 7]; 7];
+        grid[3][3] = Some(9.0);
+        let smoothed = gaussian_smooth(&grid, 4);
+        assert!(
+            smoothed[3][4].unwrap() > 0.0,
+            "the next pixel is in the window"
+        );
+        assert_eq!(smoothed[3][5], Some(0.0), "two pixels away is not");
+        // A 5-wide kernel does reach it.
+        assert!(gaussian_smooth(&grid, 5)[3][5].unwrap() > 0.0);
+        // And 2 is the pixel alone: unchanged, not NaN from a zero sigma.
+        assert_eq!(gaussian_smooth(&grid, 2), grid);
+    }
+
+    /// A raster with one contour (index 0) along the column `x = 10`, and a
+    /// gravity field pointing due east everywhere.
+    fn wall_and_eastward_field() -> (ContourRaster, GravityRaster) {
+        let mut raster = ContourRaster::new(c(0.0, 0.0), 1.0, 20, 20);
+        raster.write_contour(0, &LineString::new(vec![c(10.5, 0.5), c(10.5, 19.5)]));
+        let grid = vec![vec![Some((1.0, 0.0)); 20]; 20];
+        (raster, GravityRaster::for_test(grid, 20, 20))
+    }
+
+    #[test]
+    fn a_gravity_guided_track_ends_where_it_meets_the_contour_not_a_step_past_it() {
+        // Steps of 3 m from x = 2.5 land on 5.5, 8.5, 11.5: the step that
+        // meets the contour (pixel column 10, x in [10, 11)) ends at 11.5.
+        // The track used to end there too, painting the contour's height on
+        // the far side of it.
+        let (raster, gravity) = wall_and_eastward_field();
+        let mut config = default_config();
+        config.rain_drop_step = 3.0;
+        let (hit, path) = gravity_guided_drop_track(&raster, &gravity, 99, c(2.5, 5.5), &config)
+            .expect("an eastward drop reaches the contour");
+        assert_eq!(hit, StepHit::Contour(0));
+        let end = *path.last().unwrap();
+        assert!(
+            (end.x - 10.0).abs() < 1e-9 && (end.y - 5.5).abs() < 1e-9,
+            "{path:?}"
+        );
+    }
+
+    #[test]
+    fn an_elevation_fill_track_ends_where_it_meets_the_contour_not_a_step_past_it() {
+        // The same for Step 3's straight Fill track, which the gravity
+        // raster paints along.
+        let (mut raster, _) = wall_and_eastward_field();
+        let mut config = default_config();
+        config.rain_drop_step = 3.0;
+        let (hit, start, end) = crate::step3_rain_drop::elevation_fill_drop_track(
+            &mut raster,
+            99,
+            c(2.5, 5.5),
+            (1.0, 0.0),
+            &config,
+        )
+        .expect("an eastward drop reaches the contour");
+        assert_eq!(hit, StepHit::Contour(0));
+        assert_eq!(start, c(2.5, 5.5));
+        assert!(
+            (end.x - 10.0).abs() < 1e-9 && (end.y - 5.5).abs() < 1e-9,
+            "{end:?}"
+        );
+    }
+
+    #[test]
+    fn a_drop_going_round_in_circles_gives_up_at_once() {
+        // East of x = 10 the field points west, west of it east: a valley
+        // floor with no contour in it. The drop oscillates across x = 10 for
+        // ever; it used to do so for a million steps, growing its path.
+        let raster = ContourRaster::new(c(0.0, 0.0), 1.0, 20, 20);
+        let grid: Vec<Vec<Option<(f64, f64)>>> = (0..20)
+            .map(|_| {
+                (0..20)
+                    .map(|x| Some(if x < 10 { (1.0, 0.0) } else { (-1.0, 0.0) }))
+                    .collect()
+            })
+            .collect();
+        let gravity = GravityRaster::for_test(grid, 20, 20);
+        for step in [3.0, 0.25] {
+            let mut config = default_config();
+            config.rain_drop_step = step;
+            let started = std::time::Instant::now();
+            let result = gravity_guided_drop_track(&raster, &gravity, 99, c(5.5, 5.5), &config);
+            assert!(result.is_none(), "step {step}");
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(100),
+                "step {step}: took {:?}",
+                started.elapsed()
+            );
+        }
     }
 }

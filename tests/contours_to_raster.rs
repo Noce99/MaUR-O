@@ -4,6 +4,7 @@
 //! the documented exit codes fire on a missing map or config file.
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 
 fn contours_to_raster() -> Command {
     Command::cargo_bin("contours_to_raster").unwrap()
@@ -106,4 +107,26 @@ fn missing_config_file_exits_3() {
         .assert()
         .failure()
         .code(3);
+}
+
+/// An OCAD map is converted on the way in, as `map_to_image` does. It used
+/// to be read as XML and refused at once, exit code 2: "stream did not
+/// contain valid UTF-8".
+///
+/// `testit.ocd` has no contour symbols, so the run does not get far -- but
+/// only after reading the file, which is what this checks. (A map with
+/// contours, `Lake Sammamish.ocd`, works too, but takes about a minute.)
+#[test]
+fn an_ocd_map_is_converted_on_the_way_in() {
+    let dir = tempfile::tempdir().unwrap();
+    contours_to_raster()
+        .arg("maps/testit.ocd")
+        .arg("--results")
+        .arg(dir.path())
+        .assert()
+        .code(4)
+        .stderr(predicates::str::contains(
+            "no Contour, Slope Line, Jump or Heavy Object symbols were found",
+        ))
+        .stderr(predicates::str::contains("UTF-8").not());
 }
