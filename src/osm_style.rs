@@ -869,6 +869,7 @@ pub fn carto_style_with_overlays(
             Color {
                 name: key.clone(),
                 rgb: (r as f32, g as f32, b as f32),
+                cmyk: crate::xml_writer::rgb_to_cmyk((r as f32, g as f32, b as f32)),
                 opacity: *opacity,
             }
         })

@@ -413,15 +413,26 @@ fn number_as_string(code: &str) -> String {
     const COMPONENTS: usize = 3;
     let mut number = [-1i32; COMPONENTS];
     if !code.is_empty() {
+        // Positions are counted in characters, as QString counts them, not in
+        // bytes: a byte offset can land inside a character (`Ö1`), and one
+        // past a trailing dot (`7.`) is past the end, where Qt's `indexOf`
+        // and `midRef` just find nothing rather than panic.
+        let chars: Vec<char> = code.chars().collect();
         let mut position = 0usize;
         for slot in number.iter_mut() {
-            let dot = code[position + 1..].find('.').map(|at| at + position + 1);
-            let component = match dot {
-                Some(at) => &code[position..at],
-                None => &code[position..],
-            };
-            // QString::toInt() on something which is not a number gives 0.
-            *slot = leading_int(component);
+            let dot = chars
+                .get(position + 1..)
+                .and_then(|rest| rest.iter().position(|&c| c == '.'))
+                .map(|at| at + position + 1);
+            let end = dot.unwrap_or(chars.len());
+            let component: String = chars
+                .get(position..end)
+                .unwrap_or_default()
+                .iter()
+                .collect();
+            // QString::toInt() on something which is not a number gives 0,
+            // and so does nothing at all: `7.` is the number 7.0.
+            *slot = leading_int(&component);
             match dot {
                 Some(at) => position = at + 1,
                 None => break,
@@ -1173,6 +1184,14 @@ mod tests {
         assert_eq!(number_as_string("A"), "0");
         // Only three components are kept.
         assert_eq!(number_as_string("1.2.3.4"), "1.2.3");
+        // These used to panic, slicing past the end or inside a character.
+        // Mapper reads the missing component after a trailing dot as 0.
+        assert_eq!(number_as_string("7."), "7.0");
+        assert_eq!(number_as_string("7.1."), "7.1.0");
+        // A dot is only looked for from the second character on, as Qt does.
+        assert_eq!(number_as_string("."), "0");
+        assert_eq!(number_as_string("Ö1"), "0");
+        assert_eq!(number_as_string("5.Ö"), "5.0");
     }
 
     #[test]

@@ -32,6 +32,11 @@ enum Ev<'a> {
     Eof,
 }
 
+/// The highest colour priority believed as a colour-table index. Real
+/// symbol sets have a few dozen colours; this leaves room for any of them
+/// while keeping the table a few megabytes at worst.
+const MAX_COLOR_PRIORITY: i32 = 65_535;
+
 struct Xml<'a> {
     reader: Reader<&'a [u8]>,
     pending_end: bool,
@@ -100,12 +105,21 @@ impl<'a> Xml<'a> {
     /// whitespace-only runs (unlike `next()`), for text objects. Mirrors
     /// `QXmlStreamReader::readElementText()`.
     fn read_text_content(&mut self) -> Result<String, String> {
+        // A self-closing element (`<text/>`) was handed out by `next()` as a
+        // Start with its End still owed: it has no content, and the raw
+        // reader's next event already belongs to whatever follows it.
+        if self.pending_end {
+            self.pending_end = false;
+            return Ok(String::new());
+        }
         let mut text = String::new();
         loop {
             match self.reader.read_event().map_err(|e| e.to_string())? {
                 Event::Text(t) => text.push_str(&t.unescape().map_err(|e| e.to_string())?),
                 Event::CData(t) => text.push_str(&String::from_utf8_lossy(&t.into_inner())),
-                Event::Start(_) | Event::Empty(_) => {
+                // An unexpected empty child is complete in itself: nothing to skip.
+                Event::Empty(_) => {}
+                Event::Start(_) => {
                     // Not expected in this format; skip the unexpected child
                     // rather than misreading its text as our own.
                     let mut depth = 0i32;
@@ -215,6 +229,28 @@ fn cmyk_to_rgb(c: f32, m: f32, y: f32, k: f32) -> (f32, f32, f32) {
     (r, g, b)
 }
 
+/// The inverse of [`cmyk_to_rgb`], for a color a file defines by RGB alone.
+///
+/// Black is taken as far as it will go -- the most `k` the channels allow --
+/// which is the conventional choice and the one that round-trips: feeding the
+/// result back through `cmyk_to_rgb` returns the color it came from.
+fn rgb_to_cmyk(r: f32, g: f32, b: f32) -> (f64, f64, f64, f64) {
+    let (r, g, b) = (f64::from(r), f64::from(g), f64::from(b));
+    let k = 1.0 - r.max(g).max(b);
+    // Pure black: every channel is already spoken for by `k`, and dividing by
+    // the ink left over would be dividing by zero.
+    if k >= 1.0 {
+        return (0.0, 0.0, 0.0, 1.0);
+    }
+    let inv = 1.0 - k;
+    (
+        (1.0 - r / inv).clamp(0.0, 1.0),
+        (1.0 - g / inv).clamp(0.0, 1.0),
+        (1.0 - b / inv).clamp(0.0, 1.0),
+        k.clamp(0.0, 1.0),
+    )
+}
+
 fn point_mut(s: &mut Symbol) -> &mut PointSymbol {
     match s {
         Symbol::Point(p) => p,
@@ -318,7 +354,8 @@ impl<'a> XmlMapReader<'a> {
                         if scale > 0 {
                             this.map.scale_denominator = scale;
                         }
-                        this.xml.skip_current()?;
+                        let georeferencing = this.read_georeferencing(start)?;
+                        this.map.georeferencing = Some(georeferencing);
                         Ok(true)
                     }
                     "colors" => {
@@ -326,6 +363,9 @@ impl<'a> XmlMapReader<'a> {
                         Ok(true)
                     }
                     "symbols" => {
+                        // What the file says it is drawn with: "ISOM 2017-2",
+                        // "ISSprOM 2019", "OCD" for a converted OCAD map.
+                        this.map.symbol_set = attr_str(start, "id").filter(|id| !id.is_empty());
                         this.read_symbols()?;
                         Ok(true)
                     }
@@ -337,6 +377,63 @@ impl<'a> XmlMapReader<'a> {
                 }
             };
         self.read_children(&mut handler)
+    }
+
+    /// Reads `<georeferencing>`: the scale and rotation from its own
+    /// attributes, the projection and its reference point from the projected
+    /// CRS inside it.
+    ///
+    /// A map with no projected CRS still gets a `Georeferencing` -- it has a
+    /// scale, which is what most of it is used for. Whether it is placed on
+    /// the earth is `epsg`, which stays 0 until a CRS says otherwise.
+    fn read_georeferencing(&mut self, start: &BytesStart) -> Result<Georeferencing, String> {
+        let mut georeferencing = Georeferencing {
+            scale: attr_int(start, "scale", 0),
+            grivation: attr_double(start, "grivation", 0.0),
+            grivation_specified: has_attr(start, "grivation"),
+            auxiliary_scale_factor: attr_double(start, "auxiliary_scale_factor", 1.0),
+            ..Default::default()
+        };
+
+        let mut handler =
+            |this: &mut Self, name: &str, start: &BytesStart| -> Result<bool, String> {
+                match name {
+                    // The reference point on the paper, in mm. The one inside
+                    // `<projected_crs>` below is the same point on the ground.
+                    "ref_point" => {
+                        georeferencing.map_ref_point_x = attr_double(start, "x", 0.0);
+                        georeferencing.map_ref_point_y = attr_double(start, "y", 0.0);
+                        this.xml.skip_current()?;
+                        Ok(true)
+                    }
+                    "projected_crs" => {
+                        this.read_children(&mut |this: &mut Self,
+                                                 name: &str,
+                                                 start: &BytesStart|
+                         -> Result<bool, String> {
+                            match name {
+                                // The EPSG code is the element's own text.
+                                "parameter" => {
+                                    let text = this.xml.read_text_content()?;
+                                    georeferencing.epsg = text.trim().parse::<i32>().unwrap_or(0);
+                                    Ok(true)
+                                }
+                                "ref_point" => {
+                                    georeferencing.ref_point_x = attr_double(start, "x", 0.0);
+                                    georeferencing.ref_point_y = attr_double(start, "y", 0.0);
+                                    this.xml.skip_current()?;
+                                    Ok(true)
+                                }
+                                _ => Ok(false),
+                            }
+                        })?;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            };
+        self.read_children(&mut handler)?;
+        Ok(georeferencing)
     }
 
     fn read_colors(&mut self) -> Result<(), String> {
@@ -353,10 +450,10 @@ impl<'a> XmlMapReader<'a> {
                     ..Color::default()
                 };
 
-                let c = attr_double(start, "c", 0.0) as f32;
-                let m = attr_double(start, "m", 0.0) as f32;
-                let y = attr_double(start, "y", 0.0) as f32;
-                let k = attr_double(start, "k", 0.0) as f32;
+                let c = attr_double(start, "c", 0.0);
+                let m = attr_double(start, "m", 0.0);
+                let y = attr_double(start, "y", 0.0);
+                let k = attr_double(start, "k", 0.0);
                 let has_cmyk = has_attr(start, "c") || has_attr(start, "k");
 
                 let mut rgb: Option<(f32, f32, f32)> = None;
@@ -382,12 +479,30 @@ impl<'a> XmlMapReader<'a> {
                 }
 
                 if has_cmyk && !cmyk_from_rgb {
-                    color.rgb = cmyk_to_rgb(c, m, y, k);
+                    color.rgb = cmyk_to_rgb(c as f32, m as f32, y as f32, k as f32);
+                    color.cmyk = (c, m, y, k);
                 } else if let Some(rgb) = rgb {
                     color.rgb = rgb;
+                    // A file which gives both, but derived the CMYK from the
+                    // RGB, is still telling us what its inks are.
+                    color.cmyk = if has_cmyk {
+                        (c, m, y, k)
+                    } else {
+                        rgb_to_cmyk(rgb.0, rgb.1, rgb.2)
+                    };
                 }
 
-                if priority < 0 {
+                if priority > MAX_COLOR_PRIORITY {
+                    // The table is indexed by priority, so believing an
+                    // absurd one means allocating that many colours: a
+                    // file saying 2000000000 would abort the reader.
+                    this.warn(format!(
+                        "Color '{}' has priority {priority}, more than {MAX_COLOR_PRIORITY}: \
+                         it is drawn below every other color instead.",
+                        color.name
+                    ));
+                    this.map.colors.push(color);
+                } else if priority < 0 {
                     this.map.colors.push(color);
                 } else {
                     let idx = priority as usize;
@@ -488,6 +603,13 @@ impl<'a> XmlMapReader<'a> {
                             "combined_symbol" => self.read_combined_symbol(&mut symbol)?,
                             _ => unreachable!(),
                         }
+                    } else if cname == "icon" {
+                        // Mapper's own picture of the symbol, for a panel to
+                        // show. Kept as written; nothing here reads it.
+                        if let Some(src) = attr_str(&child, "src") {
+                            set_icon_src(&mut symbol, src);
+                        }
+                        self.xml.skip_current()?;
                     } else {
                         self.xml.skip_current()?;
                     }
@@ -960,7 +1082,14 @@ impl<'a> XmlMapReader<'a> {
 /// or an error message if the file could not be read at all.
 pub fn read_xml_map(path: &Path) -> Result<(Map, Vec<String>), String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let mut reader = XmlMapReader::new(&content);
+    read_xml_map_str(&content)
+}
+
+/// The same, for a map already in memory: the document text rather than a path
+/// to read it from. This is what a caller without a filesystem — a WebAssembly
+/// build handed the file by its host — parses through.
+pub fn read_xml_map_str(content: &str) -> Result<(Map, Vec<String>), String> {
+    let mut reader = XmlMapReader::new(content);
     reader.read()?;
     Ok((reader.map, reader.warnings))
 }
@@ -1074,9 +1203,43 @@ pub fn read_fragments(path: &Path) -> Result<Fragments, String> {
     Ok(fragments)
 }
 
+/// Puts the file's own picture of a symbol on it, whichever kind it is.
+fn set_icon_src(symbol: &mut Symbol, src: String) {
+    match symbol {
+        Symbol::Point(s) => s.icon_src = src,
+        Symbol::Line(s) => s.icon_src = src,
+        Symbol::Area(s) => s.icon_src = src,
+        Symbol::Text(s) => s.icon_src = src,
+        Symbol::Combined(s) => s.icon_src = src,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A color a file defines by RGB alone still reports the inks that make
+    /// it, and they are the ones which draw it back.
+    #[test]
+    fn derives_cmyk_from_rgb_and_back() {
+        for rgb in [
+            (0.0, 0.0, 0.0),
+            (1.0, 1.0, 1.0),
+            (0.0, 0.8, 1.0),
+            (1.0, 0.79, 0.15),
+            (0.25, 0.5, 0.75),
+        ] {
+            let (c, m, y, k) = rgb_to_cmyk(rgb.0, rgb.1, rgb.2);
+            let back = cmyk_to_rgb(c as f32, m as f32, y as f32, k as f32);
+            assert!(
+                (back.0 - rgb.0).abs() < 1e-6
+                    && (back.1 - rgb.1).abs() < 1e-6
+                    && (back.2 - rgb.2).abs() < 1e-6,
+                "{rgb:?} -> {:?} -> {back:?}",
+                (c, m, y, k)
+            );
+        }
+    }
 
     #[test]
     fn reads_empty_map() {
@@ -1100,6 +1263,12 @@ mod tests {
         assert!((r - 0.0).abs() < 1e-4, "r={r}");
         assert!((g - 0.8).abs() < 1e-4, "g={g}");
         assert!((b - 1.0).abs() < 1e-4, "b={b}");
+        // The inks themselves, kept as the file wrote them: this is what a
+        // map is checked against a standard by, and rounding it through RGB
+        // would lose the third decimal the format is written to.
+        assert_eq!(map.colors[1].cmyk, (1.0, 0.2, 0.0, 0.0));
+        assert_eq!(map.colors[0].cmyk, (0.0, 0.0, 0.0, 1.0));
+        assert_eq!(map.colors[2].cmyk, (0.0, 0.27, 0.79, 0.0));
 
         assert_eq!(map.symbols.len(), 5);
         assert_eq!(map.objects.len(), 5);

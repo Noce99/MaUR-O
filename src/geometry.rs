@@ -90,6 +90,21 @@ impl Rect {
         self.w == 0.0 && self.h == 0.0
     }
 
+    /// Whether this rectangle and `other` share any area, touching edges
+    /// included. The null rectangle intersects nothing.
+    ///
+    /// Edges count as overlapping so that a shape sitting exactly on the
+    /// boundary of a viewport is drawn rather than culled: half of its
+    /// antialiased stroke falls inside.
+    pub fn intersects(&self, other: &Rect) -> bool {
+        !self.is_null()
+            && !other.is_null()
+            && self.left() <= other.right()
+            && other.left() <= self.right()
+            && self.top() <= other.bottom()
+            && other.top() <= self.bottom()
+    }
+
     /// Moves the left edge to `v`, keeping the right one where it is.
     pub fn set_left(&mut self, v: f64) {
         self.w = self.right() - v;
@@ -306,15 +321,16 @@ pub fn add_ellipse(path: &mut Path, center: Point, rx: f64, ry: f64) {
     path.close_subpath();
 }
 
-/// The index range of one part of a coordinate list.
-struct PartRange {
-    begin: usize,
-    end: usize,
-    closed: bool,
+/// The index range of one part of a coordinate list: a `[begin, end)`
+/// half-open range of one subpath within a [`CoordList`].
+pub(crate) struct PartRange {
+    pub(crate) begin: usize,
+    pub(crate) end: usize,
+    pub(crate) closed: bool,
 }
 
 /// Splits a coordinate list at the hole points.
-fn part_ranges(coords: &CoordList) -> Vec<PartRange> {
+pub(crate) fn part_ranges(coords: &CoordList) -> Vec<PartRange> {
     let mut parts = Vec::new();
     let mut begin = 0usize;
     for i in 0..coords.len() {

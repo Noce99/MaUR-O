@@ -158,11 +158,8 @@ fn map_suffix(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     MAP_SUFFIXES
         .iter()
-        .find(|suffix| {
-            name.len() > suffix.len()
-                && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-        })
-        .map(|suffix| name[name.len() - suffix.len()..].to_string())
+        .find_map(|suffix| maur_o::naming::split_suffix_ignore_case(name, suffix))
+        .map(|(_, suffix)| suffix.to_string())
 }
 
 /// Collects every map under `folder`, subfolders included.
@@ -589,8 +586,9 @@ fn info_text(
         "The reference images are what the renderer above drew, at the resolution and the \
          frame above. They are ground truth for those two settings and for no others: a run \
          at another resolution, or with another frame, makes images of another size, and \
-         then every pixel differs. Whatever is measured against this archive has to be run \
-         with the same -r and the same -f.",
+         then every pixel differs. benchmark reads both from this file, so a run of it \
+         always draws at them; anything else measured against this archive has to use \
+         the same resolution and the same frame.",
     ];
     text.push('\n');
     for paragraph in paragraphs {
@@ -796,12 +794,9 @@ fn run() -> Result<ExitCode, String> {
     );
     println!();
     println!("Archive in {}", archive.display());
-    println!(
-        "Run it with: benchmark -r {} -f {} {}",
-        args.resolution,
-        args.frame,
-        archive.display()
-    );
+    // No -r or -f: benchmark has neither, and reads both from the
+    // archive's own info.txt, written above.
+    println!("Run it with: benchmark {}", archive.display());
     Ok(if failures.is_empty() {
         ExitCode::SUCCESS
     } else {

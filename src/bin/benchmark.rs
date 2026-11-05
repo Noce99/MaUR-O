@@ -124,6 +124,49 @@ fn parent_and_name(entry: &str) -> Option<(&str, &str)> {
     Some((&entry[..cut], &entry[cut + 1..]))
 }
 
+/// Which of the two folders an archive entry's parent is: `maps/` or
+/// `expected/` under the archive's root, the folder name compared without
+/// regard to case, the same way [`read_contents`] found them -- an archive
+/// made on Windows may well call them `Maps/` and `Expected/`.
+#[derive(Clone, Copy, PartialEq)]
+enum Folder {
+    Maps,
+    Expected,
+}
+
+impl Folder {
+    fn of(parent: &str, contents: &Contents) -> Option<Folder> {
+        let folder = parent.strip_prefix(contents.root.as_str())?;
+        if folder.contains('/') {
+            return None;
+        }
+        if folder.eq_ignore_ascii_case("maps") {
+            Some(Folder::Maps)
+        } else if folder.eq_ignore_ascii_case("expected") {
+            Some(Folder::Expected)
+        } else {
+            None
+        }
+    }
+
+    /// The name `plan` gives `file_name` in this folder, where it gives one.
+    fn corrected(self, plan: &Plan, file_name: &str) -> Option<String> {
+        match self {
+            Folder::Maps => plan.corrected_map(file_name),
+            Folder::Expected => plan.corrected_expected(file_name),
+        }
+        .map(|c| c.to_string())
+    }
+
+    /// The folder's own name, in the lower case `extract` always unpacks to.
+    fn name(self) -> &'static str {
+        match self {
+            Folder::Maps => "maps",
+            Folder::Expected => "expected",
+        }
+    }
+}
+
 /// Reads what an archive holds, without unpacking it.
 fn read_contents(archive: &Path) -> Result<Contents, String> {
     let file = std::fs::File::open(archive)
@@ -438,16 +481,14 @@ fn write_corrected(archive: &Path, contents: &Contents, plan: &Plan) -> Result<P
             continue;
         }
         let name = entry.name().replace('\\', "/");
-        let renamed = match parent_and_name(&name) {
-            Some((parent, file_name)) if parent == format!("{}maps", contents.root) => plan
-                .corrected_map(file_name)
-                .map(|corrected| format!("{parent}/{corrected}")),
-            Some((parent, file_name)) if parent == format!("{}expected", contents.root) => plan
-                .corrected_expected(file_name)
-                .map(|corrected| format!("{parent}/{corrected}")),
-            _ => None,
-        }
-        .unwrap_or_else(|| name.clone());
+        // The folder keeps the case it was written with: only the names
+        // inside it are being corrected.
+        let renamed = parent_and_name(&name)
+            .and_then(|(parent, file_name)| {
+                let corrected = Folder::of(parent, contents)?.corrected(plan, file_name)?;
+                Some(format!("{parent}/{corrected}"))
+            })
+            .unwrap_or_else(|| name.clone());
         // Copied compressed as it is: the payload is unchanged, only its name
         // is, and these archives are hundreds of megabytes.
         writer
@@ -471,15 +512,11 @@ fn extract(archive: &Path, contents: &Contents, plan: &Plan, into: &Path) -> Res
             continue;
         }
         let name = entry.name().replace('\\', "/");
-        let target = match parent_and_name(&name) {
-            Some((parent, file_name)) if parent == format!("{}maps", contents.root) => plan
-                .corrected_map(file_name)
-                .map(|c| into.join("maps").join(c)),
-            Some((parent, file_name)) if parent == format!("{}expected", contents.root) => plan
-                .corrected_expected(file_name)
-                .map(|c| into.join("expected").join(c)),
-            _ => None,
-        };
+        let target = parent_and_name(&name).and_then(|(parent, file_name)| {
+            let folder = Folder::of(parent, contents)?;
+            let corrected = folder.corrected(plan, file_name)?;
+            Some(into.join(folder.name()).join(corrected))
+        });
         let Some(target) = target else { continue };
         let mut out = std::fs::File::create(&target)
             .map_err(|e| format!("cannot write {}: {e}", target.display()))?;

@@ -10,8 +10,10 @@ use std::path::Path;
 use tiny_skia::{Pixmap, Transform};
 
 use crate::geometry::Rect;
+use crate::map::Map;
+use crate::ocd::{is_ocd_file, ocd_to_omap_xml};
 use crate::renderer::Renderer;
-use crate::xml_reader::read_xml_map;
+use crate::xml_reader::read_xml_map_str;
 
 /// The default resolution, in pixels per meter on the ground.
 pub const DEFAULT_RESOLUTION: f64 = 3.0;
@@ -51,6 +53,78 @@ pub struct Rendering {
     pub warnings: Vec<String>,
 }
 
+/// Reads a map file of either format the crate understands.
+///
+/// Mapper's own `.omap`/`.xmap` is read as it is; an OCAD `.ocd` file is
+/// converted first, by [`crate::ocd`], and its conversion warnings come back
+/// alongside the parser's. Which of the two a file is is decided by what is
+/// in it and not by what it is called, so a map keeps working under any name.
+pub fn read_map_file(map_file: &Path) -> Result<(Map, Vec<String>), String> {
+    let bytes = std::fs::read(map_file).map_err(|e| e.to_string())?;
+    if is_ocd_file(&bytes) {
+        let imported = ocd_to_omap_xml(&bytes)?;
+        let (map, mut warnings) = read_xml_map_str(&imported.xml)?;
+        // The import's own complaints first: they are about the file the
+        // caller named, where the parser's are about text it never sees.
+        let mut all = imported.warnings;
+        all.append(&mut warnings);
+        return Ok((map, all));
+    }
+    let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+    read_xml_map_str(&text)
+}
+
+/// The same map written as SVG, and what it turned out to be.
+pub struct SvgRendering {
+    /// The drawing itself, sized in millimeters on the paper.
+    ///
+    /// Nothing is painted where the map drew nothing: unlike [`Rendering`],
+    /// which is opaque white there, an SVG is a drawing rather than a page.
+    pub svg: String,
+    /// The extent covered, in meters on the ground, the frame included.
+    pub ground_width: i64,
+    /// The same, vertically.
+    pub ground_height: i64,
+    /// The map scale the file asked for: 15000 for a 1:15000 map.
+    pub scale_denominator: i32,
+    /// Non-fatal complaints from reading the map file.
+    pub warnings: Vec<String>,
+}
+
+/// The map's own extent with the white frame added, in mm on the paper.
+///
+/// Shared so that a map rendered to pixels and the same map written as SVG
+/// cover exactly the same ground.
+fn framed_extent(renderer: &Renderer, scale_denominator: i32, frame: f64) -> Rect {
+    let mm_per_meter = 1000.0 / scale_denominator as f64;
+    let frame_mm = frame * mm_per_meter;
+    renderer
+        .extent()
+        .adjusted(-frame_mm, -frame_mm, frame_mm, frame_mm)
+}
+
+/// Writes `map_file` as SVG, with a frame of `frame` meters on each side.
+pub fn render_map_svg(map_file: &Path, frame: f64) -> Result<SvgRendering, Error> {
+    let (map, warnings) = read_map_file(map_file)
+        .map_err(|e| Error::Read(format!("Failed to load {}: {}", map_file.display(), e)))?;
+
+    let scale_denominator = map.scale_denominator;
+    let mm_per_meter = 1000.0 / scale_denominator as f64;
+    let renderer = Renderer::new(&map);
+    let extent = framed_extent(&renderer, scale_denominator, frame);
+    if extent.width() <= 0.0 || extent.height() <= 0.0 {
+        return Err(Error::Geometry("The requested image is empty.".to_string()));
+    }
+
+    Ok(SvgRendering {
+        svg: renderer.to_svg(Some(extent), &[]),
+        ground_width: (extent.width() / mm_per_meter).round() as i64,
+        ground_height: (extent.height() / mm_per_meter).round() as i64,
+        scale_denominator,
+        warnings,
+    })
+}
+
 /// Renders `map_file` at `resolution` pixels per meter on the ground, with a
 /// white frame of `frame` meters on each side.
 pub fn render_map(map_file: &Path, resolution: f64, frame: f64) -> Result<Rendering, Error> {
@@ -68,7 +142,7 @@ pub fn render_map_window(
     frame: f64,
     window: Option<Rect>,
 ) -> Result<Rendering, Error> {
-    let (map, warnings) = read_xml_map(map_file)
+    let (map, warnings) = read_map_file(map_file)
         .map_err(|e| Error::Read(format!("Failed to load {}: {}", map_file.display(), e)))?;
 
     // Map coordinates are given in mm on the paper. The map scale relates
@@ -82,12 +156,9 @@ pub fn render_map_window(
     // The extent of the map objects, enlarged by the white frame. For an
     // empty map, the extent is a null rect at the origin, i.e. the frame
     // alone determines the size of the image.
-    let frame_mm = frame * mm_per_meter;
     let extent = match window {
         Some(window) => window,
-        None => renderer
-            .extent()
-            .adjusted(-frame_mm, -frame_mm, frame_mm, frame_mm),
+        None => framed_extent(&renderer, scale_denominator, frame),
     };
 
     let width = (extent.width() * pixel_per_mm).round();
@@ -135,5 +206,17 @@ pub fn save_pixmap(pixmap: &Pixmap, path: &Path) -> Result<(), String> {
     // background), so it is numerically identical to straight RGBA here.
     let image = image::RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixmap.data().to_vec())
         .ok_or_else(|| "invalid pixel buffer".to_string())?;
+    // JPEG has no alpha channel, and the encoder refuses RGBA outright
+    // rather than dropping it -- leaving an empty file behind.
+    let is_jpeg = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
+    if is_jpeg {
+        return image::DynamicImage::ImageRgba8(image)
+            .to_rgb8()
+            .save(path)
+            .map_err(|e| e.to_string());
+    }
     image.save(path).map_err(|e| e.to_string())
 }

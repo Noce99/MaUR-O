@@ -371,3 +371,82 @@ fn an_archive_without_maps_is_refused() {
         .failure()
         .stderr(predicates::str::contains("holds no maps/*.omap"));
 }
+
+/// Writes a zip from (entry name, contents) pairs as they are, for folder
+/// names the `archive` helper does not write.
+fn raw_archive(path: &Path, entries: &[(&str, Vec<u8>)]) {
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    for (name, contents) in entries {
+        zip.start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(contents).unwrap();
+    }
+    zip.finish().unwrap();
+}
+
+/// The names of everything in an archive.
+fn entry_names(path: &Path) -> Vec<String> {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    (0..zip.len())
+        .map(|i| zip.by_index(i).unwrap().name().to_string())
+        .collect()
+}
+
+/// `Maps/` and `Expected/`, as an archive made on Windows may call them,
+/// are found the same as `maps/` and `expected/`. They used to pass the name
+/// check and then never be unpacked: 0 maps rendered, and a run failing on
+/// "No reference images".
+#[test]
+fn folders_named_in_upper_case_are_run_like_any_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let zip = dir.path().join("suite.zip");
+    raw_archive(
+        &zip,
+        &[
+            ("Suite/Maps/000__empty.xmap", map("tests/data/empty.xmap")),
+            (
+                "Suite/Expected/000__empty.png",
+                render("tests/data/empty.xmap"),
+            ),
+        ],
+    );
+    let results = dir.path().join("Results");
+    benchmark()
+        .arg("--results")
+        .arg(&results)
+        .arg(&zip)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "1 image: 1 identical, 0 antialiasing only, 0 differing",
+        ));
+    assert!(run_folder(&results)
+        .join("predictions/000__empty.png")
+        .is_file());
+}
+
+/// And the corrected copy renames the files in them, keeping the folders'
+/// own spelling.
+#[test]
+fn names_in_upper_case_folders_are_corrected_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let zip = dir.path().join("suite.zip");
+    raw_archive(
+        &zip,
+        &[
+            ("Maps/1_a.xmap", map("tests/data/empty.xmap")),
+            ("Expected/1_a.png", wrong_image()),
+        ],
+    );
+    benchmark()
+        .arg("--results")
+        .arg(dir.path().join("Results"))
+        .arg("--names-only")
+        .arg(&zip)
+        .assert()
+        .success();
+    let names = entry_names(&dir.path().join("suite_corrected.zip"));
+    for wanted in ["Maps/000__a.xmap", "Expected/000__a.png"] {
+        assert!(names.contains(&wanted.to_string()), "{wanted}: {names:?}");
+    }
+}

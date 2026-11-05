@@ -175,6 +175,20 @@ impl Plan {
     }
 }
 
+/// Splits `name` into what comes before `suffix` and the suffix as `name`
+/// spells it, if `name` ends with `suffix` regardless of ASCII case and has
+/// something before it.
+///
+/// Safe on any file name: where the suffix's length would cut `name` inside
+/// a multi-byte character (`Café.pdf` against `.omap`), it is simply not a
+/// match, rather than a panicking slice.
+pub fn split_suffix_ignore_case<'a>(name: &'a str, suffix: &str) -> Option<(&'a str, &'a str)> {
+    let at = name.len().checked_sub(suffix.len()).filter(|&at| at > 0)?;
+    let tail = name.get(at..)?;
+    tail.eq_ignore_ascii_case(suffix)
+        .then(|| (&name[..at], tail))
+}
+
 /// Splits a file name into its stem and its suffix, suffix including the dot.
 ///
 /// Not `Path::extension`, which would cut a name like
@@ -182,13 +196,8 @@ impl Plan {
 /// only a known map or image suffix counts as one.
 fn split_suffix(name: &str) -> (&str, &str) {
     for suffix in [".omap", ".xmap", ".png"] {
-        if name.len() > suffix.len()
-            && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-        {
-            return (
-                &name[..name.len() - suffix.len()],
-                &name[name.len() - suffix.len()..],
-            );
+        if let Some(split) = split_suffix_ignore_case(name, suffix) {
+            return split;
         }
     }
     match name.rfind('.') {

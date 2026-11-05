@@ -1,0 +1,132 @@
+//! CLI-level checks for `contours_to_raster`: it runs Steps 1-4 end to end
+//! on a small fixture, `--create_svg` writes the ten validation files (eight
+//! numbered, plus the unnumbered "final" and "contours_function" ones), and
+//! the documented exit codes fire on a missing map or config file.
+
+use assert_cmd::Command;
+use predicates::prelude::*;
+
+fn contours_to_raster() -> Command {
+    Command::cargo_bin("contours_to_raster").unwrap()
+}
+
+/// Two nested closed contours, one resolved by a Slope Line and the other by
+/// the closed-hill heuristic -- both within Step 2, so this fixture never
+/// reaches Step 3. See the fixture's own comment in
+/// `tests/data/contours.xmap`.
+#[test]
+fn contours() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("contours.tif");
+    contours_to_raster()
+        .arg("tests/data/contours.xmap")
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("2 contours"))
+        .stdout(predicates::str::contains("1 slope line(s)"))
+        .stdout(predicates::str::contains("1 closed hill(s)"))
+        .stdout(predicates::str::contains(
+            "elevation resolved for 2/2 contours",
+        ));
+}
+
+/// `--create_svg` writes into this run's own `contours_to_raster_<timestamp>`
+/// folder under `--results`, not next to the map or the output file.
+#[test]
+fn create_svg_writes_ten_non_empty_files_in_a_timestamped_run_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let results = dir.path().join("Results");
+    let out = dir.path().join("contours.tif");
+    contours_to_raster()
+        .arg("tests/data/contours.xmap")
+        .arg(&out)
+        .arg("--results")
+        .arg(&results)
+        .arg("--create_svg")
+        .assert()
+        .success();
+
+    let entries: Vec<_> = std::fs::read_dir(&results)
+        .unwrap_or_else(|e| panic!("{}: {e}", results.display()))
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(entries.len(), 1, "expected exactly one run folder");
+    let run_dir = &entries[0];
+    assert!(
+        run_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("contours_to_raster_"),
+        "unexpected run folder name: {}",
+        run_dir.display()
+    );
+
+    for name in [
+        "contours_contours_function.svg",
+        "00_contours_step1.svg",
+        "01_contours_step1_close_search.svg",
+        "02_contours_step1_growing_seeking.svg",
+        "03_contours_step1_growing_matching.svg",
+        "04_contours_step2.svg",
+        "05_contours_step3_rain.svg",
+        "06_contours_step3_anti_rain.svg",
+        "07_contours_step4.svg",
+        "contours_final.svg",
+    ] {
+        let svg = run_dir.join(name);
+        let contents =
+            std::fs::read_to_string(&svg).unwrap_or_else(|e| panic!("{}: {e}", svg.display()));
+        assert!(contents.starts_with("<svg"));
+        assert!(contents.trim_end().ends_with("</svg>"));
+    }
+}
+
+#[test]
+fn missing_map_file_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("missing.tif");
+    contours_to_raster()
+        .arg("tests/data/does-not-exist.xmap")
+        .arg(&out)
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn missing_config_file_exits_3() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("contours.tif");
+    contours_to_raster()
+        .arg("tests/data/contours.xmap")
+        .arg(&out)
+        .arg("--config")
+        .arg("tests/data/does-not-exist.conf")
+        .assert()
+        .failure()
+        .code(3);
+}
+
+/// An OCAD map is converted on the way in, as `map_to_image` does. It used
+/// to be read as XML and refused at once, exit code 2: "stream did not
+/// contain valid UTF-8".
+///
+/// `testit.ocd` has no contour symbols, so the run does not get far -- but
+/// only after reading the file, which is what this checks. (A map with
+/// contours, `Lake Sammamish.ocd`, works too, but takes about a minute.)
+#[test]
+fn an_ocd_map_is_converted_on_the_way_in() {
+    let dir = tempfile::tempdir().unwrap();
+    contours_to_raster()
+        .arg("maps/testit.ocd")
+        .arg("--results")
+        .arg(dir.path())
+        .assert()
+        .code(4)
+        .stderr(predicates::str::contains(
+            "no Contour, Slope Line, Jump or Heavy Object symbols were found",
+        ))
+        .stderr(predicates::str::contains("UTF-8").not());
+}

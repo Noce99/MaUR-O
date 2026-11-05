@@ -1,10 +1,35 @@
 //! **Ma**p **U**tils in **R**ust for **O**rienteering.
 //!
-//! Renders [OpenOrienteering Mapper](https://www.openorienteering.org/apps/mapper/)
-//! `.omap`/`.xmap` files to raster images, and measures how closely it does
-//! so. Everything is pure Rust, with a dedicated crate for each concern — XML
-//! parsing, path stroking and rasterization, font shaping — so a map can be
-//! drawn without Mapper itself, Qt, or a graphical environment installed.
+//! Everything here is built on one data model: an orienteering map, as
+//! [OpenOrienteering Mapper](https://www.openorienteering.org/apps/mapper/)
+//! writes it in an `.omap`/`.xmap` file. [`xml_reader`] parses a file into
+//! [`map`] and [`xml_writer`] writes one back out; every other module is a
+//! consumer of that model, and a new thing to do with a map is a new module
+//! rather than a new parser.
+//!
+//! Rendering is the largest of those consumers: this crate draws a map to a
+//! raster image, and measures how closely it does so. Everything is pure
+//! Rust, with a dedicated crate for each concern — XML parsing, path stroking
+//! and rasterization, font shaping — so a map can be drawn without Mapper
+//! itself, Qt, or a graphical environment installed.
+//!
+//! # Beyond drawing
+//!
+//! [`ocd`] reads OCAD's own file format, so a map in it can be used like any
+//! other. [`runnability`] answers a different question of the same model: not
+//! what the map looks like, but how fast it is to run through, as a grid a
+//! route can be searched over — and [`route`] searches it, for the way
+//! between two controls that takes the least time. [`validate`] asks the
+//! question a mapper asks: where does this map depart from the standard it
+//! is drawn to? And [`dem`] shades a model of the ground, so that terrain
+//! can be seen at all, while [`dem_geo_tiff_evaluator`] scores a predicted
+//! one against a ground truth. [`course`] lays a course out over a map: where the
+//! circles, the lines between them and the numbers beside them go. And
+//! [`svg`] writes the same drawing the renderer makes out as vector paths
+//! rather than pixels. [`stats`] counts what a map holds — its objects, the
+//! symbols it uses, how far its lines run and how much ground it covers —
+//! and [`snap`] says what is *at* a place on it, which is what a control
+//! being placed needs to know.
 //!
 //! Mapper is both the inspiration and the yardstick. Its rendering rules are
 //! what this crate reproduces: the drawing order a map's colours define, the
@@ -67,11 +92,24 @@ pub mod all_symbols;
 pub mod archive_info;
 pub mod bundle;
 pub mod bus;
+pub mod contour_geometry;
+pub mod contour_raster;
+pub mod contour_symbols;
+pub mod contours_to_raster_config;
+pub mod contours_to_raster_svg;
+pub mod course;
+pub mod dem;
+pub mod dem_from_contours;
+pub mod dem_geo_tiff_evaluator;
 pub mod differences;
 pub mod geometry;
+pub mod geotiff;
+pub mod gravity_model;
 pub mod map;
 pub mod map_areas;
 pub mod naming;
+pub mod ocd;
+pub mod ocd_crs;
 pub mod osm;
 pub mod osm_convert;
 pub mod osm_style;
@@ -80,6 +118,18 @@ pub mod qbezier;
 pub mod render;
 pub mod renderer;
 pub mod report;
+pub mod route;
+pub mod runnability;
+pub mod snap;
+pub mod stats;
+pub mod step1_extract;
+pub mod step2_obvious_gravity;
+pub mod step3_rain_drop;
+pub mod step4_elevation;
+pub mod step5_elevation_raster;
+pub mod step5_gravity_raster;
+pub mod svg;
 pub mod text;
+pub mod validate;
 pub mod xml_reader;
 pub mod xml_writer;

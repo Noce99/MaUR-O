@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A small map exercising contours_to_raster's Steps 0-1: Contour A (a plain
+  100x100m square) encloses Contour B (a 40x40m square, one edge replaced by
+  a cubic Bezier curve). A Slope Line on A's southern edge resolves A
+  directly; B, enclosing nothing itself, resolves via the closed-hill
+  heuristic. Both are Step 1's own direct-evidence rules, so this fixture
+  never reaches Step 2 at all. The map scale is 1:10000, so one meter on the
+  ground is 100 native units (0.1 mm on paper).
+-->
+<map xmlns="http://openorienteering.org/apps/mapper/xml/v2" version="9">
+<notes></notes>
+<georeferencing scale="10000">
+ <ref_point x="0" y="0"/>
+</georeferencing>
+<colors count="1">
+ <color priority="0" name="Brown" c="0" m="0.5" y="1" k="0" opacity="1"><rgb method="cmyk" r="1" g="0.5" b="0"/></color>
+</colors>
+<barrier version="6" required="0.6.0">
+ <symbols count="2" id="">
+  <symbol type="2" id="0" code="101.0" name="Contour">
+   <line_symbol color="0" line_width="35" minimum_length="0" join_style="1" cap_style="0" start_offset="0" end_offset="0" dashed="false" segment_length="0" end_length="0" dash_length="0" break_length="0" dashes_in_group="1" in_group_break_length="0" mid_symbols_per_spot="1" mid_symbol_distance="0"/>
+  </symbol>
+  <symbol type="1" id="1" code="101.1" name="Slope line">
+   <point_symbol rotatable="true" inner_radius="0" inner_color="-1" outer_width="0" outer_color="-1" elements="0"/>
+  </symbol>
+ </symbols>
+</barrier>
+<parts count="1" current="0">
+ <part name="default">
+  <objects count="3">
+   <object type="1" symbol="0"><coords count="5">0 0;10000 0;10000 10000;0 10000;0 0 2;</coords></object>
+   <object type="1" symbol="0"><coords count="7">3000 3000;7000 3000;7000 7000;3000 7000 1;2500 6500;2500 3500;3000 3000 2;</coords></object>
+   <object type="0" symbol="1" rotation="0"><coords count="1">5000 0;</coords></object>
+  </objects>
+ </part>
+</parts>
+</map>

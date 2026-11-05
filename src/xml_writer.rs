@@ -253,7 +253,7 @@ pub fn color_element(priority: usize, color: &Color) -> String {
 
 /// The inks of an RGB colour, black taken as far as it will go: what Mapper
 /// derives a colour's CMYK from when it is defined by RGB.
-fn rgb_to_cmyk((r, g, b): (f32, f32, f32)) -> (f64, f64, f64, f64) {
+pub(crate) fn rgb_to_cmyk((r, g, b): (f32, f32, f32)) -> (f64, f64, f64, f64) {
     let (r, g, b) = (f64::from(r), f64::from(g), f64::from(b));
     let k = 1.0 - r.max(g).max(b);
     if k >= 1.0 {
@@ -790,6 +790,7 @@ mod tests {
         let color = Color {
             name: "Road & casing".to_string(),
             rgb: (1.0, 0.5, 0.25),
+            cmyk: rgb_to_cmyk((1.0, 0.5, 0.25)),
             opacity: 0.4,
         };
         let line = LineSymbol {

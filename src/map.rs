@@ -200,14 +200,31 @@ pub type CoordList = Vec<Coord>;
 ///
 /// The index of a color in `Map::colors` is its priority: it determines the
 /// drawing order of the whole map. Color 0 is drawn on top of all others.
-/// Only the RGB representation is kept; the CMYK and spot color definitions
-/// of the file format matter for printing, not for a raster image.
+///
+/// Both representations of the color are kept. Drawing uses [`rgb`](Self::rgb);
+/// [`cmyk`](Self::cmyk) is what an orienteering map is actually specified in --
+/// a standard defines its colors as ink percentages, so checking a map against
+/// one compares CMYK rather than the screen color derived from it. The spot
+/// color definitions of the file format are still dropped: they matter to a
+/// printing house, and to nothing here.
 #[derive(Clone, Debug)]
 pub struct Color {
     /// What the map calls this colour, e.g. "Upper purple".
     pub name: String,
     /// Red, green, blue, each in `[0, 1]`.
     pub rgb: (f32, f32, f32),
+    /// Cyan, magenta, yellow and black ink, each in `[0, 1]`.
+    ///
+    /// The file's own values where it gives them, and derived from
+    /// [`rgb`](Self::rgb) where it defines the colour by RGB alone -- so the
+    /// two always describe the same colour, whichever way round the file put
+    /// it.
+    ///
+    /// To full precision, where [`rgb`](Self::rgb) is single: this is what a
+    /// map is specified in, and checking one against a standard compares
+    /// these to the decimal the file was written to, where a rounding of its
+    /// own would decide the answer.
+    pub cmyk: (f64, f64, f64, f64),
     /// Opacity in `[0, 1]`. Below 1 the colour is blended with whatever has
     /// already been drawn under it.
     pub opacity: f64,
@@ -218,6 +235,7 @@ impl Default for Color {
         Color {
             name: String::new(),
             rgb: (0.0, 0.0, 0.0),
+            cmyk: (0.0, 0.0, 0.0, 1.0),
             opacity: 1.0,
         }
     }
@@ -282,6 +300,10 @@ pub struct PointSymbol {
     pub is_helper_symbol: bool,
     /// Whether an object's own rotation turns this symbol with it.
     pub is_rotatable: bool,
+    /// The picture of the symbol the file carries, for a panel to show
+    /// beside its name -- a `data:` URI, usually. Empty where the file has
+    /// none; the crate neither reads it nor draws it.
+    pub icon_src: String,
 
     /// Radius of the filled dot, in mm.
     pub inner_radius: f64,
@@ -415,6 +437,10 @@ pub struct LineSymbol {
     pub is_helper_symbol: bool,
     /// Whether an object's own rotation turns this symbol with it.
     pub is_rotatable: bool,
+    /// The picture of the symbol the file carries, for a panel to show
+    /// beside its name -- a `data:` URI, usually. Empty where the file has
+    /// none; the crate neither reads it nor draws it.
+    pub icon_src: String,
 
     /// Color index of the stroke, -1 for none. A line with no colour still
     /// draws its borders and its point symbols.
@@ -504,6 +530,7 @@ impl Default for LineSymbol {
         LineSymbol {
             name: String::new(),
             code: String::new(),
+            icon_src: String::new(),
             is_hidden: false,
             is_helper_symbol: false,
             is_rotatable: false,
@@ -616,6 +643,10 @@ pub struct AreaSymbol {
     pub is_helper_symbol: bool,
     /// Whether an object's own rotation turns this symbol with it.
     pub is_rotatable: bool,
+    /// The picture of the symbol the file carries, for a panel to show
+    /// beside its name -- a `data:` URI, usually. Empty where the file has
+    /// none; the crate neither reads it nor draws it.
+    pub icon_src: String,
 
     /// Color index of the plain fill, -1 for none. An area with no fill
     /// colour still draws its patterns.
@@ -656,6 +687,10 @@ pub struct TextSymbol {
     pub is_helper_symbol: bool,
     /// Whether an object's own rotation turns this symbol with it.
     pub is_rotatable: bool,
+    /// The picture of the symbol the file carries, for a panel to show
+    /// beside its name -- a `data:` URI, usually. Empty where the file has
+    /// none; the crate neither reads it nor draws it.
+    pub icon_src: String,
 
     /// The font family asked for, which is resolved against the fonts the
     /// machine actually has when the text is drawn.
@@ -710,6 +745,7 @@ impl Default for TextSymbol {
         TextSymbol {
             name: String::new(),
             code: String::new(),
+            icon_src: String::new(),
             is_hidden: false,
             is_helper_symbol: false,
             is_rotatable: false,
@@ -739,6 +775,7 @@ impl Default for TextSymbol {
 
 /// A resolved part of a [`CombinedSymbol`], filled in by
 /// [`Map::resolve_references`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PartRef {
     /// The part names a symbol the file does not contain, and draws nothing.
     None,
@@ -769,6 +806,10 @@ pub struct CombinedSymbol {
     pub is_helper_symbol: bool,
     /// Whether an object's own rotation turns this symbol with it.
     pub is_rotatable: bool,
+    /// The picture of the symbol the file carries, for a panel to show
+    /// beside its name -- a `data:` URI, usually. Empty where the file has
+    /// none; the crate neither reads it nor draws it.
+    pub icon_src: String,
 
     /// The private parts of this symbol.
     pub owned_parts: Vec<Symbol>,
@@ -810,6 +851,42 @@ impl Symbol {
             Symbol::Area(s) => s.is_hidden,
             Symbol::Text(s) => s.is_hidden,
             Symbol::Combined(s) => s.is_hidden,
+        }
+    }
+
+    /// What the symbol set numbers this symbol, e.g. "308".
+    ///
+    /// Text rather than a number: a symbol code is hierarchical, and may
+    /// carry a letter.
+    pub fn code(&self) -> &str {
+        match self {
+            Symbol::Point(s) => &s.code,
+            Symbol::Line(s) => &s.code,
+            Symbol::Area(s) => &s.code,
+            Symbol::Text(s) => &s.code,
+            Symbol::Combined(s) => &s.code,
+        }
+    }
+
+    /// What the symbol set calls this symbol, e.g. "Marsh".
+    pub fn name(&self) -> &str {
+        match self {
+            Symbol::Point(s) => &s.name,
+            Symbol::Line(s) => &s.name,
+            Symbol::Area(s) => &s.name,
+            Symbol::Text(s) => &s.name,
+            Symbol::Combined(s) => &s.name,
+        }
+    }
+
+    /// The picture of the symbol the file carries, or an empty string.
+    pub fn icon_src(&self) -> &str {
+        match self {
+            Symbol::Point(s) => &s.icon_src,
+            Symbol::Line(s) => &s.icon_src,
+            Symbol::Area(s) => &s.icon_src,
+            Symbol::Text(s) => &s.icon_src,
+            Symbol::Combined(s) => &s.icon_src,
         }
     }
 
@@ -936,6 +1013,94 @@ impl Object {
     }
 }
 
+/// The symbols a symbol actually draws with.
+///
+/// Itself, unless it is a combination -- a road is a wide line with two thin
+/// ones on it -- in which case its parts, resolved recursively and in
+/// drawing order. Anything asking what kind of thing an object is, rather
+/// than how to draw it, has to look through combinations this way.
+///
+/// Appends to `out` rather than returning, so a caller classifying every
+/// object on a map reuses one buffer.
+pub fn symbol_leaves<'m>(symbol: &'m Symbol, map: &'m Map, out: &mut Vec<&'m Symbol>) {
+    let Symbol::Combined(combined) = symbol else {
+        out.push(symbol);
+        return;
+    };
+    for part in &combined.parts {
+        match *part {
+            PartRef::Shared(i) => {
+                if let Some(part) = map.symbols.get(i) {
+                    symbol_leaves(part, map, out);
+                }
+            }
+            PartRef::Private(i) => {
+                if let Some(part) = combined.owned_parts.get(i) {
+                    symbol_leaves(part, map, out);
+                }
+            }
+            PartRef::None => {}
+        }
+    }
+}
+
+/// Where a map sits on the earth, as its file declares it.
+///
+/// Mapper writes this whether or not the map is really georeferenced: a map
+/// drawn on no ground at all still carries a scale. What makes it a
+/// georeference is the projected CRS — [`epsg`](Self::epsg) and the reference
+/// point in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Georeferencing {
+    /// The map scale: 15000 for a 1:15000 map.
+    pub scale: i32,
+    /// The EPSG code of the projected CRS, or 0 where the file names none.
+    pub epsg: i32,
+    /// The easting of the reference point, in the projected CRS.
+    pub ref_point_x: f64,
+    /// The northing of the reference point, in the projected CRS.
+    pub ref_point_y: f64,
+    /// Where that reference point is on the paper, in mm: Mapper's
+    /// `map_ref_point`, the file's `<georeferencing><ref_point>` (as opposed
+    /// to the projected one inside `<projected_crs>`). `(0, 0)` where the
+    /// file gives none, which is what Mapper itself assumes then.
+    pub map_ref_point_x: f64,
+    /// See [`map_ref_point_x`](Self::map_ref_point_x).
+    pub map_ref_point_y: f64,
+    /// The angle between grid north and map north, in degrees.
+    pub grivation: f64,
+    /// Whether the file actually said so.
+    ///
+    /// Worth keeping apart from a grivation of zero: a map whose rotation is
+    /// undeclared is not a map declared to be unrotated, and anything
+    /// solving a georeference has to know which it is looking at.
+    pub grivation_specified: bool,
+    /// The combined ground-to-grid scale factor (Mapper's own
+    /// `combined_scale_factor`: a projection's grid scale factor times the
+    /// elevation/auxiliary scale factor) -- only the latter is ever actually
+    /// stored in the file, as `<georeferencing auxiliary_scale_factor="…">`,
+    /// so this is that value alone. `1.0` (the multiplicative identity, not
+    /// `f64::default()`'s `0.0`) where the file names none -- which is why
+    /// this struct's own `Default` is hand-written rather than derived.
+    pub auxiliary_scale_factor: f64,
+}
+
+impl Default for Georeferencing {
+    fn default() -> Self {
+        Georeferencing {
+            scale: 0,
+            epsg: 0,
+            ref_point_x: 0.0,
+            ref_point_y: 0.0,
+            map_ref_point_x: 0.0,
+            map_ref_point_y: 0.0,
+            grivation: 0.0,
+            grivation_specified: false,
+            auxiliary_scale_factor: 1.0,
+        }
+    }
+}
+
 /// A map: colors, symbols, and the objects of all map parts.
 ///
 /// Map parts are merged: they are a course setting feature which does not
@@ -957,6 +1122,11 @@ pub struct Map {
     /// Everything drawn on the map, in the order the file gives it — which is
     /// not the order it is drawn in; see [`colors`](Self::colors).
     pub objects: Vec<Object>,
+    /// Where the map sits on the earth, where the file says.
+    pub georeferencing: Option<Georeferencing>,
+    /// What symbol set the map says it is drawn with -- "ISOM 2017-2",
+    /// "ISSprOM 2019", "OCD" -- where the file names one.
+    pub symbol_set: Option<String>,
 }
 
 impl Map {
@@ -1013,8 +1183,70 @@ impl Map {
             }
         }
 
+        self.break_part_cycles();
+
         for object in &mut self.objects {
             object.symbol_index = by_id.get(&object.symbol_id).copied();
+        }
+    }
+
+    /// Cuts every shared part that would make a combined symbol contain
+    /// itself, directly or through a chain of other combined symbols.
+    ///
+    /// A file can say so -- a combined symbol listing its own id as a part,
+    /// or an OCD area whose border is an area whose border is the first --
+    /// and everything that looks through combinations ([`symbol_leaves`], the
+    /// renderer) recurses, so a cycle left in would overflow the stack. The
+    /// part closing the cycle draws nothing instead, which is all a symbol
+    /// made of itself could ever draw.
+    ///
+    /// An iterative depth-first search, so a long (acyclic) chain of
+    /// combinations does not overflow the stack here either.
+    fn break_part_cycles(&mut self) {
+        const UNVISITED: u8 = 0;
+        const ON_STACK: u8 = 1;
+        const DONE: u8 = 2;
+        let n = self.symbols.len();
+        let mut state = vec![UNVISITED; n];
+        // (symbol index, index of the next part to look at)
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        for root in 0..n {
+            if state[root] != UNVISITED {
+                continue;
+            }
+            state[root] = ON_STACK;
+            stack.push((root, 0));
+            while let Some(&mut (node, ref mut next)) = stack.last_mut() {
+                let target = match &self.symbols[node] {
+                    Symbol::Combined(c) if *next < c.parts.len() => Some(c.parts[*next]),
+                    _ => None,
+                };
+                let Some(part) = target else {
+                    state[node] = DONE;
+                    stack.pop();
+                    continue;
+                };
+                let part_index = *next;
+                *next += 1;
+                let PartRef::Shared(child) = part else {
+                    continue;
+                };
+                if child >= n {
+                    continue;
+                }
+                match state[child] {
+                    ON_STACK => {
+                        if let Symbol::Combined(c) = &mut self.symbols[node] {
+                            c.parts[part_index] = PartRef::None;
+                        }
+                    }
+                    UNVISITED => {
+                        state[child] = ON_STACK;
+                        stack.push((child, 0));
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 }
@@ -1023,5 +1255,7 @@ impl Map {
 static REGISTRATION_BLACK: std::sync::LazyLock<Color> = std::sync::LazyLock::new(|| Color {
     name: "Registration black".to_string(),
     rgb: (0.0, 0.0, 0.0),
+    // Every plate at full ink: that is what makes it register.
+    cmyk: (1.0, 1.0, 1.0, 1.0),
     opacity: 1.0,
 });
