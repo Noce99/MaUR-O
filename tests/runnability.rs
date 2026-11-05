@@ -179,3 +179,57 @@ fn used_codes_come_back_in_reading_order() {
     // And every code listed really claimed something.
     assert!(raster.used_codes.iter().all(|u| u.cells > 0));
 }
+
+/// Every object used to clear, and then read back, a mask the size of the
+/// whole grid: a map of thousands of small objects on a fine grid -- a
+/// forest of boulders and knolls -- spent minutes doing nothing. Each object
+/// now touches only the cells under it. This is quick even unoptimized;
+/// the old way it would take far over the limit.
+#[test]
+fn many_small_objects_on_a_large_grid_are_quick() {
+    let (side, count) = (150, 6000);
+    let mut objects = String::new();
+    for i in 0..count {
+        // Short dashes on a lattice over the whole sheet, in mm * 1000.
+        let x = (i % 80) * side * 1000 / 80;
+        let y = (i / 80) * side * 1000 / (count / 80);
+        objects.push_str(&format!(
+            r#"<object type="1" symbol="0"><coords count="2">{x} {y};{} {};</coords></object>"#,
+            x + 500,
+            y + 300
+        ));
+    }
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<map xmlns="http://openorienteering.org/apps/mapper/xml/v2" version="9">
+<georeferencing scale="10000"/>
+<colors count="1"><color priority="0" name="Black" c="0" m="0" y="0" k="1" opacity="1"/></colors>
+<symbols count="1"><symbol type="2" id="0" code="203" name="Dash"><line_symbol color="0" line_width="250"/></symbol></symbols>
+<parts count="1"><part name="p"><objects count="{count}">{objects}</objects></part></parts>
+</map>"#
+    );
+    let map = maur_o::xml_reader::read_xml_map_str(&xml).unwrap().0;
+    let start = std::time::Instant::now();
+    let raster = build(
+        &map,
+        &Options {
+            pixel_size: 0.1,
+            ..options(&[("203", 0.2)])
+        },
+    )
+    .unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        raster.width * raster.height > 2_000_000,
+        "{} x {}",
+        raster.width,
+        raster.height
+    );
+    assert_eq!(raster.used_codes.len(), 1);
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "{count} objects on {} x {} cells took {elapsed:?}",
+        raster.width,
+        raster.height
+    );
+}

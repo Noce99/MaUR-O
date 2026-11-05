@@ -130,10 +130,13 @@ impl Tree {
     /// Every `(parent, child)` edge of `T`, for `--create_svg`'s own
     /// `07_<map_name>_step4.svg`.
     fn edges(&self) -> Vec<(usize, usize)> {
-        self.nodes
+        let mut edges: Vec<(usize, usize)> = self
+            .nodes
             .iter()
             .filter_map(|(&i, n)| n.parent.map(|p| (p, i)))
-            .collect()
+            .collect();
+        edges.sort_unstable();
+        edges
     }
 }
 
@@ -323,7 +326,10 @@ fn elevation_proliferation(
         )
     });
 
-    let mut votes: HashMap<usize, HitVote> = HashMap::new();
+    // Decided in contour order: each decision can evict and re-parent part
+    // of `T`, so the next one depends on it, and a `HashMap`'s order changes
+    // from run to run -- and the DEM with it.
+    let mut votes: std::collections::BTreeMap<usize, HitVote> = std::collections::BTreeMap::new();
     for (source, (dx, dy)) in placed_sources(&ls, side, config.sources_per_contour_segment) {
         let dir = if anti { (-dx, -dy) } else { (dx, dy) };
         let Some((hit_idx, at, drop_path)) =

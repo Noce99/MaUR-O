@@ -417,13 +417,25 @@ fn to_grid(bounds: Rect, pixel_size: f64) -> Transform {
     )
 }
 
-/// Draws one shape onto a mask, in the way its kind calls for.
-fn draw(mask: &mut Mask, shape: &Shape, transform: Transform, pixel_size: f64, buffer_lines: bool) {
+/// Draws one shape onto a mask, in the way its kind calls for, and returns
+/// the box of cells it can have touched (see [`Cells`]), or `None` if it drew
+/// nothing.
+fn draw(
+    mask: &mut Mask,
+    shape: &Shape,
+    transform: Transform,
+    pixel_size: f64,
+    buffer_lines: bool,
+) -> Option<Cells> {
+    let (width, height) = (mask.width(), mask.height());
+    let filled = |mask: &mut Mask, path: &tiny_skia::Path, rule: FillRule| {
+        mask.fill_path(path, rule, true, transform);
+        Cells::around(path.bounds(), transform, width, height)
+    };
     match shape.kind {
         Kind::Area => {
-            if let Some(path) = to_skia_path(&shape.path) {
-                mask.fill_path(&path, FillRule::EvenOdd, true, transform);
-            }
+            let path = to_skia_path(&shape.path)?;
+            filled(mask, &path, FillRule::EvenOdd)
         }
         Kind::Line => {
             // A cell's diagonal, so that a line crossing the grid at an angle
@@ -439,25 +451,62 @@ fn draw(mask: &mut Mask, shape: &Shape, transform: Transform, pixel_size: f64, b
                 line_join: LineJoin::Round,
                 ..Stroke::default()
             };
-            let Some(path) = to_skia_path(&shape.path) else {
-                return;
-            };
+            let path = to_skia_path(&shape.path)?;
             // Stroked in mm and filled through the same transform, so the
             // width is the one asked for rather than one cell whatever the
             // scale. Its outline may cross itself at a sharp corner, which is
             // what the winding rule is for.
-            if let Some(outline) = path.stroke(&stroke, (1.0 / pixel_size) as f32) {
-                mask.fill_path(&outline, FillRule::Winding, true, transform);
-            }
+            let outline = path.stroke(&stroke, (1.0 / pixel_size) as f32)?;
+            filled(mask, &outline, FillRule::Winding)
         }
         Kind::Point => {
             let radius = pixel_size / std::f64::consts::SQRT_2;
             let mut circle = Path::new();
             add_ellipse(&mut circle, shape.origin, radius, radius);
-            if let Some(path) = to_skia_path(&circle) {
-                mask.fill_path(&path, FillRule::Winding, true, transform);
-            }
+            let path = to_skia_path(&circle)?;
+            filled(mask, &path, FillRule::Winding)
         }
+    }
+}
+
+/// A box of grid cells, `x0..x1` by `y0..y1`, inside the grid.
+///
+/// Each shape covers a small part of a large grid, so the main pass clears
+/// and reads only the cells a shape can have touched rather than the whole
+/// mask once per shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cells {
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+}
+
+impl Cells {
+    /// The cells under `bounds` (in mm) once `transform` puts it on a
+    /// `width` x `height` grid, one cell wider all round for antialiasing
+    /// and rounding, or `None` if that misses the grid.
+    ///
+    /// `transform` is [`to_grid`]'s, a scale and a translation, so the box
+    /// of the transformed path is the transformed box.
+    fn around(
+        bounds: tiny_skia::Rect,
+        transform: Transform,
+        width: u32,
+        height: u32,
+    ) -> Option<Cells> {
+        let x = |v: f32| f64::from(v) * f64::from(transform.sx) + f64::from(transform.tx);
+        let y = |v: f32| f64::from(v) * f64::from(transform.sy) + f64::from(transform.ty);
+        let (ax, bx) = (x(bounds.left()), x(bounds.right()));
+        let (ay, by) = (y(bounds.top()), y(bounds.bottom()));
+        let clamp = |v: f64, max: u32| v.clamp(0.0, f64::from(max)) as usize;
+        let cells = Cells {
+            x0: clamp(ax.min(bx).floor() - 1.0, width),
+            y0: clamp(ay.min(by).floor() - 1.0, height),
+            x1: clamp(ax.max(bx).ceil() + 1.0, width),
+            y1: clamp(ay.max(by).ceil() + 1.0, height),
+        };
+        (cells.x0 < cells.x1 && cells.y0 < cells.y1).then_some(cells)
     }
 }
 
@@ -535,9 +584,11 @@ pub fn build(map: &Map, options: &Options) -> Result<Raster, String> {
     let mut mask = Mask::new(width, height)
         .ok_or_else(|| format!("Failed to allocate a {width} x {height} raster."))?;
 
+    // The mask starts clear, and each shape clears what it drew as it is
+    // read back, so it is clear again for the next one.
+    let row_len = width as usize;
     for shape in &shapes {
-        mask.clear();
-        draw(
+        let cells = draw(
             &mut mask,
             shape,
             transform,
@@ -558,13 +609,20 @@ pub fn build(map: &Map, options: &Options) -> Result<Raster, String> {
         });
         let speed = shape.speed as f32;
         let mut claimed = 0u64;
-        for (i, &coverage) in mask.data().iter().enumerate() {
-            if coverage == 0 {
-                continue;
+        if let Some(cells) = cells {
+            let data = mask.data_mut();
+            for row in cells.y0..cells.y1 {
+                let start = row * row_len;
+                for i in start + cells.x0..start + cells.x1 {
+                    if data[i] == 0 {
+                        continue;
+                    }
+                    data[i] = 0;
+                    values[i] = speed;
+                    code_index[i] = idx as i32;
+                    claimed += 1;
+                }
             }
-            values[i] = speed;
-            code_index[i] = idx as i32;
-            claimed += 1;
         }
         used[at].cells += claimed;
     }
@@ -751,5 +809,97 @@ fn mask_outside_hull(
         if coverage == 0 {
             values[i] = f32::NAN;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(x: f64, y: f64) -> Point {
+        Point { x, y }
+    }
+
+    fn shape(kind: Kind, points: &[(f64, f64)]) -> Shape {
+        let mut path = Path::new();
+        if kind != Kind::Point {
+            path.move_to(p(points[0].0, points[0].1));
+            for &(x, y) in &points[1..] {
+                path.line_to(p(x, y));
+            }
+            if kind == Kind::Area {
+                path.close_subpath();
+            }
+        }
+        Shape {
+            code: "1".to_string(),
+            speed: 1.0,
+            kind,
+            path,
+            origin: p(points[0].0, points[0].1),
+            object_index: 0,
+            bounds: Rect::from_ltrb(0.0, 0.0, 0.0, 0.0),
+        }
+    }
+
+    /// The main pass reads, and clears, only the box `draw` reports: a cell
+    /// drawn outside it would be missed for this shape and then handed to
+    /// whichever later shape's box covers it. So every cell `draw` touches
+    /// has to be inside, for every kind of shape, at any cell size, whether
+    /// on the grid, half off it or across its corner.
+    #[test]
+    fn every_cell_a_shape_draws_is_inside_the_box_it_reports() {
+        let bounds = Rect::from_ltrb(-3.0, 2.0, 17.0, 14.0);
+        let shapes = [
+            shape(Kind::Area, &[(1.0, 3.0), (9.3, 4.1), (6.2, 11.7)]),
+            shape(
+                Kind::Area,
+                &[(-8.0, 0.0), (2.0, 0.0), (2.0, 5.0), (-8.0, 5.0)],
+            ),
+            shape(Kind::Line, &[(0.3, 13.9), (16.9, 2.2)]),
+            shape(Kind::Line, &[(5.0, 5.0), (5.0, 5.0001)]),
+            shape(Kind::Line, &[(-4.0, 8.0), (20.0, 8.0), (20.0, 15.0)]),
+            shape(Kind::Point, &[(4.4, 7.7)]),
+            shape(Kind::Point, &[(-3.0, 2.0)]),
+            shape(Kind::Point, &[(17.0, 14.0)]),
+        ];
+        for pixel_size in [0.13, 0.5, 1.0, 3.7] {
+            let width = (bounds.width() / pixel_size).ceil() as u32;
+            let height = (bounds.height() / pixel_size).ceil() as u32;
+            let transform = to_grid(bounds, pixel_size);
+            for (n, shape) in shapes.iter().enumerate() {
+                for buffer_lines in [false, true] {
+                    let mut mask = Mask::new(width, height).unwrap();
+                    let cells = draw(&mut mask, shape, transform, pixel_size, buffer_lines);
+                    let drawn: Vec<(usize, usize)> = mask
+                        .data()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &c)| c != 0)
+                        .map(|(i, _)| (i % width as usize, i / width as usize))
+                        .collect();
+                    assert!(!drawn.is_empty(), "shape {n} at {pixel_size} drew nothing");
+                    let cells = cells.unwrap();
+                    for (x, y) in drawn {
+                        assert!(
+                            (cells.x0..cells.x1).contains(&x) && (cells.y0..cells.y1).contains(&y),
+                            "shape {n} at {pixel_size}: ({x}, {y}) is outside {cells:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shape_off_the_grid_reports_no_box() {
+        let bounds = Rect::from_ltrb(0.0, 0.0, 10.0, 10.0);
+        let mut mask = Mask::new(10, 10).unwrap();
+        let far = shape(Kind::Area, &[(50.0, 50.0), (60.0, 50.0), (60.0, 60.0)]);
+        assert_eq!(
+            draw(&mut mask, &far, to_grid(bounds, 1.0), 1.0, false),
+            None
+        );
+        assert!(mask.data().iter().all(|&c| c == 0));
     }
 }

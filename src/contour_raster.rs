@@ -42,8 +42,29 @@ pub const CONTOUR_0_MATRIX_VALUE: u32 = 5;
 
 /// A grid recording, per pixel, one of the four reserved values above, or
 /// `CONTOUR_0_MATRIX_VALUE + i` for the contour at index `i`.
+///
+/// Step 1 clears a contour's pixels every time it resolves, closes or merges,
+/// and a merge renumbers every contour after the one it removes; Step 4
+/// clears every contour Step 3 dropped. Done on the grid itself, each of
+/// those is a sweep of the whole raster -- about 1.6e10 cell visits for a
+/// thousand Flying Ends on a 4000 x 4000 raster. So a contour pixel does not
+/// store the contour's index but an *id*, fixed once written: `index_of_id`
+/// says which contour an id belongs to now, which makes a renumbering a pass
+/// over the contours rather than the pixels, and `footprint` lists the
+/// pixels each contour was written to, which makes a clear a pass over its
+/// own pixels. Nothing outside sees ids: [`Self::get`] reads back indices.
 pub struct ContourRaster {
+    /// Per pixel, a reserved value or `CONTOUR_0_MATRIX_VALUE + id`.
     grid: Vec<Vec<u32>>,
+    /// The contour index each id now belongs to.
+    index_of_id: Vec<u32>,
+    /// The id new pixels of each contour index are written with, once it has
+    /// one.
+    id_of_index: Vec<Option<u32>>,
+    /// Per contour index, every pixel it was written to: a superset of the
+    /// pixels which still hold it, since a pixel can later turn
+    /// `HIGH_DENSITY`.
+    footprint: Vec<Vec<(u32, u32)>>,
     /// World-space (ground meters) position of pixel `(0, 0)`'s low corner.
     pub origin: Coord<f64>,
     /// Pixel size, in ground meters.
@@ -119,6 +140,9 @@ impl ContourRaster {
     pub fn new(origin: Coord<f64>, px_size: f64, width: usize, height: usize) -> ContourRaster {
         ContourRaster {
             grid: vec![vec![UNDEFINED; width]; height],
+            index_of_id: Vec::new(),
+            id_of_index: Vec::new(),
+            footprint: Vec::new(),
             origin,
             px_size,
             width,
@@ -152,21 +176,39 @@ impl ContourRaster {
             return OUT_OF_BOUND;
         }
         let (x, y) = (x as usize, y as usize);
-        self.grid
-            .get(y)
-            .and_then(|row| row.get(x))
-            .copied()
-            .unwrap_or(OUT_OF_BOUND)
+        match self.grid.get(y).and_then(|row| row.get(x)).copied() {
+            None => OUT_OF_BOUND,
+            Some(raw) if raw >= CONTOUR_0_MATRIX_VALUE => {
+                CONTOUR_0_MATRIX_VALUE + self.index_of_id[(raw - CONTOUR_0_MATRIX_VALUE) as usize]
+            }
+            Some(raw) => raw,
+        }
     }
 
+    /// Sets pixel `(x, y)` to `value`, a reserved value or a contour's
+    /// `CONTOUR_0_MATRIX_VALUE + index`; a pixel off the raster is left
+    /// alone.
     fn set(&mut self, x: i64, y: i64, value: u32) {
-        if x < 0 || y < 0 {
+        if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
             return;
         }
         let (x, y) = (x as usize, y as usize);
-        if let Some(cell) = self.grid.get_mut(y).and_then(|row| row.get_mut(x)) {
-            *cell = value;
-        }
+        let raw = if value >= CONTOUR_0_MATRIX_VALUE {
+            let index = (value - CONTOUR_0_MATRIX_VALUE) as usize;
+            if self.id_of_index.len() <= index {
+                self.id_of_index.resize(index + 1, None);
+                self.footprint.resize_with(index + 1, Vec::new);
+            }
+            let id = *self.id_of_index[index].get_or_insert_with(|| {
+                self.index_of_id.push(index as u32);
+                (self.index_of_id.len() - 1) as u32
+            });
+            self.footprint[index].push((x as u32, y as u32));
+            CONTOUR_0_MATRIX_VALUE + id
+        } else {
+            value
+        };
+        self.grid[y][x] = raw;
     }
 
     /// Writes `contour_idx` (as `CONTOUR_0_MATRIX_VALUE + contour_idx`) to
@@ -366,17 +408,31 @@ impl ContourRaster {
     /// `remove_idx`'s value to `keep_idx`'s, then shifts every pixel with a
     /// higher index down by one to close the gap left in the Contours
     /// vector -- Step 1's Growing Process, case (a).
+    ///
+    /// Takes time in the number of contours and of `remove_idx`'s pixels,
+    /// not of the raster's: see [`ContourRaster`].
     pub fn merge_contour_indices(&mut self, keep_idx: u64, remove_idx: u64) {
-        let remove_val = CONTOUR_0_MATRIX_VALUE + remove_idx as u32;
-        let keep_val = CONTOUR_0_MATRIX_VALUE + keep_idx as u32;
-        for row in &mut self.grid {
-            for cell in row.iter_mut() {
-                if *cell == remove_val {
-                    *cell = keep_val;
-                } else if *cell > remove_val {
-                    *cell -= 1;
-                }
+        debug_assert!(keep_idx < remove_idx, "{keep_idx} >= {remove_idx}");
+        let (keep, remove) = (keep_idx as u32, remove_idx as u32);
+        for index in &mut self.index_of_id {
+            if *index == remove {
+                *index = keep;
+            } else if *index > remove {
+                *index -= 1;
             }
+        }
+        let (keep, remove) = (keep as usize, remove as usize);
+        if remove < self.id_of_index.len() {
+            let removed_id = self.id_of_index.remove(remove);
+            let removed_pixels = self.footprint.remove(remove);
+            if keep >= self.id_of_index.len() {
+                self.id_of_index.resize(keep + 1, None);
+                self.footprint.resize_with(keep + 1, Vec::new);
+            }
+            if self.id_of_index[keep].is_none() {
+                self.id_of_index[keep] = removed_id;
+            }
+            self.footprint[keep].extend(removed_pixels);
         }
     }
 
@@ -403,13 +459,17 @@ impl ContourRaster {
     /// the pixel's own value alone, so the conservative "don't trust it"
     /// state stays rather than risk erasing evidence that still belongs
     /// there.
+    ///
+    /// Takes time in the number of pixels the contour was written to, not in
+    /// the raster's: see [`ContourRaster`].
     pub fn clear_contour(&mut self, contour_idx: u64) {
         let value = CONTOUR_0_MATRIX_VALUE + contour_idx as u32;
-        for row in &mut self.grid {
-            for cell in row.iter_mut() {
-                if *cell == value {
-                    *cell = NO_CONTOUR_IN_BOUND;
-                }
+        let Some(pixels) = self.footprint.get_mut(contour_idx as usize) else {
+            return;
+        };
+        for (x, y) in std::mem::take(pixels) {
+            if self.get(x as i64, y as i64) == value {
+                self.grid[y as usize][x as usize] = NO_CONTOUR_IN_BOUND;
             }
         }
     }
@@ -1301,5 +1361,182 @@ mod tests {
         assert_eq!(r.get(0, 0), OUT_OF_BOUND);
         // Enclosed and never reached: stays undefined.
         assert_eq!(r.get(5, 5), UNDEFINED);
+    }
+
+    /// The raster as it was before ids and footprints: contour pixels hold
+    /// their index, and a clear or a merge sweeps the whole grid. What the
+    /// real one must still agree with, pixel for pixel.
+    struct SweptRaster(Vec<Vec<u32>>);
+
+    impl SweptRaster {
+        fn write(&mut self, idx: u64, pixels: &[(usize, usize)]) {
+            let value = CONTOUR_0_MATRIX_VALUE + idx as u32;
+            for &(x, y) in pixels {
+                let cell = &mut self.0[y][x];
+                if *cell != value && *cell != OUT_OF_BOUND {
+                    *cell = if matches!(*cell, UNDEFINED | NO_CONTOUR_IN_BOUND | TEMPORARY_CONTOUR)
+                    {
+                        value
+                    } else {
+                        HIGH_DENSITY
+                    };
+                }
+            }
+        }
+
+        fn clear(&mut self, idx: u64) {
+            let value = CONTOUR_0_MATRIX_VALUE + idx as u32;
+            for cell in self.0.iter_mut().flatten() {
+                if *cell == value {
+                    *cell = NO_CONTOUR_IN_BOUND;
+                }
+            }
+        }
+
+        fn merge(&mut self, keep: u64, remove: u64) {
+            let (keep, remove) = (
+                CONTOUR_0_MATRIX_VALUE + keep as u32,
+                CONTOUR_0_MATRIX_VALUE + remove as u32,
+            );
+            for cell in self.0.iter_mut().flatten() {
+                if *cell == remove {
+                    *cell = keep;
+                } else if *cell > remove {
+                    *cell -= 1;
+                }
+            }
+        }
+    }
+
+    /// A long run of writes, clears and merges in the order Step 1 makes
+    /// them, against the whole-grid sweeps they replace. Merges are done
+    /// both the way `merge_contours` does them (both contours cleared
+    /// first) and without clearing, so that pixels left under the removed
+    /// contour's id are seen to move to the kept one.
+    #[test]
+    fn clears_and_merges_agree_with_sweeping_the_whole_grid() {
+        let (w, h) = (24usize, 18usize);
+        let mut r = ContourRaster::new(Coord { x: 0.0, y: 0.0 }, 1.0, w, h);
+        let mut swept = SweptRaster(vec![vec![UNDEFINED; w]; h]);
+        // A few reserved values about, as Step 1's flood fill and border
+        // leave them.
+        for (x, y, v) in [
+            (0, 0, OUT_OF_BOUND),
+            (5, 5, NO_CONTOUR_IN_BOUND),
+            (9, 2, HIGH_DENSITY),
+        ] {
+            r.grid[y][x] = v;
+            swept.0[y][x] = v;
+        }
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let mut contours = 6u64;
+        for round in 0..3000 {
+            match next(10) {
+                0..=4 => {
+                    let idx = next(contours);
+                    let (x0, y0) = (next(w as u64) as f64 + 0.5, next(h as u64) as f64 + 0.5);
+                    let (x1, y1) = (next(w as u64) as f64 + 0.5, next(h as u64) as f64 + 0.5);
+                    let line = ls(&[(x0, y0), (x1, y1)]);
+                    let mut pixels = Vec::new();
+                    walk_pixels(r.origin, r.px_size, line.0[0], line.0[1], |x, y| {
+                        pixels.push((x as usize, y as usize));
+                        true
+                    });
+                    r.write_contour(idx, &line);
+                    swept.write(idx, &pixels);
+                }
+                5..=7 => {
+                    let idx = next(contours);
+                    r.clear_contour(idx);
+                    swept.clear(idx);
+                }
+                _ if contours > 2 => {
+                    let remove = 1 + next(contours - 1);
+                    let keep = next(remove);
+                    if next(2) == 0 {
+                        r.clear_contour(keep);
+                        r.clear_contour(remove);
+                        swept.clear(keep);
+                        swept.clear(remove);
+                    }
+                    r.merge_contour_indices(keep, remove);
+                    swept.merge(keep, remove);
+                    contours -= 1;
+                }
+                _ => contours += 4,
+            }
+            for y in 0..h {
+                for x in 0..w {
+                    assert_eq!(
+                        r.get(x as i64, y as i64),
+                        swept.0[y][x],
+                        "pixel ({x}, {y}) after round {round}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_merged_contour_clears_the_pixels_it_took_over() {
+        let mut r = raster();
+        r.write_contour(0, &ls(&[(1.5, 1.5), (5.5, 1.5)]));
+        r.write_contour(1, &ls(&[(1.5, 9.5), (5.5, 9.5)]));
+        r.write_contour(2, &ls(&[(1.5, 5.5), (5.5, 5.5)]));
+        r.merge_contour_indices(0, 1);
+        assert_eq!(
+            r.get(3, 9),
+            CONTOUR_0_MATRIX_VALUE,
+            "1's pixels are 0's now"
+        );
+        assert_eq!(r.get(3, 5), CONTOUR_0_MATRIX_VALUE + 1, "2 became 1");
+        r.clear_contour(0);
+        assert_eq!(r.get(3, 1), NO_CONTOUR_IN_BOUND);
+        assert_eq!(r.get(3, 9), NO_CONTOUR_IN_BOUND);
+        assert_eq!(r.get(3, 5), CONTOUR_0_MATRIX_VALUE + 1);
+        // The renumbered contour keeps its own pixels, and writes more under
+        // its new index.
+        r.write_contour(1, &ls(&[(8.5, 5.5), (9.5, 5.5)]));
+        r.clear_contour(1);
+        assert_eq!(r.get(3, 5), NO_CONTOUR_IN_BOUND);
+        assert_eq!(r.get(9, 5), NO_CONTOUR_IN_BOUND);
+    }
+
+    /// Step 1 clears and redraws a contour every time one of its Flying
+    /// Ends resolves, and merges renumber every later contour: as sweeps of
+    /// the whole raster, a run of them on a large one took minutes. Each
+    /// is now a pass over one contour's pixels, so this is quick even
+    /// unoptimized; it would take well over the limit the old way.
+    #[test]
+    fn clearing_and_merging_do_not_sweep_the_raster() {
+        let side = 2000;
+        let mut r = ContourRaster::new(Coord { x: 0.0, y: 0.0 }, 1.0, side, side);
+        let start = std::time::Instant::now();
+        let mut contours = 2000u64;
+        for i in 0..contours {
+            let y = (i % (side as u64 - 2)) as f64 + 1.5;
+            r.write_contour(i, &ls(&[(1.5, y), (40.5, y)]));
+        }
+        for i in 0..20_000u64 {
+            let idx = i % contours;
+            r.clear_contour(idx);
+            let y = (i % (side as u64 - 2)) as f64 + 1.5;
+            r.write_contour(idx, &ls(&[(60.5, y), (99.5, y)]));
+            if i % 20 == 0 && contours > 2 {
+                r.merge_contour_indices(0, contours - 1);
+                contours -= 1;
+            }
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "20 000 clears and 1000 merges on a {side} x {side} raster took {elapsed:?}"
+        );
     }
 }
