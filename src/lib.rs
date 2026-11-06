@@ -46,6 +46,24 @@
 //! lays out side by side where they share a street, and the areas of an
 //! event's maps, which [`map_areas`] reads from a list.
 //!
+//! # From contours to elevation
+//!
+//! A second, largely independent pipeline reconstructs the shape of the
+//! ground from a map's contour lines, following the algorithm specified in
+//! `mds/Contours-to-Raster.md`. [`contour_symbols`] sorts a map's symbols
+//! into the families the algorithm reads; [`step1_extract`] builds the
+//! [`contour_raster`] and the per-contour evidence of [`gravity_model`] (with
+//! [`contour_geometry`] for the curve work); [`step2_obvious_gravity`] and
+//! [`step3_rain_drop`] decide which side of every contour is downhill;
+//! [`step4_elevation`] gives each contour a height; and
+//! [`step5_gravity_raster`] and [`step5_elevation_raster`] spread those
+//! heights into a raster, which [`geotiff`] places on the earth. Its
+//! parameters come from [`contours_to_raster_config`], and
+//! [`contours_to_raster_svg`] draws every stage for inspection. The
+//! `contours_to_raster` tool runs it on a file; [`dem_from_contours`] runs it
+//! in memory, on a map already read. [`ocd_crs`] is what lets an OCAD map's
+//! georeferencing survive the trip.
+//!
 //! # Drawing a map
 //!
 //! [`render::render_map`] is the entire pipeline in one call — read the file,

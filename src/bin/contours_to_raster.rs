@@ -23,9 +23,8 @@
 //! config file could not be read or parsed, 4 the run folder, the elevation
 //! TIFF, or a `--create_svg` file could not be written, or a Step 1 geometry
 //! error (a degenerate buffer polygon -- a raster conflict no longer fails
-//! the run at all, see `Contours-to-Raster.md`'s Step 1), or 5 a Step 2/Step
-//! 3 gravity conflict, or a Step 4 tree invariant violation (a contour found
-//! to be its own ancestor -- see `step4_elevation::resolve`).
+//! the run at all, see `Contours-to-Raster.md`'s Step 1), or 5 a Step 2
+//! gravity conflict (two Slope Lines disagreeing on one contour).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

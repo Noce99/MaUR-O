@@ -1,4 +1,12 @@
-# Known Bugs
+# Known Rendering Differences
+
+Where MaUR-O's output differs from the ground-truth renderer, sorted into
+real bugs, differences not worth fixing, and cases where MaUR-O is arguably
+the more correct of the two.
+
+- [Tested benchmarks](#tested-benchmarks)
+- [ISOM/ISSprOM per-symbol benchmark](#isomissprom-per-symbol-benchmark)
+- [Real map dataset](#real-map-dataset)
 
 ## Tested benchmarks
 
@@ -11,8 +19,8 @@ pattern: build the archive with `create_benchmark`, then run it with
 **The two sample maps**, rendered whole rather than split by symbol:
 
 ```bash
-./target/release/create_benchmark /path/to/map_to_image maps/ --filter sample -o benchmarks/benchmark_sample_maps_3_px_m.zip
-./target/release/create_benchmark /path/to/map_to_image maps/ --filter sample -r 6 -o benchmarks/benchmark_sample_maps_6_px_m.zip
+./target/release/create_benchmark /path/to/ground_truth_renderer maps/ --filter sample -o benchmarks/benchmark_sample_maps_3_px_m.zip
+./target/release/create_benchmark /path/to/ground_truth_renderer maps/ --filter sample -r 6 -o benchmarks/benchmark_sample_maps_6_px_m.zip
 ./target/release/benchmark benchmarks/benchmark_sample_maps_3_px_m.zip
 ./target/release/benchmark benchmarks/benchmark_sample_maps_6_px_m.zip
 ```
@@ -21,8 +29,8 @@ pattern: build the archive with `create_benchmark`, then run it with
 symbol:**
 
 ```bash
-./target/release/create_benchmark /path/to/map_to_image maps/ISOM_10k.omap
-./target/release/create_benchmark /path/to/map_to_image maps/ISOM_10k.omap -r 6
+./target/release/create_benchmark /path/to/ground_truth_renderer maps/ISOM_10k.omap
+./target/release/create_benchmark /path/to/ground_truth_renderer maps/ISOM_10k.omap -r 6
 ./target/release/benchmark benchmarks/benchmark_ISOM_10k_3_px_m.zip
 ./target/release/benchmark benchmarks/benchmark_ISOM_10k_6_px_m.zip
 ```
@@ -31,19 +39,20 @@ symbol:**
 per symbol:**
 
 ```bash
-./target/release/create_benchmark /path/to/map_to_image maps/ISSprOM_4k.omap
-./target/release/create_benchmark /path/to/map_to_image maps/ISSprOM_4k.omap -r 6
+./target/release/create_benchmark /path/to/ground_truth_renderer maps/ISSprOM_4k.omap
+./target/release/create_benchmark /path/to/ground_truth_renderer maps/ISSprOM_4k.omap -r 6
 ./target/release/benchmark benchmarks/benchmark_ISSprOM_4k_3_px_m.zip
 ./target/release/benchmark benchmarks/benchmark_ISSprOM_4k_6_px_m.zip
 ```
 
-`/path/to/map_to_image` is the external ground-truth renderer — see
-[ground truth renderer](../README.md#ground-truth-renderer) for what that needs to be.
+`/path/to/ground_truth_renderer` is the external ground-truth renderer (not
+MaUR-O's own `map_to_image`) — see
+[Ground-truth renderer](../README.md#ground-truth-renderer) for what that needs to be.
 Both resolutions (3 and 6 pixels per meter) were run over each suite; the
 images below are picked from whichever run happened to show them, at
 either resolution.
 
-## Known Bugs
+## Differences found
 
 ### ISOM/ISSprOM per-symbol benchmark
 
@@ -103,24 +112,24 @@ fill; MaUR-O's fill has none.*
 
 ### Real map dataset
 
-Found running the benchmark over a private dataset of real,
+Found running the benchmark over a private dataset of real
 orienteering maps (not included in this repository).
 
 ![The edge of a purple symbol is missing](assets/bug_1.png)
 *Real map dataset: the edge of a purple symbol is missing.*
 
-![A black dot of a stony area is missing](assets/bug_2.png)
-*Real map dataset: extra rendering of a black dot of a stony area.*
+![An extra black dot of a stony area, drawn by MaUR-O but not by the ground truth](assets/bug_2.png)
+*Real map dataset: an extra black dot of a stony area is drawn.*
 
-![A small wedge of a striped area missing at a steep contour crossing](assets/bug_3.png)
-*Real map dataset: a 180-degree turn of a path is shortly rendered.*
+![Where a black line turns back on itself, MaUR-O draws the turn too short](assets/bug_3.png)
+*Real map dataset: where a line turns back on itself (a ~180° turn), the turn is drawn too short.*
 
-![The tip of a vegetation point symbol shaped slightly differently](assets/bug_4.png)
-*Real map dataset: same as before but with a distinct vegetation boundary.*
+![The end of a green vegetation-boundary dash at a sharp turn is drawn shorter than in the ground truth](assets/bug_4.png)
+*Real map dataset: the same too-short turn, on a green vegetation boundary.*
 
-![A notch in a black area's boundary near a track junction doesn't match](assets/bug_5.png)
-*Real map dataset: a small notch in a black area's boundary near a track
-junction doesn't match the ground truth's curve.*
+![The end of a black dash is drawn with a hook instead of a straight cut](assets/bug_5.png)
+*Real map dataset: the end of a black dash is drawn with a small hook instead
+of a straight cut.*
 
-![The gap a watercourse cuts through a crossing feature is shaped slightly differently](assets/bug_6.png)
-*Real map dataset: a render issue in the dash of a seasonal water channel.*
+![The start of a blue water-channel dash is misshapen next to a contour crossing](assets/bug_6.png)
+*Real map dataset: the start of a dash of a seasonal water channel is misshapen.*

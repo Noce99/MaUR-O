@@ -1283,9 +1283,9 @@ fn gravity_direction_segments(
 /// [`crate::step5_gravity_raster::resolve`]'s own per-pixel gravity
 /// direction, colored by its own magnitude -- `RED` for the most
 /// confidently-decided pixels, fading to `BLUE` for the least (see
-/// `gravity_direction_segments`). Diagnostic only for now -- there is no
-/// TIFF or further use of `gravity` yet, unlike Step 5's own altitude
-/// ([`crate::step5_elevation_raster`]). `08_<map_name>_step5_gravity.svg`.
+/// `gravity_direction_segments`). The same field steers Step 5's own
+/// altitude fill ([`crate::step5_elevation_raster`]).
+/// `08_<map_name>_step5_gravity.svg`.
 pub fn step5_gravity_svg_string(result: &Step1Result, gravity: &GravityRaster) -> String {
     let data = BaseLayerData::new(result);
     let buckets = gravity_direction_segments(&result.raster, gravity);

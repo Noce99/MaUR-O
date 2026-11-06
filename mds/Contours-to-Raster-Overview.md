@@ -145,13 +145,18 @@ disagreeing evidence on the same contour is a contradiction and aborts the conto
 2) Every closed contour still without a sign, that does not enclose any other contour,
 is assigned the conventional reading of an isolated hill: downhill points outward,
 away from its own interior.
-3) Every contour touching a line evidence gets its gravity from a vote across every
-line evidence touching it, each weighted by how perpendicular its own gravity is to
-the contour there.
-4) Every contour touching a parallel evidence gets its gravity the same way, from a
-vote across every such intersection. At an intersection, we take the point on the contours closeby the intersection, and we fit a
-circle through them by least squares. The gravity is the direction from the
-intersection to that circle's own centre. Each vote is weighted by the fitted circle radius, a bigger radius is less strong than a smaller one.
+3) Every contour still without a sign and touching line or parallel evidence gets
+its gravity from a single vote across all of that evidence. A line evidence reads
+its gravity directly. For a parallel evidence, we take the points on the contour
+close to the intersection, fit a circle through them by least squares, and read the
+gravity as the direction from the intersection towards that circle's centre. Every
+reading is weighted by how perpendicular it is to the contour at its contact point
+(a reading almost tangent to the contour says little about which side is downhill).
+The contour is resolved only if the total weight is large enough and the winning
+side leads by a large enough margin; otherwise it is left for Stage 3.
+4) When a contour already fixed by (1) or (2) has line or parallel evidence that
+would have voted the other way, the contradiction is reported as a warning, and the
+contour keeps the sign from (1) or (2).
 
 <figure>
   <img src="assets/CTR_8.png" alt="Zoomed grid around the tip of a hairpin contour: a red circle with a radius (point evidence) sits on the bend, and yellow ticks along the whole contour show the downhill side it assigns.">
@@ -239,22 +244,27 @@ disconnected from the evidence entirely and is dropped, with a warning naming it
 
 A second matrix $E$, at the same resolution $\delta$ as $G$, is seeded with each
 contour's own elevation on the cells $G$ assigns to it. The band between two
-elevations is then filled by the generic sensing procedure once more (the
-**Elevation Fill** variant, §4): a ray from a source contour, travelling with
-gravity, marks every cell it crosses with a value linearly interpolated between the
+elevations is then filled by a variant of the generic sensing procedure (the
+**Elevation Fill**, §4) that, unlike every other variant, does not travel in a
+straight line. First, every cell is given a downhill direction: straight-line
+particles from every contour mark the cells they cross with their own direction,
+weighted by the inverse square of their track length, and the resulting field is
+gap-filled and smoothed. Then a particle from a source contour follows that
+field step by step, bending with the terrain, and marks every cell it crosses with a value linearly interpolated between the
 two elevations at either end, weighted by the *distance to the far end* — so a cell
 near the source reads close to the source's own value. Since a cell is typically
-crossed by several such rays, its final value is a weighted average over all of
-them, each ray's contribution weighted inversely by its own total length (a short,
-locally-confident ray is trusted more than a long one crossing an open, sparsely
+crossed by several such tracks, its final value is a weighted average over all of
+them, each track's contribution weighted inversely by its own total length (a short,
+locally-confident track is trusted more than a long one crossing an open, sparsely
 contoured area).
 
-Cells no ray ever reaches — chiefly a hilltop's own interior and anything past a
+Cells no track ever reaches — chiefly a hilltop's own interior and anything past a
 map-edge contour's outward side — are filled last, by repeated local averaging:
 every unfilled cell adjacent to at least one filled cell is set to the mean of its
 filled neighbours, and this is repeated until nothing changes. This is a discrete,
 purely local extension (closer to a nearest-value fill than to an extrapolated
-peak) and is understood as the simplest option, not a final one.
+peak) and is understood as the simplest option, not a final one. The filled matrix
+is finally smoothed with a small Gaussian kernel.
 
 Every value up to this point is a *count of contour steps* relative to the
 arbitrary reference chosen in Stage 4 — not a physical unit. The very last operation
@@ -286,6 +296,8 @@ arbitrary never matters to the result.
 
 **Stepping.** A particle advances in a straight line, a fixed small distance at a
 time, from its source and in its fixed direction, for as long as it is not stopped.
+The one exception is the Elevation Fill of §3.5, whose direction is re-read from
+the per-cell gravity field at every step.
 
 **Stopping rule and action.** At each step the particle's path is tested against the
 current state of $G$: has it left the map, has it entered a `CONFLICT` cell, or has

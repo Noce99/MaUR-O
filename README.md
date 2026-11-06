@@ -19,6 +19,20 @@ ground-truth reference — useful both for tracking rendering fidelity over time
 and for spotting real regressions among the noise two rasterizers naturally
 disagree on.
 
+It also ships tools that go beyond drawing a map:
+
+- **`contours_to_raster`** reconstructs an elevation model (a GeoTIFF) from a
+  map's contour lines, and **`dem_geo_tiff_evaluator`** scores such a model
+  against a ground-truth one;
+- **`osm_to_omap`** turns OpenStreetMap data — optionally with bus and train
+  lines from GTFS feeds — into a Mapper map styled like openstreetmap.org.
+
+Everything is also usable as a Rust library (`maur_o`): besides rendering, it
+covers OCAD import, course layout, runnability grids and route finding,
+map validation against ISOM/ISSprOM, statistics and SVG export. The crate-level
+documentation (`cargo doc --open`) is the map of how those modules fit
+together.
+
 ## Table of Contents
 
 - [Installation](#installation)
@@ -27,7 +41,11 @@ disagree on.
   - [`map_to_image`](#map_to_image)
   - [`create_benchmark`](#create_benchmark)
   - [`benchmark`](#benchmark)
+  - [`contours_to_raster`](#contours_to_raster)
+  - [`dem_geo_tiff_evaluator`](#dem_geo_tiff_evaluator)
   - [`osm_to_omap`](#osm_to_omap)
+- [Using it as a library](#using-it-as-a-library)
+- [Development](#development)
 - [Implementation Details](#implementation-details)
 - [Known Limitations](#known-limitations)
 
@@ -43,8 +61,10 @@ That is all it takes to build: no C toolchain, no `pkg-config`, no `-dev`
 package. Drawing *text* correctly wants one ordinary runtime library on top —
 see [Fonts and fontconfig](#fonts-and-fontconfig).
 
-MacOS and Windows have not been tested; this project has only been built and
-run on Linux so far.
+CI builds and tests the crate on Linux, macOS and Windows, but rendering
+fidelity has only been benchmarked on Linux so far — on macOS and Windows text
+falls back to a different font resolver (see
+[Fonts and fontconfig](#fonts-and-fontconfig)).
 
 Build everything with:
 
@@ -52,10 +72,21 @@ Build everything with:
 cargo build --release
 ```
 
-The three executables are then at:
-- `target/release/`[`map_to_image`](#map_to_image)
-- `target/release/`[`benchmark`](#benchmark)
-- `target/release/`[`create_benchmark`](#create_benchmark)
+The six executables are then in `target/release/`:
+
+| Executable | What it does |
+| --- | --- |
+| [`map_to_image`](#map_to_image) | Renders one map to a PNG/BMP/TIFF/JPEG image, or to SVG. |
+| [`create_benchmark`](#create_benchmark) | Builds a benchmark archive: maps plus reference images from a ground-truth renderer. |
+| [`benchmark`](#benchmark) | Runs a benchmark archive and reports where MaUR-O's renderings differ. |
+| [`contours_to_raster`](#contours_to_raster) | Reconstructs an elevation GeoTIFF from a map's contour lines. |
+| [`dem_geo_tiff_evaluator`](#dem_geo_tiff_evaluator) | Scores a predicted elevation GeoTIFF against a ground-truth one. |
+| [`osm_to_omap`](#osm_to_omap) | Converts OpenStreetMap data into a Mapper map. |
+
+Every one of them takes `--help` and `--version`.
+
+To put them on your `PATH` instead, run `cargo install --path .` from a
+checkout.
 
 ### Fonts and fontconfig
 
@@ -95,7 +126,7 @@ fallback is what runs.
 
 ### `map_to_image`
 
-Renders a single map to a raster image.
+Renders a single map to a raster image, or to an SVG drawing.
 
 ```
 map_to_image [-r px-per-meter] [-f meters | -w left,top,right,bottom] <map-file> [image-file]
@@ -104,7 +135,7 @@ map_to_image [-r px-per-meter] [-f meters | -w left,top,right,bottom] <map-file>
 | Argument | Meaning |
 | --- | --- |
 | `<map-file>` | The map to render: `.omap`/`.xmap`, or an OCAD `.ocd` file. Which it is is decided by what is in the file, not by its name. |
-| `[image-file]` | Where to write the image. The file suffix (`.png`, `.bmp`, `.tif`, `.jpg`) selects the format; defaults to the map file's name with a `.png` suffix. |
+| `[image-file]` | Where to write the image. The file suffix (`.png`, `.bmp`, `.tif`, `.jpg`, or `.svg` for vector output) selects the format; defaults to the map file's name with a `.png` suffix. |
 | `-r, --resolution <N>` | Pixels per meter on the ground (default `3`). |
 | `-f, --frame <N>` | Width of the white frame added on every side, in meters on the ground (default `50`). |
 | `-w, --window <L,T,R,B>` | Render only this rectangle of the map, in map coordinates (mm on the paper, `y` down, as Mapper stores them), instead of the whole map. Cannot be combined with `--frame`. The image's top-left corner is the window's, so a map point's pixel is known exactly. |
@@ -129,11 +160,21 @@ the paper (200 by 200 m at 1:10000), whose top-left pixel is map point
 ```
 
 A map point `(x, y)` lands at pixel `((x - left), (y - top))` times
-`resolution × scale / 1000` pixels per mm.
+`resolution × scale / 1000` pixels per mm — in the example above,
+`10 × 10000 / 1000 = 100` pixels per mm, so the image is 2000 × 2000 pixels.
 
-It prints the image size, the ground size, and the map scale it read, and
-exits non-zero if the map cannot be read (2), its geometry cannot be built
-(3), or the image cannot be saved (4).
+Writing to a `.svg` file instead draws the map as vector paths, sharp at any
+size. `-r` has no meaning there (there are no pixels), the frame is left empty
+rather than white, and `--window` is not supported — an SVG is always the
+whole map:
+
+```bash
+./target/release/map_to_image maps/forest_sample.omap forest_sample.svg
+```
+
+It prints the image size, the ground size, and the map scale it read. Exit
+codes: `0` success, `1` a usage error, `2` the map cannot be read, `3` its
+geometry cannot be built, `4` the image cannot be saved.
 
 ### `create_benchmark`
 
@@ -157,8 +198,11 @@ create_benchmark [OPTIONS] <renderer> <source>
 
 ```bash
 cargo build --release
-./target/release/create_benchmark /path/to/map_to_image maps/ISOM.omap
+./target/release/create_benchmark /path/to/ground_truth_renderer maps/ISOM_10k.omap
 ```
+
+This writes `benchmarks/benchmark_ISOM_10k_3_px_m.zip`. Exit codes: `0`
+success, `1` a usage or setup problem, `2` a map failed to render.
 
 ![Generated per-symbol test grids from a create_benchmark run: area fill patterns, line dash groups, rotated text samples, and point symbol rotations](mds/assets/symbols_benchmark.png)
 *A handful of the maps `create_benchmark` generates when `<source>` is a single map file: one per symbol, each a grid of test objects at every size and rotation that symbol needs checked.*
@@ -172,7 +216,17 @@ that reads a map file and two options (resolution, frame) and writes an
 image works; the
 [`mapper_cmd_rederer`](https://github.com/Noce99/mapper_cmd_rederer) fork of
 OpenOrienteering Mapper's own command line renderer, built from source, is
-the one this project was benchmarked against.
+the one this project was benchmarked against. It is asked for its version
+once (`<renderer> --version`, recorded in the archive's `info.txt`), then
+invoked once per map as
+
+```
+<renderer> <map-file> <image-file> -r <px-per-meter> -f <meters>
+```
+
+which is also how `map_to_image` is called, so pointing `create_benchmark` at MaUR-O's own `map_to_image` works too — it
+is a handy way to try the tooling out, though a suite built that way only
+measures MaUR-O against itself.
 
 ### `benchmark`
 
@@ -199,7 +253,7 @@ benchmark [OPTIONS] <archive.zip>
 
 ```bash
 cargo build --release
-./target/release/benchmark benchmarks/benchmark_ISOM_3_px_m.zip
+./target/release/benchmark benchmarks/benchmark_ISOM_10k_3_px_m.zip
 ```
 
 Resolution and frame are not options here: they are always read back out of
@@ -231,6 +285,65 @@ the top, so this is where to look first. For what each column means, see
 
 ![Expected, predicted and diff crop from a real map, showing antialiasing in orange and a real error in red](mds/assets/real_error.png)
 *A crop from `differences/` on a real map: expected (left), predicted (middle), and the diff (right), where orange is just antialiasing — not a bug — and the red cluster is a real error, a pixel one renderer drew and the other did not.*
+
+### `contours_to_raster`
+
+Reconstructs the shape of the ground from a map's contour lines: works out
+which way is downhill across every contour (from slope lines, closed hills,
+cliffs, and a simulated "rain drop" flow where nothing else decides), assigns
+each contour a height, and interpolates them into an elevation raster.
+
+```
+contours_to_raster [OPTIONS] <map-file> [output.tif]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `<map-file>` | The map to read: `.omap`/`.xmap`, or an OCAD `.ocd` file. |
+| `[output.tif]` | File name of the elevation TIFF (only the name is used; it always goes into the run folder). Defaults to the map's name with `.tif`. |
+| `--results <DIR>` | Where the run's timestamped folder is created (default `Results`). |
+| `--config <FILE>` | The algorithm's ~35 tunable parameters (default `config/contours_to_raster.conf`). |
+| `--equidistance <M>` | Vertical distance between two adjacent contours, in meters (default `5`). |
+| `--create_svg` | Also write one diagnostic SVG per stage of the algorithm, plus PNG previews of the result. |
+
+```bash
+./target/release/contours_to_raster maps/contours_to_altitude_map_1.omap --create_svg
+```
+
+Each run writes into `Results/contours_to_raster_YYYY_MM_DD__hh_mm_ss/`. The
+TIFF holds single-band 32-bit float elevations in meters, relative to an
+arbitrary zero (contours alone don't say how high the lowest one is); when
+the map is georeferenced it is a proper GeoTIFF, resampled north-up. The
+`maps/contours_to_altitude_map_*.omap` files are small test maps for it.
+
+The algorithm, every parameter, and every diagnostic file are specified in
+**[Contours-to-Raster.md](mds/Contours-to-Raster.md)**;
+[Contours-to-Raster-Overview.md](mds/Contours-to-Raster-Overview.md) is a
+short, implementation-free mathematical account of the same thing.
+
+Exit codes: `0` success, `1` a usage error, `2` the map cannot be read, `3`
+the config file cannot be read or parsed, `4` an output cannot be written (or
+a Step 1 geometry error), `5` an unresolvable gravity conflict (Steps 2–4).
+
+### `dem_geo_tiff_evaluator`
+
+Scores a predicted elevation GeoTIFF — such as `contours_to_raster`'s — against
+a ground-truth one. The prediction is resampled onto the ground truth's grid,
+and since a DEM reconstructed from contours is only known up to an additive
+constant, that constant is removed before measuring.
+
+```
+dem_geo_tiff_evaluator [--results <DIR>] <ground_truth.tif> <prediction.tif>
+```
+
+Each run writes into `Results/dem_evaluation_YYYY_MM_DD__hh_mm_ss/`:
+`metrics.txt` (MSE, RMSE, MAE), `error_abs.png` and `error_signed.png` (maps
+of the error), and `error_histogram.png`.
+
+Exit codes: `0` success, `1` a usage error, `2` the ground truth cannot be
+read, `3` the prediction cannot be read, `4` the two cannot be compared
+(different or missing CRS, or no overlapping pixel with a value in both),
+`5` an output cannot be written.
 
 ### `osm_to_omap`
 
@@ -329,6 +442,37 @@ Exit codes: `0` success, `1` a usage error, `2` the OSM file or the GTFS
 feed could not be read, or held nothing to convert, `4` the map could not be
 written.
 
+## Using it as a library
+
+The crate is `maur_o`. Rendering a map takes one call:
+
+```rust
+use std::path::Path;
+use maur_o::render::{render_map, save_pixmap, DEFAULT_FRAME, DEFAULT_RESOLUTION};
+
+let drawn = render_map(Path::new("maps/forest_sample.omap"), DEFAULT_RESOLUTION, DEFAULT_FRAME)?;
+println!("{} x {} m at 1:{}", drawn.ground_width, drawn.ground_height, drawn.scale_denominator);
+save_pixmap(&drawn.pixmap, Path::new("forest_sample.png"))?;
+```
+
+Every public item is documented; `cargo doc --open` starts at the crate-level
+overview, which explains how all the modules fit together.
+
+## Development
+
+```bash
+cargo test --all-targets --locked                    # unit + integration tests
+cargo test --doc --locked                            # doc tests
+cargo fmt --all --check                              # formatting
+cargo clippy --all-targets --locked -- -D warnings   # lints, warnings are errors
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+```
+
+These are exactly what CI runs (on Linux, macOS and Windows, plus a check on
+the minimum supported Rust version, 1.88). See
+[ImplementationDetails.md § Testing](mds/ImplementationDetails.md#testing) for
+how the tests are organized.
+
 ## Implementation Details
 
 MaUR-O reads the OpenOrienteering Mapper `.omap`/`.xmap` format and renders
@@ -342,6 +486,15 @@ a ground-truth renderer, how the source is organized, and how the
 benchmarking tools tell a real rendering bug from the noise two different
 rasterizers' antialiasing produces, are documented in
 **[ImplementationDetails.md](mds/ImplementationDetails.md)**.
+
+All the longer documents live in [`mds/`](mds/):
+
+| Document | What it covers |
+| --- | --- |
+| [ImplementationDetails.md](mds/ImplementationDetails.md) | Crate stack, source layout, benchmark archive format, antialiasing classification, testing. |
+| [Contours-to-Raster.md](mds/Contours-to-Raster.md) | The full specification of `contours_to_raster`'s algorithm and parameters. |
+| [Contours-to-Raster-Overview.md](mds/Contours-to-Raster-Overview.md) | A short, formal summary of the same algorithm. |
+| [bug.md](mds/bug.md) | Known rendering differences against the ground-truth renderer, with pictures. |
 
 ## Known Limitations
 

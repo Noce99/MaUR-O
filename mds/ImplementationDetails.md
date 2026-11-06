@@ -21,12 +21,19 @@ differently.
 | Concern | Crate | Role |
 | --- | --- | --- |
 | XML parsing | `quick-xml` | Streams a map file's XML without building a DOM. |
-| CLI args | `clap` | Argument parsing, `--help` and `--version` for all three binaries. |
+| CLI args | `clap` | Argument parsing, `--help` and `--version` for every binary. |
 | Image encode | `image` | Writes the final raster in whichever format the output suffix asks for. |
 | Paths, stroking, rasterization | `tiny-skia` | Builds, strokes and fills the vector paths, and rasterizes them with antialiasing. |
 | Font discovery | `fontdb` | Resolves a font family name to an actual font file, through the system's fontconfig on Linux. |
 | Text shaping | `rustybuzz` | A pure-Rust HarfBuzz port; turns a string plus a font into positioned glyphs. |
-| Glyph outlines | `ttf-parser` | Reads the glyph outlines `rustybuzz` shapes into paths `tiny-skia` can fill. |
+| Glyph outlines | `ttf-parser` | Reads the glyph outlines `rustybuzz` shapes into paths `tiny-skia` can fill. (Pulled in through `rustybuzz`.) |
+| Font resolution | `fontconfig` | Resolves a generic family name ("Sans Serif") the way Qt and Mapper do. Unix only, opened at runtime (`dlopen`), so it is not needed to build — see the [README](../README.md#fonts-and-fontconfig). |
+| Archives | `zip` | Reads and writes benchmark archives, and GTFS feeds given as `.zip`. |
+| Timestamps | `chrono` | The timestamped run folders and the dates recorded in `info.txt`. |
+| Palette PNGs | `png` | Writes indexed (palette) PNGs — the `benchmark` diff images and `contours_to_raster`'s diagnostics — which `image` cannot. |
+| Float TIFF | `tiff` | Writes `contours_to_raster`'s single-band 32-bit float elevation GeoTIFF, which `image`'s encoder cannot. |
+| Contour geometry | `geo`, `geo-svg` | Polygon buffering and point-in-polygon for `contours_to_raster`; `geo-svg` draws its `--create_svg` diagnostics. |
+| Scratch space | `tempfile` | The temporary folder a benchmark archive is unpacked into. |
 
 `fontdb` + `rustybuzz` + `ttf-parser` + `tiny-skia` is the same pipeline
 [resvg](https://github.com/RazrFalcon/resvg) uses, which is what made text
@@ -34,32 +41,98 @@ rendering tractable here.
 
 ## Source layout
 
-One file per concern, plus a few modules only the benchmarking tools need:
+Everything is built on one data model — `map.rs`, what a map file says — and
+every other module is a consumer of it. The crate-level documentation in
+`src/lib.rs` (`cargo doc --open`) is the short, current overview; the tables
+below go one file at a time.
+
+### Reading and writing maps
 
 | File | Contents |
 | --- | --- |
 | `map.rs` | The data model read from a map file. `Symbol` is a Rust enum over the five symbol kinds — line, area, point, text, combined — each carrying its own copy of the fields common to all of them (`name`, `is_rotatable`, ...), since a `PointSymbol` nested inside a `LineSymbol` (its dash/mid/start/end symbol) needs its own regardless of which symbol kind it sits inside. |
 | `xml_reader.rs` | A `quick-xml`-based reader with a thin normalization layer so self-closing elements present as a start immediately followed by an end token, which keeps the parsing logic in `map.rs` simple regardless of how a particular file spells an empty element. |
-| `qbezier.rs` | The curve-offset algorithm line borders are built from: shifting a cubic Bézier segment sideways by a constant distance without changing its degree. Precise enough to warrant its own module and its own unit tests, since getting it exactly right matters for border fidelity. |
+| `xml_writer.rs` | Writes a map file — the only maps this project writes are ones it has just generated. For `all_symbols` the colours and symbols go out as the source file's own bytes rather than as anything this project reassembles, so nothing a symbol holds and the renderer ignores can be lost on the way. For `osm_convert`, which has no source file, `color_element`, `symbol_element` and `georeferencing_element` write them from the `map.rs` model. |
+| `ocd.rs` | Reads OCAD's binary `.ocd` format (versions 6 to 12 and 2018) by converting it into the `map.rs` model, following Mapper's and Purple Pen's importers. What OCAD stores and Mapper's format has no place for is reported, not silently dropped. |
+| `ocd_crs.rs` | Turns the coordinate-system number an OCAD file carries into an EPSG code, so its georeferencing survives the conversion. |
+
+### Rendering
+
+| File | Contents |
+| --- | --- |
+| `qbezier.rs` | The curve-offset algorithm line borders are built from: shifting a cubic Bézier segment sideways by a constant distance without changing its degree. Ported from Qt so borders match Mapper pixel for pixel, and covered by its own unit tests. |
 | `geometry.rs` | Path flattening, extents, slicing, tangents, and `shift_coordinates` (built on `qbezier.rs`). Pure arithmetic, no rendering backend involved — the part of the renderer held to an *exact* standard, and it's covered by unit tests checking specific geometric invariants (extents of capped/joined strokes, offset direction, slice round-trips) rather than just "it compiles." |
 | `renderer.rs` | Turns objects into paths and draws them: dash groups, mid symbols, area fill patterns (line and point), and the colour-priority draw order. Builds an internal `Path` IR (not `tiny_skia::Path` directly) so `geometry.rs` stays backend-independent; converts to `tiny_skia` only at paint time. |
 | `text.rs` | Font loading, shaping and glyph layout, split out from `renderer.rs` since it is a distinct concern. Lays out text at a large internal font size and scales down. |
-| `render.rs` | The map-file-to-pixel-buffer step, split out so `map_to_image` and `benchmark` render a map by the same code rather than by two copies of it. |
+| `render.rs` | The map-file-to-pixel-buffer step (`render_map`, `render_map_window`), split out so `map_to_image` and `benchmark` render a map by the same code rather than by two copies of it. |
+| `svg.rs` | Writes the renderer's own renderables out as SVG paths instead of rasterizing them — what `map_to_image` does for a `.svg` output. |
+
+### Benchmarking
+
+| File | Contents |
+| --- | --- |
+| `all_symbols.rs` | Makes one map per symbol of a symbol set, each carrying a grid of test objects. The suites this project measures itself on are built out of these, and it *uses* the renderer: a cell of the grid is as wide as what its object draws, so laying the grid out means building every object's renderables to measure them. See [One map per symbol](#one-map-per-symbol). |
 | `naming.rs` | The naming rules a benchmark archive has to follow, and how to repair an archive which breaks them. |
+| `archive_info.rs` | Reads back the `info.txt` `create_benchmark` writes into an archive, so `benchmark` always uses the resolution and frame the reference images were drawn at. |
 | `differences.rs` | Compares two rendered images and writes the difference report `benchmark` produces. Also measures the per-map error the results table reports, and classifies each differing pixel into one two rasterizers can legitimately disagree about and one they cannot, see [Antialiasing](#antialiasing). |
 | `progress.rs` | The `tqdm`-style progress bar the long stages draw, and the colour their headings use. Falls back to plain lines when the output is not a terminal. |
 | `report.rs` | Word wrapping for the plain text files a run writes, which are read in whatever opens a `.txt` and so arrive already folded. |
-| `bin/map_to_image.rs` | The CLI for rendering a single map. |
+
+### Contours to elevation
+
+A fairly literal implementation of [Contours-to-Raster.md](Contours-to-Raster.md),
+one file per step; read that document first.
+
+| File | Contents |
+| --- | --- |
+| `contour_symbols.rs` | Classifies a map's symbols into the four families the algorithm uses: Contours, Slope Lines, Jumps and Heavy Objects. |
+| `contour_geometry.rs` | Appendices 1 and 2: Bézier to equally spaced `LineString`, and `LineString` to buffered polygon. |
+| `gravity_model.rs` | Step 1's data model: per-contour evidence of which side is downhill. |
+| `contour_raster.rs` | The Contour Raster and its reserved pixel values, plus Appendix 4's pixel walk. |
+| `step1_extract.rs` … `step4_elevation.rs` | Steps 1 to 4, in order; `step3_rain_drop.rs` is also the Rain Drop Production engine the other steps share. |
+| `step5_gravity_raster.rs`, `step5_elevation_raster.rs` | Step 5: the per-pixel downhill field, then the elevation raster that follows it, and the TIFF writer. |
+| `geotiff.rs` | Georeferencing for the elevation raster: affine transform and GeoTIFF tags. |
+| `contours_to_raster_config.rs` | The ~35 tunable parameters, read from `config/contours_to_raster.conf` (a hand-rolled `key = value` format). |
+| `contours_to_raster_svg.rs` | The `--create_svg` diagnostic files, one per stage. |
+| `dem_from_contours.rs` | Steps 1 to 5 in memory, on an already-parsed map, with a progress callback and no files — the library entry point for embedding the algorithm (e.g. in a WebAssembly build). |
+| `dem_geo_tiff_evaluator.rs` | Scores a predicted DEM GeoTIFF against a ground-truth one (the `dem_geo_tiff_evaluator` binary). |
+| `dem.rs` | Shades a DEM (hillshading and similar) so terrain can be seen; downstream of the pipeline, not part of it. |
+
+### Other consumers of the map model
+
+| File | Contents |
+| --- | --- |
+| `course.rs` | Lays a course over a map: start triangle, control circles, connecting lines, numbers. |
+| `runnability.rs` | Turns a map into a grid of running speeds. |
+| `route.rs` | Searches a runnability grid for the fastest route between two points. |
+| `snap.rs` | What a control can be placed on: the point features near a spot, and what the feature there is called. |
+| `stats.rs` | Counts what a map holds: objects, symbols used, line lengths, areas. |
+| `validate.rs` | Checks a map against a mapping standard (ISOM, ISSprOM). |
+
+### OpenStreetMap to map
+
+| File | Contents |
+| --- | --- |
 | `osm.rs` | Reads OpenStreetMap XML (`.osm`): nodes, ways, relations, tags; joins multipolygon rings split over several ways. |
 | `osm_style.rs` | The openstreetmap-carto look at zooms 13 to 17 (the `--details` levels) as a Mapper symbol set — the colour table in carto's layer order, road casings and fills, path dashes, landcover — and the rules picking a symbol from a feature's tags. |
 | `osm_convert.rs` | Projects OpenStreetMap data into UTM turned to true north, clips it to a bounding box, and writes the map with `osm_style`'s symbols. |
-| `bundle.rs` | Lines sharing a street laid out side by side: routes matched to the street and rail network, a fixed left-to-right order carried along each bundle, offsets smoothed where a bundle changes, the band capped in width, stops as one bar across it. Pure geometry on the paper, independent of OSM. |
 | `bus.rs` | Bus and train lines — route, stops, colour and midday headway of each line's main variant — read from OpenStreetMap route relations, or for buses from a GTFS feed (zip or folder), whose calendar and timetable give the headway. |
-| `bin/osm_to_omap.rs` | The CLI for converting an `.osm` file into an `.omap`. |
+| `bundle.rs` | Lines sharing a street laid out side by side: routes matched to the street and rail network, a fixed left-to-right order carried along each bundle, offsets smoothed where a bundle changes, the band capped in width, stops as one bar across it. Pure geometry on the paper, independent of OSM. |
+| `map_areas.rs` | The areas of an event's maps, read from a CSV table (`--maps`): outlines, names, forbidden zones, start and finish. |
+
+### Binaries
+
+Each one is a thin CLI over the library, documented in its own top-of-file doc
+comment:
+
+| File | Contents |
+| --- | --- |
+| `bin/map_to_image.rs` | Renders a single map to an image or SVG. |
+| `bin/create_benchmark.rs` | Builds a benchmark archive: collects the maps, has a ground-truth renderer draw the reference images, and names everything the way `benchmark` expects. See [Making a benchmark archive](#making-a-benchmark-archive). |
 | `bin/benchmark.rs` | Runs a whole benchmark suite out of a zip archive, see [Running a benchmark archive](#running-a-benchmark-archive). |
-| `bin/create_benchmark.rs` | Builds such an archive: collects the maps, has a ground-truth renderer draw the reference images, and names everything the way `benchmark` expects. See [Making a benchmark archive](#making-a-benchmark-archive). |
-| `all_symbols.rs` | Makes one map per symbol of a symbol set, each carrying a grid of test objects. The suites this project measures itself on are built out of these, and it *uses* the renderer: a cell of the grid is as wide as what its object draws, so laying the grid out means building every object's renderables to measure them. |
-| `xml_writer.rs` | Writes a map file — the only maps this project writes are ones it has just generated. For `all_symbols` the colours and symbols go out as the source file's own bytes rather than as anything this project reassembles, so nothing a symbol holds and the renderer ignores can be lost on the way. For `osm_convert`, which has no source file, `color_element`, `symbol_element` and `georeferencing_element` write them from the `map.rs` model. |
+| `bin/contours_to_raster.rs` | Runs the contour-to-elevation pipeline on one map. |
+| `bin/dem_geo_tiff_evaluator.rs` | Scores a predicted DEM against a ground truth. |
+| `bin/osm_to_omap.rs` | Converts an `.osm` file into an `.omap`. |
 
 ## One map per symbol
 
@@ -272,3 +345,37 @@ than measurement — the text in the grey bars is rasterized by `tiny-skia`
 instead of FreeType, and the overview in `side_by_side.png` is scaled down
 by the `image` crate's Lanczos filter instead of Pillow's (measured on a
 downscaled overview: no pixel off by more than 7 per channel).
+
+## Testing
+
+```bash
+cargo test --all-targets --locked     # unit + integration tests
+cargo test --doc --locked             # doc tests (the example in lib.rs)
+cargo test --test cli                 # one integration test file
+cargo test <name>                     # tests whose name contains <name>
+```
+
+- **Unit tests** live next to the code they test, in `#[cfg(test)]` modules.
+  Those for the pure-arithmetic modules (`geometry.rs`, `qbezier.rs`) check
+  specific geometric invariants — extents, offset direction, slice
+  round-trips — rather than just that something runs.
+- **Integration tests** in `tests/` drive the **built binaries** through
+  `assert_cmd` wherever the command line interface is the contract being
+  tested: the exit codes are documented and scripted against, so a change to
+  one of them is a breaking change no library-level test would notice.
+  Others (`tests/ocd.rs`, `tests/route.rs`, ...) exercise library modules
+  end to end.
+- **Fixtures** are in `tests/data/`: small `.xmap` maps, an OpenStreetMap
+  extract (`bologna_sample.osm`) and a GTFS feed (`gtfs_sample/`).
+- **Regressions**: inputs that once crashed a tool, lost part of a map or
+  gave a wrong answer are pinned in `tests/regressions.rs`, each as a small
+  hand-written map holding just the thing that went wrong.
+
+CI (`.github/workflows/ci.yml`) runs the tests on Linux, macOS and Windows,
+plus `cargo fmt --check`, `cargo clippy -D warnings`, `cargo doc` with
+warnings as errors (every public item must have a doc comment), and a build on
+the minimum supported Rust version, 1.88.
+
+The benchmarks themselves are not part of the test suite: they need an
+external ground-truth renderer and maps that are not in the repository. How to
+reproduce the public ones is in [bug.md](bug.md#tested-benchmarks).

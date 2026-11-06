@@ -1,5 +1,5 @@
 //! Classifying a map's symbols into the four families
-//! [`Contours-to-Raster.md`](../../Contours-to-Raster.md) builds Step 1 out
+//! `mds/Contours-to-Raster.md` builds Step 1 out
 //! of: Contours, Slope Lines, Jumps and Heavy Objects. Nothing in the rest of
 //! the crate needs this classification, so it lives here rather than as
 //! baked-in knowledge in `map.rs`.

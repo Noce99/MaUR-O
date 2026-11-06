@@ -1,6 +1,7 @@
-//! Step 5's own per-pixel Gravity Direction prediction -- diagnostic-only for
-//! now (see [`crate::contours_to_raster_svg::write_step5_gravity_svg`]), a
-//! precursor to [`crate::step5_elevation_raster`]'s per-pixel altitude:
+//! Step 5's own per-pixel Gravity Direction prediction -- the field
+//! [`crate::step5_elevation_raster`]'s Gravity-Guided Elevation Fill drops
+//! follow (and drawn by
+//! [`crate::contours_to_raster_svg::write_step5_gravity_svg`]):
 //! instead of a scalar elevation, every in-bound Contour Raster pixel gets a
 //! 2D downhill direction, built the same way -- an Elevation Fill Rain Drop
 //! Production's own track (`crate::step3_rain_drop::elevation_fill_drop_track`)
