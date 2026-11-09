@@ -51,6 +51,22 @@
 //! `"403+410"` is the speed where rough open land and fight overlap. Those
 //! are applied after the single codes, to the cells every one of their
 //! components covers.
+//!
+//! # Widening lines and shrinking areas
+//!
+//! A map and a GPS track are both a little off, and a route which follows a
+//! path on the map may sit a few metres beside it in the track. Two lists
+//! let a caller allow for that, by code, matched the way speeds are:
+//!
+//! - [`Options::line_widths`] draws a line wider than the default, so a path
+//!   claims a strip a runner on it can actually be inside.
+//! - [`Options::shrink`] pulls an area in from its edge before it is drawn,
+//!   so a thicket's fringe, where the map and the track disagree, reads as
+//!   whatever lies under it rather than as thicket. Cells an area gives up
+//!   keep what was drawn there before it, or the background.
+//!
+//! Neither is applied to anything unless the caller names its code, and both
+//! are lengths in mm on the paper, like [`Options::pixel_size`].
 
 use std::collections::HashMap;
 
@@ -91,6 +107,16 @@ pub struct Options {
     /// Whether to draw a line a little wider than one cell, so that a path
     /// crossing a grid diagonally stays connected on it.
     pub buffer_lines: bool,
+    /// Line symbols to draw wider than one cell: a code and the full width,
+    /// in mm on the paper. A line is never drawn narrower than it would be
+    /// without an entry. Matched like [`speeds`](Self::speeds), the first
+    /// matching entry winning; codes of areas and points are ignored.
+    pub line_widths: Vec<(String, f64)>,
+    /// Area symbols to pull in from their edge before they are drawn: a code
+    /// and the distance, in mm on the paper. Matched like
+    /// [`speeds`](Self::speeds); codes of lines and points are ignored, since
+    /// a line or a point shrunk by any amount worth asking for would vanish.
+    pub shrink: Vec<(String, f64)>,
     /// The ceiling on cells; past it the cell size grows instead.
     pub max_cells: usize,
 }
@@ -103,6 +129,8 @@ impl Default for Options {
             fill_value: 0.9,
             mask_outside_convex_hull: true,
             buffer_lines: true,
+            line_widths: Vec::new(),
+            shrink: Vec::new(),
             max_cells: DEFAULT_MAX_CELLS,
         }
     }
@@ -183,6 +211,10 @@ struct Shape {
     /// Which object this came from, for the coordinates the hull is built on.
     object_index: usize,
     bounds: Rect,
+    /// The width to stroke a line at, in mm; `0` for the default.
+    line_width: f64,
+    /// How far to pull an area in from its edge, in mm; `0` for not at all.
+    shrink: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -267,10 +299,30 @@ fn collect(map: &Map, options: &Options) -> Vec<Shape> {
             }
             path
         };
+        let lookup = |list: &[(String, f64)]| {
+            list.iter()
+                .filter(|(c, _)| !c.contains('+'))
+                .find(|(c, _)| matches(code, c))
+                .map(|(_, v)| *v)
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(0.0)
+        };
+        let line_width = if kind == Kind::Line {
+            lookup(&options.line_widths)
+        } else {
+            0.0
+        };
+        let shrink = if kind == Kind::Area {
+            lookup(&options.shrink)
+        } else {
+            0.0
+        };
         shapes.push(Shape {
             code: code.to_string(),
             speed: *speed,
             kind,
+            line_width,
+            shrink,
             path,
             origin: object_origin(object),
             object_index,
@@ -433,6 +485,10 @@ fn draw(
         Cells::around(path.bounds(), transform, width, height)
     };
     match shape.kind {
+        Kind::Area if shape.shrink > 0.0 => {
+            let path = to_skia_path(&shape.path)?;
+            draw_shrunk(mask, &path, transform, shape.shrink / pixel_size)
+        }
         Kind::Area => {
             let path = to_skia_path(&shape.path)?;
             filled(mask, &path, FillRule::EvenOdd)
@@ -440,11 +496,12 @@ fn draw(
         Kind::Line => {
             // A cell's diagonal, so that a line crossing the grid at an angle
             // still touches every cell along it.
-            let width = if buffer_lines {
+            let default = if buffer_lines {
                 pixel_size * std::f64::consts::SQRT_2
             } else {
                 pixel_size
             };
+            let width = default.max(shape.line_width);
             let stroke = Stroke {
                 width: width as f32,
                 line_cap: LineCap::Round,
@@ -467,6 +524,112 @@ fn draw(
             filled(mask, &path, FillRule::Winding)
         }
     }
+}
+
+/// Fills an area pulled in by `inset` cells from its edge.
+///
+/// The area is filled on a mask of its own the size of its box, eroded there,
+/// and what is left is added to `mask`, so whatever `mask` already holds is
+/// untouched. A cell stays if its centre is more than `inset` from the
+/// nearest cell the area does not cover, measured to that cell's edge.
+fn draw_shrunk(
+    mask: &mut Mask,
+    path: &tiny_skia::Path,
+    transform: Transform,
+    inset: f64,
+) -> Option<Cells> {
+    let (width, height) = (mask.width(), mask.height());
+    let cells = Cells::around(path.bounds(), transform, width, height)?;
+    let (w, h) = (cells.x1 - cells.x0, cells.y1 - cells.y0);
+    let mut local = Mask::new(w as u32, h as u32)?;
+    local.fill_path(
+        path,
+        FillRule::EvenOdd,
+        true,
+        transform.post_translate(-(cells.x0 as f32), -(cells.y0 as f32)),
+    );
+    let inside: Vec<bool> = local.data().iter().map(|&c| c != 0).collect();
+    let distance = squared_distance_to_outside(&inside, w, h);
+    let keep = (inset + 0.5) * (inset + 0.5);
+    let row_len = width as usize;
+    let data = mask.data_mut();
+    for y in 0..h {
+        for x in 0..w {
+            if distance[y * w + x] > keep {
+                data[(cells.y0 + y) * row_len + cells.x0 + x] = 255;
+            }
+        }
+    }
+    Some(cells)
+}
+
+/// For every cell of a `w` x `h` grid, the squared distance from its centre
+/// to the centre of the nearest cell which is not `inside`, everything past
+/// the grid's edge counting as outside. Felzenszwalb and Huttenlocher's
+/// exact transform, a column pass and then a row pass.
+fn squared_distance_to_outside(inside: &[bool], w: usize, h: usize) -> Vec<f64> {
+    // Outside the grid is one cell past its edge at most, so no distance is
+    // larger than this; it stands in for "no outside cell along this line".
+    let far = ((w + h + 2) * (w + h + 2)) as f64;
+    let mut grid = vec![0.0; w * h];
+    let mut column = vec![0.0; h + 2];
+    for x in 0..w {
+        // Padded with an outside cell at each end.
+        column[0] = 0.0;
+        column[h + 1] = 0.0;
+        for y in 0..h {
+            column[y + 1] = if inside[y * w + x] { far } else { 0.0 };
+        }
+        let d = distance_1d(&column);
+        for y in 0..h {
+            grid[y * w + x] = d[y + 1];
+        }
+    }
+    let mut row = vec![0.0; w + 2];
+    for y in 0..h {
+        row[0] = 0.0;
+        row[w + 1] = 0.0;
+        row[1..=w].copy_from_slice(&grid[y * w..(y + 1) * w]);
+        let d = distance_1d(&row);
+        grid[y * w..(y + 1) * w].copy_from_slice(&d[1..=w]);
+    }
+    grid
+}
+
+/// The one-dimensional squared distance transform of `f`: for each `q`, the
+/// least `(q - p)^2 + f[p]` over every `p`, by the lower envelope of parabolas.
+fn distance_1d(f: &[f64]) -> Vec<f64> {
+    let n = f.len();
+    let mut d = vec![0.0; n];
+    let mut v = vec![0usize; n];
+    let mut z = vec![0.0f64; n + 1];
+    let mut k = 0usize;
+    z[0] = f64::NEG_INFINITY;
+    z[1] = f64::INFINITY;
+    let sq = |i: usize| (i * i) as f64;
+    let meet = |q: usize, p: usize| ((f[q] + sq(q)) - (f[p] + sq(p))) / (2.0 * (q - p) as f64);
+    for q in 1..n {
+        // z[0] is minus infinity, so this stops at k == 0 at the latest.
+        let mut s = meet(q, v[k]);
+        while s <= z[k] {
+            k -= 1;
+            s = meet(q, v[k]);
+        }
+        k += 1;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = f64::INFINITY;
+    }
+    k = 0;
+    for (q, out) in d.iter_mut().enumerate() {
+        while z[k + 1] < q as f64 {
+            k += 1;
+        }
+        let p = v[k];
+        let dq = q as f64 - p as f64;
+        *out = dq * dq + f[p];
+    }
+    d
 }
 
 /// A box of grid cells, `x0..x1` by `y0..y1`, inside the grid.
@@ -525,11 +688,12 @@ pub fn build(map: &Map, options: &Options) -> Result<Raster, String> {
     // A line is drawn wider than a cell, so the grid has to reach further
     // than the geometry does.
     let margin = |shape: &Shape| {
-        if options.buffer_lines && shape.kind != Kind::Area {
+        let buffer = if options.buffer_lines && shape.kind != Kind::Area {
             pixel_size
         } else {
             0.0
-        }
+        };
+        buffer.max(shape.line_width / 2.0)
     };
     let mut bounds = expanded(shapes[0].bounds, margin(&shapes[0]));
     for shape in &shapes[1..] {
@@ -839,6 +1003,8 @@ mod tests {
             origin: p(points[0].0, points[0].1),
             object_index: 0,
             bounds: Rect::from_ltrb(0.0, 0.0, 0.0, 0.0),
+            line_width: 0.0,
+            shrink: 0.0,
         }
     }
 
@@ -901,5 +1067,80 @@ mod tests {
             None
         );
         assert!(mask.data().iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn the_distance_transform_matches_brute_force() {
+        let (w, h) = (9, 7);
+        let inside: Vec<bool> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                !(x == 4 && y == 3) && (1..8).contains(&x) && (1..6).contains(&y)
+                    || x == 0 && y == 6
+            })
+            .collect();
+        let got = squared_distance_to_outside(&inside, w, h);
+        for y in 0..h as i64 {
+            for x in 0..w as i64 {
+                let mut best = f64::INFINITY;
+                for oy in -1..=h as i64 {
+                    for ox in -1..=w as i64 {
+                        let in_grid = (0..w as i64).contains(&ox) && (0..h as i64).contains(&oy);
+                        if in_grid && inside[(oy as usize) * w + ox as usize] {
+                            continue;
+                        }
+                        best = best.min(((x - ox).pow(2) + (y - oy).pow(2)) as f64);
+                    }
+                }
+                assert_eq!(got[y as usize * w + x as usize], best, "({x}, {y})");
+            }
+        }
+    }
+
+    fn covered(shape: &Shape, pixel_size: f64, buffer_lines: bool) -> usize {
+        let bounds = Rect::from_ltrb(0.0, 0.0, 20.0, 20.0);
+        let n = (20.0 / pixel_size).ceil() as u32;
+        let mut mask = Mask::new(n, n).unwrap();
+        draw(
+            &mut mask,
+            shape,
+            to_grid(bounds, pixel_size),
+            pixel_size,
+            buffer_lines,
+        );
+        mask.data().iter().filter(|&&c| c != 0).count()
+    }
+
+    #[test]
+    fn a_shrunk_area_loses_its_edge_and_keeps_its_middle() {
+        let square = &[(5.0, 5.0), (15.0, 5.0), (15.0, 15.0), (5.0, 15.0)];
+        let mut area = shape(Kind::Area, square);
+        assert_eq!(covered(&area, 1.0, false), 100);
+        area.shrink = 2.0;
+        // Two cells off each side of a ten-cell square.
+        assert_eq!(covered(&area, 1.0, false), 36);
+        area.shrink = 6.0;
+        assert_eq!(covered(&area, 1.0, false), 0);
+
+        // A shrunk area leaves what was already on the mask alone.
+        let bounds = Rect::from_ltrb(0.0, 0.0, 20.0, 20.0);
+        let mut mask = Mask::new(20, 20).unwrap();
+        mask.data_mut()[5 * 20 + 5] = 255;
+        area.shrink = 2.0;
+        draw(&mut mask, &area, to_grid(bounds, 1.0), 1.0, false);
+        assert_eq!(mask.data()[5 * 20 + 5], 255);
+        assert_eq!(mask.data().iter().filter(|&&c| c != 0).count(), 37);
+    }
+
+    #[test]
+    fn a_wide_line_covers_more_and_never_less() {
+        let mut line = shape(Kind::Line, &[(2.0, 10.0), (18.0, 10.0)]);
+        let narrow = covered(&line, 0.5, true);
+        line.line_width = 3.0;
+        let wide = covered(&line, 0.5, true);
+        // Six cells across instead of about three.
+        assert!(wide >= narrow * 2, "{narrow} -> {wide}");
+        line.line_width = 0.01;
+        assert_eq!(covered(&line, 0.5, true), narrow);
     }
 }
