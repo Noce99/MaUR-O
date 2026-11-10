@@ -11,7 +11,9 @@ environment. Alongside the renderer it ships benchmarking tools that compare its
 output against a ground-truth renderer, and a second, independent pipeline
 (`contours_to_raster`) that extracts elevation/gravity information from a map's
 contour lines. A sixth binary, `osm_to_omap`, goes the other way: it turns
-OpenStreetMap data (plus optional GTFS transit feeds) into a Mapper map.
+OpenStreetMap data (plus optional GTFS transit feeds) into a Mapper map. A
+seventh, `add_orthophoto`, downloads the aerial orthophoto of a map's ground
+(Emilia-Romagna's AGEA WMS, for now) and adds it to the map as a template.
 
 This crate is consumed by the o-mnia web app as a git submodule (via
 `crates/maur-o-wasm`, o-mnia's own wasm-bindgen adapter — see that repo's
@@ -37,9 +39,9 @@ cargo doc --no-deps --locked                   # doc build; every public item mu
 
 CI (`.github/workflows/ci.yml`) runs the above across Linux/macOS/Windows plus an
 MSRV check pinned to Rust 1.88 (the floor set by the `image` crate). There is no
-Cargo workspace — one crate, six binaries.
+Cargo workspace — one crate, seven binaries.
 
-### The six binaries
+### The seven binaries
 
 | Binary | Purpose |
 | --- | --- |
@@ -49,8 +51,9 @@ Cargo workspace — one crate, six binaries.
 | `contours_to_raster` | Run the 5-step elevation-extraction pipeline (see below) on one map, writing an elevation GeoTIFF. |
 | `dem_geo_tiff_evaluator` | Score a predicted DEM GeoTIFF against a ground-truth one (MSE/RMSE/MAE + error maps). |
 | `osm_to_omap` | Convert OpenStreetMap XML (and optionally GTFS feeds) into an `.omap` styled like openstreetmap-carto. |
+| `add_orthophoto` | Download a map's aerial orthophoto (Emilia-Romagna AGEA WMS only, for now) and add it to the map as a georeferenced template. |
 
-Full CLI flags for all six are documented in each binary's own top-of-file doc
+Full CLI flags for all seven are documented in each binary's own top-of-file doc
 comment (`src/bin/*.rs`) and in `README.md`'s Usage section. When changing a
 flag, default or exit code, update both (and `--help` text in the clap
 definition) — they are kept in sync by hand.
@@ -144,6 +147,19 @@ tag→symbol rules, and `osm_convert.rs` projects to UTM, clips, and writes the
 map through `xml_writer.rs`. Optional overlays: `bus.rs` (bus/train lines from
 OSM route relations or GTFS), `bundle.rs` (lines sharing a street laid out
 side by side), `map_areas.rs` (event map areas from a CSV).
+
+### Orthophotos (`add_orthophoto`)
+
+`orthophoto.rs` says *what* to download and never touches the network: the
+regional WMS services (only Emilia-Romagna's AGEA flights so far), a map's
+footprint in its projected CRS, the tile grid, `GetMap` URLs (WMS 1.1.1, so
+the bbox is always easting first), capabilities parsing, the world file.
+`image_template.rs` adds the image to the map file as a `TemplateImage` by
+editing the file's *text*, not by round-tripping through `map.rs`, which
+would lose everything Mapper keeps that the model doesn't. The binary does
+the HTTP itself (`ureq`, a native-only dependency, so o-mnia's wasm build
+never sees it). Its integration tests (`tests/add_orthophoto.rs`) cover only
+the offline exit paths, so CI never depends on the region's server.
 
 ### Benchmark support modules
 

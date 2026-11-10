@@ -222,6 +222,56 @@ fn parse_coord(cursor: &mut &str) -> Option<Coord> {
 /// with `QColor::fromCmykF`, in the same float precision. This approximates
 /// Qt's internal 16-bit fixed-point storage with a direct float computation
 /// and can differ from Qt by at most one 8-bit level in rare rounding cases.
+/// The EPSG code a `<projected_crs>` stands for, or 0 where it names none
+/// this can tell.
+///
+/// `template` is the element's `id`: the Mapper CRS template the rest is
+/// read against (`src/core/crs_template_implementation.cpp`). "EPSG" puts
+/// the code itself in `<parameter>`. "UTM" puts a zone there instead --
+/// `32`, `32 N`, `33 S` -- on the WGS84 datum, which is EPSG 326zz north of
+/// the equator and 327zz south of it. Anything else (a custom "PROJ.4"
+/// one, or an OCAD import's) is read from its PROJ `spec`: an
+/// `+init=epsg:N` or `EPSG:N`, or a WGS84 `+proj=utm`.
+fn projected_crs_epsg(template: &str, parameter: &str, spec: &str) -> i32 {
+    match template {
+        "EPSG" => parameter.trim().parse().unwrap_or(0),
+        "UTM" => {
+            let zone = parameter.trim();
+            let (zone, south) = match zone.strip_suffix('S') {
+                Some(zone) => (zone, true),
+                None => (zone.strip_suffix('N').unwrap_or(zone), false),
+            };
+            utm_epsg(zone.trim(), south)
+        }
+        _ => spec_epsg(spec),
+    }
+}
+
+/// The EPSG code of a WGS84 UTM zone (`"1"` to `"60"`), or 0 for no zone.
+fn utm_epsg(zone: &str, south: bool) -> i32 {
+    match zone.parse::<i32>() {
+        Ok(zone @ 1..=60) => (if south { 32700 } else { 32600 }) + zone,
+        _ => 0,
+    }
+}
+
+/// The EPSG code a PROJ spec names, or 0. See [`projected_crs_epsg`].
+fn spec_epsg(spec: &str) -> i32 {
+    let spec = spec.trim().to_ascii_lowercase();
+    for prefix in ["+init=epsg:", "epsg:"] {
+        if let Some(code) = spec.strip_prefix(prefix) {
+            return code.trim().parse().unwrap_or(0);
+        }
+    }
+    let params: Vec<&str> = spec.split_whitespace().collect();
+    let has = |p: &str| params.contains(&p);
+    if has("+proj=utm") && (has("+datum=wgs84") || has("+ellps=wgs84")) {
+        let zone = params.iter().find_map(|p| p.strip_prefix("+zone="));
+        return zone.map_or(0, |zone| utm_epsg(zone, has("+south")));
+    }
+    0
+}
+
 fn cmyk_to_rgb(c: f32, m: f32, y: f32, k: f32) -> (f32, f32, f32) {
     let r = 1.0 - (c * (1.0 - k) + k);
     let g = 1.0 - (m * (1.0 - k) + k);
@@ -407,15 +457,24 @@ impl<'a> XmlMapReader<'a> {
                         Ok(true)
                     }
                     "projected_crs" => {
+                        // Mapper names the CRS through one of its templates
+                        // (`id`), filled in by `<parameter>`: an EPSG code
+                        // for "EPSG", but a zone for "UTM". The `<spec>` is
+                        // what a custom ("PROJ.4") one says instead.
+                        let template = attr_str(start, "id").unwrap_or_default();
+                        let mut parameter = String::new();
+                        let mut spec = String::new();
                         this.read_children(&mut |this: &mut Self,
                                                  name: &str,
                                                  start: &BytesStart|
                          -> Result<bool, String> {
                             match name {
-                                // The EPSG code is the element's own text.
                                 "parameter" => {
-                                    let text = this.xml.read_text_content()?;
-                                    georeferencing.epsg = text.trim().parse::<i32>().unwrap_or(0);
+                                    parameter = this.xml.read_text_content()?;
+                                    Ok(true)
+                                }
+                                "spec" => {
+                                    spec = this.xml.read_text_content()?;
                                     Ok(true)
                                 }
                                 "ref_point" => {
@@ -427,6 +486,7 @@ impl<'a> XmlMapReader<'a> {
                                 _ => Ok(false),
                             }
                         })?;
+                        georeferencing.epsg = projected_crs_epsg(&template, &parameter, &spec);
                         Ok(true)
                     }
                     _ => Ok(false),
@@ -1239,6 +1299,41 @@ mod tests {
                 (c, m, y, k)
             );
         }
+    }
+
+    /// Mapper's "UTM" template stores a zone, not a code: reading `32` as
+    /// EPSG:32 put every UTM map's GeoTIFF nowhere.
+    #[test]
+    fn a_utm_zone_is_its_wgs84_epsg_code() {
+        let epsg = |template, parameter, spec| projected_crs_epsg(template, parameter, spec);
+        let utm = "+proj=utm +datum=WGS84 +zone=32";
+        assert_eq!(epsg("UTM", "32", utm), 32632);
+        assert_eq!(epsg("UTM", "31 N", utm), 32631);
+        assert_eq!(epsg("UTM", "33 S", utm), 32733);
+        assert_eq!(epsg("UTM", "61", utm), 0);
+        assert_eq!(epsg("EPSG", "3006", "+init=epsg:3006"), 3006);
+        assert_eq!(epsg("PROJ.4", "", "+init=epsg:25832"), 25832);
+        assert_eq!(epsg("PROJ.4", "", "EPSG:7791"), 7791);
+        assert_eq!(
+            epsg("PROJ.4", "", "+proj=utm +zone=33 +south +datum=WGS84"),
+            32733
+        );
+        assert_eq!(epsg("PROJ.4", "", "+proj=utm +zone=32 +ellps=intl"), 0);
+        assert_eq!(epsg("Local", "", ""), 0);
+        assert_eq!(epsg("Gauss-Krueger, datum: Potsdam", "3", ""), 0);
+    }
+
+    /// The same, read from a file the way Mapper writes it.
+    #[test]
+    fn reads_a_utm_georeferencing() {
+        let xml = r#"<map><georeferencing scale="4000" grivation="1.72"><projected_crs id="UTM"><spec language="PROJ.4">+proj=utm +datum=WGS84 +zone=32</spec><parameter>32</parameter><ref_point x="682364" y="4952128"/></projected_crs></georeferencing></map>"#;
+        let (map, _) = read_xml_map_str(xml).unwrap();
+        let georef = map.georeferencing.unwrap();
+        assert_eq!(georef.epsg, 32632);
+        assert_eq!(
+            (georef.ref_point_x, georef.ref_point_y),
+            (682364.0, 4952128.0)
+        );
     }
 
     #[test]

@@ -25,7 +25,10 @@ It also ships tools that go beyond drawing a map:
   map's contour lines, and **`dem_geo_tiff_evaluator`** scores such a model
   against a ground-truth one;
 - **`osm_to_omap`** turns OpenStreetMap data — optionally with bus and train
-  lines from GTFS feeds — into a Mapper map styled like openstreetmap.org.
+  lines from GTFS feeds — into a Mapper map styled like openstreetmap.org;
+- **`add_orthophoto`** downloads the aerial orthophoto of a map's ground and
+  adds it to the map as a georeferenced template (Emilia-Romagna only, for
+  now).
 
 Everything is also usable as a Rust library (`maur_o`): besides rendering, it
 covers OCAD import, course layout, runnability grids and route finding,
@@ -44,6 +47,7 @@ together.
   - [`contours_to_raster`](#contours_to_raster)
   - [`dem_geo_tiff_evaluator`](#dem_geo_tiff_evaluator)
   - [`osm_to_omap`](#osm_to_omap)
+  - [`add_orthophoto`](#add_orthophoto)
 - [Using it as a library](#using-it-as-a-library)
 - [Development](#development)
 - [Implementation Details](#implementation-details)
@@ -72,7 +76,7 @@ Build everything with:
 cargo build --release
 ```
 
-The six executables are then in `target/release/`:
+The seven executables are then in `target/release/`:
 
 | Executable | What it does |
 | --- | --- |
@@ -82,6 +86,7 @@ The six executables are then in `target/release/`:
 | [`contours_to_raster`](#contours_to_raster) | Reconstructs an elevation GeoTIFF from a map's contour lines. |
 | [`dem_geo_tiff_evaluator`](#dem_geo_tiff_evaluator) | Scores a predicted elevation GeoTIFF against a ground-truth one. |
 | [`osm_to_omap`](#osm_to_omap) | Converts OpenStreetMap data into a Mapper map. |
+| [`add_orthophoto`](#add_orthophoto) | Adds the aerial orthophoto of a map's ground to it as a template. |
 
 Every one of them takes `--help` and `--version`.
 
@@ -441,6 +446,68 @@ map_to_image -r 0.7143 -f 0 piazza_maggiore.omap
 Exit codes: `0` success, `1` a usage error, `2` the OSM file or the GTFS
 feed could not be read, or held nothing to convert, `4` the map could not be
 written.
+
+### `add_orthophoto`
+
+Downloads the aerial orthophoto of the ground a map covers and adds it to
+the map as a georeferenced template, behind the map and every other
+template, ready to draw over in Mapper.
+
+```
+add_orthophoto [--year 2023|2020] [--pixel-size M] [--margin M] [--image FILE] <map-file> [output-map-file]
+```
+
+The photos are AGEA's (Agenzia per le Erogazioni in Agricoltura) at 20 cm a
+pixel, as [Regione Emilia-Romagna](https://geoportale.regione.emilia-romagna.it/)
+serves them over WMS; `--year` picks the flight, 2023 by default. **Only
+Emilia-Romagna is covered for now.** A map elsewhere gets a warning and exit
+code `5`, and nothing is written.
+
+Why one region: AGEA flies all of Italy, but there is no single national
+service that hands out its photos reliably. Each region publishes its own
+flights, on its own WMS server. Each server has its own address, layer
+names, years, coordinate systems, tile-size limits and terms of use, and its
+own behaviour at the edge of its coverage (Emilia-Romagna's returns
+transparent pixels outside it, which is how the tool spots a map that is
+only partly covered). None of this can be guessed: a server asked for a
+coordinate system it doesn't serve can quietly answer with a blank image
+instead of an error. So each region has to be checked by hand, and a real
+map's objects laid over the downloaded photo, before the tool can trust it.
+Emilia-Romagna's has been; adding another region is one more entry in
+`orthophoto.rs`'s service list, once that region has been checked the same
+way.
+
+The map has to be a Mapper `.omap`/`.xmap`, georeferenced in a projected CRS
+the service offers: WGS84 / UTM 32N or 33N (Mapper's "UTM" CRS, or EPSG
+32632/32633), ETRS89 / UTM 32N or 33N (25832/25833), Monte Mario (3003/3004)
+and a few others. An OCAD map has to be saved as `.omap` in Mapper first.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--year` | `2023` | Which flight: `2023` or `2020`. |
+| `--pixel-size` | `0.2` | The image's ground resolution, in meters. Above 300 megapixels (about 3.5 × 3.5 km at 0.2 m) a larger one is needed. |
+| `--margin` | `50` | How far beyond the map's objects to download, in meters. |
+| `--image` | `<map>_agea<year>.jpg` | Where to write the image, beside the output map by default. Its world file (`.jgw`) goes beside it. |
+
+The output map defaults to the input map, rewritten in place, and only its
+template list and saved view change. The view is updated so the photo shows
+when the map is opened, unless the map was saved with all templates hidden.
+Running the tool again downloads the image again and leaves the templates
+as they are. The area downloaded is a north-up box around the map, and
+Mapper turns the image by the map's grivation itself.
+
+```bash
+add_orthophoto casalecchio.omap   # writes casalecchio_agea2023.jpg + .jgw and adds the template
+```
+
+The photos belong to Regione Emilia-Romagna and AGEA: credit them wherever a
+map drawn over them is published.
+
+Exit codes: `0` success, `1` a usage error, `2` the map could not be read,
+`3` the map is not georeferenced in a CRS the service offers, `4` the image
+or the map could not be written, `5` the map is not in Emilia-Romagna, `6`
+the service could not be reached or answered with something other than a
+photo.
 
 ## Using it as a library
 

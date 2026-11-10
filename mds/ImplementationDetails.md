@@ -34,6 +34,7 @@ differently.
 | Float TIFF | `tiff` | Writes `contours_to_raster`'s single-band 32-bit float elevation GeoTIFF, which `image`'s encoder cannot. |
 | Contour geometry | `geo`, `geo-svg` | Polygon buffering and point-in-polygon for `contours_to_raster`; `geo-svg` draws its `--create_svg` diagnostics. |
 | Scratch space | `tempfile` | The temporary folder a benchmark archive is unpacked into. |
+| HTTP | `ureq` | `add_orthophoto`'s downloads from a region's WMS: blocking, rustls. Not built for wasm, and never used by the library itself. |
 
 `fontdb` + `rustybuzz` + `ttf-parser` + `tiny-skia` is the same pipeline
 [resvg](https://github.com/RazrFalcon/resvg) uses, which is what made text
@@ -120,6 +121,13 @@ one file per step; read that document first.
 | `bundle.rs` | Lines sharing a street laid out side by side: routes matched to the street and rail network, a fixed left-to-right order carried along each bundle, offsets smoothed where a bundle changes, the band capped in width, stops as one bar across it. Pure geometry on the paper, independent of OSM. |
 | `map_areas.rs` | The areas of an event's maps, read from a CSV table (`--maps`): outlines, names, forbidden zones, start and finish. |
 
+### Orthophotos
+
+| File | Contents |
+| --- | --- |
+| `orthophoto.rs` | The regional orthophoto WMS services (Emilia-Romagna's AGEA flights), a map's footprint in its projected CRS, the north-up pixel grid and its tiles, `GetMap`/`GetCapabilities` URLs, capabilities parsing, the world file. No network access. |
+| `image_template.rs` | Adds a georeferenced image to a Mapper file as its bottom-most template, by editing the file's text: the template list's `count` and `first_front_template`, and the saved view's `<ref template>` indices. |
+
 ### Binaries
 
 Each one is a thin CLI over the library, documented in its own top-of-file doc
@@ -133,6 +141,7 @@ comment:
 | `bin/contours_to_raster.rs` | Runs the contour-to-elevation pipeline on one map. |
 | `bin/dem_geo_tiff_evaluator.rs` | Scores a predicted DEM against a ground truth. |
 | `bin/osm_to_omap.rs` | Converts an `.osm` file into an `.omap`. |
+| `bin/add_orthophoto.rs` | Downloads a map's orthophoto tile by tile and adds it to the map as a template. |
 
 ## One map per symbol
 

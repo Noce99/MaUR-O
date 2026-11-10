@@ -46,6 +46,10 @@ path = "src/bin/dem_geo_tiff_evaluator.rs"
 name = "osm_to_omap"
 path = "src/bin/osm_to_omap.rs"
 
+[[bin]]
+name = "add_orthophoto"
+path = "src/bin/add_orthophoto.rs"
+
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }
@@ -86,6 +90,13 @@ geo-svg = "0.8"
 # the wrapper to unwrap a library it never checked was loaded.
 [target.'cfg(all(unix, not(any(target_vendor = "apple", target_os = "android", target_os = "emscripten"))))'.dependencies]
 fontconfig = { version = "0.11", features = ["dlopen"] }
+
+# The HTTP client `add_orthophoto` downloads orthophotos with: blocking,
+# rustls (no system OpenSSL to find), and nothing else. The library itself
+# never touches the network -- `orthophoto` only says what to ask for -- so
+# the wasm build o-mnia makes of this crate is kept clear of it.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
