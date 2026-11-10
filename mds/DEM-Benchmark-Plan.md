@@ -79,7 +79,43 @@ On the spike tile, confirm:
   interval is `contour`, `contour_index`, `contour_intermed`, `formline`?
 - **Point cloud vs DTM**: how well do heights agree across the year gap?
 
-The answers are recorded below, under *Phase 0 findings*.
+#### Phase 0 findings
+
+Measured on LAZ tile `19b002-63975_3175_25` (2019) against DTM tile
+`639_31` (2023), by sampling the DTM along every DXF polyline:
+
+| DXF layer | Lines | Level | DTM − DXF height (median / p90 abs) |
+|---|---|---|---|
+| `contour` | 419 (368 closed) | multiples of 5 m | −0.26 m / 1.50 m |
+| `contour_index` | 92 | multiples of 25 m | −0.17 m / 1.24 m |
+| `contour_intermed` | 524 | odd multiples of 2.5 m | −0.22 m / 1.46 m |
+| `depression` / `_index` / `_intermed` | 7 / 5 / 11 rings | as above | ≤ 0.1 m / ≤ 0.5 m |
+| `slope_line` | 23 two-point 6 m ticks | the level of the ring they sit on | |
+| `small_depression` | 65 | a fixed 8-vertex 18.7 m glyph, not a contour | |
+| `formline` (`formlines.dxf`) | 721, **all open**, no height | exact pieces of `contour_intermed` / `depression_intermed` | |
+
+- **DXF coordinates are absolute SWEREF99 TM meters**, and each polyline's
+  height is its group code 38 (each vertex repeats it as code 30). So every
+  imported line comes with its true level for free; the DTM is not needed to
+  label them.
+- **Depression rings are their own layers**, not duplicated on `contour`.
+  Each one carries exactly one `slope_line` tick (23 ticks for 23 rings).
+- **The point cloud and DTM agree** to about a meter despite the four-year
+  gap, so on this tile the year gap is not a concern (still recorded per
+  sample).
+- **How `contours_to_raster` reads the input** (`step1_extract.rs`): a slope
+  line is a **point** object (101.1 / 103.1) whose rotation `r` gives the
+  downhill direction `(-sin r, -cos r)` in map coordinates (y down). It is
+  attributed to the nearest contour within
+  `slope_lines_contours_search_radius`. **Open form lines are dropped**, so
+  Karttapullautin's form lines (all open) never reach the algorithm. A closed
+  contour with no slope line and nothing inside it is assumed to be a hill,
+  which is exactly what the `none` variant gets wrong for depressions.
+- **The crate's own GeoTIFF reader** (`dem_geo_tiff_evaluator::read`) opens
+  Lantmäteriet's encoding (tiled, deflate, floating-point predictor, NoData
+  −9999), so no GDAL is needed. It reads a whole file as `f64`, though: a
+  10 000 × 10 000 DTM tile is 800 MB in memory, so cropping to the sample box
+  needs a windowed read of just the TIFF tiles it overlaps.
 
 ### Phase 1: downloader and sampler
 
@@ -109,10 +145,15 @@ For each sample (seeded RNG, `--seed`, `--samples N`, `--size 1000` m):
 |---|---|
 | `contour`, `depression` | 101 Contour |
 | `contour_index`, `depression_index` | 102 Index contour |
-| `formline` | 103 Form line |
-| `depression*`, `small_depression` | also get slope lines (101.1 / 103.1), ticks pointing into the ring |
-| `contour_intermed`, `depression_intermed` | skipped (the 2.5 m lines `formline` is selected from) |
-| dot knolls, `slope_line` | skipped |
+| `formline` | 103 Form line (open, so ignored by the algorithm, but on the map) |
+| `depression_intermed` | 103 Form line ring, only where a `formline` runs along it (that is when Karttapullautin draws it) |
+| `slope_line` | a 101.1 / 103.1 point at the tick's end on the ring, rotated to point along the tick (into the depression); dropped if its ring was not imported |
+| `contour_intermed` | skipped (the 2.5 m lines `formline` is selected from) |
+| `small_depression`, dot knolls | skipped |
+
+Every imported line keeps its DXF height in a sidecar (`levels.txt`: object
+index → level in meters), which is what per-contour scoring is measured
+against.
 
 **Variants**, written as separate maps per sample: `depressions` (slope
 lines on depressions, as a real map would have) and `none` (everything
@@ -131,6 +172,7 @@ Lines are clipped to the box; the map is georeferenced in EPSG:3006 at
     map_none.omap
     ground_truth.tif            the DTM cropped to the box
     ground_truth_smoothed.tif   Gaussian-smoothed DTM
+    levels.txt                  every imported line's true level
     water_mask.tif              large perfectly flat areas
     preview.png                 Karttapullautin's own render
     sample.txt                  center (WGS84 + 3006), tile ids, years
@@ -147,9 +189,9 @@ For each sample and variant: run `compute`, time it, and record failures
 - **RMSE / MAE**, in meters and in equidistances, with the offset fitted
   both by mean (what `evaluate` does) and by median (robust to an inverted
   hill).
-- **Per-contour level accuracy**: each contour's true level is the median of
-  the DTM along it, snapped to the equidistance grid; its predicted level is
-  the median of the prediction along it. After the best integer offset (the
+- **Per-contour level accuracy**: each contour's true level is its DXF height
+  (`levels.txt`); its predicted level is the median of the prediction along
+  it. After the best integer offset (the
   mode of differences): % exactly right, % off by one, % off by more, and
   the share of contour *length* that is wrong.
 - **Inverted area**: % of pixels whose predicted slope direction disagrees
