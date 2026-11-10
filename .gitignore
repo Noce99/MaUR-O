@@ -19,6 +19,10 @@ examples
 # Where the `create_benchmark` tool puts the archives it builds.
 benchmarks/
 
+# Where `create_dem_benchmark` keeps its downloads (lidar tiles, ground
+# models, Karttapullautin output) between runs.
+dem_cache/
+
 a_lot_of_work
 
 *.zip

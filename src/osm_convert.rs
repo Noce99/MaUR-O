@@ -53,18 +53,34 @@ pub fn utm_zone(lon: f64) -> u32 {
 
 /// `(lon, lat)` in degrees to UTM `(easting, northing)` in meters, in the
 /// northern-hemisphere grid of `zone`.
-///
-/// Krüger's series to the third power of the third flattening, which is
-/// good to well under a millimetre within a zone.
-pub fn utm(zone: u32, (lon, lat): (f64, f64)) -> (f64, f64) {
+pub fn utm(zone: u32, position: (f64, f64)) -> (f64, f64) {
+    let lon0 = (f64::from(zone) - 1.0) * 6.0 - 180.0 + 3.0;
+    transverse_mercator(lon0, position)
+}
+
+/// The third flattening `n` of WGS 84 and the rectifying radius `A`
+/// Krüger's series are written in.
+fn krueger_constants() -> (f64, f64) {
     let n = WGS84_F / (2.0 - WGS84_F);
     let big_a = WGS84_A / (1.0 + n) * (1.0 + n * n / 4.0 + n.powi(4) / 64.0);
+    (n, big_a)
+}
+
+/// `(lon, lat)` in degrees to `(easting, northing)` in meters on the
+/// transverse Mercator with central meridian `lon0`, UTM's scale (0.9996)
+/// and false easting (500 000 m), and no false northing: UTM's northern
+/// grid for `lon0` a zone's meridian, SWEREF99 TM for `lon0 = 15`.
+///
+/// Krüger's series to the third power of the third flattening, which is
+/// good to well under a millimetre within a zone. On WGS 84, whose
+/// flattening differs from GRS 80's (SWEREF99's) by under a part in 10^9.
+pub fn transverse_mercator(lon0: f64, (lon, lat): (f64, f64)) -> (f64, f64) {
+    let (n, big_a) = krueger_constants();
     let alpha = [
         n / 2.0 - 2.0 * n * n / 3.0 + 5.0 * n.powi(3) / 16.0,
         13.0 * n * n / 48.0 - 3.0 * n.powi(3) / 5.0,
         61.0 * n.powi(3) / 240.0,
     ];
-    let lon0 = (f64::from(zone) - 1.0) * 6.0 - 180.0 + 3.0;
     let phi = lat.to_radians();
     let dlambda = (lon - lon0).to_radians();
 
@@ -84,6 +100,39 @@ pub fn utm(zone: u32, (lon, lat): (f64, f64)) -> (f64, f64) {
         500_000.0 + UTM_K0 * big_a * easting,
         UTM_K0 * big_a * northing,
     )
+}
+
+/// The inverse of [`transverse_mercator`]: `(easting, northing)` in meters
+/// back to `(lon, lat)` in degrees, by Krüger's inverse series to the same
+/// order.
+pub fn transverse_mercator_inverse(lon0: f64, (easting, northing): (f64, f64)) -> (f64, f64) {
+    let (n, big_a) = krueger_constants();
+    let beta = [
+        n / 2.0 - 2.0 * n * n / 3.0 + 37.0 * n.powi(3) / 96.0,
+        n * n / 48.0 + n.powi(3) / 15.0,
+        17.0 * n.powi(3) / 480.0,
+    ];
+    let delta = [
+        2.0 * n - 2.0 * n * n / 3.0 - 2.0 * n.powi(3),
+        7.0 * n * n / 3.0 - 8.0 * n.powi(3) / 5.0,
+        56.0 * n.powi(3) / 15.0,
+    ];
+    let xi = northing / (UTM_K0 * big_a);
+    let eta = (easting - 500_000.0) / (UTM_K0 * big_a);
+    let mut xi1 = xi;
+    let mut eta1 = eta;
+    for (j, b) in beta.iter().enumerate() {
+        let k = 2.0 * (j as f64 + 1.0);
+        xi1 -= b * (k * xi).sin() * (k * eta).cosh();
+        eta1 -= b * (k * xi).cos() * (k * eta).sinh();
+    }
+    let chi = (xi1.sin() / eta1.cosh()).asin();
+    let mut phi = chi;
+    for (j, d) in delta.iter().enumerate() {
+        phi += d * (2.0 * (j as f64 + 1.0) * chi).sin();
+    }
+    let lon = lon0 + eta1.sinh().atan2(xi1.cos()).to_degrees();
+    (lon, phi.to_degrees())
 }
 
 /// Degrees on the earth to millimetres on the paper.
@@ -1979,6 +2028,16 @@ mod tests {
         // Not above, where the other area is: below, just clear of it.
         assert!(name.center.1 > 10.0 && name.center.1 < 16.0, "{name:?}");
         assert!(name.points().iter().all(|&p| !inside_ring(p, &small)));
+    }
+
+    #[test]
+    fn the_inverse_transverse_mercator_finds_the_point_again() {
+        for (lon0, lon, lat) in [(15.0, 11.95, 57.69), (15.0, 23.9, 68.2), (9.0, 11.3, 44.5)] {
+            let projected = transverse_mercator(lon0, (lon, lat));
+            let (lon1, lat1) = transverse_mercator_inverse(lon0, projected);
+            // A millimetre is about 1e-8 degrees.
+            assert!((lon1 - lon).abs() < 1e-8 && (lat1 - lat).abs() < 1e-8);
+        }
     }
 
     #[test]

@@ -129,6 +129,7 @@ pub mod geometry;
 pub mod geotiff;
 pub mod gravity_model;
 pub mod image_template;
+pub mod lantmateriet;
 pub mod map;
 pub mod map_areas;
 pub mod naming;

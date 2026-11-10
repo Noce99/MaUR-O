@@ -294,10 +294,56 @@ fn read_crs(decoder: &mut Decoder<std::fs::File>) -> Result<CrsKey, String> {
 /// at all, or its own transform is degenerate (a zero determinant, which no
 /// real raster should ever produce).
 pub fn read(path: &Path) -> Result<GeoRaster, String> {
+    let mut header = open(path)?;
+    let (width, height) = (header.width, header.height);
+    let image = header
+        .decoder
+        .read_image()
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut values =
+        decoding_result_to_f64(image).map_err(|e| format!("{}: {e}", path.display()))?;
+    if values.len() != width * height {
+        return Err(format!(
+            "{}: expected {} pixel(s), decoded {}",
+            path.display(),
+            width * height,
+            values.len()
+        ));
+    }
+    if let Some(nodata) = header.nodata {
+        for v in &mut values {
+            if *v == nodata {
+                *v = f64::NAN;
+            }
+        }
+    }
+
+    Ok(GeoRaster {
+        width,
+        height,
+        values,
+        transform: header.transform,
+        crs: header.crs,
+    })
+}
+
+/// An opened DEM file, read as far as its header.
+struct Header {
+    decoder: Decoder<std::fs::File>,
+    width: usize,
+    height: usize,
+    nodata: Option<f64>,
+    transform: AffineTransform,
+    crs: CrsKey,
+}
+
+/// Opens `path` and reads everything [`read`] needs but the pixels.
+fn open(path: &Path) -> Result<Header, String> {
     let file =
         std::fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    let mut decoder =
-        Decoder::new(file).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut decoder = Decoder::new(file)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        .with_limits(tiff::decoder::Limits::unlimited());
 
     let (width, height) = decoder
         .dimensions()
@@ -318,35 +364,149 @@ pub fn read(path: &Path) -> Result<GeoRaster, String> {
     let nodata = read_nodata(&mut decoder).map_err(|e| format!("{}: {e}", path.display()))?;
     let transform = read_transform(&mut decoder).map_err(|e| format!("{}: {e}", path.display()))?;
     let crs = read_crs(&mut decoder).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Header {
+        decoder,
+        width,
+        height,
+        nodata,
+        transform,
+        crs,
+    })
+}
 
-    let image = decoder
-        .read_image()
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let mut values =
-        decoding_result_to_f64(image).map_err(|e| format!("{}: {e}", path.display()))?;
-    if values.len() != width * height {
+/// Reads only the part of `path` that covers the world rectangle
+/// `min`..`max` (in the file's own CRS): the pixels whose centers fall
+/// inside it, decoding only the file's tiles or strips that hold them.
+///
+/// What makes a national DEM tile usable for a small area: a 10 000 x 10 000
+/// tile is 800 MB as [`read`] holds it, the window a few MB. Only for a
+/// north-up raster (no rotation); a window reaching past the file's edge is
+/// clipped to it, and one missing it entirely is an error.
+pub fn read_window(path: &Path, min: (f64, f64), max: (f64, f64)) -> Result<GeoRaster, String> {
+    let mut header = open(path)?;
+    let t = header.transform;
+    if t.row_x != 0.0 || t.col_y != 0.0 {
         return Err(format!(
-            "{}: expected {} pixel(s), decoded {}",
-            path.display(),
-            width * height,
-            values.len()
+            "{}: a window can only be read from a north-up raster",
+            path.display()
         ));
     }
-    if let Some(nodata) = nodata {
-        for v in &mut values {
-            if *v == nodata {
-                *v = f64::NAN;
+    // The pixel range whose centers are inside the rectangle, either way
+    // the axes run.
+    let (c0, r0) = t.world_to_pixel(min.0, min.1);
+    let (c1, r1) = t.world_to_pixel(max.0, max.1);
+    let range = |a: f64, b: f64, n: usize| -> (usize, usize) {
+        let lo = (a.min(b) - 0.5).ceil().max(0.0) as usize;
+        let hi = ((a.max(b) - 0.5).floor() + 1.0).clamp(0.0, n as f64) as usize;
+        (lo, hi.max(lo))
+    };
+    let (col_lo, col_hi) = range(c0, c1, header.width);
+    let (row_lo, row_hi) = range(r0, r1, header.height);
+    let (width, height) = (col_hi - col_lo, row_hi - row_lo);
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "{}: the window ({:.1}, {:.1})-({:.1}, {:.1}) is outside the raster",
+            path.display(),
+            min.0,
+            min.1,
+            max.0,
+            max.1
+        ));
+    }
+
+    let decoder = &mut header.decoder;
+    let (chunk_w, chunk_h) = decoder.chunk_dimensions();
+    let (chunk_w, chunk_h) = (chunk_w as usize, chunk_h as usize);
+    let chunks_across = header.width.div_ceil(chunk_w);
+    let mut values = vec![f64::NAN; width * height];
+    for chunk_row in row_lo / chunk_h..=(row_hi - 1) / chunk_h {
+        for chunk_col in col_lo / chunk_w..=(col_hi - 1) / chunk_w {
+            let index = (chunk_row * chunks_across + chunk_col) as u32;
+            let (data_w, _) = decoder.chunk_data_dimensions(index);
+            let chunk = decoder
+                .read_chunk(index)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let chunk =
+                decoding_result_to_f64(chunk).map_err(|e| format!("{}: {e}", path.display()))?;
+            let data_w = data_w as usize;
+            let data_h = chunk.len() / data_w.max(1);
+            for y in 0..data_h {
+                let row = chunk_row * chunk_h + y;
+                if row < row_lo || row >= row_hi {
+                    continue;
+                }
+                for x in 0..data_w {
+                    let col = chunk_col * chunk_w + x;
+                    if col < col_lo || col >= col_hi {
+                        continue;
+                    }
+                    let v = chunk[y * data_w + x];
+                    let v = if header.nodata == Some(v) {
+                        f64::NAN
+                    } else {
+                        v
+                    };
+                    values[(row - row_lo) * width + (col - col_lo)] = v;
+                }
             }
         }
     }
 
+    let (origin_x, origin_y) = t.pixel_to_world(col_lo as f64, row_lo as f64);
     Ok(GeoRaster {
         width,
         height,
         values,
-        transform,
-        crs,
+        transform: AffineTransform {
+            origin_x,
+            origin_y,
+            ..t
+        },
+        crs: header.crs,
     })
+}
+
+/// Writes a north-up `raster` as a single-band 32-bit float GeoTIFF in
+/// `epsg` (a projected CRS), with `NaN` as its no-data value: the shape
+/// [`read`] reads back, and GIS software opens.
+pub fn write(raster: &GeoRaster, epsg: u16, path: &Path) -> Result<(), String> {
+    use tiff::encoder::colortype::Gray32Float;
+    use tiff::encoder::TiffEncoder;
+
+    let t = raster.transform;
+    if t.row_x != 0.0 || t.col_y != 0.0 {
+        return Err(format!(
+            "{}: only a north-up raster can be written",
+            path.display()
+        ));
+    }
+    let err = |e: tiff::TiffError| format!("cannot write {}: {e}", path.display());
+    let file =
+        std::fs::File::create(path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    let mut encoder = TiffEncoder::new(std::io::BufWriter::new(file)).map_err(err)?;
+    let mut image = encoder
+        .new_image::<Gray32Float>(raster.width as u32, raster.height as u32)
+        .map_err(err)?;
+    let tags = image.encoder();
+    tags.write_tag(Tag::Unknown(GDAL_NODATA_TAG), "nan")
+        .map_err(err)?;
+    tags.write_tag(
+        Tag::Unknown(MODEL_PIXEL_SCALE_TAG),
+        &[t.col_x, -t.row_y, 0.0][..],
+    )
+    .map_err(err)?;
+    tags.write_tag(
+        Tag::Unknown(MODEL_TIEPOINT_TAG),
+        &[0.0, 0.0, 0.0, t.origin_x, t.origin_y, 0.0][..],
+    )
+    .map_err(err)?;
+    tags.write_tag(
+        Tag::Unknown(GEO_KEY_DIRECTORY_TAG),
+        &crate::geotiff::geo_key_directory(epsg)[..],
+    )
+    .map_err(err)?;
+    let data: Vec<f32> = raster.values.iter().map(|&v| v as f32).collect();
+    image.write_data(&data).map_err(err)
 }
 
 /// Bilinearly samples `raster` at world coordinates `(x, y)`, or `None` if
@@ -1078,5 +1238,56 @@ mod tests {
         );
         assert!(result.mse < 1e-9);
         assert!(result.valid_pixel_count > 0);
+    }
+
+    #[test]
+    fn a_window_reads_back_the_pixels_whose_centers_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dem.tif");
+        let (width, height) = (10, 7);
+        let raster = GeoRaster {
+            width,
+            height,
+            values: (0..width * height)
+                .map(|i| if i == 23 { f64::NAN } else { i as f64 })
+                .collect(),
+            transform: AffineTransform {
+                origin_x: 1000.0,
+                origin_y: 2000.0,
+                col_x: 1.0,
+                row_x: 0.0,
+                col_y: 0.0,
+                row_y: -1.0,
+            },
+            crs: CrsKey::Projected(3006),
+        };
+        write(&raster, 3006, &path).unwrap();
+
+        let whole = read(&path).unwrap();
+        assert_eq!(whole.crs, CrsKey::Projected(3006));
+        assert_eq!(whole.transform, raster.transform);
+        assert!(whole.values[23].is_nan());
+
+        // Columns 2..5 (x 1002..1005), rows 1..4 (y 1999..1996).
+        let window = read_window(&path, (1002.0, 1996.0), (1005.0, 1999.0)).unwrap();
+        assert_eq!((window.width, window.height), (3, 3));
+        assert_eq!(window.transform.origin_x, 1002.0);
+        assert_eq!(window.transform.origin_y, 1999.0);
+        for row in 0..3 {
+            for col in 0..3 {
+                let i = (row + 1) * width + col + 2;
+                let v = window.values[row * 3 + col];
+                if i == 23 {
+                    assert!(v.is_nan());
+                } else {
+                    assert_eq!(v, i as f64);
+                }
+            }
+        }
+
+        // Past the edge is clipped; entirely outside is an error.
+        let edge = read_window(&path, (1008.0, 1990.0), (1020.0, 1995.0)).unwrap();
+        assert_eq!((edge.width, edge.height), (2, 2));
+        assert!(read_window(&path, (0.0, 0.0), (10.0, 10.0)).is_err());
     }
 }

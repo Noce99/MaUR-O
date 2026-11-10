@@ -50,6 +50,10 @@ path = "src/bin/osm_to_omap.rs"
 name = "add_orthophoto"
 path = "src/bin/add_orthophoto.rs"
 
+[[bin]]
+name = "create_dem_benchmark"
+path = "src/bin/create_dem_benchmark.rs"
+
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }
