@@ -525,7 +525,7 @@ pub fn write(raster: &GeoRaster, epsg: u16, path: &Path) -> Result<(), String> {
 /// rather than treated as missing: its interpolation weight there is small
 /// (zero exactly on the grid line), and only ever reaches the edge's own
 /// value, never truly extrapolating past it.
-fn bilinear_sample(raster: &GeoRaster, x: f64, y: f64) -> Option<f64> {
+pub fn bilinear_sample(raster: &GeoRaster, x: f64, y: f64) -> Option<f64> {
     if raster.width == 0 || raster.height == 0 {
         return None;
     }

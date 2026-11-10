@@ -54,6 +54,10 @@ path = "src/bin/add_orthophoto.rs"
 name = "create_dem_benchmark"
 path = "src/bin/create_dem_benchmark.rs"
 
+[[bin]]
+name = "dem_benchmark"
+path = "src/bin/dem_benchmark.rs"
+
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }
