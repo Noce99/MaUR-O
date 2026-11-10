@@ -44,9 +44,13 @@
 //!     map_none.omap              the same contours, without slope lines
 //!     levels.txt                 every line's true height (object index, meters)
 //!     ground_truth.tif           the ground model, cut to the box
+//!     ground_truth_smoothed.tif  the same, Gaussian-smoothed
+//!     water_mask.tif             1 where the ground model is a lake or the sea
 //!     sample.txt                 where it is, which tiles, what was imported
 //!     preview.png                Karttapullautin's own render of the tile
 //! ```
+//!
+//! (`maur_o::dem_archive` documents the layout, and reads it back.)
 //!
 //! Downloads and Karttapullautin's output are kept in `--cache`
 //! (`dem_cache` by default), so a rerun or a resampled place never fetches a
@@ -75,7 +79,10 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use maur_o::dem_geo_tiff_evaluator::{read_window, write};
+use maur_o::dem_archive::{
+    gaussian_smooth, water_mask, FORMAT, SMOOTHING_SIGMA_M, WATER_FLATNESS_M, WATER_MIN_AREA_M2,
+};
+use maur_o::dem_geo_tiff_evaluator::{read_window, write, GeoRaster};
 use maur_o::dxf::{self, Entity};
 use maur_o::lantmateriet::{
     basic_auth, box_in_tile, covers, is_lantmateriet_url, parse_search, sample_point, search_url,
@@ -549,11 +556,26 @@ fn write_sample(dir: &Path, sample: &Sample, seed: u64) -> Result<(), String> {
         std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))
     };
     write_text("levels.txt", sample.with_slopes.levels_text())?;
+    let truth = &sample.ground_truth;
+    write(truth, SWEREF99_TM, &dir.join("ground_truth.tif"))?;
+    let px = truth.transform.col_x.abs();
+    let smoothed = gaussian_smooth(truth, SMOOTHING_SIGMA_M / px);
     write(
-        &sample.ground_truth,
+        &smoothed,
         SWEREF99_TM,
-        &dir.join("ground_truth.tif"),
+        &dir.join("ground_truth_smoothed.tif"),
     )?;
+    let water = water_mask(
+        truth,
+        WATER_FLATNESS_M,
+        (WATER_MIN_AREA_M2 / (px * px)).ceil() as usize,
+    );
+    let water_share = water.iter().filter(|&&w| w).count() as f64 / water.len().max(1) as f64;
+    let mask = GeoRaster {
+        values: water.iter().map(|&w| if w { 1.0 } else { 0.0 }).collect(),
+        ..truth.clone()
+    };
+    write(&mask, SWEREF99_TM, &dir.join("water_mask.tif"))?;
     if let Some(preview) = &sample.preview {
         let to = dir.join("preview.png");
         std::fs::copy(preview, &to).map_err(|e| format!("cannot write {}: {e}", to.display()))?;
@@ -590,6 +612,7 @@ fn write_sample(dir: &Path, sample: &Sample, seed: u64) -> Result<(), String> {
     );
     let _ = writeln!(text, "contour_lines_in_box = {}", sample.lines_in_box);
     let _ = writeln!(text, "relief_m = {:.1}", sample.relief);
+    let _ = writeln!(text, "water_share = {water_share:.4}");
     let _ = writeln!(text, "contours = {}", stats.contours);
     let _ = writeln!(text, "index_contours = {}", stats.index_contours);
     let _ = writeln!(text, "form_lines = {}", stats.form_lines);
@@ -666,7 +689,7 @@ fn run(args: &Args) -> Result<(), Failure> {
     }
 
     let mut info = String::new();
-    let _ = writeln!(info, "format = dem-benchmark 1");
+    let _ = writeln!(info, "format = {FORMAT}");
     let _ = writeln!(info, "seed = {}", args.seed);
     let _ = writeln!(info, "samples = {found}");
     let _ = writeln!(info, "samples_asked = {}", args.samples);
@@ -674,6 +697,7 @@ fn run(args: &Args) -> Result<(), Failure> {
     let _ = writeln!(info, "size_m = {}", args.size);
     let _ = writeln!(info, "equidistance_m = 5");
     let _ = writeln!(info, "scale = {SCALE}");
+    let _ = writeln!(info, "smoothing_sigma_m = {SMOOTHING_SIGMA_M}");
     let _ = writeln!(info, "min_contours = {}", args.min_contours);
     let _ = writeln!(info, "min_relief_m = {}", args.min_relief);
     let _ = writeln!(info, "min_density = {}", args.min_density);
