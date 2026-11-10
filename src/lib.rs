@@ -68,6 +68,12 @@
 //! in memory, on a map already read. [`ocd_crs`] is what lets an OCAD map's
 //! georeferencing survive the trip.
 //!
+//! How well it does is measured on real terrain: [`lantmateriet`] says
+//! which Swedish lidar and ground model to fetch for a random place,
+//! [`dxf`] and [`pullauta_import`] turn the contours Karttapullautin draws
+//! from that lidar into a map, [`dem_archive`] is the benchmark those make,
+//! and [`dem_benchmark`] scores the reconstruction against the ground model.
+//!
 //! # Drawing a map
 //!
 //! [`render::render_map`] is the entire pipeline in one call — read the file,

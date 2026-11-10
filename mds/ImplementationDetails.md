@@ -34,7 +34,7 @@ differently.
 | Float TIFF | `tiff` | Writes `contours_to_raster`'s single-band 32-bit float elevation GeoTIFF, which `image`'s encoder cannot. |
 | Contour geometry | `geo`, `geo-svg` | Polygon buffering and point-in-polygon for `contours_to_raster`; `geo-svg` draws its `--create_svg` diagnostics. |
 | Scratch space | `tempfile` | The temporary folder a benchmark archive is unpacked into. |
-| HTTP | `ureq` | `add_orthophoto`'s downloads from a mapping agency's WMS: blocking, rustls. Not built for wasm, and never used by the library itself. |
+| HTTP | `ureq` | `add_orthophoto`'s downloads from a mapping agency's WMS, and `create_dem_benchmark`'s from Lantmäteriet: blocking, rustls. Not built for wasm, and never used by the library itself. |
 
 `fontdb` + `rustybuzz` + `ttf-parser` + `tiny-skia` is the same pipeline
 [resvg](https://github.com/RazrFalcon/resvg) uses, which is what made text
@@ -99,6 +99,20 @@ one file per step; read that document first.
 | `dem_geo_tiff_evaluator.rs` | Scores a predicted DEM GeoTIFF against a ground-truth one (the `dem_geo_tiff_evaluator` binary). |
 | `dem.rs` | Shades a DEM (hillshading and similar) so terrain can be seen; downstream of the pipeline, not part of it. |
 
+### DEM benchmark
+
+`contours_to_raster` tested on real terrain: see
+[DEM-Benchmark-Plan.md](DEM-Benchmark-Plan.md) for the design and the
+measurements it rests on.
+
+| File | Contents |
+| --- | --- |
+| `lantmateriet.rs` | What to fetch from Lantmäteriet's STAC API: search URLs, reading the answers (with a minimal JSON reader), SWEREF99 TM, the coarse Sweden outline places are drawn from, a seeded RNG, the box placed inside a point cloud tile, and which URLs may be sent credentials. No network access. |
+| `dxf.rs` | A minimal ASCII DXF reader: the polylines, lines and points Karttapullautin writes. |
+| `pullauta_import.rs` | Karttapullautin's DXF layers as an ISOM contour map (`101`, `101.1`, `102`, `103`, `103.1`), clipped to a box and georeferenced, plus every line's true height for `levels.txt`. |
+| `dem_archive.rs` | A DEM benchmark archive's layout and reader, and the rasters derived from the ground truth: Gaussian-smoothed, and a water mask of large perfectly flat areas. |
+| `dem_benchmark.rs` | The scoring: pixel errors after the mean and median offsets, per-contour level accuracy, the inverted-slope share, and a Laplace-interpolation baseline of the true levels. |
+
 ### Other consumers of the map model
 
 | File | Contents |
@@ -143,6 +157,8 @@ comment:
 | `bin/dem_geo_tiff_evaluator.rs` | Scores a predicted DEM against a ground truth. |
 | `bin/osm_to_omap.rs` | Converts an `.osm` file into an `.omap`. |
 | `bin/add_orthophoto.rs` | Downloads a map's orthophoto tile by tile and adds it to the map as a template. |
+| `bin/create_dem_benchmark.rs` | Draws places in Sweden, downloads their lidar and ground model, runs Karttapullautin, and writes a DEM benchmark archive. |
+| `bin/dem_benchmark.rs` | Runs `contours_to_raster` over a DEM benchmark archive and writes the scores. |
 
 ## One map per symbol
 
@@ -388,4 +404,7 @@ the minimum supported Rust version, 1.88.
 
 The benchmarks themselves are not part of the test suite: they need an
 external ground-truth renderer and maps that are not in the repository. How to
-reproduce the public ones is in [bug.md](bug.md#tested-benchmarks).
+reproduce the public ones is in [bug.md](bug.md#tested-benchmarks). Likewise
+the DEM benchmark: `tests/dem_benchmark.rs` pins `create_dem_benchmark`'s
+exits before the network and runs `dem_benchmark` on a synthetic hill, but
+building a real archive needs a Lantmäteriet account and Karttapullautin.

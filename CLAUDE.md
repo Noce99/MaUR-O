@@ -14,7 +14,10 @@ contour lines. A sixth binary, `osm_to_omap`, goes the other way: it turns
 OpenStreetMap data (plus optional GTFS transit feeds) into a Mapper map. A
 seventh, `add_orthophoto`, downloads the aerial orthophoto of a map's ground
 (from about fifty open national and regional WMS services across Europe)
-and adds it to the map as a template.
+and adds it to the map as a template. The eighth and ninth,
+`create_dem_benchmark` and `dem_benchmark`, test `contours_to_raster` on real
+terrain: Swedish lidar, contoured by Karttapullautin, scored against the
+national ground model.
 
 This crate is consumed by the o-mnia web app as a git submodule (via
 `crates/maur-o-wasm`, o-mnia's own wasm-bindgen adapter — see that repo's
@@ -40,9 +43,9 @@ cargo doc --no-deps --locked                   # doc build; every public item mu
 
 CI (`.github/workflows/ci.yml`) runs the above across Linux/macOS/Windows plus an
 MSRV check pinned to Rust 1.88 (the floor set by the `image` crate). There is no
-Cargo workspace — one crate, seven binaries.
+Cargo workspace — one crate, nine binaries.
 
-### The seven binaries
+### The nine binaries
 
 | Binary | Purpose |
 | --- | --- |
@@ -53,8 +56,10 @@ Cargo workspace — one crate, seven binaries.
 | `dem_geo_tiff_evaluator` | Score a predicted DEM GeoTIFF against a ground-truth one (MSE/RMSE/MAE + error maps). |
 | `osm_to_omap` | Convert OpenStreetMap XML (and optionally GTFS feeds) into an `.omap` styled like openstreetmap-carto. |
 | `add_orthophoto` | Download a map's aerial orthophoto from the best open WMS for its place (European national/regional agencies) and add it to the map as a georeferenced template. |
+| `create_dem_benchmark` | Build a DEM benchmark archive: random places in Sweden, their Lantmäteriet lidar run through Karttapullautin into contour maps, and the ground model cut to each. |
+| `dem_benchmark` | Run `contours_to_raster` over a DEM benchmark archive and score it (RMSE, per-contour level accuracy, inverted slope, Laplace baseline). |
 
-Full CLI flags for all seven are documented in each binary's own top-of-file doc
+Full CLI flags for all nine are documented in each binary's own top-of-file doc
 comment (`src/bin/*.rs`) and in `README.md`'s Usage section. When changing a
 flag, default or exit code, update both (and `--help` text in the clap
 definition) — they are kept in sync by hand.
@@ -167,6 +172,23 @@ that the model doesn't. The binary does the HTTP itself (`ureq`, a
 native-only dependency, so o-mnia's wasm build never sees it). Its
 integration tests (`tests/add_orthophoto.rs`) cover only the offline exit
 paths, so CI never depends on anyone's server.
+
+### DEM benchmark (`create_dem_benchmark` → `dem_benchmark`)
+
+`contours_to_raster` scored on real terrain; the design and the measured
+facts it rests on are in **`mds/DEM-Benchmark-Plan.md`**. `lantmateriet.rs`
+says what to fetch from Lantmäteriet's STAC API (SWEREF99 TM, the Sweden
+outline places are drawn from, a seeded RNG, a minimal JSON reader, tile and
+box choice) and never touches the network; the binary does the HTTP, with
+HTTP Basic auth sent only to `https://*.lantmateriet.se`, and runs the
+external Karttapullautin (`pullauta`). `dxf.rs` reads Karttapullautin's DXF,
+`pullauta_import.rs` turns its layers into an ISOM contour map (plus a
+`levels.txt` of every line's true height), `dem_archive.rs` is the on-disk
+layout (and the smoothed ground truth and water mask), and
+`dem_benchmark.rs` is the scoring. `dem_geo_tiff_evaluator::read_window`
+reads just the tiles of a national 10 km GeoTIFF a sample needs. Its
+integration tests (`tests/dem_benchmark.rs`) cover the offline exit paths
+and a synthetic hill end to end, never the network.
 
 ### Benchmark support modules
 

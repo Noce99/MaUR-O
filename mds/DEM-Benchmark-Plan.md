@@ -220,3 +220,53 @@ top-of-file docs, README, CLAUDE.md, ImplementationDetails.md.
    gitignored; check before sharing archives with maps in them.
 3. Should `dem_benchmark` fail (non-zero exit) below a level-accuracy
    threshold, or only report?
+
+## Status (2026-11-10)
+
+All five phases are implemented: `create_dem_benchmark`, `dem_benchmark`,
+and the modules above, with unit tests and `tests/dem_benchmark.rs`.
+
+Where the build differs from the plan:
+
+- **Levels come from the DXF**, not from sampling the DTM (Phase 0 showed
+  every Karttapullautin line carries its height).
+- **The year gap** compares the ground model's `ursprungligtmatdatum` (when
+  its lidar was flown) with the point cloud's `datetime`. The ground model's
+  own `datetime` is when it was processed: 2023 for a tile flown in 2019.
+- **A sample's box always fits one ground model tile**: point cloud tiles
+  (2.5 km) nest inside the 10 km ground model grid, and the box is kept
+  100 m inside its point cloud tile.
+- **`--at LAT,LON`** pins places instead of drawing them, to reproduce a
+  sample.
+- **Water** is only the ground model's flat areas; the point cloud's water
+  class is not used.
+- **The ground model is cut with a windowed read** of just the TIFF tiles
+  the box needs (`dem_geo_tiff_evaluator::read_window`, 46 ms instead of
+  800 MB for a 10 km tile).
+
+### First result
+
+The spike tile's hilliest square kilometer (`--at 57.6922163,11.9632691`,
+151 contour lines, 75 m of relief), default config:
+
+| Variant | RMSE | MAE | Levels exact | Wrong length | Inverted | Baseline RMSE |
+|---|---|---|---|---|---|---|
+| `depressions` | 7.82 m | 5.78 m | 27.6% | 69.9% | 28.8% | 0.67 m |
+| `none` | 13.83 m | 12.18 m | 18.4% | 79.7% | 34.8% | 0.67 m |
+
+The baseline shows these contours support well under a meter, so almost
+all of the error is in inferring the levels: the predicted levels along the
+lines sit on whole bands (their fractional parts cluster at 0, and at 0.5
+for form lines), but spread from 7 bands below to 2 above the best offset.
+
+### Open issues
+
+- **Downloads were refused (403) for at least the 15 minutes after the
+  first ~1 GB**, for every tile, while the STAC API kept answering and
+  wrong credentials still got 401. It looks like a per-account download
+  limit; the early 403s of the spike, which cleared on retry, may have been
+  the same thing. `create_dem_benchmark` counts each such place as
+  rejected ("a tile could not be downloaded") and moves on, so a run that
+  hits the limit ends with exit code 6 having kept what it got; rerun it
+  later with the same `--cache` and seed to pick up where it left off.
+- Questions 1–3 above are still open.

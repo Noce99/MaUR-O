@@ -23,7 +23,10 @@ It also ships tools that go beyond drawing a map:
 
 - **`contours_to_raster`** reconstructs an elevation model (a GeoTIFF) from a
   map's contour lines, and **`dem_geo_tiff_evaluator`** scores such a model
-  against a ground-truth one;
+  against a ground-truth one; **`create_dem_benchmark`** and
+  **`dem_benchmark`** test it on real terrain, with contours drawn by
+  Karttapullautin from Swedish lidar and the national ground model as the
+  answer;
 - **`osm_to_omap`** turns OpenStreetMap data — optionally with bus and train
   lines from GTFS feeds — into a Mapper map styled like openstreetmap.org;
 - **`add_orthophoto`** downloads the aerial orthophoto of a map's ground from
@@ -46,6 +49,7 @@ together.
   - [`benchmark`](#benchmark)
   - [`contours_to_raster`](#contours_to_raster)
   - [`dem_geo_tiff_evaluator`](#dem_geo_tiff_evaluator)
+  - [`create_dem_benchmark` and `dem_benchmark`](#create_dem_benchmark-and-dem_benchmark)
   - [`osm_to_omap`](#osm_to_omap)
   - [`add_orthophoto`](#add_orthophoto)
 - [Using it as a library](#using-it-as-a-library)
@@ -76,7 +80,7 @@ Build everything with:
 cargo build --release
 ```
 
-The seven executables are then in `target/release/`:
+The nine executables are then in `target/release/`:
 
 | Executable | What it does |
 | --- | --- |
@@ -85,6 +89,8 @@ The seven executables are then in `target/release/`:
 | [`benchmark`](#benchmark) | Runs a benchmark archive and reports where MaUR-O's renderings differ. |
 | [`contours_to_raster`](#contours_to_raster) | Reconstructs an elevation GeoTIFF from a map's contour lines. |
 | [`dem_geo_tiff_evaluator`](#dem_geo_tiff_evaluator) | Scores a predicted elevation GeoTIFF against a ground-truth one. |
+| [`create_dem_benchmark`](#create_dem_benchmark-and-dem_benchmark) | Builds a DEM benchmark from Swedish lidar: Karttapullautin contour maps plus the ground models they should give back. |
+| [`dem_benchmark`](#create_dem_benchmark-and-dem_benchmark) | Runs `contours_to_raster` over a DEM benchmark and scores it. |
 | [`osm_to_omap`](#osm_to_omap) | Converts OpenStreetMap data into a Mapper map. |
 | [`add_orthophoto`](#add_orthophoto) | Adds the aerial orthophoto of a map's ground to it as a template. |
 
@@ -349,6 +355,70 @@ Exit codes: `0` success, `1` a usage error, `2` the ground truth cannot be
 read, `3` the prediction cannot be read, `4` the two cannot be compared
 (different or missing CRS, or no overlapping pixel with a value in both),
 `5` an output cannot be written.
+
+### `create_dem_benchmark` and `dem_benchmark`
+
+A benchmark for `contours_to_raster` on real terrain. `create_dem_benchmark`
+draws random places in Sweden and, from [Lantmäteriet](https://www.lantmateriet.se/)'s
+STAC API, downloads each one's lidar point cloud (Laserdata Skog) and the 1 m
+ground model made from it (Markhöjdmodell). It runs
+[Karttapullautin](https://github.com/karttapullautin/karttapullautin) on the
+point cloud for the contours a mapper would draw, keeps the places with
+enough relief, and writes each as two maps (with and without slope lines on
+depressions), the true height of every line, and the ground model cut to the
+same box. `dem_benchmark` then runs `contours_to_raster` on every map and
+scores it against that ground model.
+
+```
+create_dem_benchmark --pullauta <PATH> [--samples N] [--seed S] [--size M] [--cache DIR]
+                     [--env-file FILE] [--min-contours N] [--min-relief M] [--min-density D]
+                     [--max-year-gap Y] [--max-attempts N] [--at LAT,LON]... <OUTPUT-DIR>
+dem_benchmark [--results DIR] [--config FILE] [--margin M] [--variant NAME]...
+              [--min-level-accuracy PERCENT] <ARCHIVE>
+```
+
+`create_dem_benchmark` needs a [GeoTorget](https://geotorget.lantmateriet.se/)
+account with access to the elevation data, as `LANTMATERIET_USERNAME` and
+`LANTMATERIET_PASSWORD` in the environment or in an `--env-file`, and a built
+Karttapullautin (`pullauta`). Downloads are kept in `--cache` (`dem_cache/`):
+a point cloud tile is about 75 MB, a ground model tile about 250 MB. The
+point clouds are not CC licensed (the ground model is CC BY 4.0), so keep an
+archive to yourself unless you have checked you may share it.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--samples` | `10` | How many places to keep. |
+| `--seed` | `1` | The random draw: the same seed draws the same places. |
+| `--size` | `1000` | The side of each place's square, in meters. |
+| `--min-contours`, `--min-relief` | `20`, `15` | The fewest contour lines, and the least height range (m) they span, for a place to be kept. |
+| `--min-density` | `0.5` | The fewest lidar points per m². |
+| `--max-year-gap` | `1` | The most years between the point cloud's and the ground model's measurement. |
+| `--max-attempts` | 10 per sample | The most places to draw. |
+| `--at` | | A place to use instead of a random draw (repeatable). |
+
+`dem_benchmark` writes `Results/dem_benchmark_YYYY_MM_DD__hh_mm_ss/`, with a
+`summary.txt` table and, per sample and variant, the prediction GeoTIFF,
+`metrics.txt` and error images. Beside RMSE and MAE (after removing the
+unknown additive constant) it reports the share of contour lines whose level
+was inferred exactly, the share of sloping ground predicted to slope the
+wrong way, and the RMSE of a Laplace interpolation of the same lines at
+their true levels, which is about the best these contours allow. See
+[DEM-Benchmark-Plan.md](mds/DEM-Benchmark-Plan.md) for the design.
+
+```bash
+create_dem_benchmark --pullauta ~/karttapullautin/target/release/pullauta \
+    --env-file ~/.lantmateriet.env --samples 20 dem_bench
+dem_benchmark dem_bench
+```
+
+Exit codes of `create_dem_benchmark`: `0` success, `1` a usage error, `2` no
+credentials, `3` Karttapullautin cannot be run, `4` the output folder or the
+cache cannot be written (or the output folder is not empty), `5`
+Lantmäteriet cannot be reached or refuses the credentials, `6` fewer samples
+found than asked for within `--max-attempts`. Of `dem_benchmark`: `0`
+success, `1` a usage error, `2` the archive cannot be read, `3` the config
+file cannot be read or parsed, `4` the results cannot be written, `5` a
+variant's mean level accuracy is below `--min-level-accuracy`.
 
 ### `osm_to_omap`
 
