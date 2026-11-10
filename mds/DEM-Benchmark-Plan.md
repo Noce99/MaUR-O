@@ -261,7 +261,7 @@ for form lines), but spread from 7 bands below to 2 above the best offset.
 
 ### Open issues
 
-- **Downloads were refused (403) for at least the 15 minutes after the
+- **Downloads were refused (403) for at least the 50 minutes after the
   first ~1 GB**, for every tile, while the STAC API kept answering and
   wrong credentials still got 401. It looks like a per-account download
   limit; the early 403s of the spike, which cleared on retry, may have been
