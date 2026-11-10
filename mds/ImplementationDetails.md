@@ -34,7 +34,7 @@ differently.
 | Float TIFF | `tiff` | Writes `contours_to_raster`'s single-band 32-bit float elevation GeoTIFF, which `image`'s encoder cannot. |
 | Contour geometry | `geo`, `geo-svg` | Polygon buffering and point-in-polygon for `contours_to_raster`; `geo-svg` draws its `--create_svg` diagnostics. |
 | Scratch space | `tempfile` | The temporary folder a benchmark archive is unpacked into. |
-| HTTP | `ureq` | `add_orthophoto`'s downloads from a region's WMS: blocking, rustls. Not built for wasm, and never used by the library itself. |
+| HTTP | `ureq` | `add_orthophoto`'s downloads from a mapping agency's WMS: blocking, rustls. Not built for wasm, and never used by the library itself. |
 
 `fontdb` + `rustybuzz` + `ttf-parser` + `tiny-skia` is the same pipeline
 [resvg](https://github.com/RazrFalcon/resvg) uses, which is what made text
@@ -125,7 +125,8 @@ one file per step; read that document first.
 
 | File | Contents |
 | --- | --- |
-| `orthophoto.rs` | The regional orthophoto WMS services (Emilia-Romagna's AGEA flights), a map's footprint in its projected CRS, the north-up pixel grid and its tiles, `GetMap`/`GetCapabilities` URLs, capabilities parsing, the world file. No network access. |
+| `orthophoto.rs` | What an orthophoto WMS is asked for: a map's place in degrees, the CRS to ask in (the map's own, else Web Mercator or WGS84), its footprint there, the north-up pixel grid and its tiles, `GetMap`/`GetCapabilities` URLs (WMS 1.1.1 or 1.3.0), capabilities parsing, the coverage test, the world file. No network access. |
+| `orthophoto_services.rs` | The hand-checked list of open orthophoto WMS services across Europe, best first. |
 | `image_template.rs` | Adds a georeferenced image to a Mapper file as its bottom-most template, by editing the file's text: the template list's `count` and `first_front_template`, and the saved view's `<ref template>` indices. |
 
 ### Binaries

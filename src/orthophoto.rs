@@ -1,81 +1,115 @@
 //! What to ask an orthophoto server for, so a map can be drawn over the
 //! aerial photo of its own ground.
 //!
-//! Italy's orthophotos are flown by AGEA (Agenzia per le Erogazioni in
-//! Agricoltura) every few years, region by region, and served by each region
-//! rather than nationally. Every region publishes its own WMS, so a
-//! [`Service`] is one region's one flight. Only Emilia-Romagna's are listed
-//! for now ([`EMILIA_ROMAGNA`]).
+//! Aerial photos are flown and published country by country, and often
+//! region by region: Italy's regions and Germany's Länder each serve their
+//! own. A [`Service`] is one such WMS layer, and
+//! [`SERVICES`](crate::orthophoto_services::SERVICES) lists every one this
+//! crate knows of, best first wherever two cover the same ground.
 //!
 //! Nothing here touches the network: this module says which URLs to fetch and
 //! where the result lands, and the `add_orthophoto` tool does the fetching.
 //! The steps are:
 //!
-//! 1. [`map_footprint`]: the box a map's objects cover, plus a margin, in
-//!    the map's own projected CRS. It is the axis-aligned box *around* the
-//!    map, since a map turned by its grivation is not axis-aligned itself.
-//! 2. [`Grid::covering`]: that box as a pixel grid, its edges on whole
-//!    multiples of the pixel size.
-//! 3. [`Grid::tiles`] and [`get_map_url`]: the grid in pieces no larger than
+//! 1. [`geographic_anchor`]: where on the earth the map is, in degrees,
+//!    which picks the services worth asking ([`Service::covers`]).
+//! 2. [`request_crs`]: the CRS to ask in. The map's own where the service
+//!    offers it, so the photo needs no reprojecting; otherwise Web Mercator
+//!    (EPSG:3857), or plain latitude and longitude (EPSG:4326), which
+//!    Mapper reprojects onto the map itself.
+//! 3. [`footprint`]: the box a map's objects cover, plus a margin, in that
+//!    CRS. It is the axis-aligned box *around* the map, since a map turned
+//!    by its grivation is not axis-aligned itself.
+//! 4. [`Grid::covering`]: that box as a pixel grid, its edges on whole
+//!    multiples of the pixel size ([`pixel_size`]).
+//! 5. [`Grid::tiles`] and [`get_map_url`]: the grid in pieces no larger than
 //!    a server hands out in one request, and the `GetMap` request for each.
-//! 4. [`Grid::world_file`]: where the stitched image is on the earth, as the
+//! 6. [`Grid::world_file`]: where the stitched image is on the earth, as the
 //!    world file Mapper reads beside it (`src/templates/world_file.cpp`).
 //!
-//! Requests use WMS 1.1.1, whose `SRS` bounding box is always easting first.
-//! In 1.3.0 the axis order is whatever the EPSG registry says for that CRS,
-//! and some Italian ones (RDN2008's "N-E" UTM, EPSG:7791) are northing first.
+//! Requests use WMS 1.1.1, whose `SRS` bounding box is always easting (or
+//! longitude) first. In 1.3.0 the axis order is whatever the EPSG registry
+//! says for that CRS, and many (EPSG:4326 itself, RDN2008's "N-E" UTM,
+//! EPSG:7791) are northing first.
 
 use crate::geometry::Rect;
 use crate::geotiff::ground_to_projected;
-use crate::map::Map;
+use crate::map::{Georeferencing, Map};
+use crate::osm_convert::utm;
 use crate::stats::coordinate_bounds;
 
-/// One flight of one region's orthophotos, as its WMS serves it.
+/// Web Mercator: what nearly every WMS offers, whatever else it does.
+pub const WEB_MERCATOR: i32 = 3857;
+
+/// WGS84 latitude and longitude, in degrees.
+pub const WGS84: i32 = 4326;
+
+/// The WGS 84 ellipsoid's semi-major axis, in meters.
+const WGS84_A: f64 = 6_378_137.0;
+
+/// The WGS 84 ellipsoid's first eccentricity, squared.
+const WGS84_E2: f64 = 0.006_694_379_990_141_32;
+
+/// One orthophoto layer of one WMS.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Service {
-    /// The region the service covers: "Emilia-Romagna".
-    pub region: &'static str,
-    /// The year the photos were taken.
-    pub year: u16,
-    /// The WMS endpoint, up to and including its `?`.
+    /// A short name to pick it by: `it-emilia-romagna-2023`.
+    pub id: &'static str,
+    /// The ground it covers, for people: "Emilia-Romagna, Italy".
+    pub area: &'static str,
+    /// When the photos were taken: "2023", or "2021–2023" for a mosaic.
+    pub years: &'static str,
+    /// The WMS endpoint, up to and including its `?` (or a trailing `&`).
     pub url: &'static str,
+    /// The WMS version to speak: `1.1.1` wherever the server does, since
+    /// its bounding boxes are always easting first, or `1.3.0` for a
+    /// server that speaks nothing else (see [`get_map_url`]).
+    pub version: &'static str,
     /// The layer to ask for.
     pub layer: &'static str,
+    /// The `STYLES` to ask for: empty for the default, as most servers want.
+    pub styles: &'static str,
+    /// The CRSs (EPSG codes) the service was seen to serve the layer in.
+    /// Asked for even where its capabilities do not list them, or cannot
+    /// be read: some servers' capabilities are truncated or malformed, and
+    /// some serve more than they list.
+    pub crs: &'static [i32],
     /// The photos' own ground resolution, in meters per pixel.
     pub ground_resolution: f64,
     /// The largest image, in pixels a side, to ask for in one request.
     pub max_tile_size: u32,
+    /// Roughly where it has photos: a box around the region. Where the box
+    /// is larger than the region, a coverage probe ([`is_blank`]) tells the
+    /// rest apart.
+    pub coverage: LatLonBox,
     /// Who to credit for the photos.
     pub attribution: &'static str,
+    /// The terms they are published under: "CC BY 4.0".
+    pub licence: &'static str,
 }
 
-/// Emilia-Romagna's AGEA orthophotos, newest first.
-///
-/// Neither declares a `MaxWidth`/`MaxHeight`; 2000 pixels is a size the
-/// server was seen to serve in two seconds.
-pub const EMILIA_ROMAGNA: &[Service] = &[
-    Service {
-        region: "Emilia-Romagna",
-        year: 2023,
-        url: "https://servizigis.regione.emilia-romagna.it/wms/agea2023_rgb?",
-        layer: "Agea2023_RGB",
-        ground_resolution: 0.2,
-        max_tile_size: 2000,
-        attribution: "AGEA 2023, Regione Emilia-Romagna",
-    },
-    Service {
-        region: "Emilia-Romagna",
-        year: 2020,
-        url: "https://servizigis.regione.emilia-romagna.it/wms/agea2020_rgb?",
-        layer: "Agea2020_RGB",
-        ground_resolution: 0.2,
-        max_tile_size: 2000,
-        attribution: "AGEA 2020, Regione Emilia-Romagna",
-    },
-];
+impl Service {
+    /// Whether `lat`, `lon` is inside the service's [`coverage`](Self::coverage)
+    /// box: worth asking, not yet a promise of photos.
+    pub fn covers(&self, lat: f64, lon: f64) -> bool {
+        self.coverage.contains(lat, lon)
+    }
+}
 
-/// A box in a projected CRS, in its own units (meters, for every CRS this is
-/// used with).
+/// Whether an RGBA pixel of a coverage probe (a `TRANSPARENT=TRUE` PNG) is
+/// "no photo here".
+///
+/// WMS means that to be transparent, and most services draw it so. Some
+/// ignore `TRANSPARENT` and draw it opaque white, some black, and one
+/// (Lazio's) either, depending on the size asked for. A real photo is never
+/// exactly black, and is near-white only where something bright fills it,
+/// so all three count.
+pub fn is_blank([r, g, b, a]: [u8; 4]) -> bool {
+    a == 0 || (r == 0 && g == 0 && b == 0) || (r >= 250 && g >= 250 && b >= 250)
+}
+
+/// A box in a CRS, in its own units: meters for a projected one, degrees
+/// (longitude as `x`) for EPSG:4326.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProjectedBox {
     /// The western edge (smallest easting).
@@ -98,67 +132,278 @@ impl ProjectedBox {
     pub fn height(&self) -> f64 {
         self.max_y - self.min_y
     }
+
+    /// The smallest box around `points`.
+    fn around(points: impl IntoIterator<Item = (f64, f64)>) -> ProjectedBox {
+        let mut area = ProjectedBox {
+            min_x: f64::INFINITY,
+            min_y: f64::INFINITY,
+            max_x: f64::NEG_INFINITY,
+            max_y: f64::NEG_INFINITY,
+        };
+        for (x, y) in points {
+            area.min_x = area.min_x.min(x);
+            area.min_y = area.min_y.min(y);
+            area.max_x = area.max_x.max(x);
+            area.max_y = area.max_y.max(y);
+        }
+        area
+    }
+}
+
+/// Where a map is on the earth, as its file says beside its projected CRS:
+/// Mapper keeps both, whatever the CRS.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeographicAnchor {
+    /// The reference point's latitude, in degrees:
+    /// `<geographic_crs><ref_point_deg lat>`.
+    pub lat: f64,
+    /// Its longitude, in degrees.
+    pub lon: f64,
+    /// The angle from true north to the map's north, in degrees, as
+    /// `<georeferencing declination>` says (0 where it says nothing, as
+    /// Mapper reads it).
+    pub declination: f64,
+}
+
+/// Where a Mapper map file says it is ([`GeographicAnchor`]), read from its
+/// text. `None` where it has no `<ref_point_deg>`: a map in local
+/// coordinates, not placed on the earth.
+pub fn geographic_anchor(xml: &str) -> Option<GeographicAnchor> {
+    let tag_at = |name: &str| -> Option<&str> {
+        let at = xml.find(&format!("<{name} "))?;
+        Some(&xml[at..at + xml[at..].find('>')?])
+    };
+    let value = |tag: &str, name: &str| -> Option<f64> {
+        let key = format!(" {name}=\"");
+        let start = tag.find(&key)? + key.len();
+        tag[start..start + tag[start..].find('"')?].parse().ok()
+    };
+    let point = tag_at("ref_point_deg")?;
+    let declination = tag_at("georeferencing")
+        .and_then(|tag| value(tag, "declination"))
+        .unwrap_or(0.0);
+    Some(GeographicAnchor {
+        lat: value(point, "lat")?,
+        lon: value(point, "lon")?,
+        declination,
+    })
+}
+
+/// The CRS to ask a service in, for a map in EPSG `map_epsg` (0 where it
+/// has no EPSG code), given whether the service `offers` a CRS: the map's
+/// own if offered, else [`WEB_MERCATOR`], else [`WGS84`]. `None` where it
+/// offers none of them.
+pub fn request_crs(offers: impl Fn(i32) -> bool, map_epsg: i32) -> Option<i32> {
+    [map_epsg, WEB_MERCATOR, WGS84]
+        .into_iter()
+        .find(|&epsg| epsg != 0 && offers(epsg))
+}
+
+/// The map's objects on the ground, unrotated, in the meters
+/// [`ground_to_projected`] takes, grown by `margin` on every side.
+fn ground_bounds(map: &Map, margin: f64) -> Result<(Rect, &Georeferencing), String> {
+    let georef = map
+        .georeferencing
+        .as_ref()
+        .ok_or("the map is not georeferenced")?;
+    let bounds = coordinate_bounds(map).ok_or("the map has no objects")?;
+    let meters_per_mm = f64::from(map_scale(map, georef)) / 1000.0;
+    Ok((
+        Rect::from_ltrb(
+            bounds.left() * meters_per_mm - margin,
+            bounds.top() * meters_per_mm - margin,
+            bounds.right() * meters_per_mm + margin,
+            bounds.bottom() * meters_per_mm + margin,
+        ),
+        georef,
+    ))
+}
+
+fn map_scale(map: &Map, georef: &Georeferencing) -> i32 {
+    if georef.scale > 0 {
+        georef.scale
+    } else {
+        map.scale_denominator
+    }
+}
+
+/// The points around a ground box worth projecting to find the box around
+/// it in another CRS: its corners and the middles of its edges.
+fn outline(ground: &Rect) -> [(f64, f64); 8] {
+    let (l, t, r, b) = (ground.left(), ground.top(), ground.right(), ground.bottom());
+    let (cx, cy) = ((l + r) / 2.0, (t + b) / 2.0);
+    [
+        (l, t),
+        (cx, t),
+        (r, t),
+        (r, cy),
+        (r, b),
+        (cx, b),
+        (l, b),
+        (l, cy),
+    ]
 }
 
 /// The box `map`'s objects cover, grown by `margin` meters on the ground on
-/// every side, in the map's projected CRS (its [`epsg`] code).
+/// every side, in the map's own projected CRS (its [`epsg`] code).
 ///
 /// An error where the map is not placed on the earth (no georeferencing, or
 /// no CRS this crate can name by EPSG code) or has nothing on it.
 ///
 /// [`epsg`]: crate::map::Georeferencing::epsg
 pub fn map_footprint(map: &Map, margin: f64) -> Result<ProjectedBox, String> {
-    let georef = map
-        .georeferencing
-        .as_ref()
-        .filter(|g| g.epsg != 0)
-        .ok_or("the map is not georeferenced in a projected CRS with an EPSG code")?;
-    let bounds = coordinate_bounds(map).ok_or("the map has no objects")?;
-    let scale = if georef.scale > 0 {
-        georef.scale
-    } else {
-        map.scale_denominator
-    };
-    let meters_per_mm = f64::from(scale) / 1000.0;
-    let ground = Rect::from_ltrb(
-        bounds.left() * meters_per_mm - margin,
-        bounds.top() * meters_per_mm - margin,
-        bounds.right() * meters_per_mm + margin,
-        bounds.bottom() * meters_per_mm + margin,
-    );
-    let corners = [
-        (ground.left(), ground.top()),
-        (ground.right(), ground.top()),
-        (ground.right(), ground.bottom()),
-        (ground.left(), ground.bottom()),
-    ];
-    let mut footprint = ProjectedBox {
-        min_x: f64::INFINITY,
-        min_y: f64::INFINITY,
-        max_x: f64::NEG_INFINITY,
-        max_y: f64::NEG_INFINITY,
-    };
-    for (x, y) in corners {
-        let p = ground_to_projected(georef, geo::Coord { x, y })
-            .ok_or("the map is not georeferenced")?;
-        footprint.min_x = footprint.min_x.min(p.x);
-        footprint.min_y = footprint.min_y.min(p.y);
-        footprint.max_x = footprint.max_x.max(p.x);
-        footprint.max_y = footprint.max_y.max(p.y);
+    let (ground, georef) = ground_bounds(map, margin)?;
+    if georef.epsg == 0 {
+        return Err("the map is not georeferenced in a projected CRS with an EPSG code".into());
     }
-    Ok(footprint)
+    let corners = outline(&ground).map(|(x, y)| {
+        let p = ground_to_projected(georef, geo::Coord { x, y }).expect("the map has an EPSG code");
+        (p.x, p.y)
+    });
+    Ok(ProjectedBox::around(corners))
 }
 
-/// A north-up pixel grid in a projected CRS: square pixels, row 0 along the
-/// northern edge.
+/// The box `map`'s objects cover, grown by `margin` meters, in EPSG `epsg`:
+/// [`map_footprint`] where that is the map's own CRS, otherwise
+/// [`WEB_MERCATOR`] or [`WGS84`] by way of the map's [`GeographicAnchor`].
+///
+/// In another CRS the box is approximate: the ground is laid out from the
+/// anchor on the ellipsoid, turned to true north, which is good to a few
+/// meters in ten kilometers. Half a percent of the map's size goes on the
+/// margin to make up for it. Where the image lands is not approximate: its
+/// world file is exact in its own CRS, and Mapper reprojects it.
+pub fn footprint(
+    map: &Map,
+    anchor: &GeographicAnchor,
+    epsg: i32,
+    margin: f64,
+) -> Result<ProjectedBox, String> {
+    let (ground, georef) = ground_bounds(map, margin)?;
+    if epsg != 0 && epsg == georef.epsg {
+        return map_footprint(map, margin);
+    }
+    if epsg != WEB_MERCATOR && epsg != WGS84 {
+        return Err(format!(
+            "cannot work out the map's footprint in EPSG:{epsg}"
+        ));
+    }
+    let slack = 5.0 + 0.005 * ground.width().max(ground.height());
+    let ground = Rect::from_ltrb(
+        ground.left() - slack,
+        ground.top() - slack,
+        ground.right() + slack,
+        ground.bottom() + slack,
+    );
+    let north = true_north_rotation(georef, anchor);
+    let points = outline(&ground).map(|(x, y)| {
+        let (lat, lon) = ground_to_geographic(georef, anchor, north, (x, y));
+        if epsg == WGS84 {
+            (lon, lat)
+        } else {
+            web_mercator(lat, lon)
+        }
+    });
+    Ok(ProjectedBox::around(points))
+}
+
+/// The angle from true north to map north, in degrees: the file's own
+/// declination, or, for a map in UTM, its grivation plus the grid's
+/// convergence there, worked out exactly.
+///
+/// Mapper places a map on the earth by its projected CRS and grivation and
+/// only keeps the declination beside them, so where the CRS is one this
+/// crate can project, that is what to trust.
+fn true_north_rotation(georef: &Georeferencing, anchor: &GeographicAnchor) -> f64 {
+    let zone = match georef.epsg {
+        32601..=32660 => georef.epsg - 32600,
+        25828..=25838 => georef.epsg - 25800,
+        _ => return anchor.declination,
+    };
+    let step = 1e-4;
+    let (e0, n0) = utm(zone as u32, (anchor.lon, anchor.lat));
+    let (e1, n1) = utm(zone as u32, (anchor.lon, anchor.lat + step));
+    // True north in the grid, east of grid north: minus the convergence.
+    let true_north_in_grid = (e1 - e0).atan2(n1 - n0).to_degrees();
+    georef.grivation - true_north_in_grid
+}
+
+/// A point on the ground (unrotated map meters, as [`ground_to_projected`]
+/// takes them) to `(latitude, longitude)` in degrees, laid out from the
+/// anchor on the ellipsoid, `north` degrees between true and map north.
+fn ground_to_geographic(
+    georef: &Georeferencing,
+    anchor: &GeographicAnchor,
+    north: f64,
+    (x, y): (f64, f64),
+) -> (f64, f64) {
+    let meters_per_mm = f64::from(georef.scale.max(1)) / 1000.0;
+    let (lx, ly) = (
+        x - georef.map_ref_point_x * meters_per_mm,
+        y - georef.map_ref_point_y * meters_per_mm,
+    );
+    let (sin_d, cos_d) = north.to_radians().sin_cos();
+    let east = lx * cos_d - ly * sin_d;
+    let north = -(lx * sin_d + ly * cos_d);
+
+    let phi0 = anchor.lat.to_radians();
+    let first = phi0 + north / meridian_radius(phi0);
+    let phi = phi0 + north / meridian_radius((phi0 + first) / 2.0);
+    let middle = (phi0 + phi) / 2.0;
+    let lambda = anchor.lon.to_radians() + east / (prime_vertical_radius(middle) * middle.cos());
+    (phi.to_degrees(), lambda.to_degrees())
+}
+
+/// The ellipsoid's radius of curvature along a meridian at latitude `phi`
+/// (radians): meters of ground per radian of latitude.
+fn meridian_radius(phi: f64) -> f64 {
+    WGS84_A * (1.0 - WGS84_E2) / (1.0 - WGS84_E2 * phi.sin().powi(2)).powf(1.5)
+}
+
+/// The ellipsoid's radius of curvature across a meridian at latitude `phi`:
+/// times `cos(phi)`, meters of ground per radian of longitude.
+fn prime_vertical_radius(phi: f64) -> f64 {
+    WGS84_A / (1.0 - WGS84_E2 * phi.sin().powi(2)).sqrt()
+}
+
+/// `(lat, lon)` in degrees to Web Mercator `(x, y)` in its meters.
+pub fn web_mercator(lat: f64, lon: f64) -> (f64, f64) {
+    let phi = lat.to_radians();
+    (
+        WGS84_A * lon.to_radians(),
+        WGS84_A * (std::f64::consts::FRAC_PI_4 + phi / 2.0).tan().ln(),
+    )
+}
+
+/// A pixel `ground` meters on a side, at latitude `lat`, as `(width,
+/// height)` in EPSG `epsg`'s units: the same in the map's own projected CRS
+/// (`map_epsg`), stretched by Web Mercator's scale there, or in degrees.
+pub fn pixel_size(epsg: i32, map_epsg: i32, lat: f64, ground: f64) -> (f64, f64) {
+    let phi = lat.to_radians();
+    match epsg {
+        WEB_MERCATOR if map_epsg != WEB_MERCATOR => {
+            let side = ground / phi.cos();
+            (side, side)
+        }
+        WGS84 if map_epsg != WGS84 => (
+            (ground / (prime_vertical_radius(phi) * phi.cos())).to_degrees(),
+            (ground / meridian_radius(phi)).to_degrees(),
+        ),
+        _ => (ground, ground),
+    }
+}
+
+/// A north-up pixel grid in a CRS: row 0 along the northern edge.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Grid {
     /// The western edge of column 0.
     pub west: f64,
     /// The northern edge of row 0.
     pub north: f64,
-    /// The side of one pixel, in the CRS's units.
-    pub pixel_size: f64,
+    /// The width of one pixel, in the CRS's units.
+    pub pixel_width: f64,
+    /// The height of one pixel, in the CRS's units.
+    pub pixel_height: f64,
     /// Columns.
     pub width: u32,
     /// Rows.
@@ -179,20 +424,21 @@ pub struct Tile {
 }
 
 impl Grid {
-    /// The smallest grid of `pixel_size` pixels covering `area`, its edges on
-    /// whole multiples of `pixel_size`, so two grids of the same pixel size
-    /// line up pixel for pixel.
-    pub fn covering(area: &ProjectedBox, pixel_size: f64) -> Grid {
-        let west = (area.min_x / pixel_size).floor() * pixel_size;
-        let east = (area.max_x / pixel_size).ceil() * pixel_size;
-        let south = (area.min_y / pixel_size).floor() * pixel_size;
-        let north = (area.max_y / pixel_size).ceil() * pixel_size;
+    /// The smallest grid of `pixel_width` by `pixel_height` pixels covering
+    /// `area`, its edges on whole multiples of the pixel size, so two grids
+    /// of the same pixel size line up pixel for pixel.
+    pub fn covering(area: &ProjectedBox, (pixel_width, pixel_height): (f64, f64)) -> Grid {
+        let west = (area.min_x / pixel_width).floor() * pixel_width;
+        let east = (area.max_x / pixel_width).ceil() * pixel_width;
+        let south = (area.min_y / pixel_height).floor() * pixel_height;
+        let north = (area.max_y / pixel_height).ceil() * pixel_height;
         Grid {
             west,
             north,
-            pixel_size,
-            width: ((east - west) / pixel_size).round().max(1.0) as u32,
-            height: ((north - south) / pixel_size).round().max(1.0) as u32,
+            pixel_width,
+            pixel_height,
+            width: ((east - west) / pixel_width).round().max(1.0) as u32,
+            height: ((north - south) / pixel_height).round().max(1.0) as u32,
         }
     }
 
@@ -221,12 +467,12 @@ impl Grid {
 
     /// The ground a tile of this grid covers.
     pub fn tile_box(&self, tile: &Tile) -> ProjectedBox {
-        let px = self.pixel_size;
+        let (pw, ph) = (self.pixel_width, self.pixel_height);
         ProjectedBox {
-            min_x: self.west + f64::from(tile.x) * px,
-            max_x: self.west + f64::from(tile.x + tile.width) * px,
-            max_y: self.north - f64::from(tile.y) * px,
-            min_y: self.north - f64::from(tile.y + tile.height) * px,
+            min_x: self.west + f64::from(tile.x) * pw,
+            max_x: self.west + f64::from(tile.x + tile.width) * pw,
+            max_y: self.north - f64::from(tile.y) * ph,
+            min_y: self.north - f64::from(tile.y + tile.height) * ph,
         }
     }
 
@@ -241,25 +487,28 @@ impl Grid {
     }
 
     /// The world file placing an image of this grid on the earth: six lines,
-    /// the pixel size along x, two rotation terms (0 here), the pixel size
-    /// along y (negative, rows go south), and the *centre* of the top-left
-    /// pixel.
+    /// the pixel width, two rotation terms (0 here), the pixel height
+    /// (negative, rows go south), and the *centre* of the top-left pixel.
     pub fn world_file(&self) -> String {
-        let px = self.pixel_size;
+        let (pw, ph) = (self.pixel_width, self.pixel_height);
         format!(
-            "{px}\n0\n0\n{}\n{}\n{}\n",
-            -px,
-            self.west + px / 2.0,
-            self.north - px / 2.0
+            "{pw}\n0\n0\n{}\n{}\n{}\n",
+            -ph,
+            self.west + pw / 2.0,
+            self.north - ph / 2.0
         )
     }
 }
 
-/// The WMS 1.1.1 `GetMap` request for `area` (in EPSG `epsg`) from
-/// `service`, as a `width` by `height` image of type `format` (a MIME type:
+/// The WMS `GetMap` request for `area` (in EPSG `epsg`) from `service`,
+/// as a `width` by `height` image of type `format` (a MIME type:
 /// `image/jpeg`, `image/png`). With `transparent`, what the service has no
 /// photo for comes back transparent, which is how coverage is told apart from
 /// a dark photo.
+///
+/// In WMS 1.3.0 the CRS is `CRS`, not `SRS`, and the bounding box is in
+/// the CRS's own axis order: latitude first for EPSG:4326. Every projected
+/// CRS a service here is asked in is easting first either way.
 pub fn get_map_url(
     service: &Service,
     epsg: i32,
@@ -269,25 +518,34 @@ pub fn get_map_url(
     format: &str,
     transparent: bool,
 ) -> String {
+    let v13 = service.version == "1.3.0";
+    let bbox = if v13 && epsg == WGS84 {
+        [area.min_y, area.min_x, area.max_y, area.max_x]
+    } else {
+        [area.min_x, area.min_y, area.max_x, area.max_y]
+    };
     format!(
-        "{}SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS={}&STYLES=&SRS=EPSG:{epsg}\
+        "{}SERVICE=WMS&VERSION={}&REQUEST=GetMap&LAYERS={}&STYLES={}&{}=EPSG:{epsg}\
          &BBOX={},{},{},{}&WIDTH={width}&HEIGHT={height}&FORMAT={}&TRANSPARENT={}",
         service.url,
+        service.version,
         service.layer,
-        area.min_x,
-        area.min_y,
-        area.max_x,
-        area.max_y,
+        service.styles,
+        if v13 { "CRS" } else { "SRS" },
+        bbox[0],
+        bbox[1],
+        bbox[2],
+        bbox[3],
         format.replace('/', "%2F"),
         if transparent { "TRUE" } else { "FALSE" },
     )
 }
 
-/// The WMS 1.1.1 `GetCapabilities` request for `service`.
+/// The WMS `GetCapabilities` request for `service`.
 pub fn capabilities_url(service: &Service) -> String {
     format!(
-        "{}SERVICE=WMS&VERSION=1.1.1&REQUEST=GetCapabilities",
-        service.url
+        "{}SERVICE=WMS&VERSION={}&REQUEST=GetCapabilities",
+        service.url, service.version
     )
 }
 
@@ -322,22 +580,6 @@ impl LatLonBox {
     pub fn contains(&self, lat: f64, lon: f64) -> bool {
         (self.min_lat..=self.max_lat).contains(&lat) && (self.min_lon..=self.max_lon).contains(&lon)
     }
-}
-
-/// Where a Mapper map file says its reference point is, in WGS84 degrees:
-/// `(latitude, longitude)` from `<geographic_crs><ref_point_deg>`. Mapper
-/// keeps it beside the projected one whatever the map's CRS, so it says
-/// roughly where on the earth a map is even in a CRS nothing here can
-/// convert from. `None` where the file has none.
-pub fn geographic_ref_point(xml: &str) -> Option<(f64, f64)> {
-    let at = xml.find("<ref_point_deg ")?;
-    let tag = &xml[at..at + xml[at..].find('>')?];
-    let value = |name: &str| -> Option<f64> {
-        let key = format!(" {name}=\"");
-        let start = tag.find(&key)? + key.len();
-        tag[start..start + tag[start..].find('"')?].parse().ok()
-    };
-    Some((value("lat")?, value("lon")?))
 }
 
 impl Capabilities {
@@ -406,6 +648,14 @@ impl Capabilities {
         Ok(capabilities)
     }
 
+    /// Whether the capabilities name every layer in `layers`, a
+    /// comma-separated list as `GetMap` takes it.
+    pub fn has_layers(&self, layers: &str) -> bool {
+        layers
+            .split(',')
+            .all(|layer| self.layers.iter().any(|l| l == layer))
+    }
+
     /// Whether EPSG `epsg` is one of [`crs`](Self::crs).
     pub fn offers_epsg(&self, epsg: i32) -> bool {
         let wanted = format!("EPSG:{epsg}");
@@ -417,6 +667,7 @@ impl Capabilities {
 mod tests {
     use super::*;
     use crate::map::{Coord, Georeferencing, Object, ObjectKind};
+    use crate::orthophoto_services::SERVICES;
 
     fn map_with(georef: Georeferencing, coords: &[(f64, f64)]) -> Map {
         let mut map = Map::new();
@@ -480,6 +731,115 @@ mod tests {
         assert!(map_footprint(&empty, 0.0).is_err());
     }
 
+    /// `(lat, lon)` of a UTM zone 32 point, by inverting [`utm`] numerically.
+    fn utm32_inverse((e, n): (f64, f64)) -> (f64, f64) {
+        let (mut lat, mut lon) = (45.0, 9.0);
+        for _ in 0..20 {
+            let (e0, n0) = utm(32, (lon, lat));
+            let d = 1e-6;
+            let (e_lon, n_lon) = utm(32, (lon + d, lat));
+            let (e_lat, n_lat) = utm(32, (lon, lat + d));
+            let (a, b, c, dd) = (
+                (e_lon - e0) / d,
+                (e_lat - e0) / d,
+                (n_lon - n0) / d,
+                (n_lat - n0) / d,
+            );
+            let det = a * dd - b * c;
+            let (re, rn) = (e - e0, n - n0);
+            lon += (dd * re - b * rn) / det;
+            lat += (a * rn - c * re) / det;
+        }
+        (lat, lon)
+    }
+
+    /// Laid out from its anchor on the ellipsoid, a corner of a turned map
+    /// five kilometers away lands within two meters of where its UTM
+    /// coordinates put it -- and the footprint's slack covers that.
+    #[test]
+    fn the_geographic_layout_agrees_with_utm() {
+        let georef = Georeferencing {
+            scale: 10_000,
+            epsg: 32632,
+            ref_point_x: 686_000.0,
+            ref_point_y: 4_929_000.0,
+            grivation: 3.0,
+            ..Default::default()
+        };
+        let (lat, lon) = utm32_inverse((686_000.0, 4_929_000.0));
+        // The declination the file would say: deliberately wrong, since in
+        // UTM the convergence is worked out instead.
+        let anchor = GeographicAnchor {
+            lat,
+            lon,
+            declination: 99.0,
+        };
+        let north = true_north_rotation(&georef, &anchor);
+        for corner in [(3000.0, -4000.0), (-3500.0, 3500.0), (4000.0, 3000.0)] {
+            let exact = ground_to_projected(
+                &georef,
+                geo::Coord {
+                    x: corner.0,
+                    y: corner.1,
+                },
+            )
+            .unwrap();
+            let (plat, plon) = ground_to_geographic(&georef, &anchor, north, corner);
+            let (e, n) = utm(32, (plon, plat));
+            let miss = (e - exact.x).hypot(n - exact.y);
+            assert!(miss < 2.0, "{corner:?} is {miss} m off");
+        }
+    }
+
+    /// The map's own CRS is the one asked for wherever the service offers it.
+    #[test]
+    fn the_map_crs_is_asked_for_first_then_web_mercator() {
+        let offers = |crs: &'static [i32]| move |epsg: i32| crs.contains(&epsg);
+        assert_eq!(request_crs(offers(&[3857, 32632]), 32632), Some(32632));
+        assert_eq!(
+            request_crs(offers(&[3857, 32632]), 32631),
+            Some(WEB_MERCATOR)
+        );
+        assert_eq!(request_crs(offers(&[4326]), 0), Some(WGS84));
+        assert_eq!(request_crs(offers(&[3003]), 32632), None);
+    }
+
+    /// In Web Mercator, the footprint is the UTM one stretched by
+    /// `1 / cos(lat)`, around the same place.
+    #[test]
+    fn the_web_mercator_footprint_surrounds_the_map() {
+        let georef = utm32(10_000, 0.0);
+        let map = map_with(georef.clone(), &[(-100.0, -100.0), (100.0, 100.0)]);
+        let (lat, lon) = utm32_inverse((686_000.0, 4_929_000.0));
+        let anchor = GeographicAnchor {
+            lat,
+            lon,
+            declination: 0.0,
+        };
+        let area = footprint(&map, &anchor, WEB_MERCATOR, 0.0).unwrap();
+        let stretch = 1.0 / lat.to_radians().cos();
+        // 2 km of ground, plus the 0.5 % + 5 m slack on each side, turned by
+        // the grid's convergence there (1.7 degrees: 3 % more box).
+        let expected = (2000.0 + 2.0 * (5.0 + 10.0)) * stretch * 1.03;
+        assert!(
+            (area.width() - expected).abs() < 0.01 * expected,
+            "{area:?}"
+        );
+        assert!(
+            (area.height() - expected).abs() < 0.01 * expected,
+            "{area:?}"
+        );
+        let (x, y) = web_mercator(lat, lon);
+        assert!(area.min_x < x && x < area.max_x && area.min_y < y && y < area.max_y);
+
+        let (w, h) = pixel_size(WEB_MERCATOR, 32632, lat, 0.2);
+        assert!((w - 0.2 * stretch).abs() < 1e-9 && w == h);
+        let degrees = footprint(&map, &anchor, WGS84, 0.0).unwrap();
+        assert!(degrees.min_x < lon && lon < degrees.max_x);
+        assert!(degrees.min_y < lat && lat < degrees.max_y);
+        assert!(footprint(&map, &anchor, 3003, 0.0).is_err());
+    }
+
     /// The grid snaps outwards to whole pixels and its tiles cover it once,
     /// the last ones cut short.
     #[test]
@@ -490,7 +850,7 @@ mod tests {
             max_x: 500.0,
             max_y: 350.19,
         };
-        let grid = Grid::covering(&area, 0.2);
+        let grid = Grid::covering(&area, (0.2, 0.2));
         assert!((grid.west - 100.0).abs() < 1e-9 && (grid.north - 350.2).abs() < 1e-9);
         assert_eq!((grid.width, grid.height), (2000, 751));
         let bounds = grid.bounds();
@@ -518,16 +878,20 @@ mod tests {
         let grid = Grid {
             west: 1000.0,
             north: 2000.0,
-            pixel_size: 0.5,
+            pixel_width: 0.5,
+            pixel_height: 0.25,
             width: 10,
             height: 10,
         };
-        assert_eq!(grid.world_file(), "0.5\n0\n0\n-0.5\n1000.25\n1999.75\n");
+        assert_eq!(grid.world_file(), "0.5\n0\n0\n-0.25\n1000.25\n1999.875\n");
     }
 
     #[test]
     fn the_get_map_request_is_easting_first() {
-        let service = &EMILIA_ROMAGNA[0];
+        let service = SERVICES
+            .iter()
+            .find(|s| s.id == "it-emilia-romagna-2023")
+            .unwrap();
         let area = ProjectedBox {
             min_x: 686400.0,
             min_y: 4928800.0,
@@ -537,15 +901,52 @@ mod tests {
         let url = get_map_url(service, 32632, &area, 2000, 2000, "image/jpeg", false);
         assert!(url.starts_with(service.url));
         assert!(url.contains("&SRS=EPSG:32632&BBOX=686400,4928800,686800,4929200&"));
-        assert!(url.contains("&LAYERS=Agea2023_RGB&"));
+        assert!(url.contains("&LAYERS=Agea2023_RGB&STYLES=&"));
         assert!(url.contains("&FORMAT=image%2Fjpeg&TRANSPARENT=FALSE"));
+        assert!(url.contains("&VERSION=1.1.1&"));
+    }
+
+    /// WMS 1.3.0 names the CRS `CRS` and puts latitude first in EPSG:4326.
+    #[test]
+    fn a_wms_1_3_0_request_follows_its_axis_order() {
+        let service = SERVICES.iter().find(|s| s.version == "1.3.0").unwrap();
+        let area = ProjectedBox {
+            min_x: 2.0,
+            min_y: 48.0,
+            max_x: 2.5,
+            max_y: 48.5,
+        };
+        let url = get_map_url(service, WGS84, &area, 10, 10, "image/png", true);
+        assert!(url.contains("&VERSION=1.3.0&"));
+        assert!(url.contains("&CRS=EPSG:4326&BBOX=48,2,48.5,2.5&"));
+        let url = get_map_url(service, WEB_MERCATOR, &area, 10, 10, "image/png", true);
+        assert!(url.contains("&CRS=EPSG:3857&BBOX=2,48,2.5,48.5&"));
     }
 
     #[test]
     fn reads_where_a_map_says_it_is_in_degrees() {
-        let xml = r#"<georeferencing scale="15000"><projected_crs id="EPSG"><parameter>3006</parameter></projected_crs><geographic_crs id="Geographic coordinates"><spec language="PROJ.4">+proj=latlong +datum=WGS84</spec><ref_point_deg lat="57.68464003" lon="12.02263524"/></geographic_crs></georeferencing>"#;
-        assert_eq!(geographic_ref_point(xml), Some((57.68464003, 12.02263524)));
-        assert_eq!(geographic_ref_point("<map/>"), None);
+        let xml = r#"<georeferencing scale="15000" declination="5.5" grivation="3.1"><projected_crs id="EPSG"><parameter>3006</parameter></projected_crs><geographic_crs id="Geographic coordinates"><spec language="PROJ.4">+proj=latlong +datum=WGS84</spec><ref_point_deg lat="57.68464003" lon="12.02263524"/></geographic_crs></georeferencing>"#;
+        assert_eq!(
+            geographic_anchor(xml),
+            Some(GeographicAnchor {
+                lat: 57.68464003,
+                lon: 12.02263524,
+                declination: 5.5
+            })
+        );
+        let undeclared = xml.replace(" declination=\"5.5\"", "");
+        assert_eq!(geographic_anchor(&undeclared).unwrap().declination, 0.0);
+        assert_eq!(geographic_anchor("<map/>"), None);
+    }
+
+    #[test]
+    fn what_counts_as_no_photo() {
+        assert!(is_blank([120, 80, 60, 0]));
+        assert!(is_blank([0, 0, 0, 255]));
+        assert!(is_blank([252, 255, 250, 255]));
+        assert!(!is_blank([0, 0, 1, 255]));
+        assert!(!is_blank([249, 255, 255, 255]));
+        assert!(!is_blank([120, 80, 60, 255]));
     }
 
     /// The parts of a real (trimmed) capabilities document that matter.
@@ -566,6 +967,9 @@ mod tests {
         assert!(area.contains(44.4949, 11.3426)); // Bologna
         assert!(!area.contains(57.6846, 12.0226)); // Gothenburg
         assert!(!capabilities.offers_epsg(32631));
+        assert!(capabilities.has_layers("Agea2023_RGB"));
+        assert!(capabilities.has_layers("root,Agea2023_RGB"));
+        assert!(!capabilities.has_layers("Agea2023_RGB,Agea2020_RGB"));
         assert!(Capabilities::parse("<html><body>401</body></html>").is_err());
     }
 }

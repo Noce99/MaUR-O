@@ -46,7 +46,8 @@
 //! lays out side by side where they share a street, and the areas of an
 //! event's maps, which [`map_areas`] reads from a list. And it brings the
 //! world *under* a map: [`orthophoto`] says which aerial photo of a map's
-//! ground to ask a region's WMS for, and [`image_template`] adds the
+//! ground to ask which WMS for ([`orthophoto_services`] lists them, across
+//! Europe), and [`image_template`] adds the
 //! downloaded image to the map file as the template a mapper draws over.
 //!
 //! # From contours to elevation
@@ -133,6 +134,7 @@ pub mod naming;
 pub mod ocd;
 pub mod ocd_crs;
 pub mod orthophoto;
+pub mod orthophoto_services;
 pub mod osm;
 pub mod osm_convert;
 pub mod osm_style;

@@ -26,9 +26,9 @@ It also ships tools that go beyond drawing a map:
   against a ground-truth one;
 - **`osm_to_omap`** turns OpenStreetMap data — optionally with bus and train
   lines from GTFS feeds — into a Mapper map styled like openstreetmap.org;
-- **`add_orthophoto`** downloads the aerial orthophoto of a map's ground and
-  adds it to the map as a georeferenced template (Emilia-Romagna only, for
-  now).
+- **`add_orthophoto`** downloads the aerial orthophoto of a map's ground from
+  a national or regional mapping agency (about fifty open services across
+  Europe) and adds it to the map as a georeferenced template.
 
 Everything is also usable as a Rust library (`maur_o`): besides rendering, it
 covers OCAD import, course layout, runnability grids and route finding,
@@ -454,60 +454,79 @@ the map as a georeferenced template, behind the map and every other
 template, ready to draw over in Mapper.
 
 ```
-add_orthophoto [--year 2023|2020] [--pixel-size M] [--margin M] [--image FILE] <map-file> [output-map-file]
+add_orthophoto [--service ID] [--pixel-size M] [--margin M] [--image FILE] <map-file> [output-map-file]
+add_orthophoto --list-services
 ```
 
-The photos are AGEA's (Agenzia per le Erogazioni in Agricoltura) at 20 cm a
-pixel, as [Regione Emilia-Romagna](https://geoportale.regione.emilia-romagna.it/)
-serves them over WMS; `--year` picks the flight, 2023 by default. **Only
-Emilia-Romagna is covered for now.** A map elsewhere gets a warning and exit
-code `5`, and nothing is written.
+The photos come straight from the national and regional mapping agencies'
+own WMS services. Every one listed is open (no key, no account), and was
+checked by hand: a photo of a known town fetched and looked at, what it
+draws outside its own ground seen, its terms read. The service is picked by
+where the map is: the first in `--list-services`'s order with photos of the
+whole map, so a city's own photos come before its region's, a region's
+before its country's. `--service` picks one by id instead.
 
-Why one region: AGEA flies all of Italy, but there is no single national
-service that hands out its photos reliably. Each region publishes its own
-flights, on its own WMS server. Each server has its own address, layer
-names, years, coordinate systems, tile-size limits and terms of use, and its
-own behaviour at the edge of its coverage (Emilia-Romagna's returns
-transparent pixels outside it, which is how the tool spots a map that is
-only partly covered). None of this can be guessed: a server asked for a
-coordinate system it doesn't serve can quietly answer with a blank image
-instead of an error. So each region has to be checked by hand, and a real
-map's objects laid over the downloaded photo, before the tool can trust it.
-Emilia-Romagna's has been; adding another region is one more entry in
-`orthophoto.rs`'s service list, once that region has been checked the same
-way.
+| Where | Services |
+| --- | --- |
+| Italy | Emilia-Romagna, Veneto, Friuli Venezia Giulia, Alto Adige, Trentino, Liguria, Piemonte (2010; Torino 2023), Lazio, Abruzzo, Basilicata, Puglia, Sicilia, Sardegna; everywhere else the Geoportale Nazionale's 2012/2006 photos at 50 cm |
+| Germany | All sixteen Länder (10–20 cm), Berlin's 2026 true orthophoto |
+| Austria | Vorarlberg, Steiermark |
+| Switzerland, Liechtenstein | swisstopo SWISSIMAGE |
+| Benelux | Netherlands, Flanders, Wallonia, Brussels, Luxembourg |
+| France, Monaco | IGN BD ORTHO |
+| Iberia | Spain (PNOA), Portugal (mainland), Andorra |
+| Central and eastern Europe | Poland, Czechia, Slovakia, Republika Srpska, Albania, Cyprus |
+| Nordics | Helsinki |
 
-The map has to be a Mapper `.omap`/`.xmap`, georeferenced in a projected CRS
-the service offers: WGS84 / UTM 32N or 33N (Mapper's "UTM" CRS, or EPSG
-32632/32633), ETRS89 / UTM 32N or 33N (25832/25833), Monte Mario (3003/3004)
-and a few others. An OCAD map has to be saved as `.omap` in Mapper first.
+Why not everywhere: what's left either needs a key or an account (Denmark,
+Finland and Austria nationally, Sweden's official service, the German
+federal one), is closed to anyone but partner agencies (Norway), forbids
+downloading its photos (Toscana), is sold (Hungary), is broken (Lombardia's
+server, Umbria's certificate), or could not be found or reached. Every
+server has its own address, layer names, coordinate systems, limits and
+terms, and its own quirks (photos of the sea in black, or white, or both
+depending on the size asked for; capabilities documents cut short), none of
+which can be guessed. A new one goes in `src/orthophoto_services.rs` once it
+has been checked the same way.
+
+The map has to be a Mapper `.omap`/`.xmap`, georeferenced: placed on the
+earth in a projected CRS, with the latitude and longitude Mapper keeps
+beside it. The photo is asked for in the map's own CRS where the service
+offers it; otherwise in Web Mercator (EPSG:3857) or latitude and longitude
+(EPSG:4326), and Mapper reprojects it onto the map when it opens it. An
+OCAD map has to be saved as `.omap` in Mapper first.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--year` | `2023` | Which flight: `2023` or `2020`. |
-| `--pixel-size` | `0.2` | The image's ground resolution, in meters. Above 300 megapixels (about 3.5 × 3.5 km at 0.2 m) a larger one is needed. |
+| `--service` | the best for the map's place | Which service to download from, by id. |
+| `--list-services` | | Lists every service, best first, and exits. |
+| `--pixel-size` | the service's own | The image's ground resolution, in meters. Above 300 megapixels (about 3.5 × 3.5 km at 0.2 m) a larger one is needed. |
 | `--margin` | `50` | How far beyond the map's objects to download, in meters. |
-| `--image` | `<map>_agea<year>.jpg` | Where to write the image, beside the output map by default. Its world file (`.jgw`) goes beside it. |
+| `--image` | `<map>_<service id>.jpg` | Where to write the image, beside the output map by default. Its world file (`.jgw`) goes beside it. |
 
 The output map defaults to the input map, rewritten in place, and only its
 template list and saved view change. The view is updated so the photo shows
 when the map is opened, unless the map was saved with all templates hidden.
 Running the tool again downloads the image again and leaves the templates
-as they are. The area downloaded is a north-up box around the map, and
-Mapper turns the image by the map's grivation itself.
+as they are. A map straddling two regions gets the one with photos of most
+of it, with a warning, and black where it has none.
 
 ```bash
-add_orthophoto casalecchio.omap   # writes casalecchio_agea2023.jpg + .jgw and adds the template
+add_orthophoto casalecchio.omap   # writes casalecchio_it-emilia-romagna-2023.jpg + .jgw and adds the template
 ```
 
-The photos belong to Regione Emilia-Romagna and AGEA: credit them wherever a
-map drawn over them is published.
+The photos belong to the agency serving them, and the tool prints who to
+credit and under which terms. Many are open data (CC BY 4.0, dl-de, Etalab
+and the like), but not all: most of Italy's regional photos are AGEA's, all
+rights reserved, which the region is only licensed to show, and some
+services state no terms at all. Check them before publishing a map drawn
+over a photo.
 
 Exit codes: `0` success, `1` a usage error, `2` the map could not be read,
-`3` the map is not georeferenced in a CRS the service offers, `4` the image
-or the map could not be written, `5` the map is not in Emilia-Romagna, `6`
-the service could not be reached or answered with something other than a
-photo.
+`3` the map is not georeferenced (or no service covering it offers a CRS
+the photo can be placed in), `4` the image or the map could not be written,
+`5` no service has photos of the map's ground, `6` the service could not be
+reached or answered with something other than a photo.
 
 ## Using it as a library
 
