@@ -16,7 +16,8 @@ From a spike on one tile near Göteborg (2026-11-10):
 
 - **STAC search**: `GET https://api.lantmateriet.se/stac-hojd/v1/search?bbox=w,s,e,n&limit=N`
   (WGS84 bbox, HTTP Basic auth with a personal GeoTorget account, the same
-  `LANTMATERIET_USERNAME` / `LANTMATERIET_PASSWORD` o-mnia uses). It returns
+  `LANTMATERIET_USERNAME` / `LANTMATERIET_PASSWORD` o-mnia uses, read from
+  the environment or `--env-file`). It returns
   two collections:
 
   | Collection | What it is | Tile | Format |
@@ -26,9 +27,9 @@ From a spike on one tile near Göteborg (2026-11-10):
 
 - **Downloads** (`https://dl1.lantmateriet.se/hojd/data/...`) need the same
   Basic auth. **Range requests are refused (403)**: only whole-file GETs
-  work, so tiles are downloaded whole and cached. The first requests of a
-  session sometimes 403 too and succeed on retry, so the downloader retries
-  with backoff. The `.../hojd/pub/...` sidecars (`*_info.json`, thumbnails)
+  work, so tiles are downloaded whole and cached. A whole-file GET is 403
+  too unless the account has ordered that product in GeoTorget (see
+  [Open issues](#open-issues)); the downloader still retries with backoff. The `.../hojd/pub/...` sidecars (`*_info.json`, thumbnails)
   need no auth.
 - **The LAZ and DTM come from different years** (here 2019 and 2023).
 - **Karttapullautin** (Rust `pullauta`, v2.16) reads the COPC LAZ as-is,
@@ -259,14 +260,53 @@ all of the error is in inferring the levels: the predicted levels along the
 lines sit on whole bands (their fractional parts cluster at 0, and at 0.5
 for form lines), but spread from 7 bands below to 2 above the best offset.
 
+## First live run (2026-11-11)
+
+`create_dem_benchmark --samples 10 --seed 1` (defaults otherwise) drew 16
+places for 10 samples: 4 too flat, 1 with no point cloud, 1 whose point
+cloud and ground model were flown too far apart. `dem_benchmark` with the
+default config:
+
+| Sample | Lines | Relief | RMSE dep. | RMSE none | Levels dep. | Levels none | Inverted dep. | Inverted none |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 108 | 185 m | 81.79 m | 81.79 m | 13.4% | 13.4% | 71.2% | 71.2% |
+| 2 | 23 | 45 m | 16.34 m | 16.34 m | 23.8% | 23.8% | 77.9% | 77.9% |
+| 3 | 60 | 95 m | 17.31 m | 28.31 m | 29.1% | 23.1% | 26.8% | 43.9% |
+| 4 | 82 | 70 m | 3.87 m | 3.88 m | 46.9% | 46.4% | 13.5% | 13.6% |
+| 5 | 38 | 65 m | 7.64 m | 6.92 m | 55.5% | 46.4% | 24.8% | 24.7% |
+| 6 | 74 | 60 m | 5.67 m | 3.99 m | 43.3% | 35.8% | 29.9% | 22.2% |
+| 7 | 29 | 15 m | 4.75 m | 6.72 m | 49.0% | 35.3% | 48.7% | 58.9% |
+| 8 | 32 | 55 m | 20.70 m | 22.00 m | 53.8% | 14.1% | 53.8% | 77.6% |
+| 9 | 66 | 65 m | 4.85 m | 4.85 m | 43.8% | 41.0% | 16.6% | 16.3% |
+| 10 | 76 | 20 m | 7.67 m | 7.67 m | 25.9% | 25.9% | 24.5% | 24.5% |
+| **Mean** | | | **17.06 m** | **18.25 m** | **38.5%** | **30.5%** | **38.8%** | **43.1%** |
+
+The Laplace baseline averages 0.52 m (0.41–0.62 m), so, as on the spike
+tile, nearly all of the error is in inferring the levels, not in filling
+between them. Against the smoothed ground model every number moves by
+about 0.01 m: the lidar's roughness is not what is being scored.
+
+- **Sample 1 dominates the mean.** The steepest place (185 m of relief),
+  with 71% of its sloping ground sloping the wrong way: a whole slope
+  reconstructed upside down, one wrong hill-or-hollow decision compounded
+  over 37 levels. Sample 2 looks like the same failure, smaller.
+- **Slope lines help most where depressions are many** (samples 3, 7, 8;
+  in sample 8 exact levels go from 14% to 54%), and cost a little in 5
+  and 6. Samples 1, 2 and 10 score the same in both variants: no
+  depressions were drawn there.
+
 ### Open issues
 
-- **Downloads were refused (403) for at least the 50 minutes after the
-  first ~1 GB**, for every tile, while the STAC API kept answering and
-  wrong credentials still got 401. It looks like a per-account download
-  limit; the early 403s of the spike, which cleared on retry, may have been
-  the same thing. `create_dem_benchmark` counts each such place as
-  rejected ("a tile could not be downloaded") and moves on, so a run that
-  hits the limit ends with exit code 6 having kept what it got; rerun it
-  later with the same `--cache` and seed to pick up where it left off.
-- Questions 1–3 above are still open.
+- **Download access is per product.** The early 403s were not a rate
+  limit: the account used had not ordered the products. A GeoTorget
+  account must order (and have approved) both **Laserdata Skog** and
+  **Markhöjdmodell** before `dl1.lantmateriet.se` serves their files;
+  without an order the STAC search still answers, but every download is
+  403. Once both were ordered, 10 samples downloaded with no 403 at all.
+- **The cache grows fast**: about 12 GB for the run above, most of it
+  Karttapullautin's working files under `<cache>/pullauta` (~0.5–1 GB per
+  place tried). They are only needed to rebuild an archive without
+  rerunning Karttapullautin; the downloaded tiles are the part worth
+  keeping. Deleting the working folder after each place, keeping only the
+  DXF, would cut that to the downloads.
+- Questions 1–3 above are still open; sample 1 is evidence for question 1.
