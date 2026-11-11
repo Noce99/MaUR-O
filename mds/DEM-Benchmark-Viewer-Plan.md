@@ -96,7 +96,7 @@ Views:
   opened through the host's own import), the error grid and the coloured
   contours as map layers.
 
-Tests: Vitest on `bundle.ts` and `stats.ts` (a tiny zip built in the test);
+Tests: `node:test` on `bundle.ts` and `stats.ts` (a tiny zip built in the test);
 the profile problems test covers the E05 entry. Docs:
 `docs/dev/dem-benchmark.md`, the built-ins list in
 `docs/dev/extension-api.md`, `FEATURES.md`.
@@ -110,6 +110,27 @@ the profile problems test covers the E05 entry. Docs:
    3. the 3D view and the sample charts;
    4. the map layers;
    5. docs.
+
+## Status (2026-11-11)
+
+Both parts are built. MaUR-O: `b43cd6c` on `dem-benchmark`. o-mnia: five
+commits on `feat/dem-benchmark-viewer`, documented in that repo's
+`docs/dev/dem-benchmark.md`. Checked by hand in the browser on the 10-sample
+run of [DEM-Benchmark-Plan.md](DEM-Benchmark-Plan.md).
+
+Where the build differs from the plan above:
+
+- **E06**, not E05: GPX analysis had taken E05.
+- **No tool panel**: the ribbon holds every control (open run, compare,
+  sample, variant). The visualization panel docks right, half width, so the
+  map layers stay in view beside it.
+- **Tests use `node:test`** (o-mnia's runner, through tsx), not Vitest.
+- **The prediction is stored on the truth's datum**: the bundle adds the
+  mean difference the scores remove, so heights compare directly.
+- **Opening a map** goes through the host's import, which switches to Map
+  mode; the extension returns to its own mode once the map is in.
+- **Added**: an error map (top-down) that the cross-section is drawn on, and
+  an "On the map" card.
 
 ## Later
 
