@@ -173,6 +173,22 @@ pub struct LevelAccuracy {
     pub off_by_more: f64,
     /// Share of the scored lines' length at a wrong level.
     pub wrong_length: f64,
+    /// Each input line's predicted level (the median of the prediction
+    /// along it), in the order the lines were given; `None` where the
+    /// prediction does not reach the line.
+    pub predicted: Vec<Option<f64>>,
+}
+
+impl LevelAccuracy {
+    /// Line `index`'s level error in whole bands after [`band_offset`]
+    /// (`0` exact, `±1` one band off, ...), given its true level; `None`
+    /// where it has no prediction.
+    ///
+    /// [`band_offset`]: LevelAccuracy::band_offset
+    pub fn band_error(&self, index: usize, level: f64, equidistance: f64) -> Option<i64> {
+        let predicted = (*self.predicted.get(index)?)?;
+        Some(((predicted - level) / equidistance - self.band_offset as f64).round() as i64)
+    }
 }
 
 /// Everything [`score`] measures.
@@ -364,19 +380,25 @@ fn along(line: &Line) -> Vec<(f64, f64)> {
 pub fn level_accuracy(prediction: &GeoRaster, lines: &[Line], equidistance: f64) -> LevelAccuracy {
     // (band difference, length) per line with a prediction along it.
     let mut scored: Vec<(f64, f64)> = Vec::new();
+    let mut predicted_levels = Vec::with_capacity(lines.len());
     for line in lines {
         let values: Vec<f64> = along(line)
             .into_iter()
             .filter_map(|(x, y)| bilinear_sample(prediction, x, y))
             .collect();
         if values.is_empty() {
+            predicted_levels.push(None);
             continue;
         }
         let predicted = median(values);
+        predicted_levels.push(Some(predicted));
         scored.push(((predicted - line.level) / equidistance, line.length()));
     }
     if scored.is_empty() {
-        return LevelAccuracy::default();
+        return LevelAccuracy {
+            predicted: predicted_levels,
+            ..LevelAccuracy::default()
+        };
     }
     // The offset with the most length behind it.
     let mut by_offset: std::collections::BTreeMap<i64, f64> = std::collections::BTreeMap::new();
@@ -414,6 +436,7 @@ pub fn level_accuracy(prediction: &GeoRaster, lines: &[Line], equidistance: f64)
         } else {
             0.0
         },
+        predicted: predicted_levels,
     }
 }
 
@@ -583,6 +606,11 @@ mod tests {
         assert!((acc.exact - 0.8).abs() < 1e-12);
         assert!((acc.off_by_one - 0.2).abs() < 1e-12);
         assert!((acc.wrong_length - 0.2).abs() < 1e-12);
+        // The raised line reads one band low; the rest are exact.
+        let errors: Vec<Option<i64>> = (0..wrong.len())
+            .map(|i| acc.band_error(i, wrong[i].level, 5.0))
+            .collect();
+        assert_eq!(errors, vec![Some(0), Some(0), Some(-1), Some(0), Some(0)]);
     }
 
     #[test]

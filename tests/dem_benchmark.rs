@@ -282,3 +282,84 @@ fn a_missing_config_is_exit_3() {
         .assert()
         .code(3);
 }
+
+/// The one run folder under `results`.
+fn run_dir(results: &Path) -> std::path::PathBuf {
+    std::fs::read_dir(results)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+}
+
+#[test]
+fn a_run_is_bundled_for_a_viewer() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("archive");
+    hill_archive(&archive);
+    let results = dir.path().join("results");
+    bench()
+        .arg(&archive)
+        .arg("--results")
+        .arg(&results)
+        .assert()
+        .success();
+
+    let file = std::fs::File::open(run_dir(&results).join("bundle.zip")).unwrap();
+    let mut zip = zip::ZipArchive::new(file).unwrap();
+    let mut read = |name: &str| {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut zip.by_name(name).unwrap(), &mut bytes).unwrap();
+        bytes
+    };
+    let results_json = String::from_utf8(read("results.json")).unwrap();
+    assert!(results_json.starts_with(r#"{"format":"dem-benchmark-bundle 1""#));
+    assert!(results_json.contains(r#""variants":["depressions","none"]"#));
+    let sample = String::from_utf8(read("sample_0001/sample.json")).unwrap();
+    // The 1 km truth at 1 m is 500 x 500 cells of 2 m.
+    assert!(sample.contains(r#""width":500,"height":500"#), "{sample}");
+
+    let floats = |bytes: Vec<u8>| -> Vec<f32> {
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect()
+    };
+    let truth = floats(read("sample_0001/truth.f32"));
+    let prediction = floats(read("sample_0001/depressions/prediction.f32"));
+    assert_eq!(truth.len(), 500 * 500);
+    assert_eq!(prediction.len(), truth.len());
+    assert_eq!(read("sample_0001/water.u8").len(), truth.len());
+    // On the truth's datum, the prediction is close to it where the hill is.
+    let center = 250 * 500 + 250;
+    assert!((truth[center] - HEIGHT as f32).abs() < 1.0);
+    let mid = 250 * 500 + 350; // 200 m east of the top
+    assert!(
+        (prediction[mid] - truth[mid]).abs() < 3.0,
+        "{} vs {}",
+        prediction[mid],
+        truth[mid]
+    );
+    let lines = String::from_utf8(read("sample_0001/depressions/lines.json")).unwrap();
+    assert_eq!(lines.matches(r#""error":0"#).count(), 9, "{lines}");
+}
+
+#[test]
+fn no_bundle_leaves_it_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("archive");
+    hill_archive(&archive);
+    let results = dir.path().join("results");
+    bench()
+        .arg(&archive)
+        .args(["--variant", "none", "--no-bundle", "--results"])
+        .arg(&results)
+        .assert()
+        .success();
+    let run = run_dir(&results);
+    assert!(run.join("summary.txt").is_file());
+    assert!(!run.join("bundle.zip").exists());
+}

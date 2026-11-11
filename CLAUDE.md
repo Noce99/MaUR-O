@@ -184,8 +184,10 @@ HTTP Basic auth sent only to `https://*.lantmateriet.se`, and runs the
 external Karttapullautin (`pullauta`). `dxf.rs` reads Karttapullautin's DXF,
 `pullauta_import.rs` turns its layers into an ISOM contour map (plus a
 `levels.txt` of every line's true height), `dem_archive.rs` is the on-disk
-layout (and the smoothed ground truth and water mask), and
-`dem_benchmark.rs` is the scoring. `dem_geo_tiff_evaluator::read_window`
+layout (and the smoothed ground truth and water mask),
+`dem_benchmark.rs` is the scoring, and `dem_bundle.rs` the run's
+`bundle.zip` that o-mnia's viewer extension reads (see
+`mds/DEM-Benchmark-Viewer-Plan.md`). `dem_geo_tiff_evaluator::read_window`
 reads just the tiles of a national 10 km GeoTIFF a sample needs. Its
 integration tests (`tests/dem_benchmark.rs`) cover the offline exit paths
 and a synthetic hill end to end, never the network.

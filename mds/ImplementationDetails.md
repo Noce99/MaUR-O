@@ -112,6 +112,7 @@ measurements it rests on.
 | `pullauta_import.rs` | Karttapullautin's DXF layers as an ISOM contour map (`101`, `101.1`, `102`, `103`, `103.1`), clipped to a box and georeferenced, plus every line's true height for `levels.txt`. |
 | `dem_archive.rs` | A DEM benchmark archive's layout and reader, and the rasters derived from the ground truth: Gaussian-smoothed, and a water mask of large perfectly flat areas. |
 | `dem_benchmark.rs` | The scoring: pixel errors after the mean and median offsets, per-contour level accuracy, the inverted-slope share, and a Laplace-interpolation baseline of the true levels. |
+| `dem_bundle.rs` | A run as one `bundle.zip` for a viewer: every grid of a sample on one 2 m grid as raw little-endian floats, the contours with their true and predicted levels, the metrics as hand-written JSON. |
 
 ### Other consumers of the map model
 
@@ -158,7 +159,7 @@ comment:
 | `bin/osm_to_omap.rs` | Converts an `.osm` file into an `.omap`. |
 | `bin/add_orthophoto.rs` | Downloads a map's orthophoto tile by tile and adds it to the map as a template. |
 | `bin/create_dem_benchmark.rs` | Draws places in Sweden, downloads their lidar and ground model, runs Karttapullautin, and writes a DEM benchmark archive. |
-| `bin/dem_benchmark.rs` | Runs `contours_to_raster` over a DEM benchmark archive and writes the scores. |
+| `bin/dem_benchmark.rs` | Runs `contours_to_raster` over a DEM benchmark archive and writes the scores, and the run's `bundle.zip`. |
 
 ## One map per symbol
 

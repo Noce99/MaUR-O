@@ -374,7 +374,7 @@ create_dem_benchmark --pullauta <PATH> [--samples N] [--seed S] [--size M] [--ca
                      [--env-file FILE] [--min-contours N] [--min-relief M] [--min-density D]
                      [--max-year-gap Y] [--max-attempts N] [--at LAT,LON]... <OUTPUT-DIR>
 dem_benchmark [--results DIR] [--config FILE] [--margin M] [--variant NAME]...
-              [--min-level-accuracy PERCENT] <ARCHIVE>
+              [--min-level-accuracy PERCENT] [--no-bundle] <ARCHIVE>
 ```
 
 `create_dem_benchmark` needs a [GeoTorget](https://geotorget.lantmateriet.se/)
@@ -404,6 +404,13 @@ was inferred exactly, the share of sloping ground predicted to slope the
 wrong way, and the RMSE of a Laplace interpolation of the same lines at
 their true levels, which is about the best these contours allow. See
 [DEM-Benchmark-Plan.md](mds/DEM-Benchmark-Plan.md) for the design.
+
+The run folder also gets `bundle.zip` (unless `--no-bundle`): every metric
+as JSON and, per sample, the ground truth, each prediction (on the truth's
+datum) and the water mask on one 2 m grid, and every contour with its true
+and predicted level. It is what o-mnia's DEM benchmark extension reads for
+its 3D comparison and charts; `src/dem_bundle.rs` documents the layout and
+[DEM-Benchmark-Viewer-Plan.md](mds/DEM-Benchmark-Viewer-Plan.md) the viewer.
 
 ```bash
 create_dem_benchmark --pullauta ~/karttapullautin/target/release/pullauta \

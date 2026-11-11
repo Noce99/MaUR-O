@@ -72,7 +72,8 @@
 //! which Swedish lidar and ground model to fetch for a random place,
 //! [`dxf`] and [`pullauta_import`] turn the contours Karttapullautin draws
 //! from that lidar into a map, [`dem_archive`] is the benchmark those make,
-//! and [`dem_benchmark`] scores the reconstruction against the ground model.
+//! and [`dem_benchmark`] scores the reconstruction against the ground model;
+//! [`dem_bundle`] packs a run into one file for a viewer.
 //!
 //! # Drawing a map
 //!
@@ -129,6 +130,7 @@ pub mod course;
 pub mod dem;
 pub mod dem_archive;
 pub mod dem_benchmark;
+pub mod dem_bundle;
 pub mod dem_from_contours;
 pub mod dem_geo_tiff_evaluator;
 pub mod differences;
