@@ -643,6 +643,11 @@ impl Clutter {
     }
 }
 
+/// The credit OpenStreetMap's licence, the ODbL, asks of a map made from its
+/// data, written into every map's notes.
+pub const OSM_CREDIT: &str =
+    "Map data \u{a9} OpenStreetMap contributors, ODbL (https://www.openstreetmap.org/copyright)";
+
 /// What [`convert`] makes of an extract.
 pub struct Conversion {
     /// Where the map sits, and how degrees become millimetres.
@@ -1368,6 +1373,7 @@ impl Conversion {
     ) -> Result<(), String> {
         MapFile {
             scale_denominator: self.scale(),
+            notes: OSM_CREDIT,
             colors: &style.fragments.colors,
             symbols: &style.fragments.symbols,
             objects: &self.objects,
@@ -1393,6 +1399,7 @@ impl Conversion {
             .collect();
         MapFile {
             scale_denominator: self.scale(),
+            notes: OSM_CREDIT,
             colors: &colors,
             symbols: &symbols,
             objects: &self.objects,

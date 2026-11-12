@@ -24,9 +24,10 @@ It also ships tools that go beyond drawing a map:
 - **`contours_to_raster`** reconstructs an elevation model (a GeoTIFF) from a
   map's contour lines, and **`dem_geo_tiff_evaluator`** scores such a model
   against a ground-truth one;
-- **`osm_to_omap`** turns OpenStreetMap data into a Mapper map: a base for an
-  orienteering map drawn to ISSprOM 2019 or ISOM 2017-2, or a map styled like
-  openstreetmap.org, optionally with bus and train lines from GTFS feeds;
+- **`osm_to_omap`** turns OpenStreetMap data — from a file, or downloaded for
+  an area — into a Mapper map: a base for an orienteering map drawn to
+  ISSprOM 2019 or ISOM 2017-2, or a map styled like openstreetmap.org,
+  optionally with bus and train lines from GTFS feeds;
 - **`add_orthophoto`** downloads the aerial orthophoto of a map's ground from
   a national or regional mapping agency (about fifty open services across
   Europe) and adds it to the map as a georeferenced template.
@@ -357,8 +358,35 @@ Converts OpenStreetMap data into a Mapper map, drawn to an orienteering
 standard or like openstreetmap.org.
 
 ```
-osm_to_omap [--standard issprom|isom|osm] [--bbox min_lon,min_lat,max_lon,max_lat] <osm-file> [omap-file]
+osm_to_omap [--standard issprom|isom|osm] [--bbox min_lon,min_lat,max_lon,max_lat | --around lat,lon [--size 1km]] <osm-file> [omap-file]
+osm_to_omap --download (--bbox ... | --around lat,lon [--size 1km]) [--save-osm area.osm] [--overpass-url URL] [--max-area 25] [--standard ...] <omap-file>
 ```
+
+The area is a box (`--bbox`, in OpenStreetMap's order: west, south, east,
+north), or a square `--size` on a side (`2km`, `500m`, or metres; 1 km by
+default) centred on a point (`--around lat,lon`, latitude first as a map app
+copies it). Without either, the whole file is converted.
+
+With `--download` the data comes from OpenStreetMap itself, through the
+[Overpass API](https://wiki.openstreetmap.org/wiki/Overpass_API)
+(`overpass-api.de` by default, or `--overpass-url`), and the only file named
+is the map to write. The query asks for everything in the area, the
+multipolygons reaching into it whole (a park crossing the edge is closed
+before it is cut), and, with `--bus` or `--train`, the bus and train routes
+with their route masters; not the boundaries or the cycle and hiking routes
+passing through, which would be most of the download. A server too busy to
+answer is asked again twice, after 5 and 15 seconds. `--save-osm` keeps what
+was downloaded, to convert again offline. The public servers are shared, so
+an area over `--max-area` km² (25 by default) is refused: for a larger one,
+convert from an extract (e.g. [Geofabrik](https://download.geofabrik.de/)).
+
+```bash
+osm_to_omap --download --around 44.4939,11.3431 --size 2km --save-osm piazza.osm piazza.omap
+```
+
+Every map credits OpenStreetMap's contributors in its notes (Map > Notes in
+Mapper), as the data's licence, the
+[ODbL](https://www.openstreetmap.org/copyright), asks.
 
 | `--standard` | symbol set | scale |
 | --- | --- | --- |
@@ -502,8 +530,9 @@ map_to_image -r 0.7143 -f 0 piazza_maggiore.omap
 ```
 
 Exit codes: `0` success, `1` a usage error (an option of `--standard osm`
-given with another standard among them), `2` the OSM file or the GTFS
-feed could not be read, or held nothing to convert, `4` the map could not be
+given with another standard, or an area over `--max-area`, among them), `2`
+the OSM file or the GTFS feed could not be read, or held nothing to convert,
+`3` the download failed, `4` the map (or the `--save-osm` file) could not be
 written.
 
 ### `add_orthophoto`

@@ -39,7 +39,8 @@
 //! the ground truth a whole suite of maps is scored against, image by image.
 //!
 //! It also goes the other way, from the world to a map: [`osm`] reads
-//! OpenStreetMap data, [`osm_orienteering`] says what each feature looks like
+//! OpenStreetMap data (which [`osm_download`] says how to ask the Overpass
+//! API for, for an area), [`osm_orienteering`] says what each feature looks like
 //! on an orienteering map drawn to ISSprOM or ISOM, [`osm_style`] what it
 //! looks like on openstreetmap.org's own map, and [`osm_convert`] makes a
 //! whole Mapper map out of the data and either — with, where asked, bus and train lines over it, which
@@ -138,6 +139,7 @@ pub mod orthophoto;
 pub mod orthophoto_services;
 pub mod osm;
 pub mod osm_convert;
+pub mod osm_download;
 pub mod osm_orienteering;
 pub mod osm_style;
 pub mod progress;

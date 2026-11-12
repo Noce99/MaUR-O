@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! osm_to_omap [--standard issprom|isom|osm]
-//!             [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4]
+//!             [--bbox min_lon,min_lat,max_lon,max_lat | --around lat,lon [--size 1km]]
+//!             [--details 0-4]
 //!             [--bus 13,19,...]
 //!             [--train S1,S2A,MEX,...]
 //!             [--gtfs feed.zip ... [--day weekday|saturday|sunday | --date YYYYMMDD]]
@@ -12,6 +13,10 @@
 //!             [--drinking-water]
 //!             [--legend]
 //!             <osm-file> [omap-file]
+//!
+//! osm_to_omap --download (--bbox ... | --around lat,lon [--size 1km])
+//!             [--save-osm area.osm] [--overpass-url URL] [--max-area 25]
+//!             [the options above] <omap-file>
 //! ```
 //!
 //! The input is an `.osm` XML file, as openstreetmap.org's export, the
@@ -20,6 +25,25 @@
 //! cover, so that a river or a motorway the extract keeps whole does not
 //! stretch the map far past it (see `OsmData::extent`). The output defaults
 //! to the input's name with `.omap`.
+//!
+//! `--around lat,lon` is the other way to give the area: a square
+//! `--size` on a side (`2km`, `500m`, or metres; 1 km by default) centred
+//! on that point, latitude first as a map app copies one.
+//!
+//! # Downloading
+//!
+//! `--download` takes the data from OpenStreetMap itself, through the
+//! Overpass API (`--overpass-url`, `overpass-api.de` by default), instead of
+//! from a file: everything in the area of `--bbox` or `--around`, and
+//! whatever reaches out of it whole (see `maur_o::osm_download`). The only
+//! file named is then the map to write. `--save-osm` keeps what was
+//! downloaded, to convert again offline. The public servers are shared:
+//! an area over `--max-area` square kilometres (25 by default) is refused —
+//! a larger one is better cut from an extract, Geofabrik's say, and
+//! converted from the file.
+//!
+//! Every map credits OpenStreetMap's contributors in its notes, as the
+//! data's licence, the ODbL, asks.
 //!
 //! The map is georeferenced in the UTM zone of its centre, turned so that
 //! true north is up.
@@ -113,12 +137,14 @@
 //! `--legend` adds a legend under the map, in Italian: a sample of every
 //! symbol the map uses with what it means, the bus and train lines first.
 //!
-//! Exit codes: 0 success, 1 usage error, 2 the OSM file, the GTFS feed or
-//! the list of maps could not be read, or held nothing to convert, 4 the
-//! map could not be written.
+//! Exit codes: 0 success, 1 usage error (an area over `--max-area` among
+//! them), 2 the OSM file, the GTFS feed or the list of maps could not be
+//! read, or held nothing to convert, 3 the download failed, 4 the map (or
+//! the `--save-osm` file) could not be written.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
@@ -128,8 +154,11 @@ use maur_o::bus::{
     HEADWAY_HOURS,
 };
 use maur_o::map_areas::{read_map_areas, single_color};
-use maur_o::osm::{read_osm, BBox};
+use maur_o::osm::{read_osm, read_osm_str, BBox};
 use maur_o::osm_convert::convert;
+use maur_o::osm_download::{
+    overpass_error, overpass_query, parse_center, parse_size, MAX_AREA_KM2, OVERPASS_URL, TIMEOUT_S,
+};
 use maur_o::osm_orienteering::{OrienteeringStyle, Standard};
 use maur_o::osm_style::{
     carto_style_with_overlays, line_color, BusLook, Details, COURSE_PURPLE, MAP_AREA_FILL_ALPHA,
@@ -173,15 +202,43 @@ const OSM_ONLY: &[&str] = &[
              openstreetmap.org's Standard style."
 )]
 struct Args {
-    /// The OpenStreetMap XML file to convert.
-    osm_file: PathBuf,
+    /// The OpenStreetMap XML file to convert; with --download, the map to
+    /// be written.
+    #[arg(value_name = "OSM_FILE")]
+    osm_file: Option<PathBuf>,
 
     /// The map to be written. Defaults to the OSM file name with a .omap suffix.
     omap_file: Option<PathBuf>,
 
+    /// Download the data of the area of --bbox or --around from
+    /// OpenStreetMap (the Overpass API) instead of reading a file.
+    #[arg(long)]
+    download: bool,
+
+    /// Only convert a square centred on this point: lat,lon in degrees.
+    #[arg(long, value_parser = parse_center, allow_hyphen_values = true,
+          conflicts_with = "bbox", value_name = "LAT,LON")]
+    around: Option<(f64, f64)>,
+
+    /// The side of the --around square: 2km, 500m, or metres.
+    #[arg(long, value_parser = parse_size, default_value = "1km", value_name = "SIZE")]
+    size: f64,
+
+    /// Keep the downloaded data in this .osm file.
+    #[arg(long, requires = "download", value_name = "FILE")]
+    save_osm: Option<PathBuf>,
+
+    /// The Overpass API server to download from.
+    #[arg(long, requires = "download", default_value = OVERPASS_URL, value_name = "URL")]
+    overpass_url: String,
+
+    /// The largest area to download, in square kilometres.
+    #[arg(long, requires = "download", default_value_t = MAX_AREA_KM2, value_name = "KM2")]
+    max_area: f64,
+
     /// The symbols to draw the map with: an orienteering standard (ISSprOM
     /// 2019 at 1:4000, ISOM 2017-2 at 1:10000), or openstreetmap.org's look.
-    /// Every option below but --bbox is osm's only.
+    /// The options below, from --details on, are osm's only.
     #[arg(long, value_enum, default_value = "issprom")]
     standard: StandardArg,
 
@@ -304,16 +361,65 @@ fn run() -> Result<(), (ExitCode, String)> {
             ));
         }
     }
-    let omap_file = args
-        .omap_file
-        .clone()
-        .unwrap_or_else(|| args.osm_file.with_extension("omap"));
-
-    let data = read_osm(&args.osm_file).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+    let usage_error = |message: &str| (ExitCode::from(1), format!("Error: {message}"));
+    if matches.value_source("size") == Some(ValueSource::CommandLine) && args.around.is_none() {
+        return Err(usage_error("--size needs --around"));
+    }
+    let area = args
+        .bbox
+        .or_else(|| args.around.map(|center| BBox::square(center, args.size)));
+    let (data, omap_file) = if args.download {
+        let omap_file = match (&args.osm_file, &args.omap_file) {
+            (Some(omap), None) => omap.clone(),
+            (None, _) => return Err(usage_error("--download needs the map to write")),
+            (Some(_), Some(_)) => {
+                return Err(usage_error(
+                    "with --download, name only the map to write: the data is downloaded",
+                ))
+            }
+        };
+        let area = area.ok_or_else(|| usage_error("--download needs --bbox or --around"))?;
+        let km2 = area.area_km2();
+        if km2 > args.max_area {
+            return Err(usage_error(&format!(
+                "the area is {km2:.1} km², over --max-area {}: give a smaller one, or a \
+                 larger --max-area, or convert it from an extract",
+                args.max_area
+            )));
+        }
+        let routes = !args.bus.is_empty() || !args.train.is_empty();
+        let text = download(&args.overpass_url, &area, routes)?;
+        if let Some(path) = &args.save_osm {
+            std::fs::write(path, &text).map_err(|e| {
+                (
+                    ExitCode::from(4),
+                    format!("Error: cannot write {}: {e}", path.display()),
+                )
+            })?;
+        }
+        let data = read_osm_str(&text).map_err(|e| {
+            (
+                ExitCode::from(3),
+                format!("Error: the downloaded data cannot be read: {e}"),
+            )
+        })?;
+        (data, omap_file)
+    } else {
+        let osm_file = args
+            .osm_file
+            .clone()
+            .ok_or_else(|| usage_error("give the OSM file to convert, or --download"))?;
+        let omap_file = args
+            .omap_file
+            .clone()
+            .unwrap_or_else(|| osm_file.with_extension("omap"));
+        let data = read_osm(&osm_file).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+        (data, omap_file)
+    };
     if let Some(standard) = standard {
         let style = OrienteeringStyle::new(standard);
-        let conversion = convert(&data, &style, args.bbox)
-            .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+        let conversion =
+            convert(&data, &style, area).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
         conversion
             .write_standard(&style, &omap_file)
             .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
@@ -379,7 +485,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     let (train_refs, all_trains) = every(&train_refs, Mode::Train)?;
     // The area is settled before the lines are, so that `all` keeps only
     // the lines which reach it.
-    let bbox = args.bbox.or_else(|| data.extent()).ok_or((
+    let bbox = area.or_else(|| data.extent()).ok_or((
         ExitCode::from(2),
         "Error: the extract holds nothing to convert".to_string(),
     ))?;
@@ -627,6 +733,72 @@ fn run() -> Result<(), (ExitCode, String)> {
         omap_file.display()
     );
     Ok(())
+}
+
+/// The largest answer read from the server, in bytes.
+const MAX_ANSWER: u64 = 1 << 30;
+
+/// How long to wait before each new attempt at a download, in seconds: the
+/// public Overpass servers turn a query away now and then when busy.
+const RETRY_AFTER: [u64; 2] = [5, 15];
+
+/// Downloads the OpenStreetMap data of `area` from the Overpass server at
+/// `url`, as `.osm` XML, with the bus and train routes where `routes`.
+/// A server too busy to answer (429, 502, 503, 504), or taking too long to,
+/// is asked again, [`RETRY_AFTER`]; one which cannot be reached at all is
+/// not. Exit code 3 where there is no answer, or one that says the query
+/// failed.
+fn download(url: &str, area: &BBox, routes: bool) -> Result<String, (ExitCode, String)> {
+    let failed = |e: String| {
+        (
+            ExitCode::from(3),
+            format!("Error: download from {url}: {e}"),
+        )
+    };
+    println!(
+        "Downloading {:.2} km² of OpenStreetMap data from {url}",
+        area.area_km2()
+    );
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(TIMEOUT_S + 60)))
+        .user_agent(concat!("maur-o/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into();
+    let query = overpass_query(area, routes);
+    let mut waits = RETRY_AFTER.iter();
+    loop {
+        let error = match ask(&agent, url, &query) {
+            Ok(text) => break Ok(text),
+            Err(error) => error,
+        };
+        let busy = match &error {
+            ureq::Error::StatusCode(code) => matches!(code, 429 | 502 | 503 | 504),
+            ureq::Error::Timeout(_) => true,
+            _ => false,
+        };
+        match waits.next() {
+            Some(&wait) if busy => {
+                println!("{url}: {error}; asking again in {wait} s");
+                std::thread::sleep(Duration::from_secs(wait));
+            }
+            _ => break Err(failed(error.to_string())),
+        }
+    }
+    .and_then(|text| match overpass_error(&text) {
+        Some(error) => Err(failed(error)),
+        None => Ok(text),
+    })
+}
+
+/// One attempt at [`download`].
+fn ask(agent: &ureq::Agent, url: &str, query: &str) -> Result<String, ureq::Error> {
+    agent
+        .post(url)
+        .send_form([("data", query)])?
+        .body_mut()
+        .with_config()
+        .limit(MAX_ANSWER)
+        .read_to_string()
 }
 
 fn main() -> ExitCode {

@@ -1050,6 +1050,7 @@ fn write_symbol(
     let name = base_name(map, index);
     let file = MapFile {
         scale_denominator: map.scale_denominator,
+        notes: "",
         // Every colour, in the file's own order: that order is the drawing
         // order of the whole map, and a symbol names a colour by its place in
         // it, so dropping the unused ones would mean renumbering the rest.

@@ -116,6 +116,7 @@ one file per step; read that document first.
 | --- | --- |
 | `osm.rs` | Reads OpenStreetMap XML (`.osm`): nodes, ways, relations, tags; joins multipolygon rings split over several ways. |
 | `osm_style.rs` | The openstreetmap-carto look at zooms 13 to 17 (the `--details` levels) as a Mapper symbol set — the colour table in carto's layer order, road casings and fills, path dashes, landcover — and the rules picking a symbol from a feature's tags. |
+| `osm_download.rs` | What `osm_to_omap --download` asks the Overpass API for an area — the query (everything in the box, multipolygons and, for `--bus`/`--train`, transit routes whole; no boundaries or other routes), the error remark an answer may carry, the `--around`/`--size` parsing — with no network access: the binary does the HTTP. |
 | `osm_orienteering.rs` | ISSprOM 2019 and ISOM 2017-2 for OpenStreetMap: the standard's symbol set, read verbatim from the reference map in `maps/` (embedded with `include_str!`), and the rules picking a symbol code from a feature's tags. |
 | `osm_convert.rs` | Projects OpenStreetMap data into UTM turned to true north, clips it to a bounding box, and writes the map with the symbols of an `OsmRules`: carto's `osm_style`, or a standard's `osm_orienteering`. Land cover a standard's colour table would hide is cut out of the larger areas it lies on, and ways the rules draw as strips (streets at their real width, porticoes) are buffered into areas, joined, and where they say so cut out of the buildings they run under (`geo`'s buffer and boolean operations). |
 | `bus.rs` | Bus and train lines — route, stops, colour and midday headway of each line's main variant — read from OpenStreetMap route relations, or for buses from a GTFS feed (zip or folder), whose calendar and timetable give the headway. |
@@ -142,7 +143,7 @@ comment:
 | `bin/benchmark.rs` | Runs a whole benchmark suite out of a zip archive, see [Running a benchmark archive](#running-a-benchmark-archive). |
 | `bin/contours_to_raster.rs` | Runs the contour-to-elevation pipeline on one map. |
 | `bin/dem_geo_tiff_evaluator.rs` | Scores a predicted DEM against a ground truth. |
-| `bin/osm_to_omap.rs` | Converts an `.osm` file into an `.omap`, drawn to ISSprOM (the default), ISOM or carto (`--standard`). |
+| `bin/osm_to_omap.rs` | Converts an `.osm` file, or the data of an area downloaded from the Overpass API (`--download`, over `ureq`), into an `.omap`, drawn to ISSprOM (the default), ISOM or carto (`--standard`). |
 | `bin/add_orthophoto.rs` | Downloads a map's orthophoto tile by tile and adds it to the map as a template. |
 
 ## One map per symbol

@@ -51,7 +51,7 @@ Cargo workspace — one crate, seven binaries.
 | `benchmark` | Run a benchmark archive: render every map, diff against the reference, write a report under `Results/`. |
 | `contours_to_raster` | Run the 5-step elevation-extraction pipeline (see below) on one map, writing an elevation GeoTIFF. |
 | `dem_geo_tiff_evaluator` | Score a predicted DEM GeoTIFF against a ground-truth one (MSE/RMSE/MAE + error maps). |
-| `osm_to_omap` | Convert OpenStreetMap XML into an `.omap` drawn to ISSprOM 2019 (default) or ISOM 2017-2, or (`--standard osm`, optionally with GTFS feeds) styled like openstreetmap-carto. |
+| `osm_to_omap` | Convert OpenStreetMap XML (a file, or downloaded for an area from the Overpass API with `--download`) into an `.omap` drawn to ISSprOM 2019 (default) or ISOM 2017-2, or (`--standard osm`, optionally with GTFS feeds) styled like openstreetmap-carto. |
 | `add_orthophoto` | Download a map's aerial orthophoto from the best open WMS for its place (European national/regional agencies) and add it to the map as a georeferenced template. |
 
 Full CLI flags for all seven are documented in each binary's own top-of-file doc
@@ -153,6 +153,10 @@ colour order would hide it, and writes the map through `xml_writer.rs`.
 Optional overlays, `--standard osm` only: `bus.rs` (bus/train lines from
 OSM route relations or GTFS), `bundle.rs` (lines sharing a street laid out
 side by side), `map_areas.rs` (event map areas from a CSV).
+`osm_download.rs` says what to ask the Overpass API for an area (the query,
+reading its error remarks) and never touches the network; the binary does
+the HTTP (`ureq`, native-only, as in `add_orthophoto`), and its integration
+tests cover only the offline paths.
 
 ### Orthophotos (`add_orthophoto`)
 

@@ -1066,3 +1066,90 @@ fn houses_wall_to_wall_are_one_building() {
     assert!((widths[0] - 2.5).abs() < 0.05, "{widths:?}");
     assert!((widths[1] - 7.5).abs() < 0.05, "{widths:?}");
 }
+
+#[test]
+fn around_converts_a_square_centred_on_a_point() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("square.omap");
+    orienteering()
+        .args(["--around", "44.4935,11.3430", "--size", "200m", SAMPLE])
+        .arg(&out)
+        .assert()
+        .success();
+    let (map, _warnings) = read_xml_map(&out).unwrap();
+    // The building, the street, the footway, as with the box around them.
+    assert_eq!(map.objects.len(), 3);
+    // Every map credits OpenStreetMap's contributors, as the ODbL asks.
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(text.contains("<notes>Map data © OpenStreetMap contributors, ODbL"));
+}
+
+#[test]
+fn download_options_are_checked_before_anything_is_asked() {
+    let cases: [(&[&str], &str); 6] = [
+        (
+            &["--download", "out.omap"],
+            "--download needs --bbox or --around",
+        ),
+        (
+            &["--download", "--around", "44.49,11.34"],
+            "--download needs the map to write",
+        ),
+        (
+            &["--download", "--around", "44.49,11.34", "a.osm", "b.omap"],
+            "name only the map to write",
+        ),
+        (
+            &[
+                "--download",
+                "--around",
+                "44.49,11.34",
+                "--size",
+                "6km",
+                "out.omap",
+            ],
+            "over --max-area 25",
+        ),
+        (&["--size", "2km", SAMPLE], "--size needs --around"),
+        (&["--save-osm", "a.osm", SAMPLE], "--download"),
+    ];
+    for (args, message) in cases {
+        orienteering()
+            .args(args)
+            .assert()
+            .code(1)
+            .stderr(predicates::str::contains(message));
+    }
+    orienteering()
+        .args([
+            "--bbox=11.34,44.49,11.35,44.50",
+            "--around",
+            "44.49,11.34",
+            SAMPLE,
+        ])
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn a_server_that_cannot_be_reached_exits_with_3() {
+    let dir = tempfile::tempdir().unwrap();
+    // Nothing listens on the discard port: the connection is refused at once.
+    orienteering()
+        .args([
+            "--download",
+            "--around",
+            "44.49,11.34",
+            "--size",
+            "100m",
+            "--overpass-url",
+            "http://127.0.0.1:9/api/interpreter",
+        ])
+        .arg(dir.path().join("out.omap"))
+        .assert()
+        .code(3)
+        .stderr(predicates::str::contains(
+            "download from http://127.0.0.1:9",
+        ));
+    assert!(!dir.path().join("out.omap").exists());
+}

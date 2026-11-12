@@ -579,6 +579,9 @@ pub fn georeferencing_element(georef: &Georeference) -> String {
 pub struct MapFile<'a> {
     /// The scale the objects' coordinates are to be read at.
     pub scale_denominator: i32,
+    /// The map's notes, as Mapper shows them under Map > Notes: plain text,
+    /// empty for none. Where the map's data must be credited, the credit.
+    pub notes: &'a str,
     /// The colours, as the file they came from spells them. Their order is
     /// the drawing order of the whole map, and a symbol refers to one of them
     /// by its position here, so they go out whole and in order.
@@ -606,7 +609,7 @@ impl MapFile<'_> {
         out.push_str(&format!(
             "<map xmlns=\"http://openorienteering.org/apps/mapper/xml/v2\" version=\"{FORMAT_VERSION}\">\n"
         ));
-        out.push_str("<notes></notes>\n");
+        out.push_str(&format!("<notes>{}</notes>\n", escape(self.notes)));
         match &self.georeferencing {
             Some(element) => {
                 out.push_str(element);

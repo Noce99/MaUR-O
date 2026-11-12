@@ -106,6 +106,29 @@ impl BBox {
         lon >= self.min_lon && lon <= self.max_lon && lat >= self.min_lat && lat <= self.max_lat
     }
 
+    /// The square `side` meters on a side centred on `(lon, lat)`.
+    ///
+    /// Meters become degrees by the lengths of a degree of latitude and of
+    /// longitude at that latitude on the WGS 84 ellipsoid (the usual series,
+    /// good to centimetres): over a few kilometres the square is square to
+    /// well under a meter.
+    pub fn square((lon, lat): (f64, f64), side: f64) -> BBox {
+        let (per_lat, per_lon) = degree_lengths(lat);
+        let (half_lat, half_lon) = (side / 2.0 / per_lat, side / 2.0 / per_lon);
+        BBox {
+            min_lon: lon - half_lon,
+            min_lat: lat - half_lat,
+            max_lon: lon + half_lon,
+            max_lat: lat + half_lat,
+        }
+    }
+
+    /// How large the box is on the ground, in square kilometres.
+    pub fn area_km2(&self) -> f64 {
+        let (per_lat, per_lon) = degree_lengths((self.min_lat + self.max_lat) / 2.0);
+        (self.max_lat - self.min_lat) * per_lat * (self.max_lon - self.min_lon) * per_lon / 1e6
+    }
+
     /// The smallest box holding every point, or `None` for no points.
     pub fn around(points: impl IntoIterator<Item = (f64, f64)>) -> Option<BBox> {
         let mut points = points.into_iter();
@@ -124,6 +147,15 @@ impl BBox {
         }
         Some(bbox)
     }
+}
+
+/// How long a degree of latitude and a degree of longitude are at latitude
+/// `lat`, in meters, on the WGS 84 ellipsoid.
+fn degree_lengths(lat: f64) -> (f64, f64) {
+    let phi = lat.to_radians();
+    let per_lat = 111_132.92 - 559.82 * (2.0 * phi).cos() + 1.175 * (4.0 * phi).cos();
+    let per_lon = 111_412.84 * phi.cos() - 93.5 * (3.0 * phi).cos();
+    (per_lat, per_lon)
 }
 
 /// A node carrying tags of its own: a feature in its own right, a tree or a
