@@ -36,6 +36,9 @@
 //! buildings, the canopies and the marshes is
 //! [ground](crate::osm_convert::OsmRules::ground).
 //!
+//! Buildings wall to wall are joined into one block, with no outline
+//! between them, and so are those mapped less than half a meter apart.
+//!
 //! Nothing underground is drawn: tunnels, culverts, and whatever is on a
 //! negative `layer`. Of the trees, only those tagged a landmark or a natural
 //! monument: a city maps every tree in its streets and parks. There are no
@@ -102,6 +105,8 @@ pub struct OrienteeringStyle {
     ids: HashMap<String, i32>,
     /// The symbols which are land cover.
     ground: HashSet<i32>,
+    /// The building symbol.
+    building: i32,
 }
 
 /// The value of attribute `name` in the first tag of `element`.
@@ -143,12 +148,14 @@ impl OrienteeringStyle {
                 ground.insert(fragment.id);
             }
         }
+        let building = ids["521"];
         OrienteeringStyle {
             standard,
             fragments,
             scale,
             ids,
             ground,
+            building,
         }
     }
 
@@ -527,6 +534,10 @@ impl OrienteeringStyle {
     }
 }
 
+/// The widest gap between two buildings that is taken for a mapping
+/// inaccuracy and closed, in meters: no passage is this narrow.
+const BUILDING_GAP: f64 = 0.5;
+
 /// How wide a portico is, in meters: Bologna's are 3 to 5.
 const PORTICO_WIDTH: f64 = 4.0;
 
@@ -638,6 +649,12 @@ impl OsmRules for OrienteeringStyle {
 
     fn ground(&self, symbol: i32) -> bool {
         self.ground.contains(&symbol)
+    }
+
+    /// Buildings: houses wall to wall are one block, as on a sprint map,
+    /// and so are those mapped a hair apart.
+    fn merge(&self, symbol: i32) -> Option<f64> {
+        (symbol == self.building).then_some(BUILDING_GAP)
     }
 
     fn strip(&self, tags: &Tags) -> Option<Strip> {

@@ -1431,6 +1431,13 @@ pub trait OsmRules {
     fn strip(&self, _tags: &Tags) -> Option<Strip> {
         None
     }
+    /// Whether the areas in this symbol which touch, or come closer than
+    /// the gap returned (in meters on the ground), are joined into one:
+    /// houses wall to wall drawn as one block, with no outline between
+    /// them. None by default.
+    fn merge(&self, _symbol: i32) -> Option<f64> {
+        None
+    }
 }
 
 /// A way drawn as an area of some width around it, rather than as a line.
@@ -1484,6 +1491,11 @@ impl OsmRules for Style {
 /// it, every strip of a symbol joined into one (a street network is one
 /// paved area) and cut to the map; one which [`cuts`](Strip::cuts) is
 /// also cut out of the other areas lying under it which are not land cover.
+///
+/// # Merged areas
+///
+/// The areas of a symbol `style` [merges](OsmRules::merge) — houses wall
+/// to wall — are joined into one before the strips cut them.
 pub fn convert(
     data: &OsmData,
     style: &impl OsmRules,
@@ -1665,11 +1677,35 @@ pub fn convert(
         .filter(|(strip, _)| strip.cuts)
         .flat_map(|(_, shape)| &shape.0)
         .collect();
+    // The other areas, on the paper: those of a symbol `style` merges
+    // joined, each kept apart by symbol.
+    let mut merged: Vec<(i32, f64, Vec<geo::MultiPolygon<f64>>)> = Vec::new();
+    let mut apart: Vec<Cover> = Vec::new();
     for (symbols, rings) in over {
         let rings: Vec<Vec<(f64, f64)>> = rings
             .iter()
             .map(|ring| ring.iter().map(|&p| paper(p)).collect())
             .collect();
+        let (joined_symbols, kept): (Vec<i32>, Vec<i32>) =
+            symbols.into_iter().partition(|&s| style.merge(s).is_some());
+        for symbol in joined_symbols {
+            let gap = style.merge(symbol).expect("partitioned on it") * 1000.0 / f64::from(scale);
+            let shape = even_odd(&rings);
+            match merged.iter_mut().find(|(s, _, _)| *s == symbol) {
+                Some((_, _, shapes)) => shapes.push(shape),
+                None => merged.push((symbol, gap, vec![shape])),
+            }
+        }
+        if !kept.is_empty() {
+            apart.push((kept, rings));
+        }
+    }
+    for (symbol, gap, shapes) in merged {
+        for polygon in join_areas(&shapes, gap).0 {
+            apart.push((vec![symbol], polygon_rings(&polygon)));
+        }
+    }
+    for (symbols, rings) in apart {
         let rings = cut_by(rings, &cutters);
         if rings.is_empty() {
             continue;
@@ -1699,7 +1735,7 @@ pub fn convert(
     })
 }
 
-/// An area of land cover: its symbols, and its rings in degrees.
+/// An area: its symbols, and its rings, in degrees or on the paper.
 type Cover = (Vec<i32>, Vec<Vec<(f64, f64)>>);
 
 /// Rings read with the even-odd rule, as one shape.
@@ -1745,6 +1781,26 @@ fn join_strips(
         .into_iter()
         .map(|(strip, shapes)| (strip, unary_union(&shapes).intersection(&edge)))
         .collect()
+}
+
+/// `shapes` joined into one, closing every gap narrower than `gap` (on
+/// the paper) between them: grown by half the gap, the union taken, and
+/// shrunk back, corners kept square. What is not near another shape comes
+/// back as it was.
+fn join_areas(shapes: &[geo::MultiPolygon<f64>], gap: f64) -> geo::MultiPolygon<f64> {
+    use geo::algorithm::buffer::{BufferStyle, LineJoin};
+    use geo::{unary_union, Buffer};
+    let union = unary_union(shapes);
+    if gap <= 0.0 {
+        return union;
+    }
+    // Corners sharper than this (radians) are cut off rather than drawn out
+    // to a point.
+    const SHARPEST: f64 = 0.1;
+    let style = |d: f64| BufferStyle::new(d).line_join(LineJoin::Miter(SHARPEST));
+    union
+        .buffer_with_style(style(gap / 2.0))
+        .buffer_with_style(style(-gap / 2.0))
 }
 
 /// An area, on the paper, with whatever of `cutters` lies on it cut out.

@@ -370,7 +370,9 @@ With `issprom` or `isom` the map holds the standard's whole symbol set,
 exactly as Mapper ships it (`maps/ISSprOM_4k.omap`, `maps/ISOM_10k.omap`),
 and every feature it can place drawn with it:
 
-- buildings (521), roofs and carports as canopies (522), and porticoes —
+- buildings (521) — houses wall to wall, or mapped less than 0.5 m apart,
+  joined into one block with no outline between them — roofs and carports as
+  canopies (522), and porticoes —
   walkways tagged `covered=arcade` or `colonnade` — as 4 m canopies cut out of
   the building they run under;
 - in ISSprOM, paved streets as one paved area (light traffic 501.5, heavy

@@ -1005,3 +1005,64 @@ fn drinking_water_marks_the_fountains_with_a_glass() {
     // The fountain and the tap, not the ornamental fountain.
     assert_eq!(glasses(true), 2);
 }
+
+#[test]
+fn houses_wall_to_wall_are_one_building() {
+    let dir = tempfile::tempdir().unwrap();
+    let osm = dir.path().join("houses.osm");
+    // Four 10 m wide houses in a row, 0.0001° of latitude (11 m) deep. The
+    // first two share a wall (nodes 2-3), the third is drawn 0.2 m off the
+    // second, the fourth 3 m beyond the third, across an alley.
+    // A degree of longitude is 79 430 m here (on the UTM grid, near
+    // enough for these sizes).
+    let lon = |m: f64| 11.34 + m / 79_430.0;
+    let mut nodes = String::new();
+    let mut ways = String::new();
+    let mut add = |id: i64, x0: f64, x1: f64, shared: Option<(i64, i64)>| {
+        let (a, b) = shared.unwrap_or((id * 10 + 1, id * 10 + 2));
+        let (c, d) = (id * 10 + 3, id * 10 + 4);
+        if shared.is_none() {
+            nodes += &format!("<node id=\"{a}\" lat=\"44.4900\" lon=\"{}\"/>\n", lon(x0));
+            nodes += &format!("<node id=\"{b}\" lat=\"44.4901\" lon=\"{}\"/>\n", lon(x0));
+        }
+        nodes += &format!("<node id=\"{c}\" lat=\"44.4901\" lon=\"{}\"/>\n", lon(x1));
+        nodes += &format!("<node id=\"{d}\" lat=\"44.4900\" lon=\"{}\"/>\n", lon(x1));
+        ways += &format!(
+            "<way id=\"{id}\"><nd ref=\"{a}\"/><nd ref=\"{b}\"/><nd ref=\"{c}\"/><nd ref=\"{d}\"/><nd ref=\"{a}\"/><tag k=\"building\" v=\"yes\"/></way>\n"
+        );
+        (d, c)
+    };
+    let shared = add(1, 0.0, 10.0, None);
+    add(2, 10.0, 20.0, Some(shared));
+    add(3, 20.2, 30.0, None);
+    add(4, 33.0, 43.0, None);
+    std::fs::write(
+        &osm,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<osm version=\"0.6\">\n\
+             <bounds minlat=\"44.4895\" minlon=\"11.3395\" maxlat=\"44.4906\" maxlon=\"11.3410\"/>\n\
+             {nodes}{ways}</osm>\n"
+        ),
+    )
+    .unwrap();
+    let out = dir.path().join("houses.omap");
+    orienteering().arg(&osm).arg(&out).assert().success();
+    let (map, _warnings) = read_xml_map(&out).unwrap();
+    let codes = object_codes(&map);
+    let buildings: Vec<&maur_o::map::Object> = codes
+        .iter()
+        .zip(&map.objects)
+        .filter(|(c, _)| *c == "521")
+        .map(|(_, o)| o)
+        .collect();
+    // The first three are one block, 30 m (7.5 mm) long; the fourth stays apart.
+    assert_eq!(buildings.len(), 2);
+    let width = |o: &maur_o::map::Object| {
+        let xs: Vec<f64> = o.coords.iter().map(|c| c.x).collect();
+        xs.iter().cloned().fold(f64::MIN, f64::max) - xs.iter().cloned().fold(f64::MAX, f64::min)
+    };
+    let mut widths: Vec<f64> = buildings.iter().map(|o| width(o)).collect();
+    widths.sort_by(f64::total_cmp);
+    assert!((widths[0] - 2.5).abs() < 0.05, "{widths:?}");
+    assert!((widths[1] - 7.5).abs() < 0.05, "{widths:?}");
+}
