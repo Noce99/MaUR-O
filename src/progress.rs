@@ -10,6 +10,11 @@
 //! terminal, and is replaced by a single summary line when it is not, so
 //! that a redirected log holds one line per stage instead of a few thousand
 //! carriage returns. Colour is decided separately, on standard output.
+//!
+//! [`LIVE_ENV`] set in the environment keeps the bar live all the same: the
+//! `mauro` terminal interface sets it on the commands it runs, reading their
+//! standard error through a pipe and drawing each carriage return as the
+//! bar it is.
 
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
@@ -23,6 +28,10 @@ const WIDTH: usize = 32;
 /// How often the bar is redrawn at most. Redrawing it for every one of a few
 /// thousand quick steps costs more than the steps do.
 const REDRAW: Duration = Duration::from_millis(60);
+
+/// The environment variable that keeps the bar drawn on a standard error
+/// that is not a terminal (see the module documentation).
+pub const LIVE_ENV: &str = "MAURO_LIVE_PROGRESS";
 
 /// Whether the stage headings should be coloured.
 pub fn colour() -> bool {
@@ -84,7 +93,7 @@ impl Progress {
             start: Instant::now(),
             drawn: Instant::now(),
             shown: None,
-            live: std::io::stderr().is_terminal(),
+            live: std::io::stderr().is_terminal() || std::env::var_os(LIVE_ENV).is_some(),
         };
         progress.draw();
         progress

@@ -791,6 +791,19 @@ fn ask(agent: &ureq::Agent, url: &str, query: &str) -> Result<String, ureq::Erro
         .read_to_string()
 }
 
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error (an area over --max-area among them)",
+        2 => "the OSM file, a GTFS feed or the list of maps could not be read, or held nothing to convert",
+        3 => "the download failed",
+        4 => "the map (or the --save-osm file) could not be written",
+        _ => return None,
+    })
+}
+
 /// Runs `mauro osm`; `matches` are its own, for which options were given.
 pub fn main(args: Args, matches: &ArgMatches) -> ExitCode {
     match run(args, matches) {

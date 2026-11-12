@@ -140,7 +140,7 @@ comment:
 | File | Contents |
 | --- | --- |
 | `bin/mauro/main.rs` | The `mauro` executable: parses the command line and hands it to the subcommand's module below — or, given no arguments in a terminal, opens the terminal interface. |
-| `bin/mauro/tui/` | The terminal interface: `home.rs` (the list of tools), `render_form.rs` (`mauro render`'s screen), `job.rs` (runs a built command line as a child `mauro`, its output shown live), `widgets.rs` (text input, file picker). A screen only builds a command line, checked with the same clap parser, so it cannot do what the CLI cannot. |
+| `bin/mauro/tui/` | The terminal interface: `home.rs` (the list of tools), `form.rs` (the form every screen is: fields whose help and defaults come from clap, and the screen around it), `screens/` (one per subcommand, with what each can tell before running: a map's size, an area's, the services covering a map, an archive's contents), `job.rs` (runs a built command line as a child `mauro`, its output and progress bars shown live), `widgets.rs` (text input, file and folder picker). A screen only builds a command line, checked with the same clap parser, so it cannot do what the CLI cannot. |
 | `bin/mauro/render.rs` | `mauro render`: renders a single map to an image or SVG. |
 | `bin/mauro/benchmark_create.rs` | `mauro benchmark create`: builds a benchmark archive: collects the maps, has a ground-truth renderer draw the reference images, and names everything the way `mauro benchmark run` expects. See [Making a benchmark archive](#making-a-benchmark-archive). |
 | `bin/mauro/benchmark_run.rs` | `mauro benchmark run`: runs a whole benchmark suite out of a zip archive, see [Running a benchmark archive](#running-a-benchmark-archive). |

@@ -812,6 +812,17 @@ fn run(args: Args) -> Result<ExitCode, String> {
     })
 }
 
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage or setup error",
+        2 => "a map failed to render",
+        _ => return None,
+    })
+}
+
 /// Runs `mauro benchmark create`.
 pub fn main(args: Args) -> ExitCode {
     match run(args) {

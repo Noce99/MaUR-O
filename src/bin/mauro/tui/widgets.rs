@@ -20,13 +20,6 @@ pub struct TextInput {
 }
 
 impl TextInput {
-    /// A field holding `text`, the cursor at its end.
-    pub fn new(text: impl Into<String>) -> Self {
-        let mut input = Self::default();
-        input.set(text);
-        input
-    }
-
     /// What the field holds.
     pub fn text(&self) -> &str {
         &self.text
@@ -103,14 +96,34 @@ pub enum Picked {
     Cancelled,
 }
 
-/// Picks a file by walking the folders, showing only the files with one of
-/// the suffixes it is given (and every folder, to walk into). Hidden files
-/// and folders are left out.
+/// What a [`FilePicker`] picks.
+#[derive(Clone, Copy, Debug)]
+pub enum Pick {
+    /// A file with one of these suffixes.
+    Files(&'static [&'static str]),
+    /// Any file at all: a program, say.
+    AnyFile,
+    /// A folder.
+    Folder,
+    /// A folder, or a file with one of these suffixes.
+    FileOrFolder(&'static [&'static str]),
+}
+
+impl Pick {
+    fn folders(self) -> bool {
+        matches!(self, Pick::Folder | Pick::FileOrFolder(_))
+    }
+}
+
+/// Picks a file (or a folder) by walking the folders, showing only the
+/// files it can pick, and every folder to walk into. A folder is picked by
+/// the `./` row at the top of its own listing. Hidden files and folders are
+/// left out.
 pub struct FilePicker {
     dir: PathBuf,
     entries: Vec<Entry>,
     state: ListState,
-    extensions: &'static [&'static str],
+    kind: Pick,
     /// Why `dir` could not be listed, if it could not.
     error: Option<String>,
     /// The name being typed, to jump to; and when its last letter was.
@@ -124,7 +137,7 @@ const TYPING_PAUSE: Duration = Duration::from_secs(1);
 impl FilePicker {
     /// A picker starting at `start`: a folder, or a file, which is then the
     /// one selected in its folder.
-    pub fn new(start: &Path, extensions: &'static [&'static str]) -> Self {
+    pub fn new(start: &Path, kind: Pick) -> Self {
         let start = std::path::absolute(start).unwrap_or_else(|_| start.to_path_buf());
         let (dir, selected) = if start.is_dir() {
             (start, None)
@@ -138,7 +151,7 @@ impl FilePicker {
             dir,
             entries: Vec::new(),
             state: ListState::default(),
-            extensions,
+            kind,
             error: None,
             typed: String::new(),
             typed_at: Instant::now(),
@@ -162,6 +175,13 @@ impl FilePicker {
                 label: "../".to_string(),
                 path: parent.to_path_buf(),
                 is_dir: true,
+            });
+        }
+        if self.kind.folders() {
+            self.entries.push(Entry {
+                label: "./  (pick this folder)".to_string(),
+                path: self.dir.clone(),
+                is_dir: false,
             });
         }
         match std::fs::read_dir(&self.dir) {
@@ -204,11 +224,15 @@ impl FilePicker {
     }
 
     fn wanted(&self, path: &Path) -> bool {
-        path.extension().is_some_and(|e| {
-            self.extensions
-                .iter()
-                .any(|wanted| e.eq_ignore_ascii_case(wanted))
-        })
+        let suffix_in = |extensions: &[&str]| {
+            path.extension()
+                .is_some_and(|e| extensions.iter().any(|w| e.eq_ignore_ascii_case(w)))
+        };
+        match self.kind {
+            Pick::Files(extensions) | Pick::FileOrFolder(extensions) => suffix_in(extensions),
+            Pick::AnyFile => true,
+            Pick::Folder => false,
+        }
     }
 
     /// Walks into `dir`, selecting `selected` there where it is given.
@@ -381,7 +405,8 @@ mod tests {
 
     #[test]
     fn text_input_edits_at_the_cursor_in_characters() {
-        let mut input = TextInput::new("città");
+        let mut input = TextInput::default();
+        input.set("città");
         assert_eq!(input.cursor(), 5);
         input.handle(key(KeyCode::Left));
         input.handle(key(KeyCode::Backspace));
@@ -406,7 +431,7 @@ mod tests {
         }
         std::fs::write(dir.path().join("sub").join("deep.ocd"), "").unwrap();
 
-        let mut picker = FilePicker::new(dir.path(), &["omap", "xmap", "ocd"]);
+        let mut picker = FilePicker::new(dir.path(), Pick::Files(&["omap", "xmap", "ocd"]));
         let labels: Vec<&str> = picker.entries.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(labels, ["../", "sub/", "A.XMAP", "b.omap"]);
 
@@ -433,7 +458,7 @@ mod tests {
         for name in ["alpha.omap", "beta.omap", "bravo.omap", "brown.omap"] {
             std::fs::write(dir.path().join(name), "").unwrap();
         }
-        let mut picker = FilePicker::new(dir.path(), &["omap"]);
+        let mut picker = FilePicker::new(dir.path(), Pick::Files(&["omap"]));
         let label = |p: &FilePicker| p.entries[p.state.selected().unwrap()].label.clone();
         let t0 = Instant::now();
         let later = |ms| t0 + Duration::from_millis(ms);
@@ -461,6 +486,29 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_is_picked_by_its_own_row() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("out")).unwrap();
+        std::fs::write(dir.path().join("a.omap"), "").unwrap();
+        let mut picker = FilePicker::new(dir.path(), Pick::Folder);
+        let labels: Vec<&str> = picker.entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, ["../", "./  (pick this folder)", "out/"]);
+        picker.handle(key(KeyCode::Down));
+        picker.handle(key(KeyCode::Down));
+        picker.handle(key(KeyCode::Enter)); // into out/
+        picker.handle(key(KeyCode::Down)); // its ./ row
+        assert_eq!(
+            picker.handle(key(KeyCode::Enter)),
+            Picked::File(std::path::absolute(dir.path().join("out")).unwrap())
+        );
+
+        let picker = FilePicker::new(dir.path(), Pick::FileOrFolder(&["omap"]));
+        assert_eq!(picker.entries.len(), 4);
+        let picker = FilePicker::new(dir.path(), Pick::AnyFile);
+        assert_eq!(picker.entries.last().unwrap().label, "a.omap");
+    }
+
+    #[test]
     fn long_values_show_the_cursor_or_the_end() {
         assert_eq!(visible("short", Some(2), 10), ("short".to_string(), 2));
         assert_eq!(
@@ -477,7 +525,7 @@ mod tests {
         for name in ["a.omap", "b.omap"] {
             std::fs::write(dir.path().join(name), "").unwrap();
         }
-        let picker = FilePicker::new(&dir.path().join("b.omap"), &["omap"]);
+        let picker = FilePicker::new(&dir.path().join("b.omap"), Pick::Files(&["omap"]));
         let at = picker.state.selected().unwrap();
         assert_eq!(picker.entries[at].label, "b.omap");
     }

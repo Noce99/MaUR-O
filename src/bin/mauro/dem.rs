@@ -474,6 +474,20 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
     Ok(())
 }
 
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "the map could not be read",
+        3 => "the config file could not be read or parsed",
+        4 => "something could not be written, or a Step 1 geometry error",
+        5 => "a Step 2 gravity conflict: two Slope Lines disagree on one contour",
+        _ => return None,
+    })
+}
+
 /// Runs `mauro dem`.
 pub fn main(args: Args) -> ExitCode {
     match run(args) {

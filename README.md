@@ -146,14 +146,25 @@ form to fill in.
 ./target/release/mauro
 ```
 
-So far `render` has a screen of its own; the others are listed, and say so.
-Its screen picks the map from the disk (type the start of a name to jump to
-it), shows what the map is — scale, objects, symbols, where it is placed —
-and how large the image will be, in pixels and on the ground, as the options
-change, before anything is drawn. Every screen builds an ordinary `mauro`
-command line, shown at the bottom as it is filled in, and running it runs
-exactly that, its output shown as it comes: what the interface does can
-always be done again from the shell.
+Every tool has a screen: its options as a form, files and folders picked
+from the disk (type the start of a name to jump to it), and the help of the
+option being filled in beside it — the same text `--help` prints. Beside
+the form, what can be known before running:
+
+- `render` reads the map — scale, objects, symbols, where it is placed — and
+  says how large the image will be, in pixels and on the ground, as the
+  options change;
+- `osm` measures the area asked for, against the download limit, and the
+  scale the map comes out at;
+- `ortho` finds where the map is on the earth, and which services cover it,
+  to choose among;
+- `dem` reads the map; `benchmark run` reads the archive: how many maps and
+  references it holds, and what they were drawn at.
+
+Every screen builds an ordinary `mauro` command line, shown at the bottom as
+it is filled in, and running it runs exactly that, its output (progress bars
+included) shown as it comes: what the interface does can always be done
+again from the shell.
 
 `↑`/`↓` move between fields, `←`/`→` change a choice, `Enter` picks or runs,
 `Ctrl+R` runs from anywhere on the form, `Esc` goes back, and `q` (on the

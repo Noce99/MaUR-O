@@ -98,6 +98,20 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
     Ok(())
 }
 
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "the ground truth could not be read",
+        3 => "the prediction could not be read",
+        4 => "the two could not be compared (different or missing CRS, or no pixel with a value on both)",
+        5 => "the run folder or one of its files could not be written",
+        _ => return None,
+    })
+}
+
 /// Runs `mauro dem-eval`.
 pub fn main(args: Args) -> ExitCode {
     match run(args) {

@@ -183,6 +183,7 @@ impl Job {
         let spawned = std::env::current_exe().and_then(|exe| {
             Command::new(exe)
                 .args(&spec.args)
+                .env(maur_o::progress::LIVE_ENV, "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

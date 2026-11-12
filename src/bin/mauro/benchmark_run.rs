@@ -105,15 +105,16 @@ pub struct Args {
     filter: String,
 }
 
-/// Where in an archive the two folders are, and what is in them.
-struct Contents {
+/// Where in an archive the two folders are, and what is in them. The
+/// terminal interface reads an archive with it too, to show what is in it.
+pub struct Contents {
     /// What comes before `maps/` and `expected/` inside the archive, with a
     /// trailing slash, empty when they are at the top of it.
-    root: String,
+    pub root: String,
     /// The file names in `maps/`, without the folder.
-    maps: Vec<String>,
+    pub maps: Vec<String>,
     /// The file names in `expected/`, without the folder.
-    expected: Vec<String>,
+    pub expected: Vec<String>,
 }
 
 /// Splits an archive entry into the folder it is directly in and its file name.
@@ -167,7 +168,7 @@ impl Folder {
 }
 
 /// Reads what an archive holds, without unpacking it.
-fn read_contents(archive: &Path) -> Result<Contents, String> {
+pub fn read_contents(archive: &Path) -> Result<Contents, String> {
     let file = std::fs::File::open(archive)
         .map_err(|e| format!("cannot open {}: {e}", archive.display()))?;
     let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file))
@@ -706,6 +707,17 @@ fn run(args: Args) -> Result<ExitCode, String> {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(2)
+    })
+}
+
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage or archive error",
+        2 => "a map failed to render",
+        _ => return None,
     })
 }
 

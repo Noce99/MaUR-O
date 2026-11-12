@@ -692,6 +692,21 @@ fn write_atomically(path: &Path, content: &[u8]) -> Result<(), Failure> {
     })
 }
 
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "the map could not be read",
+        3 => "the map is not georeferenced, or no service covering it offers a CRS to place the photo in",
+        4 => "the image or the map could not be written",
+        5 => "no service has photos of the map's ground",
+        6 => "the service could not be reached, or answered with something other than a photo",
+        _ => return None,
+    })
+}
+
 /// Runs `mauro ortho`.
 pub fn main(args: Args) -> ExitCode {
     match run(args) {

@@ -62,8 +62,16 @@ error is exit code 1 for every subcommand. A bare `mauro` in a terminal opens
 the ratatui interface in `src/bin/mauro/tui/` (elsewhere it prints help, exit
 1). Its rule: a screen never runs a tool itself — it builds the subcommand's
 argument list, checks it with `tui::check` (the same clap `Cli`), and runs
-`mauro` with it as a child process (`tui/job.rs`) — so it can't drift from the
-CLI. A flag change that a screen still emits fails that screen's unit tests. Full CLI
+`mauro` with it as a child process (`tui/job.rs`, which sets
+`progress::LIVE_ENV` so progress bars still draw through the pipe) — so it
+can't drift from the CLI. Each screen (`tui/screens/<subcommand>.rs`) is a
+`form::Tool` on the shared `form::Form`; a field naming its clap argument
+(`Field::arg("id")`) takes its help and default from clap, so don't copy those
+into the TUI. Adding or renaming a flag: update that subcommand's screen too —
+a stale arg id panics `Form::new`, caught by `every_tool_opens_and_draws_its_screen`,
+and a flag a screen still emits fails that screen's unit tests. Each
+subcommand module also has `exit_meaning(code)`, mirroring its doc comment's
+exit codes, which the job screen shows; keep the two in sync. Full CLI
 flags for each are documented in its module's own top-of-file doc comment
 (`src/bin/mauro/*.rs`) and in `README.md`'s Usage section. When changing a
 flag, default or exit code, update both (and `--help` text in the clap

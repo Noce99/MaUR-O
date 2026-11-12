@@ -8,13 +8,14 @@
 //! screen whose command line `mauro` no longer accepts fails its tests
 //! rather than its user.
 //!
-//! The screens: [`home::Home`] lists the tools, [`render_form::RenderForm`]
-//! is `mauro render`'s, and the job screen shows a running command's output
-//! as it comes.
+//! The screens: [`home::Home`] lists the tools; [`screens`] has one per
+//! tool, each a [`form::Tool`] on the shared [`form::Form`]; and the job
+//! screen shows a running command's output as it comes.
 
+mod form;
 mod home;
 mod job;
-mod render_form;
+mod screens;
 mod widgets;
 
 use std::io;
@@ -25,9 +26,9 @@ use clap::Parser;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{DefaultTerminal, Frame};
 
+use form::Tool;
 use home::Home;
 use job::{Job, JobSpec};
-use render_form::RenderForm;
 
 /// What a key on a screen asks of the interface as a whole.
 pub enum Action {
@@ -35,7 +36,8 @@ pub enum Action {
     Quit,
     /// Back to where this screen was opened from.
     Back,
-    OpenRender,
+    /// Show this tool's screen.
+    Open(Box<dyn Tool>),
     /// Run `mauro` with these arguments, on the job screen.
     Run(JobSpec),
 }
@@ -43,7 +45,7 @@ pub enum Action {
 /// The screen being shown.
 enum Screen {
     Home(Home),
-    Render(Box<RenderForm>),
+    Tool(Box<dyn Tool>),
     /// A job, and the screen to go back to when it is done.
     Job {
         job: Box<Job>,
@@ -72,7 +74,7 @@ impl App {
         }
         let action = match &mut self.screen {
             Screen::Home(home) => home.handle(key),
-            Screen::Render(form) => form.handle(key),
+            Screen::Tool(tool) => form::handle(tool.as_mut(), key),
             Screen::Job { job, .. } => job.handle(key),
         };
         match action {
@@ -84,10 +86,7 @@ impl App {
                     self.screen = *back;
                 }
             }
-            Action::OpenRender => {
-                let here = std::env::current_dir().unwrap_or_else(|_| ".".into());
-                self.screen = Screen::Render(Box::new(RenderForm::new(&here)));
-            }
+            Action::Open(tool) => self.screen = Screen::Tool(tool),
             Action::Run(spec) => {
                 let back = std::mem::replace(&mut self.screen, Screen::Home(Home::default()));
                 self.screen = Screen::Job {
@@ -102,7 +101,7 @@ impl App {
     fn tick(&mut self) {
         match &mut self.screen {
             Screen::Home(_) => {}
-            Screen::Render(form) => form.tick(),
+            Screen::Tool(tool) => tool.tick(),
             Screen::Job { job, .. } => job.tick(),
         }
     }
@@ -110,7 +109,7 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         match &mut self.screen {
             Screen::Home(home) => home.draw(frame),
-            Screen::Render(form) => form.draw(frame),
+            Screen::Tool(tool) => form::draw(tool.as_mut(), frame),
             Screen::Job { job, .. } => job.draw(frame),
         }
     }
@@ -175,9 +174,9 @@ mod tests {
         KeyEvent::from(code)
     }
 
-    /// Everything `app` shows, as text.
-    fn screen(app: &mut App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    /// Everything `app` shows, as text, on a terminal `width` by `height`.
+    fn screen_sized(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
         buffer
@@ -188,40 +187,54 @@ mod tests {
             .join("\n")
     }
 
-    #[test]
-    fn home_lists_every_tool_and_opens_render() {
-        let mut app = App::new();
-        let shown = screen(&mut app);
-        for tool in [
-            "render",
-            "osm",
-            "ortho",
-            "dem-eval",
-            "benchmark create",
-            "benchmark run",
-        ] {
-            assert!(shown.contains(tool), "{tool} missing from:\n{shown}");
-        }
-        app.handle(key(KeyCode::Enter));
-        assert!(matches!(app.screen, Screen::Render(_)));
-        assert!(screen(&mut app).contains("Pick a map"));
+    fn screen(app: &mut App) -> String {
+        screen_sized(app, 100, 30)
     }
 
     #[test]
-    fn a_tool_without_a_screen_says_so() {
-        let mut app = App::new();
-        app.handle(key(KeyCode::Down));
-        app.handle(key(KeyCode::Enter));
-        assert!(matches!(app.screen, Screen::Home(_)));
-        assert!(screen(&mut app).contains("mauro osm --help"));
+    fn every_tool_opens_and_draws_its_screen() {
+        let titles = [
+            "mauro render",
+            "mauro osm",
+            "mauro ortho",
+            "mauro dem",
+            "mauro dem-eval",
+            "mauro benchmark create",
+            "mauro benchmark run",
+        ];
+        for (at, title) in titles.iter().enumerate() {
+            let mut app = App::new();
+            let shown = screen(&mut app);
+            let command = title.trim_start_matches("mauro ");
+            assert!(shown.contains(command), "{command} missing from:\n{shown}");
+            for _ in 0..at {
+                app.handle(key(KeyCode::Down));
+            }
+            app.handle(key(KeyCode::Enter));
+            assert!(matches!(app.screen, Screen::Tool(_)), "{title}");
+            // Past the picker, where the screen opened on one.
+            if screen(&mut app).contains("Pick: ") {
+                app.handle(key(KeyCode::Esc));
+            }
+            let shown = screen(&mut app);
+            assert!(shown.contains(title), "{title} missing from:\n{shown}");
+            // Every field, and the button, can be walked through and drawn,
+            // on a cramped terminal too.
+            for _ in 0..40 {
+                app.handle(key(KeyCode::Down));
+                screen_sized(&mut app, 50, 14);
+            }
+            assert!(screen(&mut app).contains("[ "), "{title}: no run button");
+        }
     }
 
     #[test]
     fn esc_goes_back_and_q_quits() {
         let mut app = App::new();
         app.handle(key(KeyCode::Enter));
+        assert!(screen(&mut app).contains("Pick: Map"));
         app.handle(key(KeyCode::Esc)); // closes the picker
-        assert!(matches!(app.screen, Screen::Render(_)));
+        assert!(matches!(app.screen, Screen::Tool(_)));
         assert!(screen(&mut app).contains("[ Render ]"));
         app.handle(key(KeyCode::Esc));
         assert!(matches!(app.screen, Screen::Home(_)));
