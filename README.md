@@ -370,13 +370,20 @@ With `issprom` or `isom` the map holds the standard's whole symbol set,
 exactly as Mapper ships it (`maps/ISSprOM_4k.omap`, `maps/ISOM_10k.omap`),
 and every feature it can place drawn with it:
 
-- buildings (521), roofs and carports as canopies (522);
-- roads as paved footprints by traffic and width in ISSprOM (`501.19` for a
-  primary road, `501.8` for a residential street, `501.6` for a paved
-  footway), as ISOM's road lines in ISOM (502 to 507); stairways (532);
+- buildings (521), roofs and carports as canopies (522), and porticoes —
+  walkways tagged `covered=arcade` or `colonnade` — as 4 m canopies cut out of
+  the building they run under;
+- in ISSprOM, paved streets as one paved area (light traffic 501.5, heavy
+  501.11 for primary and secondary roads) as wide as each street: its
+  `width`, or `lanes` at 3.25 m, or what is usual for its kind, plus 1.5 m
+  pavements where its `sidewalk` tags say, or on both sides of a street in
+  town where they say nothing; paths and unpaved roads as footprints (`501.6`
+  for a paved footway, `505.x`/506/507); in ISOM, ISOM's road lines (502 to
+  507); stairways (532);
 - squares, pedestrian areas, parkings and platforms as paved areas;
 - water, watercourses and marshes; woods (405, or by `wood:density`), scrub,
-  open land, fields, orchards and vineyards; sand and bare rock;
+  parks as open land with scattered trees (402) with their lawns as open land,
+  fields, orchards and vineyards; sand and bare rock;
 - walls and fences, impassable unless a `height` under 1.5 m says
   otherwise; hedges, railways, power lines, cliffs;
 - residential, commercial, industrial land, allotments, cemeteries,

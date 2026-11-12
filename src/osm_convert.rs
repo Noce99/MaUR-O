@@ -1426,6 +1426,24 @@ pub trait OsmRules {
     fn ground(&self, _symbol: i32) -> bool {
         false
     }
+    /// The strip a way with these tags is drawn as, as an area of its width
+    /// around it: a street at its real width, a portico. None by default.
+    fn strip(&self, _tags: &Tags) -> Option<Strip> {
+        None
+    }
+}
+
+/// A way drawn as an area of some width around it, rather than as a line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Strip {
+    /// The area symbol it is drawn with.
+    pub symbol: i32,
+    /// How wide it is, in meters on the ground.
+    pub width: f64,
+    /// Whether it is cut out of the areas which are not land cover lying
+    /// under it — a portico out of the building it runs under, whose
+    /// colour would otherwise hide it.
+    pub cuts: bool,
 }
 
 impl OsmRules for Style {
@@ -1459,6 +1477,13 @@ impl OsmRules for Style {
 /// symbols `style` calls [`ground`](OsmRules::ground) are cut instead: each
 /// gives up whatever smaller ones cover of it, and every place on the map
 /// is left drawn with the smallest land cover lying on it.
+///
+/// # Strips
+///
+/// A way `style` draws as a [`Strip`] is an area of the strip's width around
+/// it, every strip of a symbol joined into one (a street network is one
+/// paved area) and cut to the map; one which [`cuts`](Strip::cuts) is
+/// also cut out of the other areas lying under it which are not land cover.
 pub fn convert(
     data: &OsmData,
     style: &impl OsmRules,
@@ -1475,12 +1500,11 @@ pub fn convert(
         (x, y)
     };
 
-    let area_object = |symbol: i32, rings: &[Vec<(f64, f64)>]| {
+    let paper_area = |symbol: i32, rings: &[Vec<(f64, f64)>]| {
         let mut coords = Vec::new();
         for (i, ring) in rings.iter().enumerate() {
             let last = ring.len() - 1;
-            for (j, &p) in ring.iter().enumerate() {
-                let (x, y) = paper(p);
+            for (j, &(x, y)) in ring.iter().enumerate() {
                 let mut flags = 0;
                 if j == last {
                     flags = coord_flag::CLOSE_POINT;
@@ -1492,6 +1516,13 @@ pub fn convert(
             }
         }
         path_object(symbol, coords)
+    };
+    let area_object = |symbol: i32, rings: &[Vec<(f64, f64)>]| {
+        let rings: Vec<Vec<(f64, f64)>> = rings
+            .iter()
+            .map(|ring| ring.iter().map(|&p| paper(p)).collect())
+            .collect();
+        paper_area(symbol, &rings)
     };
     let line_object = |symbol: i32, points: &[(f64, f64)]| {
         let closed = points.len() >= 4 && points.first() == points.last();
@@ -1512,16 +1543,18 @@ pub fn convert(
         path_object(symbol, coords)
     };
 
-    let mut areas = Vec::new();
     let mut lines = Vec::new();
     let mut points = Vec::new();
-    // The land cover, cut once every area is known.
+    // The land cover, cut once every area is known; the other areas, which
+    // a strip may cut; and the strips, on the paper.
     let mut ground: Vec<Cover> = Vec::new();
+    let mut over: Vec<Cover> = Vec::new();
+    let mut strips: Vec<(Strip, geo::MultiPolygon<f64>)> = Vec::new();
     let mut add_area = |symbols: Vec<i32>, rings: Vec<Vec<(f64, f64)>>| {
-        let (cover, over): (Vec<i32>, Vec<i32>) =
+        let (cover, others): (Vec<i32>, Vec<i32>) =
             symbols.into_iter().partition(|&s| style.ground(s));
-        for symbol in over {
-            areas.push(area_object(symbol, &rings));
+        if !others.is_empty() {
+            over.push((others, rings.clone()));
         }
         if !cover.is_empty() {
             ground.push((cover, rings));
@@ -1561,7 +1594,8 @@ pub fn convert(
             Vec::new()
         };
         let line_symbols = style.line_symbols(&way.tags);
-        if area_symbols.is_empty() && line_symbols.is_empty() {
+        let strip = style.strip(&way.tags);
+        if area_symbols.is_empty() && line_symbols.is_empty() && strip.is_none() {
             continue;
         }
         let Some(coords) = data.way_coords(way) else {
@@ -1573,7 +1607,7 @@ pub fn convert(
                 add_area(area_symbols, rings);
             }
         }
-        if !line_symbols.is_empty() {
+        if !line_symbols.is_empty() || strip.is_some() {
             let pieces = if coords.iter().all(|&p| bbox.contains(p)) {
                 vec![coords]
             } else {
@@ -1582,6 +1616,13 @@ pub fn convert(
             for piece in &pieces {
                 for &symbol in &line_symbols {
                     lines.push(line_object(symbol, piece));
+                }
+                if let Some(strip) = strip {
+                    use geo::Buffer;
+                    let line: geo::LineString<f64> =
+                        piece.iter().map(|&p| paper(p)).collect::<Vec<_>>().into();
+                    let half = strip.width / 2.0 * 1000.0 / f64::from(scale);
+                    strips.push((strip, line.buffer(half)));
                 }
             }
         }
@@ -1600,14 +1641,51 @@ pub fn convert(
         }
     }
 
-    let mut cover = Vec::new();
+    let mut areas = Vec::new();
     for (symbols, rings) in largest_first(ground) {
         for symbol in symbols {
-            cover.push(area_object(symbol, &rings));
+            areas.push(area_object(symbol, &rings));
         }
     }
-    cover.append(&mut areas);
-    let areas = cover;
+
+    // The strips, each symbol's joined and cut to the map.
+    let edge: Vec<(f64, f64)> = [
+        (bbox.min_lon, bbox.min_lat),
+        (bbox.max_lon, bbox.min_lat),
+        (bbox.max_lon, bbox.max_lat),
+        (bbox.min_lon, bbox.max_lat),
+        (bbox.min_lon, bbox.min_lat),
+    ]
+    .iter()
+    .map(|&p| paper(p))
+    .collect();
+    let joined = join_strips(strips, &edge);
+    let cutters: Vec<&geo::Polygon<f64>> = joined
+        .iter()
+        .filter(|(strip, _)| strip.cuts)
+        .flat_map(|(_, shape)| &shape.0)
+        .collect();
+    for (symbols, rings) in over {
+        let rings: Vec<Vec<(f64, f64)>> = rings
+            .iter()
+            .map(|ring| ring.iter().map(|&p| paper(p)).collect())
+            .collect();
+        let rings = cut_by(rings, &cutters);
+        if rings.is_empty() {
+            continue;
+        }
+        for symbol in symbols {
+            areas.push(paper_area(symbol, &rings));
+        }
+    }
+    for (strip, shape) in &joined {
+        for polygon in &shape.0 {
+            let rings = polygon_rings(polygon);
+            if !rings.is_empty() {
+                areas.push(paper_area(strip.symbol, &rings));
+            }
+        }
+    }
 
     let counts = (areas.len(), lines.len(), points.len());
     let mut objects = areas;
@@ -1624,6 +1702,78 @@ pub fn convert(
 /// An area of land cover: its symbols, and its rings in degrees.
 type Cover = (Vec<i32>, Vec<Vec<(f64, f64)>>);
 
+/// Rings read with the even-odd rule, as one shape.
+fn even_odd(rings: &[Vec<(f64, f64)>]) -> geo::MultiPolygon<f64> {
+    use geo::{BooleanOps, LineString, MultiPolygon, Polygon};
+    rings
+        .iter()
+        .fold(MultiPolygon::new(Vec::new()), |shape, ring| {
+            let ring = Polygon::new(LineString::from(ring.clone()), Vec::new());
+            shape.xor(&ring)
+        })
+}
+
+/// A polygon's rings, the outer first, as plain points.
+fn polygon_rings(polygon: &geo::Polygon<f64>) -> Vec<Vec<(f64, f64)>> {
+    std::iter::once(polygon.exterior())
+        .chain(polygon.interiors())
+        .map(|ring| ring.coords().map(|c| (c.x, c.y)).collect::<Vec<_>>())
+        .filter(|ring| ring.len() >= 4)
+        .collect()
+}
+
+/// The strips of each kind joined into one shape, cut to `edge` (the map's
+/// outline on the paper).
+fn join_strips(
+    strips: Vec<(Strip, geo::MultiPolygon<f64>)>,
+    edge: &[(f64, f64)],
+) -> Vec<(Strip, geo::MultiPolygon<f64>)> {
+    use geo::{unary_union, BooleanOps, LineString, Polygon};
+    let edge = Polygon::new(LineString::from(edge.to_vec()), Vec::new());
+    let mut kinds: Vec<(Strip, Vec<geo::MultiPolygon<f64>>)> = Vec::new();
+    for (strip, shape) in strips {
+        let key = Strip {
+            width: 0.0,
+            ..strip
+        };
+        match kinds.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, shapes)) => shapes.push(shape),
+            None => kinds.push((key, vec![shape])),
+        }
+    }
+    kinds
+        .into_iter()
+        .map(|(strip, shapes)| (strip, unary_union(&shapes).intersection(&edge)))
+        .collect()
+}
+
+/// An area, on the paper, with whatever of `cutters` lies on it cut out.
+fn cut_by(rings: Vec<Vec<(f64, f64)>>, cutters: &[&geo::Polygon<f64>]) -> Vec<Vec<(f64, f64)>> {
+    use geo::{unary_union, Area, BooleanOps, BoundingRect, Intersects};
+    let shape = even_odd(&rings);
+    let Some(bounds) = shape.bounding_rect() else {
+        return rings;
+    };
+    let near: Vec<&geo::Polygon<f64>> = cutters
+        .iter()
+        .copied()
+        .filter(|c| c.bounding_rect().is_some_and(|b| b.intersects(&bounds)))
+        .filter(|c| c.intersects(&shape))
+        .collect();
+    if near.is_empty() {
+        return rings;
+    }
+    // A sliver left along a cut, in square millimetres on the paper.
+    const SLIVER: f64 = 1e-4;
+    shape
+        .difference(&unary_union(near))
+        .0
+        .iter()
+        .filter(|polygon| polygon.unsigned_area() > SLIVER)
+        .flat_map(polygon_rings)
+        .collect()
+}
+
 /// The land cover areas, each cut to what no smaller one covers of it: what
 /// painting them largest first would leave showing (see [`convert`]).
 ///
@@ -1631,20 +1781,13 @@ type Cover = (Vec<i32>, Vec<Vec<(f64, f64)>>);
 /// them, and come back the same way. An area left with nothing is dropped.
 fn largest_first(areas: Vec<Cover>) -> Vec<Cover> {
     use geo::{unary_union, Area, BooleanOps, BoundingRect, Intersects};
-    use geo::{LineString, MultiPolygon, Polygon, Rect};
+    use geo::{MultiPolygon, Rect};
 
     // A sliver a boolean operation leaves along a shared edge, in square
     // degrees: about a hundredth of a square meter.
     const SLIVER: f64 = 1e-12;
 
-    let shape = |rings: &[Vec<(f64, f64)>]| -> MultiPolygon<f64> {
-        rings
-            .iter()
-            .fold(MultiPolygon::new(Vec::new()), |shape, ring| {
-                let ring = Polygon::new(LineString::from(ring.clone()), Vec::new());
-                shape.xor(&ring)
-            })
-    };
+    let shape = even_odd;
     // Each area as a shape, with the box around it.
     type Shape = (Vec<i32>, MultiPolygon<f64>, Option<Rect<f64>>);
     let shapes: Vec<Shape> = areas
@@ -1678,9 +1821,7 @@ fn largest_first(areas: Vec<Cover>) -> Vec<Cover> {
             .0
             .iter()
             .filter(|polygon| polygon.unsigned_area() > SLIVER)
-            .flat_map(|polygon| std::iter::once(polygon.exterior()).chain(polygon.interiors()))
-            .map(|ring| ring.coords().map(|c| (c.x, c.y)).collect::<Vec<_>>())
-            .filter(|ring| ring.len() >= 4)
+            .flat_map(polygon_rings)
             .collect();
         if !rings.is_empty() {
             kept.push((symbols.clone(), rings));

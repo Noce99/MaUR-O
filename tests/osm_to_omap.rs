@@ -58,10 +58,11 @@ fn the_default_is_a_sprint_map_with_the_whole_issprom_symbol_set() {
 
     let (map, _warnings) = read_xml_map(&out).unwrap();
     assert_eq!(map.scale_denominator, 4000);
-    // The building, the street, the footway; the tree is no landmark.
+    // The building, the street as a paved area, the footway; the tree is no
+    // landmark.
     let mut codes = object_codes(&map);
     codes.sort();
-    assert_eq!(codes, ["501.6", "501.8", "521"]);
+    assert_eq!(codes, ["501.5", "501.6", "521"]);
 
     // Every colour and symbol as the standard has them.
     let (golden, _) = read_xml_map(std::path::Path::new("maps/ISSprOM_4k.omap")).unwrap();
@@ -114,10 +115,11 @@ fn an_option_of_the_osm_look_is_a_usage_error_with_a_standard() {
 }
 
 #[test]
-fn a_wood_in_a_park_is_cut_out_of_the_park() {
+fn a_park_in_a_meadow_is_cut_out_of_it_and_its_lawn_out_of_the_park() {
     let dir = tempfile::tempdir().unwrap();
     let osm = dir.path().join("park.osm");
-    // A park 0.004° across with a wood in its middle, each a closed way.
+    // A meadow 0.004° across, a park in its middle and a lawn in the park,
+    // each a closed way.
     let square = |id: i64, first: i64, (lon0, lat0, lon1, lat1): (f64, f64, f64, f64)| {
         let corners = [(lon0, lat0), (lon1, lat0), (lon1, lat1), (lon0, lat1)];
         let nodes: String = corners
@@ -137,14 +139,16 @@ fn a_wood_in_a_park_is_cut_out_of_the_park() {
     };
     let (park_nodes, park) = square(1, 1, (11.340, 44.490, 11.344, 44.494));
     let (wood_nodes, wood) = square(2, 11, (11.341, 44.491, 11.343, 44.493));
+    let (lawn_nodes, lawn) = square(3, 21, (11.3415, 44.4915, 11.3425, 44.4925));
     std::fs::write(
         &osm,
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <osm version="0.6">
   <bounds minlat="44.489" minlon="11.339" maxlat="44.495" maxlon="11.345"/>
-{park_nodes}{wood_nodes}{park}<tag k="leisure" v="park"/></way>
-{wood}<tag k="natural" v="wood"/></way>
+{park_nodes}{wood_nodes}{lawn_nodes}{park}<tag k="landuse" v="meadow"/></way>
+{wood}<tag k="leisure" v="park"/></way>
+{lawn}<tag k="landuse" v="grass"/></way>
 </osm>
 "#
         ),
@@ -154,12 +158,61 @@ fn a_wood_in_a_park_is_cut_out_of_the_park() {
     orienteering().arg(&osm).arg(&out).assert().success();
     let (map, _warnings) = read_xml_map(&out).unwrap();
     let codes = object_codes(&map);
-    let park = &map.objects[codes.iter().position(|c| c == "401").unwrap()];
-    let wood = &map.objects[codes.iter().position(|c| c == "405").unwrap()];
-    // The park keeps a hole where the wood is, the wood is whole.
     let rings = |o: &maur_o::map::Object| o.coords.iter().filter(|c| c.is_close_point()).count();
+    let open: Vec<usize> = codes
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| *c == "401")
+        .map(|(i, _)| rings(&map.objects[i]))
+        .collect();
+    let park = &map.objects[codes.iter().position(|c| c == "402").unwrap()];
+    // The meadow keeps a hole where the park is, the park one where the
+    // lawn is, the lawn is whole.
+    assert_eq!(open.len(), 2);
+    assert!(open.contains(&2) && open.contains(&1), "{open:?}");
     assert_eq!(rings(park), 2);
-    assert_eq!(rings(wood), 1);
+}
+
+#[test]
+fn a_portico_is_cut_out_of_the_building_it_runs_under() {
+    let dir = tempfile::tempdir().unwrap();
+    let osm = dir.path().join("portico.osm");
+    std::fs::write(
+        &osm,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <bounds minlat="44.4920" minlon="11.3400" maxlat="44.4950" maxlon="11.3450"/>
+  <node id="1" lat="44.4930" lon="11.3410"/>
+  <node id="2" lat="44.4930" lon="11.3440"/>
+  <node id="3" lat="44.4940" lon="11.3440"/>
+  <node id="4" lat="44.4940" lon="11.3410"/>
+  <node id="5" lat="44.4930" lon="11.3405"/>
+  <node id="6" lat="44.4930" lon="11.3445"/>
+  <way id="1"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/>
+    <tag k="building" v="yes"/></way>
+  <way id="2"><nd ref="5"/><nd ref="6"/>
+    <tag k="highway" v="footway"/><tag k="covered" v="arcade"/></way>
+</osm>
+"#,
+    )
+    .unwrap();
+    let out = dir.path().join("portico.omap");
+    orienteering().arg(&osm).arg(&out).assert().success();
+    let (map, _warnings) = read_xml_map(&out).unwrap();
+    let codes = object_codes(&map);
+    let canopy = &map.objects[codes.iter().position(|c| c == "522").unwrap()];
+    let building = &map.objects[codes.iter().position(|c| c == "521").unwrap()];
+    // The walkway runs along the building's south side: the 4 m canopy
+    // takes 2 m off the building, which is 0.001° (111.2 m) deep. On the
+    // paper, at 1:4000: 27.30 mm of building, 1 mm of canopy.
+    let span = |o: &maur_o::map::Object| {
+        let ys: Vec<f64> = o.coords.iter().map(|c| c.y).collect();
+        ys.iter().cloned().fold(f64::MIN, f64::max) - ys.iter().cloned().fold(f64::MAX, f64::min)
+    };
+    assert!((span(building) - 27.30).abs() < 0.05, "{}", span(building));
+    assert!((span(canopy) - 1.0).abs() < 0.05, "{}", span(canopy));
+    // No footway line is drawn under it.
+    assert!(!codes.iter().any(|c| c.starts_with("501.6")));
 }
 
 #[test]

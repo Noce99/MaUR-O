@@ -41,14 +41,21 @@
 //! monument: a city maps every tree in its streets and parks. There are no
 //! names: an orienteering map has none.
 //!
-//! A road is drawn as a paved footprint of its kind's usual width, from
-//! its centre line; what lies between it and the next area OpenStreetMap
-//! has — the rest of a wide avenue, its verges — is left white.
+//! On a sprint map a paved street is a paved area as wide as the street,
+//! pavements included, laid around its centre line: its `width` or
+//! `lanes` where it has them, what is usual for its kind where not (see
+//! [`street_width`]); the streets of the map joined into one area. A path
+//! is a footprint of fixed width. On a forest map roads are ISOM's lines.
+//!
+//! A park is open land with scattered trees, and its lawns, where mapped
+//! on their own, open land. A portico — a walkway `covered=arcade` or `colonnade`,
+//! as Bologna maps its own — is a canopy 4 m wide, cut out of the building
+//! it runs under.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::osm::Tags;
-use crate::osm_convert::OsmRules;
+use crate::osm_convert::{OsmRules, Strip};
 use crate::osm_style::{surface, Surface};
 use crate::xml_reader::{read_fragments_str, Fragments};
 
@@ -270,12 +277,17 @@ impl OrienteeringStyle {
         if matches!(get("natural"), "heath" | "grassland") {
             return vec!["403"];
         }
+        // A park is lawns and trees: open land with scattered trees, its
+        // lawns, where mapped on their own, open land lying on it.
+        if tags.is("leisure", "park") {
+            return vec!["402"];
+        }
         let open = matches!(
             get("landuse"),
             "grass" | "meadow" | "village_green" | "recreation_ground"
         ) || matches!(
             get("leisure"),
-            "park" | "garden" | "playground" | "golf_course" | "common" | "dog_park"
+            "garden" | "playground" | "golf_course" | "common" | "dog_park"
         );
         if open {
             return vec!["401"];
@@ -304,7 +316,7 @@ impl OrienteeringStyle {
         }
         let get = |key: &str| tags.get(key).unwrap_or("");
         let code = if let Some(highway) = tags.get("highway") {
-            if tags.is("area", "yes") {
+            if tags.is("area", "yes") || self.strip_code(tags).is_some() {
                 return Vec::new();
             }
             self.road(highway, tags)
@@ -364,6 +376,42 @@ impl OrienteeringStyle {
             }
         };
         code.into_iter().collect()
+    }
+
+    /// The code and width of the strip a way is drawn as (see
+    /// [`OsmRules::strip`]), and whether it cuts what it runs under.
+    ///
+    /// A portico (a way `covered=arcade` or `colonnade`, as Bologna's are
+    /// mapped: the walkway under the building) is a canopy 4 m wide, cut out
+    /// of the building. On a sprint map a paved street is a paved area as wide
+    /// as the street, pavements included ([`street_width`]), rather than a
+    /// footprint of fixed width, so that the ground between it and the
+    /// houses is not left to whatever area the street runs through — most
+    /// often land not to be entered.
+    pub fn strip_code(&self, tags: &Tags) -> Option<(&'static str, f64, bool)> {
+        let highway = tags.get("highway")?;
+        if underground(tags) || tags.is("area", "yes") {
+            return None;
+        }
+        if matches!(tags.get("covered"), Some("arcade" | "colonnade")) && highway != "steps" {
+            return Some(("522", PORTICO_WIDTH, true));
+        }
+        if self.standard != Standard::Issprom || surface(tags) == Surface::Unpaved {
+            return None;
+        }
+        let heavy = matches!(
+            highway,
+            "motorway"
+                | "trunk"
+                | "primary"
+                | "secondary"
+                | "motorway_link"
+                | "trunk_link"
+                | "primary_link"
+                | "secondary_link"
+        );
+        let width = street_width(highway, tags)?;
+        Some((if heavy { "501.11" } else { "501.5" }, width, false))
     }
 
     /// The code of a road, a path or a stairway.
@@ -479,6 +527,74 @@ impl OrienteeringStyle {
     }
 }
 
+/// How wide a portico is, in meters: Bologna's are 3 to 5.
+const PORTICO_WIDTH: f64 = 4.0;
+
+/// How wide a pavement is, in meters.
+const PAVEMENT_WIDTH: f64 = 1.5;
+
+/// How wide a street is on the ground, in meters, pavements included: its
+/// `width` where it has one, else its `lanes` at 3.25 m, else what is usual
+/// for its kind; plus a pavement on each side its `sidewalk` tags say, or,
+/// where they say nothing, on both sides of a street in town. `None` for a
+/// way which is no street.
+pub fn street_width(highway: &str, tags: &Tags) -> Option<f64> {
+    let get = |key: &str| tags.get(key).unwrap_or("");
+    let (usual, in_town) = match highway {
+        "motorway" | "trunk" => (7.5, false),
+        "primary" => (7.5, true),
+        "secondary" => (7.0, true),
+        "tertiary" => (6.5, true),
+        "motorway_link" | "trunk_link" | "primary_link" | "secondary_link" | "tertiary_link" => {
+            (5.0, false)
+        }
+        "residential" => (6.0, true),
+        "unclassified" | "road" => (6.0, false),
+        "living_street" => (5.0, false),
+        "pedestrian" => (6.0, false),
+        "service" => match get("service") {
+            "parking_aisle" => (5.0, false),
+            "driveway" | "alley" => (3.5, false),
+            _ => (4.5, false),
+        },
+        _ => return None,
+    };
+    let carriageway = tags
+        .get("width")
+        .and_then(|w| {
+            let w = w.trim();
+            w.strip_suffix('m').unwrap_or(w).trim().parse::<f64>().ok()
+        })
+        .filter(|w| *w > 0.0)
+        .or_else(|| {
+            tags.get("lanes")
+                .and_then(|l| l.parse::<f64>().ok())
+                .map(|l| l * 3.25)
+        })
+        .unwrap_or(usual);
+    let side = |value: &str| match value {
+        "both" => Some(2.0),
+        "left" | "right" | "yes" => Some(1.0),
+        "no" | "none" | "separate" => Some(0.0),
+        _ => None,
+    };
+    let either = |key: &str| match get(key) {
+        "yes" => Some(1.0),
+        "no" | "separate" => Some(0.0),
+        _ => None,
+    };
+    let pavements = side(get("sidewalk"))
+        .or_else(|| side(get("sidewalk:both")))
+        .or_else(
+            || match (either("sidewalk:left"), either("sidewalk:right")) {
+                (None, None) => None,
+                (l, r) => Some(l.unwrap_or(0.0) + r.unwrap_or(0.0)),
+            },
+        )
+        .unwrap_or(if in_town { 2.0 } else { 0.0 });
+    Some(carriageway + pavements * PAVEMENT_WIDTH)
+}
+
 /// Whether a feature lies under the ground: a tunnel, a culvert, an
 /// underground car park, anything on a negative layer.
 fn underground(tags: &Tags) -> bool {
@@ -522,6 +638,15 @@ impl OsmRules for OrienteeringStyle {
 
     fn ground(&self, symbol: i32) -> bool {
         self.ground.contains(&symbol)
+    }
+
+    fn strip(&self, tags: &Tags) -> Option<Strip> {
+        let (code, width, cuts) = self.strip_code(tags)?;
+        Some(Strip {
+            symbol: self.id(code),
+            width,
+            cuts,
+        })
     }
 }
 
@@ -634,6 +759,12 @@ mod tests {
             &[("surface", "gravel")],
         );
         add("highway", &["service"], &[("service", "driveway")]);
+        add("highway", &["footway"], &[("covered", "arcade")]);
+        add(
+            "highway",
+            &["secondary", "pedestrian", "living_street"],
+            &[],
+        );
         add("highway", &["track"], &[("tracktype", "grade1")]);
         add("highway", &["track"], &[("tracktype", "grade5")]);
         add("highway", &["path"], &[("surface", "asphalt")]);
@@ -671,6 +802,7 @@ mod tests {
                 style.area_symbols(&tags, true);
                 style.line_symbols(&tags);
                 style.point_symbols(&tags);
+                style.strip(&tags);
             }
         }
     }
@@ -686,15 +818,54 @@ mod tests {
         let sprint = OrienteeringStyle::new(Standard::Issprom);
         let forest = OrienteeringStyle::new(Standard::Isom);
         let primary = tags(&[("highway", "primary")]);
-        assert_eq!(sprint.line_codes(&primary), ["501.19"]);
+        assert_eq!(sprint.strip_code(&primary), Some(("501.11", 10.5, false)));
         assert_eq!(forest.line_codes(&primary), ["502"]);
         let residential = tags(&[("highway", "residential")]);
-        assert_eq!(sprint.line_codes(&residential), ["501.8"]);
+        assert!(sprint.line_codes(&residential).is_empty());
+        assert_eq!(sprint.strip_code(&residential), Some(("501.5", 9.0, false)));
         assert_eq!(forest.line_codes(&residential), ["503"]);
+        assert_eq!(forest.strip_code(&residential), None);
+        // An unpaved street stays a footprint.
+        let gravel = tags(&[("highway", "residential"), ("surface", "gravel")]);
+        assert_eq!(sprint.line_codes(&gravel), ["505.2"]);
         // A square is paved ground, not a loop of road.
         let square = tags(&[("highway", "pedestrian"), ("area", "yes")]);
         assert_eq!(sprint.area_codes(&square, false), ["501.5"]);
         assert!(sprint.line_codes(&square).is_empty());
+    }
+
+    #[test]
+    fn a_street_is_as_wide_as_its_tags_say() {
+        let width = |pairs: &[(&str, &str)]| street_width("residential", &tags(pairs)).unwrap();
+        assert_eq!(width(&[]), 9.0);
+        assert_eq!(width(&[("sidewalk", "separate")]), 6.0);
+        assert_eq!(width(&[("sidewalk", "right")]), 7.5);
+        assert_eq!(width(&[("width", "4 m"), ("sidewalk", "no")]), 4.0);
+        assert_eq!(width(&[("lanes", "2"), ("sidewalk:left", "yes")]), 8.0);
+        assert_eq!(street_width("footway", &tags(&[])), None);
+    }
+
+    #[test]
+    fn a_portico_is_a_canopy_cut_out_of_its_building() {
+        for standard in [Standard::Issprom, Standard::Isom] {
+            let style = OrienteeringStyle::new(standard);
+            let portico = tags(&[("highway", "footway"), ("covered", "arcade")]);
+            assert_eq!(style.strip_code(&portico), Some(("522", 4.0, true)));
+            assert!(style.line_codes(&portico).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_park_has_scattered_trees_and_its_lawn_is_open_land() {
+        let sprint = OrienteeringStyle::new(Standard::Issprom);
+        assert_eq!(
+            sprint.area_codes(&tags(&[("leisure", "park")]), false),
+            ["402"]
+        );
+        assert_eq!(
+            sprint.area_codes(&tags(&[("landuse", "grass")]), false),
+            ["401"]
+        );
     }
 
     #[test]
