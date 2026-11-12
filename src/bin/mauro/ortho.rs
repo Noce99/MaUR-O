@@ -2,9 +2,9 @@
 //! as a georeferenced template, behind everything else.
 //!
 //! ```text
-//! add_orthophoto [--service ID] [--pixel-size M] [--margin M]
+//! mauro ortho [--service ID] [--pixel-size M] [--margin M]
 //!                [--image FILE] <map-file> [output-map-file]
-//! add_orthophoto --list-services
+//! mauro ortho --list-services
 //! ```
 //!
 //! The photos come from the national and regional mapping agencies' own
@@ -87,12 +87,11 @@ const MAX_RESPONSE: u64 = 64 << 20;
 
 #[derive(Parser)]
 #[command(
-    name = "add_orthophoto",
-    version,
-    about = "Downloads the aerial orthophoto of a map's ground from a national or regional \
+    about = "Adds a map's aerial orthophoto to it as a georeferenced template",
+    long_about = "Downloads the aerial orthophoto of a map's ground from a national or regional \
              mapping agency and adds it to the map as a georeferenced template."
 )]
-struct Args {
+pub struct Args {
     /// The OpenOrienteering Mapper map (.omap or .xmap) to add the photo to.
     #[arg(required_unless_present = "list_services")]
     map_file: Option<PathBuf>,
@@ -162,17 +161,7 @@ fn list_services() {
     }
 }
 
-fn run() -> Result<(), Failure> {
-    let args = match Args::try_parse() {
-        Ok(a) => a,
-        Err(e) => {
-            e.print().ok();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
+fn run(args: Args) -> Result<(), Failure> {
     if args.list_services {
         list_services();
         return Ok(());
@@ -703,8 +692,9 @@ fn write_atomically(path: &Path, content: &[u8]) -> Result<(), Failure> {
     })
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// Runs `mauro ortho`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err((code, message)) => {
             if !message.is_empty() {

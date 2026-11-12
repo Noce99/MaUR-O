@@ -1,5 +1,5 @@
-//! In-memory, no-disk-I/O variant of the `contours_to_raster` binary
-//! (`src/bin/contours_to_raster.rs`): runs the same Steps 1 through 5
+//! In-memory, no-disk-I/O variant of `mauro dem`
+//! (`src/bin/mauro/dem.rs`): runs the same Steps 1 through 5
 //! (`Contours-to-Raster.md`) against an already-parsed [`Map`], reporting
 //! progress through a callback instead of `--create_svg` files, and
 //! returning the final elevation grid in memory instead of writing a TIFF.
@@ -69,7 +69,7 @@ pub struct DemFromContoursResult {
     pub still_undefined: u64,
     /// `(name, svg)` pairs, one per `--create_svg` diagnostic this run built
     /// (see [`compute`]'s own `debug_svg` argument) -- empty when that
-    /// argument was `false`. Names match `src/bin/contours_to_raster.rs`'s
+    /// argument was `false`. Names match `src/bin/mauro/dem.rs`'s
     /// own step names (`"contours_function"`, `"step1"`,
     /// `"step1_close_search"`, `"step1_growing_seeking"`,
     /// `"step1_growing_matching"`, `"step2"`, `"step3_rain"`,
@@ -91,7 +91,7 @@ pub struct DemFromContoursResult {
 /// optionally `"step3"` (only if Step 2 left contours undefined),
 /// `"step4"`, `"step5_gravity"`, `"step5_elevation"`), each call carrying a
 /// short human-readable summary of what that stage found -- the same
-/// information `src/bin/contours_to_raster.rs`'s own `run()` prints to
+/// information `src/bin/mauro/dem.rs`'s own `run()` prints to
 /// stdout/stderr, just handed to a callback instead. Every warning a step
 /// would otherwise `eprintln!` is forwarded the same way, tagged with that
 /// step's own stage name.

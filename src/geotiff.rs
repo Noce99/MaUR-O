@@ -44,7 +44,7 @@
 //! re-opened. [`resample_north_up`] resamples the raster itself onto a
 //! plain axis-aligned grid before it's ever written, so there is no
 //! rotation left in the file for a reader to drop. [`model_transformation`]
-//! is kept (and still tested) for `dem_geo_tiff_evaluator`, which *does*
+//! is kept (and still tested) for `mauro dem-eval`, which *does*
 //! read `ModelTransformationTag` correctly and uses it as a reference
 //! fixture.
 

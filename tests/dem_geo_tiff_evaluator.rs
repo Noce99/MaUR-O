@@ -1,4 +1,4 @@
-//! CLI-level checks for `dem_geo_tiff_evaluator`: it scores a predicted DEM
+//! CLI-level checks for `mauro dem-eval`: it scores a predicted DEM
 //! against a ground truth into its own timestamped `Results` folder, and the
 //! documented exit codes fire on a missing file or an uncomparable pair.
 
@@ -13,8 +13,10 @@ const MODEL_PIXEL_SCALE_TAG: u16 = 33550;
 const MODEL_TIEPOINT_TAG: u16 = 33922;
 const GEO_KEY_DIRECTORY_TAG: u16 = 34735;
 
-fn dem_geo_tiff_evaluator() -> Command {
-    Command::cargo_bin("dem_geo_tiff_evaluator").unwrap()
+fn dem_eval() -> Command {
+    let mut command = Command::cargo_bin("mauro").unwrap();
+    command.args(["dem-eval"]);
+    command
 }
 
 /// A minimal single-band, tiepoint-georeferenced DEM GeoTIFF -- the
@@ -65,7 +67,7 @@ fn scores_two_identical_resolution_dems_into_a_timestamped_run_folder() {
     write_dem(&pred, 4, 4, &[7.0; 16], (0.0, 0.0), 1.0, 3006);
 
     let results = dir.path().join("Results");
-    dem_geo_tiff_evaluator()
+    dem_eval()
         .arg(&gt)
         .arg(&pred)
         .arg("--results")
@@ -111,7 +113,7 @@ fn resamples_a_coarser_prediction_onto_the_ground_truths_own_grid() {
     write_dem(&gt, 6, 6, &[50.0; 36], (0.0, 0.0), 1.0, 3006);
     write_dem(&pred, 6, 6, &[45.0; 36], (-2.0, 2.0), 2.0, 3006);
 
-    dem_geo_tiff_evaluator()
+    dem_eval()
         .arg(&gt)
         .arg(&pred)
         .arg("--results")
@@ -130,7 +132,7 @@ fn mismatched_crs_exits_4() {
     write_dem(&gt, 2, 2, &[1.0; 4], (0.0, 0.0), 1.0, 3006);
     write_dem(&pred, 2, 2, &[1.0; 4], (0.0, 0.0), 1.0, 4326);
 
-    dem_geo_tiff_evaluator()
+    dem_eval()
         .arg(&gt)
         .arg(&pred)
         .arg("--results")
@@ -147,7 +149,7 @@ fn missing_ground_truth_exits_2() {
     let pred = dir.path().join("pred.tif");
     write_dem(&pred, 2, 2, &[1.0; 4], (0.0, 0.0), 1.0, 3006);
 
-    dem_geo_tiff_evaluator()
+    dem_eval()
         .arg(dir.path().join("does-not-exist.tif"))
         .arg(&pred)
         .arg("--results")
@@ -163,7 +165,7 @@ fn missing_prediction_exits_3() {
     let gt = dir.path().join("gt.tif");
     write_dem(&gt, 2, 2, &[1.0; 4], (0.0, 0.0), 1.0, 3006);
 
-    dem_geo_tiff_evaluator()
+    dem_eval()
         .arg(&gt)
         .arg(dir.path().join("does-not-exist.tif"))
         .arg("--results")

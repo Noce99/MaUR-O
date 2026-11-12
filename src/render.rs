@@ -1,8 +1,8 @@
 //! Rendering a map file to a raster image.
 //!
 //! The geometry here — how the map extent, the white frame and the
-//! resolution turn into a pixel buffer — is what `map_to_image` does, kept
-//! in one place so that the `benchmark` tool renders a map the same way the
+//! resolution turn into a pixel buffer — is what `mauro render` does, kept
+//! in one place so that the `mauro benchmark run` tool renders a map the same way the
 //! command line tool does rather than by a second, drifting copy of it.
 
 use std::path::Path;
@@ -21,7 +21,7 @@ pub const DEFAULT_RESOLUTION: f64 = 3.0;
 pub const DEFAULT_FRAME: f64 = 50.0;
 
 /// Why a map could not be turned into an image. The variants are the two
-/// failures `map_to_image` reports with distinct exit codes.
+/// failures `mauro render` reports with distinct exit codes.
 pub enum Error {
     /// The map file could not be read or parsed.
     Read(String),
@@ -42,7 +42,7 @@ pub struct Rendering {
     /// The image itself, opaque RGBA, white wherever the map drew nothing.
     pub pixmap: Pixmap,
     /// The extent covered by the image, in meters on the ground, the white
-    /// frame included, and rounded the way `map_to_image` reports it.
+    /// frame included, and rounded the way `mauro render` reports it.
     pub ground_width: i64,
     /// The same, vertically.
     pub ground_height: i64,

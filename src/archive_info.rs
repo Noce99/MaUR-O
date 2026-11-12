@@ -1,9 +1,9 @@
 //! Reading the archive's own record of what it was made with back out of
 //! `info.txt`.
 //!
-//! `create_benchmark` writes `info.txt` into every archive: what it is, how
+//! `mauro benchmark create` writes `info.txt` into every archive: what it is, how
 //! it was made, and, on their own line each, the resolution and the frame
-//! the reference images were drawn at. `benchmark` reads those two back with
+//! the reference images were drawn at. `mauro benchmark run` reads those two back with
 //! [`parse`], so that a run measures at what they actually were rather than
 //! at whatever was typed in by hand and may no longer agree.
 
@@ -20,7 +20,7 @@ pub struct ArchiveInfo {
     pub frame: f64,
 }
 
-/// Parses `info.txt`'s content back into the two settings `benchmark` needs.
+/// Parses `info.txt`'s content back into the two settings `mauro benchmark run` needs.
 /// `None` for a value missing or not a number, which an archive made before
 /// this file existed, or edited by hand, may well be.
 ///

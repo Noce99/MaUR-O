@@ -21,7 +21,7 @@ differently.
 | Concern | Crate | Role |
 | --- | --- | --- |
 | XML parsing | `quick-xml` | Streams a map file's XML without building a DOM. |
-| CLI args | `clap` | Argument parsing, `--help` and `--version` for every binary. |
+| CLI args | `clap` | Argument parsing, `--help` and `--version` for `mauro` and each of its subcommands. |
 | Image encode | `image` | Writes the final raster in whichever format the output suffix asks for. |
 | Paths, stroking, rasterization | `tiny-skia` | Builds, strokes and fills the vector paths, and rasterizes them with antialiasing. |
 | Font discovery | `fontdb` | Resolves a font family name to an actual font file, through the system's fontconfig on Linux. |
@@ -30,11 +30,11 @@ differently.
 | Font resolution | `fontconfig` | Resolves a generic family name ("Sans Serif") the way Qt and Mapper do. Unix only, opened at runtime (`dlopen`), so it is not needed to build — see the [README](../README.md#fonts-and-fontconfig). |
 | Archives | `zip` | Reads and writes benchmark archives, and GTFS feeds given as `.zip`. |
 | Timestamps | `chrono` | The timestamped run folders and the dates recorded in `info.txt`. |
-| Palette PNGs | `png` | Writes indexed (palette) PNGs — the `benchmark` diff images and `contours_to_raster`'s diagnostics — which `image` cannot. |
-| Float TIFF | `tiff` | Writes `contours_to_raster`'s single-band 32-bit float elevation GeoTIFF, which `image`'s encoder cannot. |
-| Contour geometry | `geo`, `geo-svg` | Polygon buffering and point-in-polygon for `contours_to_raster`; `geo-svg` draws its `--create_svg` diagnostics. |
+| Palette PNGs | `png` | Writes indexed (palette) PNGs — the `mauro benchmark run` diff images and `mauro dem`'s diagnostics — which `image` cannot. |
+| Float TIFF | `tiff` | Writes `mauro dem`'s single-band 32-bit float elevation GeoTIFF, which `image`'s encoder cannot. |
+| Contour geometry | `geo`, `geo-svg` | Polygon buffering and point-in-polygon for `mauro dem`; `geo-svg` draws its `--create_svg` diagnostics. |
 | Scratch space | `tempfile` | The temporary folder a benchmark archive is unpacked into. |
-| HTTP | `ureq` | `add_orthophoto`'s downloads from a mapping agency's WMS: blocking, rustls. Not built for wasm, and never used by the library itself. |
+| HTTP | `ureq` | `mauro ortho`'s downloads from a mapping agency's WMS: blocking, rustls. Not built for wasm, and never used by the library itself. |
 
 `fontdb` + `rustybuzz` + `ttf-parser` + `tiny-skia` is the same pipeline
 [resvg](https://github.com/RazrFalcon/resvg) uses, which is what made text
@@ -65,8 +65,8 @@ below go one file at a time.
 | `geometry.rs` | Path flattening, extents, slicing, tangents, and `shift_coordinates` (built on `qbezier.rs`). Pure arithmetic, no rendering backend involved — the part of the renderer held to an *exact* standard, and it's covered by unit tests checking specific geometric invariants (extents of capped/joined strokes, offset direction, slice round-trips) rather than just "it compiles." |
 | `renderer.rs` | Turns objects into paths and draws them: dash groups, mid symbols, area fill patterns (line and point), and the colour-priority draw order. Builds an internal `Path` IR (not `tiny_skia::Path` directly) so `geometry.rs` stays backend-independent; converts to `tiny_skia` only at paint time. |
 | `text.rs` | Font loading, shaping and glyph layout, split out from `renderer.rs` since it is a distinct concern. Lays out text at a large internal font size and scales down. |
-| `render.rs` | The map-file-to-pixel-buffer step (`render_map`, `render_map_window`), split out so `map_to_image` and `benchmark` render a map by the same code rather than by two copies of it. |
-| `svg.rs` | Writes the renderer's own renderables out as SVG paths instead of rasterizing them — what `map_to_image` does for a `.svg` output. |
+| `render.rs` | The map-file-to-pixel-buffer step (`render_map`, `render_map_window`), split out so `mauro render` and `mauro benchmark run` render a map by the same code rather than by two copies of it. |
+| `svg.rs` | Writes the renderer's own renderables out as SVG paths instead of rasterizing them — what `mauro render` does for a `.svg` output. |
 
 ### Benchmarking
 
@@ -74,8 +74,8 @@ below go one file at a time.
 | --- | --- |
 | `all_symbols.rs` | Makes one map per symbol of a symbol set, each carrying a grid of test objects. The suites this project measures itself on are built out of these, and it *uses* the renderer: a cell of the grid is as wide as what its object draws, so laying the grid out means building every object's renderables to measure them. See [One map per symbol](#one-map-per-symbol). |
 | `naming.rs` | The naming rules a benchmark archive has to follow, and how to repair an archive which breaks them. |
-| `archive_info.rs` | Reads back the `info.txt` `create_benchmark` writes into an archive, so `benchmark` always uses the resolution and frame the reference images were drawn at. |
-| `differences.rs` | Compares two rendered images and writes the difference report `benchmark` produces. Also measures the per-map error the results table reports, and classifies each differing pixel into one two rasterizers can legitimately disagree about and one they cannot, see [Antialiasing](#antialiasing). |
+| `archive_info.rs` | Reads back the `info.txt` `mauro benchmark create` writes into an archive, so `mauro benchmark run` always uses the resolution and frame the reference images were drawn at. |
+| `differences.rs` | Compares two rendered images and writes the difference report `mauro benchmark run` produces. Also measures the per-map error the results table reports, and classifies each differing pixel into one two rasterizers can legitimately disagree about and one they cannot, see [Antialiasing](#antialiasing). |
 | `progress.rs` | The `tqdm`-style progress bar the long stages draw, and the colour their headings use. Falls back to plain lines when the output is not a terminal. |
 | `report.rs` | Word wrapping for the plain text files a run writes, which are read in whatever opens a `.txt` and so arrive already folded. |
 
@@ -96,7 +96,7 @@ one file per step; read that document first.
 | `contours_to_raster_config.rs` | The ~35 tunable parameters, read from `config/contours_to_raster.conf` (a hand-rolled `key = value` format). |
 | `contours_to_raster_svg.rs` | The `--create_svg` diagnostic files, one per stage. |
 | `dem_from_contours.rs` | Steps 1 to 5 in memory, on an already-parsed map, with a progress callback and no files — the library entry point for embedding the algorithm (e.g. in a WebAssembly build). |
-| `dem_geo_tiff_evaluator.rs` | Scores a predicted DEM GeoTIFF against a ground-truth one (the `dem_geo_tiff_evaluator` binary). |
+| `dem_geo_tiff_evaluator.rs` | Scores a predicted DEM GeoTIFF against a ground-truth one (`mauro dem-eval`). |
 | `dem.rs` | Shades a DEM (hillshading and similar) so terrain can be seen; downstream of the pipeline, not part of it. |
 
 ### Other consumers of the map model
@@ -116,7 +116,7 @@ one file per step; read that document first.
 | --- | --- |
 | `osm.rs` | Reads OpenStreetMap XML (`.osm`): nodes, ways, relations, tags; joins multipolygon rings split over several ways. |
 | `osm_style.rs` | The openstreetmap-carto look at zooms 13 to 17 (the `--details` levels) as a Mapper symbol set — the colour table in carto's layer order, road casings and fills, path dashes, landcover — and the rules picking a symbol from a feature's tags. |
-| `osm_download.rs` | What `osm_to_omap --download` asks the Overpass API for an area — the query (everything in the box, multipolygons and, for `--bus`/`--train`, transit routes whole; no boundaries or other routes), the error remark an answer may carry, the `--around`/`--size` parsing — with no network access: the binary does the HTTP. |
+| `osm_download.rs` | What `mauro osm --download` asks the Overpass API for an area — the query (everything in the box, multipolygons and, for `--bus`/`--train`, transit routes whole; no boundaries or other routes), the error remark an answer may carry, the `--around`/`--size` parsing — with no network access: `mauro osm` does the HTTP. |
 | `osm_orienteering.rs` | ISSprOM 2019 and ISOM 2017-2 for OpenStreetMap: the standard's symbol set, read verbatim from the reference map in `maps/` (embedded with `include_str!`), and the rules picking a symbol code from a feature's tags. |
 | `osm_convert.rs` | Projects OpenStreetMap data into UTM turned to true north, clips it to a bounding box, and writes the map with the symbols of an `OsmRules`: carto's `osm_style`, or a standard's `osm_orienteering`. Land cover a standard's colour table would hide is cut out of the larger areas it lies on, and ways the rules draw as strips (streets at their real width, porticoes) are buffered into areas, joined, and where they say so cut out of the buildings they run under (`geo`'s buffer and boolean operations). |
 | `bus.rs` | Bus and train lines — route, stops, colour and midday headway of each line's main variant — read from OpenStreetMap route relations, or for buses from a GTFS feed (zip or folder), whose calendar and timetable give the headway. |
@@ -138,20 +138,21 @@ comment:
 
 | File | Contents |
 | --- | --- |
-| `bin/map_to_image.rs` | Renders a single map to an image or SVG. |
-| `bin/create_benchmark.rs` | Builds a benchmark archive: collects the maps, has a ground-truth renderer draw the reference images, and names everything the way `benchmark` expects. See [Making a benchmark archive](#making-a-benchmark-archive). |
-| `bin/benchmark.rs` | Runs a whole benchmark suite out of a zip archive, see [Running a benchmark archive](#running-a-benchmark-archive). |
-| `bin/contours_to_raster.rs` | Runs the contour-to-elevation pipeline on one map. |
-| `bin/dem_geo_tiff_evaluator.rs` | Scores a predicted DEM against a ground truth. |
-| `bin/osm_to_omap.rs` | Converts an `.osm` file, or the data of an area downloaded from the Overpass API (`--download`, over `ureq`), into an `.omap`, drawn to ISSprOM (the default), ISOM or carto (`--standard`). |
-| `bin/add_orthophoto.rs` | Downloads a map's orthophoto tile by tile and adds it to the map as a template. |
+| `bin/mauro/main.rs` | The `mauro` executable: parses the command line and hands it to the subcommand's module below. |
+| `bin/mauro/render.rs` | `mauro render`: renders a single map to an image or SVG. |
+| `bin/mauro/benchmark_create.rs` | `mauro benchmark create`: builds a benchmark archive: collects the maps, has a ground-truth renderer draw the reference images, and names everything the way `mauro benchmark run` expects. See [Making a benchmark archive](#making-a-benchmark-archive). |
+| `bin/mauro/benchmark_run.rs` | `mauro benchmark run`: runs a whole benchmark suite out of a zip archive, see [Running a benchmark archive](#running-a-benchmark-archive). |
+| `bin/mauro/dem.rs` | `mauro dem`: runs the contour-to-elevation pipeline on one map. |
+| `bin/mauro/dem_eval.rs` | `mauro dem-eval`: scores a predicted DEM against a ground truth. |
+| `bin/mauro/osm.rs` | `mauro osm`: converts an `.osm` file, or the data of an area downloaded from the Overpass API (`--download`, over `ureq`), into an `.omap`, drawn to ISSprOM (the default), ISOM or carto (`--standard`). |
+| `bin/mauro/ortho.rs` | `mauro ortho`: downloads a map's orthophoto tile by tile and adds it to the map as a template. |
 
 ## One map per symbol
 
 `maur_o::all_symbols` takes a symbol set and writes one map per symbol of it,
 each with a grid of objects drawn with that symbol alone, and a `.txt` next
 to it saying what is in each cell of the grid. It has no CLI of its own —
-`create_benchmark` calls it whenever it is pointed at a single map file
+`mauro benchmark create` calls it whenever it is pointed at a single map file
 rather than a folder (see [Making a benchmark archive](#making-a-benchmark-archive)).
 
 A line symbol gets a straight line, a closed polygonal square, a closed
@@ -172,7 +173,7 @@ which draws it.
 ## Making a benchmark archive
 
 An archive is maps plus what a ground-truth renderer draws from them (see
-the [`create_benchmark` usage](../README.md#create_benchmark) for its CLI
+the [`mauro benchmark create` usage](../README.md#mauro-benchmark-create) for its CLI
 options). The naming rules below apply regardless of source — spaces become
 underscores, and the ordinals are handed out from zero. Internally, an
 archive looks like this:
@@ -192,7 +193,7 @@ archive is a few hundred megabytes of maps which are usually not ours to
 distribute. `-r` and `-f` are what the archive is ground truth for:
 reference images drawn with a 50 m frame line up with nothing drawn with a
 20 m one, so `info.txt` records both, along with the renderer, its version,
-the source and the date. `benchmark` has no `-r`/`-f` of its own — it always
+the source and the date. `mauro benchmark run` has no `-r`/`-f` of its own — it always
 reads them back out of `info.txt`, so a run can't drift from the resolution
 and frame the reference images were actually drawn at.
 
@@ -208,8 +209,8 @@ looking at.
 
 ## Running a benchmark archive
 
-`benchmark` takes a whole suite as a single zip file (see the
-[`benchmark` usage](../README.md#benchmark) for its CLI options). The archive
+`mauro benchmark run` takes a whole suite as a single zip file (see the
+[`mauro benchmark run` usage](../README.md#mauro-benchmark-run) for its CLI options). The archive
 holds a `maps/` folder of `.omap` files and an `expected/` folder with one
 reference image per map, either at its top level or under a single folder:
 
@@ -240,7 +241,7 @@ have left rather than scrolling a line per map.
 
 Each run goes into its own timestamped folder, so runs do not overwrite each
 other; alongside the `results.txt`/`predictions/`/`differences/` the
-[`benchmark` usage](../README.md#benchmark) already mentions, it also holds:
+[`mauro benchmark run` usage](../README.md#mauro-benchmark-run) already mentions, it also holds:
 
 ```
 Results/<archive name>_YYYY_MM_DD__hh_mm_ss/
@@ -347,7 +348,7 @@ Three limits, all worth knowing:
   raw number replaced.
 
 `--keep-antialiasing` turns the whole classification off and counts every
-differing pixel as real — see [`benchmark`'s options](../README.md#benchmark).
+differing pixel as real — see [`mauro benchmark run`'s options](../README.md#mauro-benchmark-run).
 
 `differences.rs`'s output was checked pixel-for-pixel against a companion
 Python difference-report tool, on a 169-map suite: the same folders, the
@@ -371,7 +372,7 @@ cargo test <name>                     # tests whose name contains <name>
   Those for the pure-arithmetic modules (`geometry.rs`, `qbezier.rs`) check
   specific geometric invariants — extents, offset direction, slice
   round-trips — rather than just that something runs.
-- **Integration tests** in `tests/` drive the **built binaries** through
+- **Integration tests** in `tests/` drive the **built `mauro` binary** through
   `assert_cmd` wherever the command line interface is the contract being
   tested: the exit codes are documented and scripted against, so a change to
   one of them is a breaking change no library-level test would notice.

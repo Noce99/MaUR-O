@@ -1,4 +1,4 @@
-//! End to end tests for the `benchmark` tool: an archive goes in, a run
+//! End to end tests for the `mauro benchmark run` tool: an archive goes in, a run
 //! folder comes out. The archives are built here rather than checked in, so
 //! that a test says in one place what it puts in and what it expects back.
 
@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 
-fn benchmark() -> Command {
-    Command::cargo_bin("benchmark").unwrap()
+fn benchmark_run() -> Command {
+    let mut command = Command::cargo_bin("mauro").unwrap();
+    command.args(["benchmark", "run"]);
+    command
 }
 
 /// Writes a zip holding `maps/` and `expected/` under `root`, from
@@ -18,7 +20,7 @@ fn archive(path: &Path, root: &str, maps: &[(&str, Vec<u8>)], expected: &[(&str,
 }
 
 /// The same, with an `info.txt` alongside `maps/` and `expected/` when
-/// `resolution_and_frame` is given, the way create_benchmark writes one.
+/// `resolution_and_frame` is given, the way mauro benchmark create writes one.
 fn archive_with_info(
     path: &Path,
     root: &str,
@@ -62,8 +64,9 @@ fn run_folder(results: &Path) -> PathBuf {
 fn render(map: &str) -> Vec<u8> {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("reference.png");
-    Command::cargo_bin("map_to_image")
+    Command::cargo_bin("mauro")
         .unwrap()
+        .args(["render"])
         .arg(map)
         .arg(&out)
         .assert()
@@ -97,7 +100,7 @@ fn an_archive_which_follows_the_rules_is_run_as_it_is() {
     );
 
     let results = dir.path().join("Results");
-    benchmark()
+    benchmark_run()
         .arg("--results")
         .arg(&results)
         .arg(&zip)
@@ -161,7 +164,7 @@ fn an_archive_which_follows_the_rules_is_run_as_it_is() {
 }
 
 /// Resolution and frame are always read from the archive's own info.txt,
-/// which create_benchmark writes when it makes the archive — benchmark has
+/// which mauro benchmark create writes when it makes the archive — benchmark has
 /// no flag of its own to override them, which is what keeps a run from
 /// silently drifting from what the reference images were drawn at.
 #[test]
@@ -171,8 +174,9 @@ fn resolution_and_frame_are_read_from_the_archives_own_info_txt() {
 
     let reference = {
         let out = dir.path().join("reference.png");
-        Command::cargo_bin("map_to_image")
+        Command::cargo_bin("mauro")
             .unwrap()
+            .args(["render"])
             .arg("tests/data/empty.xmap")
             .arg(&out)
             .args(["-r", "10", "-f", "5"])
@@ -189,7 +193,7 @@ fn resolution_and_frame_are_read_from_the_archives_own_info_txt() {
     );
 
     let results = dir.path().join("Results");
-    benchmark()
+    benchmark_run()
         .arg("--results")
         .arg(&results)
         .arg(&zip)
@@ -227,7 +231,7 @@ fn a_differing_pair_gets_the_whole_report() {
     );
 
     let results = dir.path().join("Results");
-    benchmark()
+    benchmark_run()
         .arg("--results")
         .arg(&results)
         .args(["--crops", "2"])
@@ -302,7 +306,7 @@ fn broken_names_are_reported_and_written_out_corrected() {
     );
 
     let results = dir.path().join("Results");
-    benchmark()
+    benchmark_run()
         .arg("--results")
         .arg(&results)
         .arg("--names-only")
@@ -350,7 +354,7 @@ fn broken_names_are_reported_and_written_out_corrected() {
         "{names:?}"
     );
 
-    benchmark()
+    benchmark_run()
         .arg("--names-only")
         .arg(&corrected)
         .assert()
@@ -365,7 +369,7 @@ fn an_archive_without_maps_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let zip = dir.path().join("empty.zip");
     archive(&zip, "", &[], &[("000__a.png", wrong_image())]);
-    benchmark()
+    benchmark_run()
         .arg(&zip)
         .assert()
         .failure()
@@ -411,7 +415,7 @@ fn folders_named_in_upper_case_are_run_like_any_other() {
         ],
     );
     let results = dir.path().join("Results");
-    benchmark()
+    benchmark_run()
         .arg("--results")
         .arg(&results)
         .arg(&zip)
@@ -438,7 +442,7 @@ fn names_in_upper_case_folders_are_corrected_too() {
             ("Expected/1_a.png", wrong_image()),
         ],
     );
-    benchmark()
+    benchmark_run()
         .arg("--results")
         .arg(dir.path().join("Results"))
         .arg("--names-only")

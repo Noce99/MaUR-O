@@ -23,32 +23,8 @@ name = "maur_o"
 path = "src/lib.rs"
 
 [[bin]]
-name = "map_to_image"
-path = "src/bin/map_to_image.rs"
-
-[[bin]]
-name = "benchmark"
-path = "src/bin/benchmark.rs"
-
-[[bin]]
-name = "create_benchmark"
-path = "src/bin/create_benchmark.rs"
-
-[[bin]]
-name = "contours_to_raster"
-path = "src/bin/contours_to_raster.rs"
-
-[[bin]]
-name = "dem_geo_tiff_evaluator"
-path = "src/bin/dem_geo_tiff_evaluator.rs"
-
-[[bin]]
-name = "osm_to_omap"
-path = "src/bin/osm_to_omap.rs"
-
-[[bin]]
-name = "add_orthophoto"
-path = "src/bin/add_orthophoto.rs"
+name = "mauro"
+path = "src/bin/mauro/main.rs"
 
 [dependencies]
 quick-xml = "0.37"

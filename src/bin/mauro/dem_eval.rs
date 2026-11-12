@@ -4,7 +4,7 @@
 //! couple of colormap images of the error.
 //!
 //! ```text
-//! dem_geo_tiff_evaluator <ground_truth.tif> <prediction.tif> [--results <dir>]
+//! mauro dem-eval <ground_truth.tif> <prediction.tif> [--results <dir>]
 //! ```
 //!
 //! Every run gets its own timestamped folder, so nothing from an earlier run
@@ -30,12 +30,11 @@ use maur_o::dem_geo_tiff_evaluator::{
 
 #[derive(Parser)]
 #[command(
-    name = "dem_geo_tiff_evaluator",
-    version,
-    about = "Scores a predicted DEM GeoTIFF against a ground-truth one over their shared, \
+    about = "Scores a predicted DEM GeoTIFF against a ground-truth one",
+    long_about = "Scores a predicted DEM GeoTIFF against a ground-truth one over their shared, \
              georeferenced ground."
 )]
-struct Args {
+pub struct Args {
     /// The ground-truth DEM GeoTIFF -- the output grid's own resolution and
     /// origin.
     ground_truth: PathBuf,
@@ -49,19 +48,7 @@ struct Args {
     results: PathBuf,
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(a) => a,
-        Err(e) => {
-            // clap prints its own usage/help text; forward its exit behavior.
-            e.print().ok();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
-
+fn run(args: Args) -> Result<(), (ExitCode, String)> {
     let ground_truth =
         read(&args.ground_truth).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     let prediction =
@@ -111,8 +98,9 @@ fn run() -> Result<(), (ExitCode, String)> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// Runs `mauro dem-eval`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::from(0),
         Err((code, message)) => {
             if !message.is_empty() {

@@ -4,7 +4,7 @@
 //! truth's own grid ([`evaluate`]), and writing the result out as a report
 //! and a couple of colormap PNGs ([`write_report`], [`write_abs_error_png`],
 //! [`write_signed_error_png`], [`write_histogram_png`]) -- what the
-//! `dem_geo_tiff_evaluator` binary is built on.
+//! `mauro dem-eval` is built on.
 //!
 //! Both files must already share the same CRS -- reprojecting one onto the
 //! other is out of scope. Each file's own affine may carry a rotation (a

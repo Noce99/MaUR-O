@@ -1356,7 +1356,7 @@ mod tests {
         assert_eq!(map.colors[0].name, "Black");
         assert_eq!(map.colors[1].name, "Blue");
         // c=1,m=0.2,y=0,k=0 -> computed from CMYK (not the file's stale <rgb>
-        // child), matching the real map_to_image's rendered pixel (0,204,255).
+        // child), matching the real mauro render's rendered pixel (0,204,255).
         let (r, g, b) = map.colors[1].rgb;
         assert!((r - 0.0).abs() < 1e-4, "r={r}");
         assert!((g - 0.8).abs() < 1e-4, "g={g}");

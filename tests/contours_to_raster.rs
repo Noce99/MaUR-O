@@ -1,4 +1,4 @@
-//! CLI-level checks for `contours_to_raster`: it runs Steps 1-4 end to end
+//! CLI-level checks for `mauro dem`: it runs Steps 1-4 end to end
 //! on a small fixture, `--create_svg` writes the ten validation files (eight
 //! numbered, plus the unnumbered "final" and "contours_function" ones), and
 //! the documented exit codes fire on a missing map or config file.
@@ -6,8 +6,10 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-fn contours_to_raster() -> Command {
-    Command::cargo_bin("contours_to_raster").unwrap()
+fn dem() -> Command {
+    let mut command = Command::cargo_bin("mauro").unwrap();
+    command.args(["dem"]);
+    command
 }
 
 /// Two nested closed contours, one resolved by a Slope Line and the other by
@@ -18,7 +20,7 @@ fn contours_to_raster() -> Command {
 fn contours() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("contours.tif");
-    contours_to_raster()
+    dem()
         .arg("tests/data/contours.xmap")
         .arg(&out)
         .assert()
@@ -38,7 +40,7 @@ fn create_svg_writes_ten_non_empty_files_in_a_timestamped_run_folder() {
     let dir = tempfile::tempdir().unwrap();
     let results = dir.path().join("Results");
     let out = dir.path().join("contours.tif");
-    contours_to_raster()
+    dem()
         .arg("tests/data/contours.xmap")
         .arg(&out)
         .arg("--results")
@@ -87,7 +89,7 @@ fn create_svg_writes_ten_non_empty_files_in_a_timestamped_run_folder() {
 fn missing_map_file_exits_2() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("missing.tif");
-    contours_to_raster()
+    dem()
         .arg("tests/data/does-not-exist.xmap")
         .arg(&out)
         .assert()
@@ -99,7 +101,7 @@ fn missing_map_file_exits_2() {
 fn missing_config_file_exits_3() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("contours.tif");
-    contours_to_raster()
+    dem()
         .arg("tests/data/contours.xmap")
         .arg(&out)
         .arg("--config")
@@ -109,7 +111,7 @@ fn missing_config_file_exits_3() {
         .code(3);
 }
 
-/// An OCAD map is converted on the way in, as `map_to_image` does. It used
+/// An OCAD map is converted on the way in, as `mauro render` does. It used
 /// to be read as XML and refused at once, exit code 2: "stream did not
 /// contain valid UTF-8".
 ///
@@ -119,7 +121,7 @@ fn missing_config_file_exits_3() {
 #[test]
 fn an_ocd_map_is_converted_on_the_way_in() {
     let dir = tempfile::tempdir().unwrap();
-    contours_to_raster()
+    dem()
         .arg("maps/testit.ocd")
         .arg("--results")
         .arg(dir.path())

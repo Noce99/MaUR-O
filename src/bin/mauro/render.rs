@@ -2,7 +2,7 @@
 //! Qt, no graphical environment needed.
 //!
 //! ```text
-//! map_to_image [-r px-per-meter] [-f meters | -w left,top,right,bottom] <map-file> [image-file]
+//! mauro render [-r px-per-meter] [-f meters | -w left,top,right,bottom] <map-file> [image-file]
 //! ```
 //!
 //! This is the tool to reach for to just look at a map. The suffix of the
@@ -40,14 +40,13 @@ use maur_o::render::{
 
 #[derive(Parser)]
 #[command(
-    name = "map_to_image",
-    version,
-    about = "Renders an OpenOrienteering Mapper or OCAD map to a raster image, without a \
+    about = "Renders a map to a raster image (PNG/BMP/TIFF/JPEG) or to SVG",
+    long_about = "Renders an OpenOrienteering Mapper or OCAD map to a raster image, without a \
              graphical user interface.\n\n\
              Lengths are given in meters on the ground. They are converted to paper \
              units using the map scale (1:15000 etc.) stored in the map file."
 )]
-struct Args {
+pub struct Args {
     /// The map to be rendered (.omap, .xmap, .ocd).
     map_file: PathBuf,
 
@@ -116,19 +115,7 @@ fn write_svg(args: &Args, svg_path: &Path) -> Result<(), (ExitCode, String)> {
     Ok(())
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(a) => a,
-        Err(e) => {
-            // clap prints its own usage/help text; forward its exit behavior.
-            e.print().ok();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
-
+fn run(args: Args) -> Result<(), (ExitCode, String)> {
     if !args.resolution.is_finite() || args.resolution < 0.0 {
         return Err((
             ExitCode::from(1),
@@ -223,8 +210,9 @@ fn run() -> Result<(), (ExitCode, String)> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// Runs `mauro render`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::from(0),
         Err((code, message)) => {
             if !message.is_empty() {

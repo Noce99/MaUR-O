@@ -588,7 +588,7 @@ fn whole(path: &Path, height: u32, width: u32, limit: u32) -> Result<RgbImage, S
 ///
 /// Without limits: the `image` crate refuses by default to decode past 512MiB,
 /// a guard against a hostile file, which a map rendered by this project's own
-/// `benchmark` and `create_benchmark` is not. A real map at a fine resolution
+/// `mauro benchmark run` and `mauro benchmark create` is not. A real map at a fine resolution
 /// clears that on its own — the images compared here are not.
 pub fn open_image(path: &Path) -> Result<RgbImage, String> {
     let mut reader = image::ImageReader::open(path)

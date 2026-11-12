@@ -3,7 +3,7 @@
 //! writes it out as a raster -- `Contours-to-Raster.md`'s Steps 1 through 5.
 //!
 //! ```text
-//! contours_to_raster <map.omap> [output.tif] [--results <dir>] [--config <path>]
+//! mauro dem <map.omap> [output.tif] [--results <dir>] [--config <path>]
 //!     [--equidistance <meters>] [--create_svg]
 //! ```
 //!
@@ -47,12 +47,11 @@ use maur_o::step5_gravity_raster;
 
 #[derive(Parser)]
 #[command(
-    name = "contours_to_raster",
-    version,
-    about = "Extracts elevation-gravity information from a map's contours and writes it out as \
+    about = "Extracts an elevation GeoTIFF from a map's contours",
+    long_about = "Extracts elevation-gravity information from a map's contours and writes it out as \
              an elevation TIFF (Contours-to-Raster.md, Steps 1-5)."
 )]
-struct Args {
+pub struct Args {
     /// The map to read: Mapper's `.omap`/`.xmap`, or OCAD's `.ocd`.
     map_file: PathBuf,
 
@@ -174,19 +173,7 @@ fn write_step3_svgs(
     Ok(())
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(a) => a,
-        Err(e) => {
-            // clap prints its own usage/help text; forward its exit behavior.
-            e.print().ok();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
-
+fn run(args: Args) -> Result<(), (ExitCode, String)> {
     let config =
         Config::load(&args.config).map_err(|e| (ExitCode::from(3), format!("Error: {e}")))?;
 
@@ -208,7 +195,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     let output_path = run_dir.join(&output_name);
 
     // Either format the crate reads: an OCAD `.ocd` is converted on the way
-    // in, the same as `map_to_image` does.
+    // in, the same as `mauro render` does.
     let (map, read_warnings) =
         read_map_file(&args.map_file).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     for warning in &read_warnings {
@@ -487,8 +474,9 @@ fn run() -> Result<(), (ExitCode, String)> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// Runs `mauro dem`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::from(0),
         Err((code, message)) => {
             if !message.is_empty() {

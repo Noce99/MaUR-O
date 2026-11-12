@@ -1,4 +1,4 @@
-//! `osm_to_omap`'s command line: that what it writes is a map this crate and
+//! `mauro osm`'s command line: that what it writes is a map this crate and
 //! Mapper read back as one, georeferenced and clipped, drawn to the standard
 //! asked for, and that it exits with the documented code when it cannot.
 //!
@@ -18,7 +18,7 @@ const BBOX: &str = "--bbox=11.3415,44.4925,11.3445,44.4945";
 
 /// The command, drawing like openstreetmap.org: what most tests here are
 /// about.
-fn osm_to_omap() -> Command {
+fn carto() -> Command {
     let mut command = orienteering();
     command.args(["--standard", "osm"]);
     command
@@ -26,7 +26,9 @@ fn osm_to_omap() -> Command {
 
 /// The command as it is, which draws to ISSprOM.
 fn orienteering() -> Command {
-    Command::cargo_bin("osm_to_omap").unwrap()
+    let mut command = Command::cargo_bin("mauro").unwrap();
+    command.args(["osm"]);
+    command
 }
 
 /// The symbol code of each object of a map, in order.
@@ -219,7 +221,7 @@ fn a_portico_is_cut_out_of_the_building_it_runs_under() {
 fn converts_and_reads_back_as_a_georeferenced_map() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("sample.omap");
-    osm_to_omap()
+    carto()
         .arg(BBOX)
         .arg(SAMPLE)
         .arg(&out)
@@ -227,7 +229,7 @@ fn converts_and_reads_back_as_a_georeferenced_map() {
         .success()
         .stdout(predicates::str::contains("map scale 1:5000"))
         .stdout(predicates::str::contains("EPSG:32632"))
-        .stdout(predicates::str::contains("map_to_image -r 0.7143"));
+        .stdout(predicates::str::contains("mauro render -r 0.7143"));
 
     let (map, _warnings) = read_xml_map(&out).unwrap();
     assert_eq!(map.scale_denominator, 5000);
@@ -278,7 +280,7 @@ fn converts_and_reads_back_as_a_georeferenced_map() {
 fn fewer_details_leave_out_what_carto_leaves_out_at_that_zoom() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("sample.omap");
-    osm_to_omap()
+    carto()
         .arg(BBOX)
         .args(["--details", "0"])
         .arg(SAMPLE)
@@ -291,7 +293,7 @@ fn fewer_details_leave_out_what_carto_leaves_out_at_that_zoom() {
     // Zoom 13 has no building, footway or tree: the land and the street.
     assert_eq!(symbol_names(&map), ["land", "highway residential"]);
 
-    osm_to_omap()
+    carto()
         .arg(BBOX)
         .args(["--details", "5"])
         .arg(SAMPLE)
@@ -305,14 +307,10 @@ fn the_written_map_renders() {
     let dir = tempfile::tempdir().unwrap();
     let omap = dir.path().join("sample.omap");
     let png = dir.path().join("sample.png");
-    osm_to_omap()
-        .arg(BBOX)
-        .arg(SAMPLE)
-        .arg(&omap)
-        .assert()
-        .success();
-    Command::cargo_bin("map_to_image")
+    carto().arg(BBOX).arg(SAMPLE).arg(&omap).assert().success();
+    Command::cargo_bin("mauro")
         .unwrap()
+        .args(["render"])
         .args(["-r", "0.7143", "-f", "0"])
         .arg(&omap)
         .arg(&png)
@@ -323,7 +321,7 @@ fn the_written_map_renders() {
 
 #[test]
 fn a_missing_file_exits_with_2() {
-    osm_to_omap()
+    carto()
         .arg("tests/data/does_not_exist.osm")
         .assert()
         .code(2)
@@ -332,7 +330,7 @@ fn a_missing_file_exits_with_2() {
 
 #[test]
 fn a_malformed_bounding_box_is_a_usage_error() {
-    osm_to_omap()
+    carto()
         .args(["--bbox=11.34,44.49", SAMPLE])
         .assert()
         .code(1);
@@ -356,7 +354,7 @@ fn symbol_names(map: &maur_o::map::Map) -> Vec<String> {
 fn a_bus_line_from_the_route_relations_gets_its_route_stops_and_numbers() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("bus.omap");
-    osm_to_omap()
+    carto()
         .args([BBOX, "--bus", "13,99", SAMPLE])
         .arg(&out)
         .assert()
@@ -390,7 +388,7 @@ fn a_bus_line_from_the_route_relations_gets_its_route_stops_and_numbers() {
 fn a_bus_line_from_a_gtfs_feed() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("gtfs.omap");
-    osm_to_omap()
+    carto()
         .args([
             BBOX,
             "--bus",
@@ -434,7 +432,7 @@ fn a_bus_line_from_a_gtfs_feed() {
 
 #[test]
 fn a_line_not_running_that_date_is_left_out() {
-    osm_to_omap()
+    carto()
         .args([
             BBOX,
             "--bus",
@@ -456,7 +454,7 @@ fn a_line_not_running_that_date_is_left_out() {
 
 #[test]
 fn a_day_and_a_date_do_not_go_together() {
-    osm_to_omap()
+    carto()
         .args([
             BBOX,
             "--bus",
@@ -475,7 +473,7 @@ fn a_day_and_a_date_do_not_go_together() {
 
 #[test]
 fn a_day_the_feed_has_no_service_on_is_reported() {
-    osm_to_omap()
+    carto()
         .args([
             BBOX,
             "--bus",
@@ -496,7 +494,7 @@ fn a_day_the_feed_has_no_service_on_is_reported() {
 
 #[test]
 fn a_missing_gtfs_feed_exits_with_2() {
-    osm_to_omap()
+    carto()
         .args([
             BBOX,
             "--bus",
@@ -514,7 +512,7 @@ fn a_missing_gtfs_feed_exits_with_2() {
 fn a_train_line_keeps_its_own_colour_and_is_not_a_bus() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("train.omap");
-    osm_to_omap()
+    carto()
         .args([BBOX, "--train", "MEX", "--bus", "MEX", SAMPLE])
         .arg(&out)
         .assert()
@@ -568,7 +566,7 @@ fn a_train_line_keeps_its_own_colour_and_is_not_a_bus() {
 fn a_legend_explains_the_symbols_the_map_uses_below_it() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("legend.omap");
-    osm_to_omap()
+    carto()
         .args([BBOX, "--bus", "13", "--legend", SAMPLE])
         .arg(&out)
         .assert()
@@ -612,7 +610,7 @@ fn a_legend_explains_the_symbols_the_map_uses_below_it() {
 fn all_takes_every_line_of_the_feed_or_else_of_the_extract() {
     let dir = tempfile::tempdir().unwrap();
     // From the GTFS feed: its one route.
-    osm_to_omap()
+    carto()
         .args([
             BBOX,
             "--bus",
@@ -628,7 +626,7 @@ fn all_takes_every_line_of_the_feed_or_else_of_the_extract() {
         .stderr(predicates::str::contains("Warning").not());
     // With no feed, from the route relations: the bus, and the monorail as
     // the one train.
-    osm_to_omap()
+    carto()
         .args([BBOX, "--bus", "all", "--train", "all", SAMPLE])
         .arg(dir.path().join("osm.omap"))
         .assert()
@@ -641,7 +639,7 @@ fn all_takes_every_line_of_the_feed_or_else_of_the_extract() {
 fn a_cap_on_the_headway_leaves_out_the_buses_running_less_often() {
     let dir = tempfile::tempdir().unwrap();
     let gtfs = |cap: &str, name: &str| {
-        osm_to_omap()
+        carto()
             .args([
                 BBOX,
                 "--bus",
@@ -666,7 +664,7 @@ fn a_cap_on_the_headway_leaves_out_the_buses_running_less_often() {
 
     // From the route relations, with no interval tag: nothing says how
     // often it runs, so it is kept, and said so.
-    osm_to_omap()
+    carto()
         .args([BBOX, "--bus", "13", "--max-headway", "10", SAMPLE])
         .arg(dir.path().join("unknown.omap"))
         .assert()
@@ -681,7 +679,7 @@ fn a_cap_on_the_headway_leaves_out_the_buses_running_less_often() {
 fn two_bus_lines_on_one_street_are_drawn_side_by_side_with_one_bar() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("bundle.omap");
-    osm_to_omap()
+    carto()
         .args([BBOX, "--bus", "14,13", SAMPLE])
         .arg(&out)
         .assert()
@@ -724,7 +722,7 @@ fn excluded_buses_are_left_out_of_those_selected() {
     // From all the extract's buses, 13 and 14, leave out 13 — under either
     // spelling of the option.
     for option in ["--bus-exclude", "--bus_exclude"] {
-        osm_to_omap()
+        carto()
             .args([BBOX, "--bus", "all", option, "13", SAMPLE])
             .arg(dir.path().join("excluded.omap"))
             .assert()
@@ -733,7 +731,7 @@ fn excluded_buses_are_left_out_of_those_selected() {
             .stdout(predicates::str::contains("bus 13 (").not());
     }
     // Leaving out a line not selected says so.
-    osm_to_omap()
+    carto()
         .args([BBOX, "--bus", "14", "--bus-exclude", "99", SAMPLE])
         .arg(dir.path().join("unknown.omap"))
         .assert()
@@ -760,7 +758,7 @@ fn maps_draws_each_maps_area_and_name() {
     )
     .unwrap();
     let out = dir.path().join("maps.omap");
-    osm_to_omap()
+    carto()
         .args([BBOX, "--maps"])
         .arg(&list)
         .args(["--legend", SAMPLE])
@@ -804,7 +802,7 @@ fn maps_draws_each_maps_area_and_name() {
 
 #[test]
 fn a_maps_list_that_cannot_be_read_exits_with_2() {
-    osm_to_omap()
+    carto()
         .args(["--maps", "no/such/list.csv", SAMPLE])
         .assert()
         .code(2);
@@ -825,7 +823,7 @@ fn maps_takes_the_colours_of_a_csv_list() {
     )
     .unwrap();
     let out = dir.path().join("maps.omap");
-    osm_to_omap()
+    carto()
         .args([BBOX, "--maps"])
         .arg(&list)
         .arg(SAMPLE)
@@ -878,7 +876,7 @@ fn maps_draws_the_forbidden_zones_the_start_and_the_finish() {
     )
     .unwrap();
     let out = dir.path().join("maps.omap");
-    osm_to_omap()
+    carto()
         .args([BBOX, "--maps"])
         .arg(&list)
         .args(["--legend", SAMPLE])
@@ -942,7 +940,7 @@ fn areas_single_color_draws_every_area_in_black() {
     )
     .unwrap();
     let out = dir.path().join("maps.omap");
-    osm_to_omap()
+    carto()
         .args([BBOX, "--areas"])
         .arg(&list)
         .args(["--areas-single-color", SAMPLE])
@@ -961,7 +959,7 @@ fn areas_single_color_draws_every_area_in_black() {
 
 #[test]
 fn areas_single_color_needs_a_list_of_maps() {
-    osm_to_omap()
+    carto()
         .args(["--areas-single-color", SAMPLE])
         .assert()
         .code(1);
@@ -987,7 +985,7 @@ fn drinking_water_marks_the_fountains_with_a_glass() {
     .unwrap();
     let out = dir.path().join("water.omap");
     let glasses = |water: bool| {
-        let mut command = osm_to_omap();
+        let mut command = carto();
         if water {
             command.arg("--drinking-water");
         }

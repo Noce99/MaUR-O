@@ -1,4 +1,4 @@
-//! Every orthophoto WMS [`add_orthophoto`](crate::orthophoto) knows of.
+//! Every orthophoto WMS [`mauro ortho`](crate::orthophoto) knows of.
 //!
 //! Each was checked by hand before going in: its capabilities read, a photo
 //! of a known town fetched and looked at, what it draws outside its ground

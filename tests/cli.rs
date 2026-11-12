@@ -1,4 +1,4 @@
-//! The quick checks on `map_to_image`'s command line interface: that it
+//! The quick checks on `mauro render`'s command line interface: that it
 //! renders what it is given, and that it says something useful and exits with
 //! the documented code when it cannot.
 //!
@@ -9,8 +9,10 @@
 
 use assert_cmd::Command;
 
-fn map_to_image() -> Command {
-    Command::cargo_bin("map_to_image").unwrap()
+fn render() -> Command {
+    let mut command = Command::cargo_bin("mauro").unwrap();
+    command.args(["render"]);
+    command
 }
 
 /// An empty map with the default options is a white square of 100 by 100 meters.
@@ -18,7 +20,7 @@ fn map_to_image() -> Command {
 fn empty_map() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("empty.png");
-    map_to_image()
+    render()
         .arg("tests/data/empty.xmap")
         .arg(&out)
         .assert()
@@ -31,7 +33,7 @@ fn empty_map() {
 fn empty_map_options() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("empty2.png");
-    map_to_image()
+    render()
         .args(["--resolution=2", "--frame=25"])
         .arg("tests/data/empty.xmap")
         .arg(&out)
@@ -45,7 +47,7 @@ fn empty_map_options() {
 fn shapes() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("shapes.png");
-    map_to_image()
+    render()
         .arg("--frame=10")
         .arg("tests/data/shapes.xmap")
         .arg(&out)
@@ -58,7 +60,7 @@ fn shapes() {
 fn missing_file() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("missing.png");
-    map_to_image()
+    render()
         .arg("tests/data/does-not-exist.xmap")
         .arg(&out)
         .assert()
@@ -69,7 +71,7 @@ fn missing_file() {
 fn invalid_resolution() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("invalid.png");
-    map_to_image()
+    render()
         .arg("--resolution=nonsense")
         .arg("tests/data/empty.xmap")
         .arg(&out)
@@ -83,7 +85,7 @@ fn invalid_resolution() {
 fn window() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("window.png");
-    map_to_image()
+    render()
         .args(["--window", "-1,-1,3,3"])
         .arg("tests/data/shapes.xmap")
         .arg(&out)
@@ -106,7 +108,7 @@ fn invalid_window() {
         "0,4,4,0",
         "nan,0,1,1",
     ] {
-        map_to_image()
+        render()
             .args(["--window", window])
             .arg("tests/data/shapes.xmap")
             .arg(&out)
@@ -120,7 +122,7 @@ fn invalid_window() {
 fn window_and_frame() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("invalid.png");
-    map_to_image()
+    render()
         .args(["--window", "0,0,4,4", "--frame=10"])
         .arg("tests/data/shapes.xmap")
         .arg(&out)
@@ -133,11 +135,51 @@ fn window_and_frame() {
 fn huge_window() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("huge.png");
-    map_to_image()
+    render()
         .args(["--window", "0,0,1e9,1e9"])
         .arg("tests/data/shapes.xmap")
         .arg(&out)
         .assert()
         .code(3)
         .stderr(predicates::str::contains("too large"));
+}
+
+/// `mauro` with no subcommand prints its help, the subcommands listed, and
+/// is a usage error.
+#[test]
+fn no_subcommand() {
+    Command::cargo_bin("mauro")
+        .unwrap()
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("Usage: mauro <COMMAND>"))
+        .stderr(predicates::str::contains("render"))
+        .stderr(predicates::str::contains("benchmark"));
+}
+
+/// An unknown subcommand is a usage error, as an unknown option is.
+#[test]
+fn unknown_subcommand() {
+    Command::cargo_bin("mauro")
+        .unwrap()
+        .arg("map_to_image")
+        .assert()
+        .code(1);
+}
+
+/// `--help` and `--version` succeed, for `mauro` and for its subcommands.
+#[test]
+fn help_and_version() {
+    for args in [
+        &["--help"][..],
+        &["--version"],
+        &["render", "--help"],
+        &["benchmark", "run", "--version"],
+    ] {
+        Command::cargo_bin("mauro")
+            .unwrap()
+            .args(args)
+            .assert()
+            .success();
+    }
 }

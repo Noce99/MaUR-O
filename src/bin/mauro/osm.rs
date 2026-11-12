@@ -3,7 +3,7 @@
 //! like openstreetmap.org's own Standard map.
 //!
 //! ```text
-//! osm_to_omap [--standard issprom|isom|osm]
+//! mauro osm [--standard issprom|isom|osm]
 //!             [--bbox min_lon,min_lat,max_lon,max_lat | --around lat,lon [--size 1km]]
 //!             [--details 0-4]
 //!             [--bus 13,19,...]
@@ -14,7 +14,7 @@
 //!             [--legend]
 //!             <osm-file> [omap-file]
 //!
-//! osm_to_omap --download (--bbox ... | --around lat,lon [--size 1km])
+//! mauro osm --download (--bbox ... | --around lat,lon [--size 1km])
 //!             [--save-osm area.osm] [--overpass-url URL] [--max-area 25]
 //!             [the options above] <omap-file>
 //! ```
@@ -81,7 +81,7 @@
 //! | 4 | 17 | 1:2 500 |
 //!
 //! The resolution printed at the end is the `-r` to give
-//! `map_to_image` for a rendering with one pixel to a carto pixel, as on
+//! `mauro render` for a rendering with one pixel to a carto pixel, as on
 //! openstreetmap.org.
 //!
 //! `--bus` draws bus lines over the map, each in its own colour: its route,
@@ -147,7 +147,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::parser::ValueSource;
-use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
+use clap::{ArgMatches, Parser, ValueEnum};
 
 use maur_o::bus::{
     gtfs_references, lines_from_gtfs, lines_from_osm, osm_references, BusLine, Day, Mode,
@@ -195,13 +195,12 @@ const OSM_ONLY: &[&str] = &[
 
 #[derive(Parser)]
 #[command(
-    name = "osm_to_omap",
-    version,
-    about = "Converts OpenStreetMap data (.osm) into an OpenOrienteering Mapper map: an \
+    about = "Converts OpenStreetMap data into an OpenOrienteering Mapper map",
+    long_about = "Converts OpenStreetMap data (.osm) into an OpenOrienteering Mapper map: an \
              orienteering map drawn to ISSprOM 2019 or ISOM 2017-2, or one drawn like \
              openstreetmap.org's Standard style."
 )]
-struct Args {
+pub struct Args {
     /// The OpenStreetMap XML file to convert; with --download, the map to
     /// be written.
     #[arg(value_name = "OSM_FILE")]
@@ -335,16 +334,7 @@ struct Args {
     legend: bool,
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let usage = |e: clap::Error| {
-        e.print().ok();
-        (
-            ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-            String::new(),
-        )
-    };
-    let matches = Args::command().try_get_matches().map_err(usage)?;
-    let args = Args::from_arg_matches(&matches).map_err(usage)?;
+fn run(args: Args, matches: &ArgMatches) -> Result<(), (ExitCode, String)> {
     let standard = match args.standard {
         StandardArg::Issprom => Some(Standard::Issprom),
         StandardArg::Isom => Some(Standard::Isom),
@@ -728,7 +718,7 @@ fn run() -> Result<(), (ExitCode, String)> {
         );
     }
     println!(
-        "One pixel to a carto pixel, as on openstreetmap.org: map_to_image -r {:.4} {}",
+        "One pixel to a carto pixel, as on openstreetmap.org: mauro render -r {:.4} {}",
         conversion.tile_resolution(),
         omap_file.display()
     );
@@ -801,8 +791,9 @@ fn ask(agent: &ureq::Agent, url: &str, query: &str) -> Result<String, ureq::Erro
         .read_to_string()
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// Runs `mauro osm`; `matches` are its own, for which options were given.
+pub fn main(args: Args, matches: &ArgMatches) -> ExitCode {
+    match run(args, matches) {
         Ok(()) => ExitCode::SUCCESS,
         Err((code, message)) => {
             if !message.is_empty() {

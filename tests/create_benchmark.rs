@@ -1,8 +1,8 @@
-//! End to end tests for the `create_benchmark` tool: maps go in, an archive
-//! `benchmark` can run comes out.
+//! End to end tests for the `mauro benchmark create` tool: maps go in, an archive
+//! `mauro benchmark run` can run comes out.
 //!
 //! The ground truth renderer is a stub script rather than the real external
-//! renderer. What is being tested here is what `create_benchmark` does
+//! renderer. What is being tested here is what `mauro benchmark create` does
 //! *around* a renderer — which maps it finds, what it calls them, what it
 //! leaves out — and for that a stub is not a compromise but the better tool:
 //! it can be told to fail on the third map, which is how the interesting
@@ -15,8 +15,10 @@ use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 
-fn create_benchmark() -> Command {
-    Command::cargo_bin("create_benchmark").unwrap()
+fn benchmark_create() -> Command {
+    let mut command = Command::cargo_bin("mauro").unwrap();
+    command.args(["benchmark", "create"]);
+    command
 }
 
 /// Writes an executable script and returns its path.
@@ -82,7 +84,7 @@ fn a_folder_becomes_an_archive_which_follows_the_naming_rules() {
     map(&source, "deeper/notes.txt", "not a map");
     let archive = dir.path().join("suite.zip");
 
-    create_benchmark()
+    benchmark_create()
         .arg(&renderer)
         .arg(&source)
         .arg("-o")
@@ -131,7 +133,7 @@ fn an_archive_nobody_named_lands_in_a_folder_of_its_own() {
 
     // Named after the source and the resolution, in benchmarks/, which is
     // made on the way.
-    create_benchmark()
+    benchmark_create()
         .current_dir(&here)
         .arg(&renderer)
         .arg(&source)
@@ -152,7 +154,7 @@ fn the_archive_it_writes_needs_no_correcting() {
         map(&source, name, "map");
     }
     let archive = dir.path().join("suite.zip");
-    create_benchmark()
+    benchmark_create()
         .arg(&renderer)
         .arg(&source)
         .arg("-o")
@@ -160,8 +162,9 @@ fn the_archive_it_writes_needs_no_correcting() {
         .assert()
         .success();
 
-    Command::cargo_bin("benchmark")
+    Command::cargo_bin("mauro")
         .unwrap()
+        .args(["benchmark", "run"])
         .arg("--names-only")
         .arg(&archive)
         .assert()
@@ -180,7 +183,7 @@ fn a_map_which_cannot_be_rendered_leaves_no_hole_in_the_ordinals() {
     let archive = dir.path().join("suite.zip");
 
     // Exit code 2: the archive was written, but not every map is in it.
-    create_benchmark()
+    benchmark_create()
         .arg(&renderer)
         .arg(&source)
         .arg("-o")
@@ -215,7 +218,7 @@ fn two_maps_of_the_same_name_are_told_apart_by_their_folder() {
     map(&source, "south/Contour.omap", "south");
     let archive = dir.path().join("suite.zip");
 
-    create_benchmark()
+    benchmark_create()
         .arg(&renderer)
         .arg(&source)
         .arg("-o")
@@ -244,7 +247,7 @@ fn a_map_file_becomes_one_map_per_symbol_with_its_description() {
     let renderer = stub_renderer(dir.path());
     let archive = dir.path().join("symbols.zip");
 
-    create_benchmark()
+    benchmark_create()
         .arg(&renderer)
         .arg("tests/data/shapes.xmap")
         .arg("-o")
@@ -277,7 +280,7 @@ fn the_settings_the_images_were_drawn_at_are_written_down() {
     map(&source, "a.omap", "a");
     let archive = dir.path().join("suite.zip");
 
-    create_benchmark()
+    benchmark_create()
         .arg(&renderer)
         .arg(&source)
         .arg("-o")
@@ -310,7 +313,7 @@ fn an_archive_which_is_already_there_is_kept_unless_it_is_to_be_replaced() {
     let archive = dir.path().join("suite.zip");
     std::fs::write(&archive, "not an archive").unwrap();
 
-    create_benchmark()
+    benchmark_create()
         .arg(&renderer)
         .arg(&source)
         .arg("-o")
@@ -320,7 +323,7 @@ fn an_archive_which_is_already_there_is_kept_unless_it_is_to_be_replaced() {
         .stderr(predicates::str::contains("--force replaces it"));
     assert_eq!(std::fs::read_to_string(&archive).unwrap(), "not an archive");
 
-    create_benchmark()
+    benchmark_create()
         .arg(&renderer)
         .arg(&source)
         .arg("-o")
@@ -338,7 +341,7 @@ fn a_renderer_which_cannot_be_run_is_reported_before_anything_is_made() {
     map(&source, "a.omap", "a");
     let archive = dir.path().join("suite.zip");
 
-    create_benchmark()
+    benchmark_create()
         .arg(dir.path().join("no_such_renderer"))
         .arg(&source)
         .arg("-o")
@@ -361,7 +364,7 @@ fn a_file_with_a_non_ascii_name_is_no_reason_to_stop() {
     map(&source, "Café.pdf", "not a map");
     let archive = dir.path().join("suite.zip");
 
-    create_benchmark()
+    benchmark_create()
         .arg(&renderer)
         .arg(&source)
         .arg("-o")
@@ -377,8 +380,8 @@ fn a_file_with_a_non_ascii_name_is_no_reason_to_stop() {
     assert!(!names.iter().any(|n| n.ends_with(".pdf")), "{names:?}");
 }
 
-/// The command it prints for running the archive is one `benchmark`
-/// accepts. It used to print `benchmark -r X -f Y archive`, and `benchmark`
+/// The command it prints for running the archive is one `mauro benchmark run`
+/// accepts. It used to print `benchmark -r X -f Y archive`, and `mauro benchmark run`
 /// has neither flag: it reads both settings from the archive's info.txt.
 #[test]
 fn the_command_it_suggests_for_the_archive_runs() {
@@ -388,7 +391,7 @@ fn the_command_it_suggests_for_the_archive_runs() {
     map(&source, "a.omap", "a");
     let archive = dir.path().join("suite.zip");
 
-    let output = create_benchmark()
+    let output = benchmark_create()
         .arg(&renderer)
         .arg(&source)
         .arg("-o")
@@ -400,14 +403,15 @@ fn the_command_it_suggests_for_the_archive_runs() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let suggested = stdout
         .lines()
-        .find_map(|line| line.strip_prefix("Run it with: benchmark "))
+        .find_map(|line| line.strip_prefix("Run it with: mauro benchmark run "))
         .unwrap_or_else(|| panic!("no suggestion in:\n{stdout}"));
     assert_eq!(suggested, archive.display().to_string());
 
     // The stub's images are not PNGs, so only the names are checked; what
     // matters is that the command line is accepted.
-    Command::cargo_bin("benchmark")
+    Command::cargo_bin("mauro")
         .unwrap()
+        .args(["benchmark", "run"])
         .arg("--results")
         .arg(dir.path().join("Results"))
         .arg("--names-only")
@@ -417,4 +421,36 @@ fn the_command_it_suggests_for_the_archive_runs() {
 
     let info = contents(&archive, "suite/info.txt");
     assert!(!info.contains("-r "), "{info}");
+}
+
+/// `--renderer-arg` goes before the renderer's own arguments, which is how
+/// `mauro` itself is the renderer: `mauro render`. The archive that makes
+/// then runs with no difference at all, as MaUR-O measured against itself.
+#[test]
+fn mauro_render_is_a_renderer_with_renderer_arg() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("suite");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::copy("tests/data/shapes.xmap", source.join("shapes.xmap")).unwrap();
+    let archive = dir.path().join("suite.zip");
+
+    benchmark_create()
+        .args(["--renderer-arg", "render"])
+        .arg(assert_cmd::cargo::cargo_bin("mauro"))
+        .arg(&source)
+        .arg("-o")
+        .arg(&archive)
+        .assert()
+        .success();
+    let info = contents(&archive, "suite/info.txt");
+    assert!(info.contains("mauro render ("), "{info}");
+
+    Command::cargo_bin("mauro")
+        .unwrap()
+        .args(["benchmark", "run"])
+        .arg("--results")
+        .arg(dir.path().join("Results"))
+        .arg(&archive)
+        .assert()
+        .success();
 }

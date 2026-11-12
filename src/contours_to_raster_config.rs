@@ -1,4 +1,4 @@
-//! The `contours_to_raster` config file: the thirty-five parameters
+//! The `mauro dem` config file: the thirty-five parameters
 //! `Contours-to-Raster.md` names, read from a small hand-rolled `key =
 //! value` format (no `serde`/`toml` dependency exists anywhere else in this
 //! crate, and one file with thirty-five numbers does not need one).
@@ -320,7 +320,7 @@ impl Config {
     /// time), for callers with no filesystem access (e.g. wasm) that have no
     /// need to tune the algorithm's own thirty-five parameters. Panics if
     /// the embedded file is malformed, which would mean this crate itself
-    /// fails to build a working `contours_to_raster` binary either --
+    /// fails to build a working `mauro dem` either --
     /// `tests::default_shipped_config_parses` below guards against that.
     pub fn default_shipped() -> Config {
         Config::parse(SHIPPED_CONFIG, "<embedded config/contours_to_raster.conf>")

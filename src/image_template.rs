@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(once, twice);
     }
 
-    /// What `xml_writer` (and so `osm_to_omap`) writes: no templates and no
+    /// What `xml_writer` (and so `mauro osm`) writes: no templates and no
     /// view.
     #[test]
     fn a_map_without_templates_gets_its_first() {

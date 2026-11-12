@@ -1,4 +1,4 @@
-//! `add_orthophoto`'s command line: the exit codes it gives before it ever
+//! `mauro ortho`'s command line: the exit codes it gives before it ever
 //! reaches the network.
 //!
 //! Everything past that point talks to a mapping agency's WMS, which a test
@@ -8,8 +8,10 @@
 
 use assert_cmd::Command;
 
-fn add_orthophoto() -> Command {
-    Command::cargo_bin("add_orthophoto").unwrap()
+fn ortho() -> Command {
+    let mut command = Command::cargo_bin("mauro").unwrap();
+    command.args(["ortho"]);
+    command
 }
 
 /// `shapes.xmap`, its objects intact, placed on the earth at `lat`, `lon`
@@ -26,7 +28,7 @@ fn shapes_at(lat: f64, lon: f64) -> String {
 
 #[test]
 fn lists_the_services() {
-    add_orthophoto()
+    ortho()
         .arg("--list-services")
         .assert()
         .success()
@@ -35,7 +37,7 @@ fn lists_the_services() {
 
 #[test]
 fn an_unknown_service_is_a_usage_error() {
-    add_orthophoto()
+    ortho()
         .args(["--service", "atlantis-1999", "tests/data/empty.xmap"])
         .assert()
         .code(1)
@@ -44,7 +46,7 @@ fn an_unknown_service_is_a_usage_error() {
 
 #[test]
 fn a_pixel_size_must_be_positive() {
-    add_orthophoto()
+    ortho()
         .args(["--pixel-size", "0", "tests/data/empty.xmap"])
         .assert()
         .code(1)
@@ -53,7 +55,7 @@ fn a_pixel_size_must_be_positive() {
 
 #[test]
 fn a_missing_map_cannot_be_read() {
-    add_orthophoto()
+    ortho()
         .arg("tests/data/no_such_map.omap")
         .assert()
         .code(2)
@@ -65,7 +67,7 @@ fn only_mapper_files_are_edited() {
     let dir = tempfile::tempdir().unwrap();
     let ocd = dir.path().join("map.ocd");
     std::fs::write(&ocd, b"not really OCAD").unwrap();
-    add_orthophoto()
+    ortho()
         .arg(&ocd)
         .assert()
         .code(2)
@@ -80,7 +82,7 @@ fn a_map_not_on_the_earth_is_turned_away_untouched() {
     let map = dir.path().join("local.xmap");
     std::fs::copy("tests/data/shapes.xmap", &map).unwrap();
     let before = std::fs::read(&map).unwrap();
-    add_orthophoto()
+    ortho()
         .arg(&map)
         .assert()
         .code(3)
@@ -104,7 +106,7 @@ fn an_empty_map_has_nothing_to_download() {
 </map>"#,
     )
     .unwrap();
-    add_orthophoto()
+    ortho()
         .arg(&map)
         .assert()
         .code(3)
@@ -119,7 +121,7 @@ fn a_map_no_service_covers_is_a_warning() {
     let map = dir.path().join("atlantic.xmap");
     std::fs::write(&map, shapes_at(40.0, -40.0)).unwrap();
     let before = std::fs::read(&map).unwrap();
-    add_orthophoto()
+    ortho()
         .arg(&map)
         .assert()
         .code(5)

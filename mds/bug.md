@@ -13,40 +13,40 @@ the more correct of the two.
 Three benchmarks are public and reproducible from what's in this repository
 (a fourth, over a private real map dataset, is not — see
 [Real map dataset](#real-map-dataset) below). All three follow the same
-pattern: build the archive with `create_benchmark`, then run it with
-`benchmark`. See [README.md](../README.md#usage) for what the options mean.
+pattern: build the archive with `mauro benchmark create`, then run it with
+`mauro benchmark run`. See [README.md](../README.md#usage) for what the options mean.
 
 **The two sample maps**, rendered whole rather than split by symbol:
 
 ```bash
-./target/release/create_benchmark /path/to/ground_truth_renderer maps/ --filter sample -o benchmarks/benchmark_sample_maps_3_px_m.zip
-./target/release/create_benchmark /path/to/ground_truth_renderer maps/ --filter sample -r 6 -o benchmarks/benchmark_sample_maps_6_px_m.zip
-./target/release/benchmark benchmarks/benchmark_sample_maps_3_px_m.zip
-./target/release/benchmark benchmarks/benchmark_sample_maps_6_px_m.zip
+./target/release/mauro benchmark create /path/to/ground_truth_renderer maps/ --filter sample -o benchmarks/benchmark_sample_maps_3_px_m.zip
+./target/release/mauro benchmark create /path/to/ground_truth_renderer maps/ --filter sample -r 6 -o benchmarks/benchmark_sample_maps_6_px_m.zip
+./target/release/mauro benchmark run benchmarks/benchmark_sample_maps_3_px_m.zip
+./target/release/mauro benchmark run benchmarks/benchmark_sample_maps_6_px_m.zip
 ```
 
 **ISOM 2017-2 (`maps/ISOM_10k.omap`, a 1:10000 map), split one map per
 symbol:**
 
 ```bash
-./target/release/create_benchmark /path/to/ground_truth_renderer maps/ISOM_10k.omap
-./target/release/create_benchmark /path/to/ground_truth_renderer maps/ISOM_10k.omap -r 6
-./target/release/benchmark benchmarks/benchmark_ISOM_10k_3_px_m.zip
-./target/release/benchmark benchmarks/benchmark_ISOM_10k_6_px_m.zip
+./target/release/mauro benchmark create /path/to/ground_truth_renderer maps/ISOM_10k.omap
+./target/release/mauro benchmark create /path/to/ground_truth_renderer maps/ISOM_10k.omap -r 6
+./target/release/mauro benchmark run benchmarks/benchmark_ISOM_10k_3_px_m.zip
+./target/release/mauro benchmark run benchmarks/benchmark_ISOM_10k_6_px_m.zip
 ```
 
 **ISSprOM 2019 (`maps/ISSprOM_4k.omap`, a 1:4000 sprint map), split one map
 per symbol:**
 
 ```bash
-./target/release/create_benchmark /path/to/ground_truth_renderer maps/ISSprOM_4k.omap
-./target/release/create_benchmark /path/to/ground_truth_renderer maps/ISSprOM_4k.omap -r 6
-./target/release/benchmark benchmarks/benchmark_ISSprOM_4k_3_px_m.zip
-./target/release/benchmark benchmarks/benchmark_ISSprOM_4k_6_px_m.zip
+./target/release/mauro benchmark create /path/to/ground_truth_renderer maps/ISSprOM_4k.omap
+./target/release/mauro benchmark create /path/to/ground_truth_renderer maps/ISSprOM_4k.omap -r 6
+./target/release/mauro benchmark run benchmarks/benchmark_ISSprOM_4k_3_px_m.zip
+./target/release/mauro benchmark run benchmarks/benchmark_ISSprOM_4k_6_px_m.zip
 ```
 
 `/path/to/ground_truth_renderer` is the external ground-truth renderer (not
-MaUR-O's own `map_to_image`) — see
+MaUR-O's own `mauro render`) — see
 [Ground-truth renderer](../README.md#ground-truth-renderer) for what that needs to be.
 Both resolutions (3 and 6 pixels per meter) were run over each suite; the
 images below are picked from whichever run happened to show them, at

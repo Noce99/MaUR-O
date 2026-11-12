@@ -9,12 +9,12 @@ Mapper `.omap`/`.xmap` files (and OCAD `.ocd` files, converted to Mapper's forma
 the way in) to raster images in pure Rust — no Qt, no Mapper, no graphical
 environment. Alongside the renderer it ships benchmarking tools that compare its
 output against a ground-truth renderer, and a second, independent pipeline
-(`contours_to_raster`) that extracts elevation/gravity information from a map's
-contour lines. A sixth binary, `osm_to_omap`, goes the other way: it turns
-OpenStreetMap data (plus optional GTFS transit feeds) into a Mapper map. A
-seventh, `add_orthophoto`, downloads the aerial orthophoto of a map's ground
+(`mauro dem`) that extracts elevation/gravity information from a map's
+contour lines. `mauro osm` goes the other way: it turns
+OpenStreetMap data (plus optional GTFS transit feeds) into a Mapper map, and
+`mauro ortho` downloads the aerial orthophoto of a map's ground
 (from about fifty open national and regional WMS services across Europe)
-and adds it to the map as a template.
+and adds it to the map as a template. All of these are subcommands of the one binary, `mauro`.
 
 This crate is consumed by the o-mnia web app from a vendored copy (via
 `crates/maur-o-wasm`, o-mnia's own wasm-bindgen adapter — see that repo's
@@ -27,7 +27,7 @@ wiring (wasm export, job protocol, UI) belongs in o-mnia, not here.
 ## Commands
 
 ```bash
-cargo build --release                          # build everything; binaries land in target/release/
+cargo build --release                          # build everything; the binary is target/release/mauro
 cargo test --all-targets --locked              # run all tests (unit + integration)
 cargo test --doc --locked                      # doc tests (the render_map example in lib.rs)
 cargo test <test_name>                         # run a single test by name (substring match)
@@ -40,26 +40,29 @@ cargo doc --no-deps --locked                   # doc build; every public item mu
 
 CI (`.github/workflows/ci.yml`) runs the above across Linux/macOS/Windows plus an
 MSRV check pinned to Rust 1.88 (the floor set by the `image` crate). There is no
-Cargo workspace — one crate, seven binaries.
+Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 
-### The seven binaries
+### The `mauro` subcommands
 
-| Binary | Purpose |
+| Subcommand | Purpose |
 | --- | --- |
-| `map_to_image` | Render a single map to PNG/BMP/TIFF/JPEG, or to SVG. |
-| `create_benchmark` | Build a benchmark archive (maps + ground-truth reference images) from a folder of maps or a single map (in which case one test map per symbol is generated). |
-| `benchmark` | Run a benchmark archive: render every map, diff against the reference, write a report under `Results/`. |
-| `contours_to_raster` | Run the 5-step elevation-extraction pipeline (see below) on one map, writing an elevation GeoTIFF. |
-| `dem_geo_tiff_evaluator` | Score a predicted DEM GeoTIFF against a ground-truth one (MSE/RMSE/MAE + error maps). |
-| `osm_to_omap` | Convert OpenStreetMap XML (a file, or downloaded for an area from the Overpass API with `--download`) into an `.omap` drawn to ISSprOM 2019 (default) or ISOM 2017-2, or (`--standard osm`, optionally with GTFS feeds) styled like openstreetmap-carto. |
-| `add_orthophoto` | Download a map's aerial orthophoto from the best open WMS for its place (European national/regional agencies) and add it to the map as a georeferenced template. |
+| `mauro render` | Render a single map to PNG/BMP/TIFF/JPEG, or to SVG. |
+| `mauro benchmark create` | Build a benchmark archive (maps + ground-truth reference images) from a folder of maps or a single map (in which case one test map per symbol is generated). |
+| `mauro benchmark run` | Run a benchmark archive: render every map, diff against the reference, write a report under `Results/`. |
+| `mauro dem` | Run the 5-step elevation-extraction pipeline (see below) on one map, writing an elevation GeoTIFF. |
+| `mauro dem-eval` | Score a predicted DEM GeoTIFF against a ground-truth one (MSE/RMSE/MAE + error maps). |
+| `mauro osm` | Convert OpenStreetMap XML (a file, or downloaded for an area from the Overpass API with `--download`) into an `.omap` drawn to ISSprOM 2019 (default) or ISOM 2017-2, or (`--standard osm`, optionally with GTFS feeds) styled like openstreetmap-carto. |
+| `mauro ortho` | Download a map's aerial orthophoto from the best open WMS for its place (European national/regional agencies) and add it to the map as a georeferenced template. |
 
-Full CLI flags for all seven are documented in each binary's own top-of-file doc
-comment (`src/bin/*.rs`) and in `README.md`'s Usage section. When changing a
+`src/bin/mauro/main.rs` is only the dispatcher (the clap `Cli`, one module per
+subcommand, each module's `Args` and `pub fn main(args) -> ExitCode`). A usage
+error is exit code 1 for every subcommand, and so is a bare `mauro`. Full CLI
+flags for each are documented in its module's own top-of-file doc comment
+(`src/bin/mauro/*.rs`) and in `README.md`'s Usage section. When changing a
 flag, default or exit code, update both (and `--help` text in the clap
 definition) — they are kept in sync by hand.
 
-Quick smoke test: `cargo build --release && ./target/release/map_to_image maps/forest_sample.omap`
+Quick smoke test: `cargo build --release && ./target/release/mauro render maps/forest_sample.omap`
 
 Rendering text correctly wants the system's `fontconfig` library (see
 [README's Fonts and fontconfig section](README.md#fonts-and-fontconfig)) — it's
@@ -79,7 +82,7 @@ worth reading in full before making cross-cutting changes.
 
 There are two largely independent pipelines living in this one crate:
 
-### 1. Rendering pipeline (`map_to_image`, `benchmark`)
+### 1. Rendering pipeline (`mauro render`, `mauro benchmark run`)
 
 `render::render_map` is the whole thing in one call: read the file, build
 renderables, rasterize.
@@ -93,12 +96,12 @@ renderables, rasterize.
   algorithm, ported to keep border rendering pixel-faithful to Mapper.
 - **`text.rs`** is font loading/shaping/layout (`fontdb` + `rustybuzz` +
   `ttf-parser`, the same stack `resvg` uses), laid out large and scaled down.
-- **`render.rs`** is the map-file-to-pixel-buffer glue shared by `map_to_image`
-  and `benchmark`, so both draw a map through identical code.
+- **`render.rs`** is the map-file-to-pixel-buffer glue shared by `mauro render`
+  and `mauro benchmark run`, so both draw a map through identical code.
 
-**Benchmarking** (`create_benchmark` → `benchmark`) exists because "close enough"
+**Benchmarking** (`mauro benchmark create` → `mauro benchmark run`) exists because "close enough"
 can't be judged in the abstract: a suite is scored against an external ground-truth
-OMap renderer (see `create_benchmark`'s `<renderer>` arg). Key pieces:
+OMap renderer (see `mauro benchmark create`'s `<renderer>` arg). Key pieces:
 `all_symbols.rs` (one generated test map per symbol, laid out by running the
 renderer over each object to measure it), `naming.rs` (the ordinal naming rules a
 benchmark archive must follow, and how to repair one that doesn't), `differences.rs`
@@ -107,7 +110,7 @@ benchmark archive must follow, and how to repair one that doesn't), `differences
 for *why* that split exists and how it's computed). Full details, including the
 exact on-disk archive/results layout, are in **`mds/ImplementationDetails.md`**.
 
-### 2. Contour-to-elevation pipeline (`contours_to_raster`)
+### 2. Contour-to-elevation pipeline (`mauro dem`)
 
 A five-step algorithm, specified in full (including all math/force-model
 parameters) in **`mds/Contours-to-Raster.md`** — read that doc before touching
@@ -123,12 +126,12 @@ step, named to match:
 - `contour_raster.rs` — the Contour Raster itself (Step 1) + the Appendix 4 pixel-walk used by Steps 1 and 3.
 - `step1_extract.rs` → `step2_obvious_gravity.rs` → `step3_rain_drop.rs` (also the shared Rain Drop Production engine) → `step4_elevation.rs` → `step5_elevation_raster.rs` / `step5_gravity_raster.rs` — the steps in order.
 - `contours_to_raster_config.rs` — the ~35 tunable parameters, read from `config/contours_to_raster.conf` (a hand-rolled `key = value` format; no serde/toml dependency in this crate for one 35-line file).
-- `dem_from_contours.rs` — Steps 1–5 in memory on an already-parsed `Map`, with a progress callback and no file I/O: the library entry point (used by the wasm build) parallel to the binary.
+- `dem_from_contours.rs` — Steps 1–5 in memory on an already-parsed `Map`, with a progress callback and no file I/O: the library entry point (used by the wasm build) parallel to `mauro dem`.
 - `contours_to_raster_svg.rs` — the `--create_svg` diagnostic dumps (one SVG per sub-stage, see the doc's "Visualization" section).
 - `geotiff.rs` — georeferencing (affine transform + GeoTIFF tags) for the final elevation raster.
 
 `dem.rs` (terrain shading for display) and `dem_geo_tiff_evaluator.rs` (scoring a
-predicted DEM against ground truth, used by the `dem_geo_tiff_evaluator` binary)
+predicted DEM against ground truth, used by `mauro dem-eval`)
 are related but downstream of this pipeline's output, not part of it.
 
 ### Other consumers of `map.rs`
@@ -140,7 +143,7 @@ are related but downstream of this pipeline's output, not part of it.
 - **`svg.rs`** — writes the renderer's own renderables out as SVG vector paths instead of rasterizing them.
 - **`validate.rs`** — checks a map against a mapping standard (ISOM/ISSprOM).
 
-### OpenStreetMap → map (`osm_to_omap`)
+### OpenStreetMap → map (`mauro osm`)
 
 The one pipeline that *produces* a map rather than consuming one: `osm.rs`
 parses `.osm` XML; the symbols come from an `OsmRules` (in `osm_convert.rs`):
@@ -155,10 +158,10 @@ OSM route relations or GTFS), `bundle.rs` (lines sharing a street laid out
 side by side), `map_areas.rs` (event map areas from a CSV).
 `osm_download.rs` says what to ask the Overpass API for an area (the query,
 reading its error remarks) and never touches the network; the binary does
-the HTTP (`ureq`, native-only, as in `add_orthophoto`), and its integration
+the HTTP (`ureq`, native-only, as in `mauro ortho`), and its integration
 tests cover only the offline paths.
 
-### Orthophotos (`add_orthophoto`)
+### Orthophotos (`mauro ortho`)
 
 `orthophoto.rs` says *what* to download and never touches the network: a
 map's place on the earth (`ref_point_deg`), the CRS to ask in (the map's
@@ -184,7 +187,7 @@ paths, so CI never depends on anyone's server.
 
 ## Testing conventions
 
-- Integration tests (`tests/*.rs`) drive the **built binaries** via `assert_cmd`,
+- Integration tests (`tests/*.rs`) drive the **built `mauro` binary** via `assert_cmd`,
   not the library directly, where the CLI's exit codes and messages are the
   documented contract being tested (see `tests/cli.rs`'s own doc comment).
 - Unit tests for pure-arithmetic modules (`geometry.rs`, `qbezier.rs`) check
@@ -200,7 +203,7 @@ paths, so CI never depends on anyone's server.
 
 - **`mds/ImplementationDetails.md`** — crate/dependency stack, full source-layout
   table, benchmark archive format, antialiasing classification.
-- **`mds/Contours-to-Raster.md`** — the full spec for the `contours_to_raster`
+- **`mds/Contours-to-Raster.md`** — the full spec for the `mauro dem`
   pipeline (algorithm steps, appendices, every config parameter's meaning).
   **`mds/Contours-to-Raster-Overview.md`** is a short, implementation-free,
   mathematically-formal account of the same algorithm.

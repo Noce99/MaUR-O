@@ -8,7 +8,7 @@
 //! crate knows of, best first wherever two cover the same ground.
 //!
 //! Nothing here touches the network: this module says which URLs to fetch and
-//! where the result lands, and the `add_orthophoto` tool does the fetching.
+//! where the result lands, and the `mauro ortho` tool does the fetching.
 //! The steps are:
 //!
 //! 1. [`geographic_anchor`]: where on the earth the map is, in degrees,

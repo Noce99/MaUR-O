@@ -1,7 +1,7 @@
 //! Runs a whole benchmark suite out of a zip archive.
 //!
 //! ```text
-//! benchmark [options] <archive.zip>
+//! mauro benchmark run [options] <archive.zip>
 //! ```
 //!
 //! The archive holds a `maps/` folder of `.omap` files and an `expected/`
@@ -53,15 +53,14 @@ type Section = (&'static str, Vec<Setting>);
 
 #[derive(Parser)]
 #[command(
-    name = "benchmark",
-    version,
-    about = "Renders a benchmark suite out of a zip archive and reports where the \
+    about = "Renders a benchmark archive and reports where it differs from the references",
+    long_about = "Renders a benchmark suite out of a zip archive and reports where the \
              renderings differ from the reference images.\n\n\
              The archive holds a maps/ folder of .omap files and an expected/ folder \
              with a reference image for each of them. Names which break the naming \
              rules are reported and written out as a corrected copy of the archive."
 )]
-struct Args {
+pub struct Args {
     /// The benchmark archive: a .zip holding maps/ and expected/.
     archive: PathBuf,
 
@@ -274,7 +273,7 @@ fn write_info(
         started.format("%Y-%m-%d %H:%M:%S %z")
     ));
     text.push_str(&format!(
-        "  tool        benchmark {}\n",
+        "  tool        mauro benchmark run {}\n",
         env!("CARGO_PKG_VERSION")
     ));
     text.push_str(&format!("  maps        {maps} in the archive\n"));
@@ -583,9 +582,7 @@ fn render_all(
     Ok(failures)
 }
 
-fn run() -> Result<ExitCode, String> {
-    let args = Args::parse();
-
+fn run(args: Args) -> Result<ExitCode, String> {
     // Read before anything is created, so that an archive which is not one
     // does not leave an empty run folder behind.
     let contents = read_contents(&args.archive)?;
@@ -712,8 +709,9 @@ fn run() -> Result<ExitCode, String> {
     })
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// Runs `mauro benchmark run`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(code) => code,
         Err(message) => {
             eprintln!("Error: {message}");

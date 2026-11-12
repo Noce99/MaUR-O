@@ -1,12 +1,12 @@
 //! Builds a benchmark archive out of maps and a ground truth renderer.
 //!
 //! ```text
-//! create_benchmark [options] <renderer> <folder or map file>
+//! mauro benchmark create [options] <renderer> <folder or map file>
 //! ```
 //!
 //! The reference images in an archive are drawn by an external, ground truth
 //! renderer, not by this project — that is the whole point of the archive.
-//! `benchmark` later measures this project's own rendering against them, and
+//! `mauro benchmark run` later measures this project's own rendering against them, and
 //! a reference this project produced itself would measure nothing.
 //!
 //! Any command line tool that takes a map file, a resolution and a frame and
@@ -34,7 +34,7 @@
 //!     <archive>/index/          what is on each generated map, when there is one
 //! ```
 //!
-//! which is what `benchmark` expects, so the archive it produces runs without
+//! which is what `mauro benchmark run` expects, so the archive it produces runs without
 //! being corrected first.
 //!
 //! A map the renderer cannot draw is left out of the archive rather than put
@@ -65,7 +65,7 @@ const STAGES: usize = 3;
 /// folder keeps them out of the working tree without a rule per archive.
 const ARCHIVES: &str = "benchmarks";
 
-/// The map file suffixes this tool collects, and `benchmark` reads.
+/// The map file suffixes this tool collects, and `mauro benchmark run` reads.
 const MAP_SUFFIXES: [&str; 2] = [".omap", ".xmap"];
 
 /// What the rendering stage leaves behind: the maps which now have a
@@ -82,19 +82,24 @@ enum Origin {
 
 #[derive(Parser)]
 #[command(
-    name = "create_benchmark",
-    version,
-    about = "Builds a benchmark archive: a zip of maps and of the reference images a \
+    about = "Builds a benchmark archive from maps and a ground truth renderer",
+    long_about = "Builds a benchmark archive: a zip of maps and of the reference images a \
              ground truth renderer draws from them.\n\n\
              A folder is searched, subfolders included, for every map in it. A single \
              map file is taken apart into one map per symbol, each on a grid of test \
-             objects. The names follow the rules benchmark checks, so the archive runs \
+             objects. The names follow the rules mauro benchmark run checks, so the archive runs \
              without being corrected first."
 )]
-struct Args {
+pub struct Args {
     /// The ground truth renderer: an external command line map renderer,
     /// which draws the reference images this project is measured against.
     renderer: PathBuf,
+
+    /// An argument put before the renderer's own, as many times as needed:
+    /// `--renderer-arg render` makes `mauro` itself the renderer, as
+    /// `mauro render`.
+    #[arg(long = "renderer-arg", value_name = "ARG", allow_hyphen_values = true)]
+    renderer_args: Vec<String>,
 
     /// The maps: a folder, searched recursively, or a single map file, whose
     /// symbols each become a map of their own.
@@ -262,8 +267,9 @@ fn entries_from(paths: &[PathBuf], root: &Path) -> Vec<Entry> {
 
 /// What an executable says its version is, which is also the cheapest way to
 /// find out whether it can be run at all.
-fn tool_version(tool: &Path) -> Result<String, String> {
+fn tool_version(tool: &Path, tool_args: &[String]) -> Result<String, String> {
     let output = Command::new(tool)
+        .args(tool_args)
         .arg("--version")
         .output()
         .map_err(|e| format!("cannot run {}: {e}", tool.display()))?;
@@ -325,7 +331,7 @@ fn generate_symbol_maps(source: &Path, into: &Path) -> Result<Vec<PathBuf>, Stri
 ///
 /// Returns the entries it worked for, and the reason it did not work for the
 /// others. A map with no reference image has no place in the archive: the
-/// archive would break its own rules, and `benchmark` would report the map as
+/// archive would break its own rules, and `mauro benchmark run` would report the map as
 /// missing on every run for ever after.
 fn render_all(
     renderer: &Path,
@@ -374,6 +380,7 @@ fn render_one(
     args: &Args,
 ) -> Result<Vec<String>, String> {
     let output = Command::new(renderer)
+        .args(&args.renderer_args)
         .arg(map)
         .arg(image)
         .arg("-r")
@@ -546,13 +553,16 @@ fn info_text(
     match origin {
         Origin::Folder => text.push_str("  mode        every map found in the source folder\n"),
         Origin::Symbols => text.push_str(&format!(
-            "  mode        one map per symbol of the source map, made by create_benchmark {}\n",
+            "  mode        one map per symbol of the source map, made by mauro benchmark create {}\n",
             env!("CARGO_PKG_VERSION")
         )),
     }
     text.push_str(&format!(
         "  renderer    {} ({renderer_version})\n",
-        args.renderer.display()
+        std::iter::once(args.renderer.display().to_string())
+            .chain(args.renderer_args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ")
     ));
     text.push_str(&format!(
         "  resolution  {} pixels per meter on the ground\n",
@@ -573,7 +583,7 @@ fn info_text(
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z")
     ));
     text.push_str(&format!(
-        "  tool        create_benchmark {}\n",
+        "  tool        mauro benchmark create {}\n",
         env!("CARGO_PKG_VERSION")
     ));
 
@@ -586,7 +596,7 @@ fn info_text(
         "The reference images are what the renderer above drew, at the resolution and the \
          frame above. They are ground truth for those two settings and for no others: a run \
          at another resolution, or with another frame, makes images of another size, and \
-         then every pixel differs. benchmark reads both from this file, so a run of it \
+         then every pixel differs. mauro benchmark run reads both from this file, so a run of it \
          always draws at them; anything else measured against this archive has to use \
          the same resolution and the same frame.",
     ];
@@ -652,9 +662,7 @@ fn default_archive(source: &Path, resolution: f64) -> PathBuf {
     Path::new(ARCHIVES).join(format!("benchmark_{name}_{resolution}_px_m.zip"))
 }
 
-fn run() -> Result<ExitCode, String> {
-    let args = Args::parse();
-
+fn run(args: Args) -> Result<ExitCode, String> {
     if !args.resolution.is_finite() || args.resolution <= 0.0 {
         return Err(format!(
             "the resolution must be greater than zero, not {}",
@@ -700,7 +708,7 @@ fn run() -> Result<ExitCode, String> {
 
     // Run before anything is made: an unusable renderer is the one failure
     // worth finding out about before a few hundred maps have been prepared.
-    let renderer_version = tool_version(&args.renderer)?;
+    let renderer_version = tool_version(&args.renderer, &args.renderer_args)?;
 
     println!("I will build a benchmark archive from {}", source.display());
     println!("and I will write it to {}", archive.display());
@@ -796,7 +804,7 @@ fn run() -> Result<ExitCode, String> {
     println!("Archive in {}", archive.display());
     // No -r or -f: benchmark has neither, and reads both from the
     // archive's own info.txt, written above.
-    println!("Run it with: benchmark {}", archive.display());
+    println!("Run it with: mauro benchmark run {}", archive.display());
     Ok(if failures.is_empty() {
         ExitCode::SUCCESS
     } else {
@@ -804,8 +812,9 @@ fn run() -> Result<ExitCode, String> {
     })
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// Runs `mauro benchmark create`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(code) => code,
         Err(message) => {
             eprintln!("Error: {message}");

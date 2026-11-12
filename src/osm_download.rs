@@ -1,6 +1,6 @@
 //! What to ask the [Overpass API](https://wiki.openstreetmap.org/wiki/Overpass_API)
 //! for the OpenStreetMap data of an area, and how to read what it says
-//! back. Nothing here touches the network: `osm_to_omap --download` does the
+//! back. Nothing here touches the network: `mauro osm --download` does the
 //! asking (with `ureq`, a native-only dependency), so that this crate's wasm
 //! build never sees an HTTP client.
 //!

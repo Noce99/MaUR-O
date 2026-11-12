@@ -21,14 +21,14 @@ disagree on.
 
 It also ships tools that go beyond drawing a map:
 
-- **`contours_to_raster`** reconstructs an elevation model (a GeoTIFF) from a
-  map's contour lines, and **`dem_geo_tiff_evaluator`** scores such a model
+- **`mauro dem`** reconstructs an elevation model (a GeoTIFF) from a
+  map's contour lines, and **`mauro dem-eval`** scores such a model
   against a ground-truth one;
-- **`osm_to_omap`** turns OpenStreetMap data — from a file, or downloaded for
+- **`mauro osm`** turns OpenStreetMap data — from a file, or downloaded for
   an area — into a Mapper map: a base for an orienteering map drawn to
   ISSprOM 2019 or ISOM 2017-2, or a map styled like openstreetmap.org,
   optionally with bus and train lines from GTFS feeds;
-- **`add_orthophoto`** downloads the aerial orthophoto of a map's ground from
+- **`mauro ortho`** downloads the aerial orthophoto of a map's ground from
   a national or regional mapping agency (about fifty open services across
   Europe) and adds it to the map as a georeferenced template.
 
@@ -43,13 +43,13 @@ together.
 - [Installation](#installation)
   - [Fonts and fontconfig](#fonts-and-fontconfig)
 - [Usage](#usage)
-  - [`map_to_image`](#map_to_image)
-  - [`create_benchmark`](#create_benchmark)
-  - [`benchmark`](#benchmark)
-  - [`contours_to_raster`](#contours_to_raster)
-  - [`dem_geo_tiff_evaluator`](#dem_geo_tiff_evaluator)
-  - [`osm_to_omap`](#osm_to_omap)
-  - [`add_orthophoto`](#add_orthophoto)
+  - [`mauro render`](#mauro-render)
+  - [`mauro benchmark create`](#mauro-benchmark-create)
+  - [`mauro benchmark run`](#mauro-benchmark-run)
+  - [`mauro dem`](#mauro-dem)
+  - [`mauro dem-eval`](#mauro-dem-eval)
+  - [`mauro osm`](#mauro-osm)
+  - [`mauro ortho`](#mauro-ortho)
 - [Using it as a library](#using-it-as-a-library)
 - [Development](#development)
 - [Implementation Details](#implementation-details)
@@ -78,21 +78,23 @@ Build everything with:
 cargo build --release
 ```
 
-The seven executables are then in `target/release/`:
+Everything is one executable, `target/release/mauro`, with a subcommand per
+tool:
 
-| Executable | What it does |
+| Subcommand | What it does |
 | --- | --- |
-| [`map_to_image`](#map_to_image) | Renders one map to a PNG/BMP/TIFF/JPEG image, or to SVG. |
-| [`create_benchmark`](#create_benchmark) | Builds a benchmark archive: maps plus reference images from a ground-truth renderer. |
-| [`benchmark`](#benchmark) | Runs a benchmark archive and reports where MaUR-O's renderings differ. |
-| [`contours_to_raster`](#contours_to_raster) | Reconstructs an elevation GeoTIFF from a map's contour lines. |
-| [`dem_geo_tiff_evaluator`](#dem_geo_tiff_evaluator) | Scores a predicted elevation GeoTIFF against a ground-truth one. |
-| [`osm_to_omap`](#osm_to_omap) | Converts OpenStreetMap data into a Mapper map, drawn to ISSprOM, ISOM or openstreetmap.org's look. |
-| [`add_orthophoto`](#add_orthophoto) | Adds the aerial orthophoto of a map's ground to it as a template. |
+| [`mauro render`](#mauro-render) | Renders one map to a PNG/BMP/TIFF/JPEG image, or to SVG. |
+| [`mauro benchmark create`](#mauro-benchmark-create) | Builds a benchmark archive: maps plus reference images from a ground-truth renderer. |
+| [`mauro benchmark run`](#mauro-benchmark-run) | Runs a benchmark archive and reports where MaUR-O's renderings differ. |
+| [`mauro dem`](#mauro-dem) | Reconstructs an elevation GeoTIFF from a map's contour lines. |
+| [`mauro dem-eval`](#mauro-dem-eval) | Scores a predicted elevation GeoTIFF against a ground-truth one. |
+| [`mauro osm`](#mauro-osm) | Converts OpenStreetMap data into a Mapper map, drawn to ISSprOM, ISOM or openstreetmap.org's look. |
+| [`mauro ortho`](#mauro-ortho) | Adds the aerial orthophoto of a map's ground to it as a template. |
 
-Every one of them takes `--help` and `--version`.
+`mauro --help` lists them, and every one of them takes `--help` and
+`--version` (`mauro render --help`).
 
-To put them on your `PATH` instead, run `cargo install --path .` from a
+To put `mauro` on your `PATH` instead, run `cargo install --path .` from a
 checkout.
 
 ### Fonts and fontconfig
@@ -131,12 +133,12 @@ fallback is what runs.
 
 ## Usage
 
-### `map_to_image`
+### `mauro render`
 
 Renders a single map to a raster image, or to an SVG drawing.
 
 ```
-map_to_image [-r px-per-meter] [-f meters | -w left,top,right,bottom] <map-file> [image-file]
+mauro render [-r px-per-meter] [-f meters | -w left,top,right,bottom] <map-file> [image-file]
 ```
 
 | Argument | Meaning |
@@ -151,11 +153,11 @@ This is the tool to reach for to just look at a map:
 
 ```bash
 cargo build --release
-./target/release/map_to_image maps/forest_sample.omap
+./target/release/mauro render maps/forest_sample.omap
 ```
 
-![A forest orienteering map rendered by map_to_image](mds/assets/forest_sample.png)
-*`maps/forest_sample.omap` rendered by `map_to_image`.*
+![A forest orienteering map rendered by mauro render](mds/assets/forest_sample.png)
+*`maps/forest_sample.omap` rendered by `mauro render`.*
 
 To look closely at one part of a map, or to draw something over the image
 at known positions, render a window instead. Here a square of 20 by 20 mm on
@@ -163,7 +165,7 @@ the paper (200 by 200 m at 1:10000), whose top-left pixel is map point
 `(85, 40)`:
 
 ```bash
-./target/release/map_to_image -r 10 -w 85,40,105,60 maps/forest_sample.omap closeup.png
+./target/release/mauro render -r 10 -w 85,40,105,60 maps/forest_sample.omap closeup.png
 ```
 
 A map point `(x, y)` lands at pixel `((x - left), (y - top))` times
@@ -176,26 +178,27 @@ rather than white, and `--window` is not supported — an SVG is always the
 whole map:
 
 ```bash
-./target/release/map_to_image maps/forest_sample.omap forest_sample.svg
+./target/release/mauro render maps/forest_sample.omap forest_sample.svg
 ```
 
 It prints the image size, the ground size, and the map scale it read. Exit
 codes: `0` success, `1` a usage error, `2` the map cannot be read, `3` its
 geometry cannot be built, `4` the image cannot be saved.
 
-### `create_benchmark`
+### `mauro benchmark create`
 
 Builds a benchmark archive: it takes a set of maps and a *ground-truth
 renderer*, has that renderer draw each map, and packages both together
-following the naming rules `benchmark` expects.
+following the naming rules `mauro benchmark run` expects.
 
 ```
-create_benchmark [OPTIONS] <renderer> <source>
+mauro benchmark create [OPTIONS] <renderer> <source>
 ```
 
 | Option | Meaning |
 | --- | --- |
 | `<renderer>` | Path to the ground-truth renderer executable — [see below](#ground-truth-renderer). |
+| `--renderer-arg <ARG>` | An argument put before the renderer's own, repeatable: `--renderer-arg render` makes `mauro` itself the renderer. |
 | `<source>` | Either a folder, searched recursively for `.omap`/`.xmap` files, or a single map file, which is instead split into one generated map per symbol on a grid of test objects. |
 | `-o, --output <FILE>` | Archive path to write. Defaults to `benchmarks/benchmark_<source name>_<resolution>_px_m.zip`; the containing folder is created if needed. |
 | `--force` | Overwrite the output archive if it already exists. |
@@ -205,14 +208,14 @@ create_benchmark [OPTIONS] <renderer> <source>
 
 ```bash
 cargo build --release
-./target/release/create_benchmark /path/to/ground_truth_renderer maps/ISOM_10k.omap
+./target/release/mauro benchmark create /path/to/ground_truth_renderer maps/ISOM_10k.omap
 ```
 
 This writes `benchmarks/benchmark_ISOM_10k_3_px_m.zip`. Exit codes: `0`
 success, `1` a usage or setup problem, `2` a map failed to render.
 
-![Generated per-symbol test grids from a create_benchmark run: area fill patterns, line dash groups, rotated text samples, and point symbol rotations](mds/assets/symbols_benchmark.png)
-*A handful of the maps `create_benchmark` generates when `<source>` is a single map file: one per symbol, each a grid of test objects at every size and rotation that symbol needs checked.*
+![Generated per-symbol test grids from a mauro benchmark create run: area fill patterns, line dash groups, rotated text samples, and point symbol rotations](mds/assets/symbols_benchmark.png)
+*A handful of the maps `mauro benchmark create` generates when `<source>` is a single map file: one per symbol, each a grid of test objects at every size and rotation that symbol needs checked.*
 
 #### Ground-truth renderer
 
@@ -231,23 +234,29 @@ invoked once per map as
 <renderer> <map-file> <image-file> -r <px-per-meter> -f <meters>
 ```
 
-which is also how `map_to_image` is called, so pointing `create_benchmark` at MaUR-O's own `map_to_image` works too — it
-is a handy way to try the tooling out, though a suite built that way only
+which is also how `mauro render` is called, so MaUR-O itself can be the
+renderer, the `render` subcommand given with `--renderer-arg`:
+
+```bash
+./target/release/mauro benchmark create --renderer-arg render ./target/release/mauro maps/ISOM_10k.omap
+```
+
+It is a handy way to try the tooling out, though a suite built that way only
 measures MaUR-O against itself.
 
-### `benchmark`
+### `mauro benchmark run`
 
 Runs a whole benchmark suite — a zip archive of maps plus reference images —
 in one pass: renders every map, compares it against its reference, and
 writes a difference report.
 
 ```
-benchmark [OPTIONS] <archive.zip>
+mauro benchmark run [OPTIONS] <archive.zip>
 ```
 
 | Option | Meaning |
 | --- | --- |
-| `<archive.zip>` | The benchmark archive, as produced by `create_benchmark`. |
+| `<archive.zip>` | The benchmark archive, as produced by `mauro benchmark create`. |
 | `--results <DIR>` | Where the run's output folder is created (default `Results`). |
 | `--names-only` | Check and, if needed, correct the archive's file naming without rendering anything. |
 | `--tolerance <N>` | Per-pixel difference (summed over R+G+B, 0–765) below which a pixel does not count as wrong (default `3`). |
@@ -260,11 +269,11 @@ benchmark [OPTIONS] <archive.zip>
 
 ```bash
 cargo build --release
-./target/release/benchmark benchmarks/benchmark_ISOM_10k_3_px_m.zip
+./target/release/mauro benchmark run benchmarks/benchmark_ISOM_10k_3_px_m.zip
 ```
 
 Resolution and frame are not options here: they are always read back out of
-the archive's own `info.txt`, written by `create_benchmark` when the archive
+the archive's own `info.txt`, written by `mauro benchmark create` when the archive
 was made, so a run can't silently drift from the resolution and frame the
 reference images were actually drawn at.
 
@@ -293,7 +302,7 @@ the top, so this is where to look first. For what each column means, see
 ![Expected, predicted and diff crop from a real map, showing antialiasing in orange and a real error in red](mds/assets/real_error.png)
 *A crop from `differences/` on a real map: expected (left), predicted (middle), and the diff (right), where orange is just antialiasing — not a bug — and the red cluster is a real error, a pixel one renderer drew and the other did not.*
 
-### `contours_to_raster`
+### `mauro dem`
 
 Reconstructs the shape of the ground from a map's contour lines: works out
 which way is downhill across every contour (from slope lines, closed hills,
@@ -301,7 +310,7 @@ cliffs, and a simulated "rain drop" flow where nothing else decides), assigns
 each contour a height, and interpolates them into an elevation raster.
 
 ```
-contours_to_raster [OPTIONS] <map-file> [output.tif]
+mauro dem [OPTIONS] <map-file> [output.tif]
 ```
 
 | Option | Meaning |
@@ -314,7 +323,7 @@ contours_to_raster [OPTIONS] <map-file> [output.tif]
 | `--create_svg` | Also write one diagnostic SVG per stage of the algorithm, plus PNG previews of the result. |
 
 ```bash
-./target/release/contours_to_raster maps/contours_to_altitude_map_1.omap --create_svg
+./target/release/mauro dem maps/contours_to_altitude_map_1.omap --create_svg
 ```
 
 Each run writes into `Results/contours_to_raster_YYYY_MM_DD__hh_mm_ss/`. The
@@ -332,15 +341,15 @@ Exit codes: `0` success, `1` a usage error, `2` the map cannot be read, `3`
 the config file cannot be read or parsed, `4` an output cannot be written (or
 a Step 1 geometry error), `5` an unresolvable gravity conflict (Steps 2–4).
 
-### `dem_geo_tiff_evaluator`
+### `mauro dem-eval`
 
-Scores a predicted elevation GeoTIFF — such as `contours_to_raster`'s — against
+Scores a predicted elevation GeoTIFF — such as `mauro dem`'s — against
 a ground-truth one. The prediction is resampled onto the ground truth's grid,
 and since a DEM reconstructed from contours is only known up to an additive
 constant, that constant is removed before measuring.
 
 ```
-dem_geo_tiff_evaluator [--results <DIR>] <ground_truth.tif> <prediction.tif>
+mauro dem-eval [--results <DIR>] <ground_truth.tif> <prediction.tif>
 ```
 
 Each run writes into `Results/dem_evaluation_YYYY_MM_DD__hh_mm_ss/`:
@@ -352,14 +361,14 @@ read, `3` the prediction cannot be read, `4` the two cannot be compared
 (different or missing CRS, or no overlapping pixel with a value in both),
 `5` an output cannot be written.
 
-### `osm_to_omap`
+### `mauro osm`
 
 Converts OpenStreetMap data into a Mapper map, drawn to an orienteering
 standard or like openstreetmap.org.
 
 ```
-osm_to_omap [--standard issprom|isom|osm] [--bbox min_lon,min_lat,max_lon,max_lat | --around lat,lon [--size 1km]] <osm-file> [omap-file]
-osm_to_omap --download (--bbox ... | --around lat,lon [--size 1km]) [--save-osm area.osm] [--overpass-url URL] [--max-area 25] [--standard ...] <omap-file>
+mauro osm [--standard issprom|isom|osm] [--bbox min_lon,min_lat,max_lon,max_lat | --around lat,lon [--size 1km]] <osm-file> [omap-file]
+mauro osm --download (--bbox ... | --around lat,lon [--size 1km]) [--save-osm area.osm] [--overpass-url URL] [--max-area 25] [--standard ...] <omap-file>
 ```
 
 The area is a box (`--bbox`, in OpenStreetMap's order: west, south, east,
@@ -381,7 +390,7 @@ an area over `--max-area` km² (25 by default) is refused: for a larger one,
 convert from an extract (e.g. [Geofabrik](https://download.geofabrik.de/)).
 
 ```bash
-osm_to_omap --download --around 44.4939,11.3431 --size 2km --save-osm piazza.osm piazza.omap
+mauro osm --download --around 44.4939,11.3431 --size 2km --save-osm piazza.osm piazza.omap
 ```
 
 Every map credits OpenStreetMap's contributors in its notes (Map > Notes in
@@ -427,13 +436,13 @@ a standard's colour table would otherwise hide it. Nothing underground,
 no names, no ordinary street trees. OpenStreetMap does not say how runnable
 a wood is or whether a wall can be crossed, and has no contours: the map is
 a base for field work, together with an orthophoto from
-[`add_orthophoto`](#add_orthophoto), not a finished map. The other options
+[`mauro ortho`](#mauro-ortho), not a finished map. The other options
 below belong to `--standard osm`; given with another standard, they are a
 usage error.
 
 ```bash
-osm_to_omap --bbox 11.348,44.481,11.358,44.487 bologna.osm margherita.omap
-osm_to_omap --standard isom --bbox 11.33,44.47,11.37,44.50 bologna.osm colli.omap
+mauro osm --bbox 11.348,44.481,11.358,44.487 bologna.osm margherita.omap
+mauro osm --standard isom --bbox 11.33,44.47,11.37,44.50 bologna.osm colli.omap
 ```
 
 #### openstreetmap.org's look
@@ -447,7 +456,7 @@ one carto pixel being 0.28 mm on the paper, along with what carto shows at
 that zoom and what it leaves out. Labels and POI icons are not drawn.
 
 ```
-osm_to_omap --standard osm [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,19,...] [--gtfs feed.zip [--day weekday|saturday|sunday | --date YYYYMMDD]] [--max-headway N] [--train S1,S2A,MEX,...] [--maps areas.csv [--areas-single-color]] [--drinking-water] [--legend] <osm-file> [omap-file]
+mauro osm --standard osm [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,19,...] [--gtfs feed.zip [--day weekday|saturday|sunday | --date YYYYMMDD]] [--max-headway N] [--train S1,S2A,MEX,...] [--maps areas.csv [--areas-single-color]] [--drinking-water] [--legend] <osm-file> [omap-file]
 ```
 
 | Option | Meaning |
@@ -502,7 +511,7 @@ TPER publishes its network as GTFS on its
 IT: a map made from them has to credit TPER):
 
 ```bash
-osm_to_omap --standard osm --bus all --train S1,S2A,MEX \
+mauro osm --standard osm --bus all --train S1,S2A,MEX \
   --gtfs gommagtfsbo_20261006.zip --gtfs gtfsmex_20260421.zip \
   --legend bologna.osm bologna.omap
 ```
@@ -520,13 +529,13 @@ that zoom's own (at Bologna's latitude zoom 16 is about 1:6100):
 
 Bus and train lines, stops and numbers are as large on the paper at every
 level. The map is georeferenced in the UTM zone of its centre, turned so
-that true north is up. The tool prints the `map_to_image -r` resolution at
+that true north is up. The tool prints the `mauro render -r` resolution at
 which one carto pixel is one pixel of the rendering, as on
 openstreetmap.org:
 
 ```bash
-osm_to_omap --standard osm --bbox 11.3304,44.4848,11.3556,44.5028 bologna.osm piazza_maggiore.omap
-map_to_image -r 0.7143 -f 0 piazza_maggiore.omap
+mauro osm --standard osm --bbox 11.3304,44.4848,11.3556,44.5028 bologna.osm piazza_maggiore.omap
+mauro render -r 0.7143 -f 0 piazza_maggiore.omap
 ```
 
 Exit codes: `0` success, `1` a usage error (an option of `--standard osm`
@@ -535,15 +544,15 @@ the OSM file or the GTFS feed could not be read, or held nothing to convert,
 `3` the download failed, `4` the map (or the `--save-osm` file) could not be
 written.
 
-### `add_orthophoto`
+### `mauro ortho`
 
 Downloads the aerial orthophoto of the ground a map covers and adds it to
 the map as a georeferenced template, behind the map and every other
 template, ready to draw over in Mapper.
 
 ```
-add_orthophoto [--service ID] [--pixel-size M] [--margin M] [--image FILE] <map-file> [output-map-file]
-add_orthophoto --list-services
+mauro ortho [--service ID] [--pixel-size M] [--margin M] [--image FILE] <map-file> [output-map-file]
+mauro ortho --list-services
 ```
 
 The photos come straight from the national and regional mapping agencies'
@@ -600,7 +609,7 @@ as they are. A map straddling two regions gets the one with photos of most
 of it, with a warning, and black where it has none.
 
 ```bash
-add_orthophoto casalecchio.omap   # writes casalecchio_it-emilia-romagna-2023.jpg + .jgw and adds the template
+mauro ortho casalecchio.omap   # writes casalecchio_it-emilia-romagna-2023.jpg + .jgw and adds the template
 ```
 
 The photos belong to the agency serving them, and the tool prints who to
@@ -666,7 +675,7 @@ All the longer documents live in [`mds/`](mds/):
 | Document | What it covers |
 | --- | --- |
 | [ImplementationDetails.md](mds/ImplementationDetails.md) | Crate stack, source layout, benchmark archive format, antialiasing classification, testing. |
-| [Contours-to-Raster.md](mds/Contours-to-Raster.md) | The full specification of `contours_to_raster`'s algorithm and parameters. |
+| [Contours-to-Raster.md](mds/Contours-to-Raster.md) | The full specification of `mauro dem`'s algorithm and parameters. |
 | [Contours-to-Raster-Overview.md](mds/Contours-to-Raster-Overview.md) | A short, formal summary of the same algorithm. |
 | [bug.md](mds/bug.md) | Known rendering differences against the ground-truth renderer, with pictures. |
 

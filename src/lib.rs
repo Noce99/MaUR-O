@@ -66,14 +66,14 @@
 //! heights into a raster, which [`geotiff`] places on the earth. Its
 //! parameters come from [`contours_to_raster_config`], and
 //! [`contours_to_raster_svg`] draws every stage for inspection. The
-//! `contours_to_raster` tool runs it on a file; [`dem_from_contours`] runs it
+//! `mauro dem` tool runs it on a file; [`dem_from_contours`] runs it
 //! in memory, on a map already read. [`ocd_crs`] is what lets an OCAD map's
 //! georeferencing survive the trip.
 //!
 //! # Drawing a map
 //!
 //! [`render::render_map`] is the entire pipeline in one call — read the file,
-//! build the renderables, rasterize them — and is what the `map_to_image`
+//! build the renderables, rasterize them — and is what the `mauro render`
 //! tool is built on. [`render::render_map_window`] does the same for one
 //! rectangle of the map, given in map coordinates, instead of all of it:
 //!
@@ -106,7 +106,7 @@
 //! benchmark archive's files in an order everything agrees on; [`differences`]
 //! compares a run's images against the reference ones and classifies every
 //! pixel that disagrees; and [`archive_info`], [`progress`] and [`report`] are
-//! the small pieces the `create_benchmark` and `benchmark` tools are assembled
+//! the small pieces the `mauro benchmark create` and `mauro benchmark run` tools are assembled
 //! from.
 
 // Every public item carries a doc comment; this keeps it that way.

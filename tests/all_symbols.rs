@@ -4,7 +4,7 @@
 //! The maps are checked by reading them back with this project's own reader
 //! and rendering them, which is the property that matters — a generated map
 //! is only worth generating if a renderer can draw the symbol it was made
-//! for from it. `create_benchmark`, the only thing that calls this function,
+//! for from it. `mauro benchmark create`, the only thing that calls this function,
 //! has its own tests for turning the result into an archive; these are the
 //! ones for what ends up in each generated map.
 

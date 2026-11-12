@@ -887,7 +887,7 @@ mod tests {
     /// Every test below needs a resolved [`GravityRaster`] to hand
     /// [`resolve`] before it can build its own drop paths -- computed
     /// against the exact same `contours`/`raster`/`config` the elevation
-    /// call itself then uses, the same way `src/bin/contours_to_raster.rs`
+    /// call itself then uses, the same way `src/bin/mauro/dem.rs`
     /// chains the two.
     fn gravity_for(
         contours: &[Contour],

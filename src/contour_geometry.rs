@@ -1,5 +1,5 @@
 //! Turning an object's [`CoordList`] into ground-meter [`geo`] geometry, for
-//! `contours_to_raster` (see `Contours-to-Raster.md`).
+//! `mauro dem` (see `Contours-to-Raster.md`).
 //!
 //! [`bezier_to_linestring`] and [`resample_equal_chords`] are Appendix 1,
 //! ported close to verbatim from the doc. [`ls_to_polygon`] is Appendix 2: a

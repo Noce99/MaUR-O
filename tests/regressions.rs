@@ -28,13 +28,14 @@ const BLACK: &str = r#"<color priority="0" name="Black" c="0" m="0" y="0" k="1" 
 const A_LINE: &str =
     r#"<object type="1" symbol="0"><coords count="2">0 0;10000 10000;</coords></object>"#;
 
-/// Renders `xml` with `map_to_image` and asserts that it worked.
+/// Renders `xml` with `mauro render` and asserts that it worked.
 fn renders(xml: &str) {
     let dir = tempfile::tempdir().unwrap();
     let map = dir.path().join("map.xmap");
     std::fs::write(&map, xml).unwrap();
-    Command::cargo_bin("map_to_image")
+    Command::cargo_bin("mauro")
         .unwrap()
+        .args(["render"])
         .arg(&map)
         .arg(dir.path().join("map.png"))
         .assert()
@@ -182,8 +183,9 @@ fn a_map_renders_to_jpeg() {
     let dir = tempfile::tempdir().unwrap();
     for name in ["map.jpg", "map.JPEG"] {
         let out = dir.path().join(name);
-        Command::cargo_bin("map_to_image")
+        Command::cargo_bin("mauro")
             .unwrap()
+            .args(["render"])
             .arg("tests/data/shapes.xmap")
             .arg(&out)
             .assert()

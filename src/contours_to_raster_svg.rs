@@ -1151,7 +1151,7 @@ pub fn write_step1_close_search_svg(path: &Path, result: &Step1Result) -> Result
 /// (written right after `run_growing_seeking`) still shows no Heavy Object
 /// arrow, but `03_<map_name>_step1_growing_matching.svg` does, since by then
 /// `resolve_heavy_object_gravity` has already run (see
-/// `src/bin/contours_to_raster.rs`'s own call ordering).
+/// `src/bin/mauro/dem.rs`'s own call ordering).
 pub fn step1_growing_svg_string(result: &Step1Result, config: &Config) -> String {
     let push_pull =
         push_pull_vector_layers(result, config.growing_visualization_push_pull_vectors_scale);
