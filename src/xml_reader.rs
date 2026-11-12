@@ -1201,7 +1201,12 @@ impl Fragments {
 /// to hide where one element ends and the next begins.
 pub fn read_fragments(path: &Path) -> Result<Fragments, String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let mut reader = Reader::from_str(&content);
+    read_fragments_str(&content).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// [`read_fragments`] on a map file's text already in memory.
+pub fn read_fragments_str(content: &str) -> Result<Fragments, String> {
+    let mut reader = Reader::from_str(content);
     let mut fragments = Fragments::default();
 
     // The name of every element still open, so that a `<color>` inside
@@ -1214,9 +1219,7 @@ pub fn read_fragments(path: &Path) -> Result<Fragments, String> {
 
     loop {
         let begins = reader.buffer_position() as usize;
-        let event = reader
-            .read_event()
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let event = reader.read_event().map_err(|e| e.to_string())?;
         let (start, closes) = match &event {
             Event::Start(start) => (Some(start.clone()), false),
             // A self-closing element opens and closes in one event.

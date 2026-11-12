@@ -53,7 +53,7 @@ below go one file at a time.
 | --- | --- |
 | `map.rs` | The data model read from a map file. `Symbol` is a Rust enum over the five symbol kinds — line, area, point, text, combined — each carrying its own copy of the fields common to all of them (`name`, `is_rotatable`, ...), since a `PointSymbol` nested inside a `LineSymbol` (its dash/mid/start/end symbol) needs its own regardless of which symbol kind it sits inside. |
 | `xml_reader.rs` | A `quick-xml`-based reader with a thin normalization layer so self-closing elements present as a start immediately followed by an end token, which keeps the parsing logic in `map.rs` simple regardless of how a particular file spells an empty element. |
-| `xml_writer.rs` | Writes a map file — the only maps this project writes are ones it has just generated. For `all_symbols` the colours and symbols go out as the source file's own bytes rather than as anything this project reassembles, so nothing a symbol holds and the renderer ignores can be lost on the way. For `osm_convert`, which has no source file, `color_element`, `symbol_element` and `georeferencing_element` write them from the `map.rs` model. |
+| `xml_writer.rs` | Writes a map file — the only maps this project writes are ones it has just generated. For `all_symbols` the colours and symbols go out as the source file's own bytes rather than as anything this project reassembles, so nothing a symbol holds and the renderer ignores can be lost on the way. For `osm_convert` with carto's look, which has no source file, `color_element`, `symbol_element` and `georeferencing_element` write them from the `map.rs` model; with a standard, they are the reference map's own bytes, like `all_symbols`'. |
 | `ocd.rs` | Reads OCAD's binary `.ocd` format (versions 6 to 12 and 2018) by converting it into the `map.rs` model, following Mapper's and Purple Pen's importers. What OCAD stores and Mapper's format has no place for is reported, not silently dropped. |
 | `ocd_crs.rs` | Turns the coordinate-system number an OCAD file carries into an EPSG code, so its georeferencing survives the conversion. |
 
@@ -116,7 +116,8 @@ one file per step; read that document first.
 | --- | --- |
 | `osm.rs` | Reads OpenStreetMap XML (`.osm`): nodes, ways, relations, tags; joins multipolygon rings split over several ways. |
 | `osm_style.rs` | The openstreetmap-carto look at zooms 13 to 17 (the `--details` levels) as a Mapper symbol set — the colour table in carto's layer order, road casings and fills, path dashes, landcover — and the rules picking a symbol from a feature's tags. |
-| `osm_convert.rs` | Projects OpenStreetMap data into UTM turned to true north, clips it to a bounding box, and writes the map with `osm_style`'s symbols. |
+| `osm_orienteering.rs` | ISSprOM 2019 and ISOM 2017-2 for OpenStreetMap: the standard's symbol set, read verbatim from the reference map in `maps/` (embedded with `include_str!`), and the rules picking a symbol code from a feature's tags. |
+| `osm_convert.rs` | Projects OpenStreetMap data into UTM turned to true north, clips it to a bounding box, and writes the map with the symbols of an `OsmRules`: carto's `osm_style`, or a standard's `osm_orienteering`. Land cover a standard's colour table would hide is cut out of the larger areas it lies on (`geo`'s boolean operations). |
 | `bus.rs` | Bus and train lines — route, stops, colour and midday headway of each line's main variant — read from OpenStreetMap route relations, or for buses from a GTFS feed (zip or folder), whose calendar and timetable give the headway. |
 | `bundle.rs` | Lines sharing a street laid out side by side: routes matched to the street and rail network, a fixed left-to-right order carried along each bundle, offsets smoothed where a bundle changes, the band capped in width, stops as one bar across it. Pure geometry on the paper, independent of OSM. |
 | `map_areas.rs` | The areas of an event's maps, read from a CSV table (`--maps`): outlines, names, forbidden zones, start and finish. |
@@ -141,7 +142,7 @@ comment:
 | `bin/benchmark.rs` | Runs a whole benchmark suite out of a zip archive, see [Running a benchmark archive](#running-a-benchmark-archive). |
 | `bin/contours_to_raster.rs` | Runs the contour-to-elevation pipeline on one map. |
 | `bin/dem_geo_tiff_evaluator.rs` | Scores a predicted DEM against a ground truth. |
-| `bin/osm_to_omap.rs` | Converts an `.osm` file into an `.omap`. |
+| `bin/osm_to_omap.rs` | Converts an `.osm` file into an `.omap`, drawn to ISSprOM (the default), ISOM or carto (`--standard`). |
 | `bin/add_orthophoto.rs` | Downloads a map's orthophoto tile by tile and adds it to the map as a template. |
 
 ## One map per symbol

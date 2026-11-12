@@ -1,6 +1,6 @@
 //! `osm_to_omap`'s command line: that what it writes is a map this crate and
-//! Mapper read back as one, georeferenced and clipped, and that it exits with
-//! the documented code when it cannot.
+//! Mapper read back as one, georeferenced and clipped, drawn to the standard
+//! asked for, and that it exits with the documented code when it cannot.
 //!
 //! Driven through the built binary, like `cli.rs`, because the interface —
 //! the exit codes and the resolution hint it prints — is the contract.
@@ -16,8 +16,150 @@ const SAMPLE: &str = "tests/data/bologna_sample.osm";
 /// ends cut off.
 const BBOX: &str = "--bbox=11.3415,44.4925,11.3445,44.4945";
 
+/// The command, drawing like openstreetmap.org: what most tests here are
+/// about.
 fn osm_to_omap() -> Command {
+    let mut command = orienteering();
+    command.args(["--standard", "osm"]);
+    command
+}
+
+/// The command as it is, which draws to ISSprOM.
+fn orienteering() -> Command {
     Command::cargo_bin("osm_to_omap").unwrap()
+}
+
+/// The symbol code of each object of a map, in order.
+fn object_codes(map: &maur_o::map::Map) -> Vec<String> {
+    map.objects
+        .iter()
+        .map(|o| match &map.symbols[o.symbol_index.unwrap()] {
+            Symbol::Point(s) => s.code.clone(),
+            Symbol::Line(s) => s.code.clone(),
+            Symbol::Area(s) => s.code.clone(),
+            Symbol::Text(s) => s.code.clone(),
+            Symbol::Combined(s) => s.code.clone(),
+        })
+        .collect()
+}
+
+#[test]
+fn the_default_is_a_sprint_map_with_the_whole_issprom_symbol_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("sprint.omap");
+    orienteering()
+        .arg(BBOX)
+        .arg(SAMPLE)
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ISSprOM 2019, map scale 1:4000"))
+        .stdout(predicates::str::contains("EPSG:32632"));
+
+    let (map, _warnings) = read_xml_map(&out).unwrap();
+    assert_eq!(map.scale_denominator, 4000);
+    // The building, the street, the footway; the tree is no landmark.
+    let mut codes = object_codes(&map);
+    codes.sort();
+    assert_eq!(codes, ["501.6", "501.8", "521"]);
+
+    // Every colour and symbol as the standard has them.
+    let (golden, _) = read_xml_map(std::path::Path::new("maps/ISSprOM_4k.omap")).unwrap();
+    assert_eq!(map.symbols.len(), golden.symbols.len());
+    let none = Default::default();
+    let reference = maur_o::validate::Reference {
+        golden: &golden,
+        base_scale: 4000.0,
+        code_descriptions: &Default::default(),
+        impassable_codes: &none,
+        no_cross_codes: &none,
+        forbidden_area_overlaps: &[],
+        gap_exempt_pairs: &[],
+        min_gap_mm: 0.0,
+        min_gap_impassable_mm: 0.0,
+    };
+    let issues = maur_o::validate::validate_colors(&map, &reference);
+    assert!(issues.is_empty(), "{issues:?}");
+    let issues = maur_o::validate::validate_symbols(&map, &reference);
+    assert!(issues.is_empty(), "{issues:?}");
+}
+
+#[test]
+fn isom_draws_a_forest_map_at_1_10000() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("forest.omap");
+    orienteering()
+        .args([BBOX, "--standard", "isom", SAMPLE])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ISOM 2017-2, map scale 1:10000"));
+    let (map, _warnings) = read_xml_map(&out).unwrap();
+    assert_eq!(map.scale_denominator, 10_000);
+    let mut codes = object_codes(&map);
+    codes.sort();
+    assert_eq!(codes, ["503", "505", "521"]);
+}
+
+#[test]
+fn an_option_of_the_osm_look_is_a_usage_error_with_a_standard() {
+    for option in [&["--legend"][..], &["--details", "2"], &["--bus", "13"]] {
+        orienteering()
+            .args(option)
+            .arg(SAMPLE)
+            .assert()
+            .code(1)
+            .stderr(predicates::str::contains("needs --standard osm"));
+    }
+}
+
+#[test]
+fn a_wood_in_a_park_is_cut_out_of_the_park() {
+    let dir = tempfile::tempdir().unwrap();
+    let osm = dir.path().join("park.osm");
+    // A park 0.004° across with a wood in its middle, each a closed way.
+    let square = |id: i64, first: i64, (lon0, lat0, lon1, lat1): (f64, f64, f64, f64)| {
+        let corners = [(lon0, lat0), (lon1, lat0), (lon1, lat1), (lon0, lat1)];
+        let nodes: String = corners
+            .iter()
+            .enumerate()
+            .map(|(i, (lon, lat))| {
+                format!(
+                    "<node id=\"{}\" lat=\"{lat}\" lon=\"{lon}\"/>\n",
+                    first + i as i64
+                )
+            })
+            .collect();
+        let refs: String = (0..5)
+            .map(|i| format!("<nd ref=\"{}\"/>", first + i % 4))
+            .collect();
+        (nodes, format!("<way id=\"{id}\">{refs}"))
+    };
+    let (park_nodes, park) = square(1, 1, (11.340, 44.490, 11.344, 44.494));
+    let (wood_nodes, wood) = square(2, 11, (11.341, 44.491, 11.343, 44.493));
+    std::fs::write(
+        &osm,
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <bounds minlat="44.489" minlon="11.339" maxlat="44.495" maxlon="11.345"/>
+{park_nodes}{wood_nodes}{park}<tag k="leisure" v="park"/></way>
+{wood}<tag k="natural" v="wood"/></way>
+</osm>
+"#
+        ),
+    )
+    .unwrap();
+    let out = dir.path().join("park.omap");
+    orienteering().arg(&osm).arg(&out).assert().success();
+    let (map, _warnings) = read_xml_map(&out).unwrap();
+    let codes = object_codes(&map);
+    let park = &map.objects[codes.iter().position(|c| c == "401").unwrap()];
+    let wood = &map.objects[codes.iter().position(|c| c == "405").unwrap()];
+    // The park keeps a hole where the wood is, the wood is whole.
+    let rings = |o: &maur_o::map::Object| o.coords.iter().filter(|c| c.is_close_point()).count();
+    assert_eq!(rings(park), 2);
+    assert_eq!(rings(wood), 1);
 }
 
 #[test]

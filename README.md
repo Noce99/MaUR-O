@@ -24,8 +24,9 @@ It also ships tools that go beyond drawing a map:
 - **`contours_to_raster`** reconstructs an elevation model (a GeoTIFF) from a
   map's contour lines, and **`dem_geo_tiff_evaluator`** scores such a model
   against a ground-truth one;
-- **`osm_to_omap`** turns OpenStreetMap data — optionally with bus and train
-  lines from GTFS feeds — into a Mapper map styled like openstreetmap.org;
+- **`osm_to_omap`** turns OpenStreetMap data into a Mapper map: a base for an
+  orienteering map drawn to ISSprOM 2019 or ISOM 2017-2, or a map styled like
+  openstreetmap.org, optionally with bus and train lines from GTFS feeds;
 - **`add_orthophoto`** downloads the aerial orthophoto of a map's ground from
   a national or regional mapping agency (about fifty open services across
   Europe) and adds it to the map as a georeferenced template.
@@ -85,7 +86,7 @@ The seven executables are then in `target/release/`:
 | [`benchmark`](#benchmark) | Runs a benchmark archive and reports where MaUR-O's renderings differ. |
 | [`contours_to_raster`](#contours_to_raster) | Reconstructs an elevation GeoTIFF from a map's contour lines. |
 | [`dem_geo_tiff_evaluator`](#dem_geo_tiff_evaluator) | Scores a predicted elevation GeoTIFF against a ground-truth one. |
-| [`osm_to_omap`](#osm_to_omap) | Converts OpenStreetMap data into a Mapper map. |
+| [`osm_to_omap`](#osm_to_omap) | Converts OpenStreetMap data into a Mapper map, drawn to ISSprOM, ISOM or openstreetmap.org's look. |
 | [`add_orthophoto`](#add_orthophoto) | Adds the aerial orthophoto of a map's ground to it as a template. |
 
 Every one of them takes `--help` and `--version`.
@@ -352,7 +353,55 @@ read, `3` the prediction cannot be read, `4` the two cannot be compared
 
 ### `osm_to_omap`
 
-Converts OpenStreetMap data into a Mapper map that looks like
+Converts OpenStreetMap data into a Mapper map, drawn to an orienteering
+standard or like openstreetmap.org.
+
+```
+osm_to_omap [--standard issprom|isom|osm] [--bbox min_lon,min_lat,max_lon,max_lat] <osm-file> [omap-file]
+```
+
+| `--standard` | symbol set | scale |
+| --- | --- | --- |
+| `issprom` (default) | ISSprOM 2019, sprint | 1:4000 |
+| `isom` | ISOM 2017-2, forest | 1:10000 |
+| `osm` | openstreetmap-carto (see [below](#openstreetmaporgs-look)) | by `--details` |
+
+With `issprom` or `isom` the map holds the standard's whole symbol set,
+exactly as Mapper ships it (`maps/ISSprOM_4k.omap`, `maps/ISOM_10k.omap`),
+and every feature it can place drawn with it:
+
+- buildings (521), roofs and carports as canopies (522);
+- roads as paved footprints by traffic and width in ISSprOM (`501.19` for a
+  primary road, `501.8` for a residential street, `501.6` for a paved
+  footway), as ISOM's road lines in ISOM (502 to 507); stairways (532);
+- squares, pedestrian areas, parkings and platforms as paved areas;
+- water, watercourses and marshes; woods (405, or by `wood:density`), scrub,
+  open land, fields, orchards and vineyards; sand and bare rock;
+- walls and fences, impassable unless a `height` under 1.5 m says
+  otherwise; hedges, railways, power lines, cliffs;
+- residential, commercial, industrial land, allotments, cemeteries,
+  farmyards and private gardens as areas that shall not be entered (520);
+- towers, cairns and memorials, springs and fountains, landmark trees.
+
+The rules start from the cross-reference tables Mapper ships for
+OpenStreetMap. Where areas overlap, a smaller one is cut out of the larger
+one it lies on (a wood out of a park, a park out of residential land), since
+a standard's colour table would otherwise hide it. Nothing underground,
+no names, no ordinary street trees. OpenStreetMap does not say how runnable
+a wood is or whether a wall can be crossed, and has no contours: the map is
+a base for field work, together with an orthophoto from
+[`add_orthophoto`](#add_orthophoto), not a finished map. The other options
+below belong to `--standard osm`; given with another standard, they are a
+usage error.
+
+```bash
+osm_to_omap --bbox 11.348,44.481,11.358,44.487 bologna.osm margherita.omap
+osm_to_omap --standard isom --bbox 11.33,44.47,11.37,44.50 bologna.osm colli.omap
+```
+
+#### openstreetmap.org's look
+
+With `--standard osm` the map looks like
 [openstreetmap.org](https://www.openstreetmap.org)'s Standard map at one of
 the zooms 13 to 17: the symbol set (colours, road casings, path dashes, landcover, buildings,
 water, railways, barriers, trees) is transcribed from
@@ -361,7 +410,7 @@ one carto pixel being 0.28 mm on the paper, along with what carto shows at
 that zoom and what it leaves out. Labels and POI icons are not drawn.
 
 ```
-osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,19,...] [--gtfs feed.zip [--day weekday|saturday|sunday | --date YYYYMMDD]] [--max-headway N] [--train S1,S2A,MEX,...] [--maps areas.csv [--areas-single-color]] [--drinking-water] [--legend] <osm-file> [omap-file]
+osm_to_omap --standard osm [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4] [--bus 13,19,...] [--gtfs feed.zip [--day weekday|saturday|sunday | --date YYYYMMDD]] [--max-headway N] [--train S1,S2A,MEX,...] [--maps areas.csv [--areas-single-color]] [--drinking-water] [--legend] <osm-file> [omap-file]
 ```
 
 | Option | Meaning |
@@ -416,7 +465,7 @@ TPER publishes its network as GTFS on its
 IT: a map made from them has to credit TPER):
 
 ```bash
-osm_to_omap --bus all --train S1,S2A,MEX \
+osm_to_omap --standard osm --bus all --train S1,S2A,MEX \
   --gtfs gommagtfsbo_20261006.zip --gtfs gtfsmex_20260421.zip \
   --legend bologna.osm bologna.omap
 ```
@@ -439,11 +488,12 @@ which one carto pixel is one pixel of the rendering, as on
 openstreetmap.org:
 
 ```bash
-osm_to_omap --bbox 11.3304,44.4848,11.3556,44.5028 bologna.osm piazza_maggiore.omap
+osm_to_omap --standard osm --bbox 11.3304,44.4848,11.3556,44.5028 bologna.osm piazza_maggiore.omap
 map_to_image -r 0.7143 -f 0 piazza_maggiore.omap
 ```
 
-Exit codes: `0` success, `1` a usage error, `2` the OSM file or the GTFS
+Exit codes: `0` success, `1` a usage error (an option of `--standard osm`
+given with another standard among them), `2` the OSM file or the GTFS
 feed could not be read, or held nothing to convert, `4` the map could not be
 written.
 

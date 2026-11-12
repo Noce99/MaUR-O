@@ -39,9 +39,10 @@
 //! the ground truth a whole suite of maps is scored against, image by image.
 //!
 //! It also goes the other way, from the world to a map: [`osm`] reads
-//! OpenStreetMap data, [`osm_style`] says what each feature looks like on
-//! openstreetmap.org's own map, and [`osm_convert`] makes a whole Mapper map
-//! out of the two — with, where asked, bus and train lines over it, which
+//! OpenStreetMap data, [`osm_orienteering`] says what each feature looks like
+//! on an orienteering map drawn to ISSprOM or ISOM, [`osm_style`] what it
+//! looks like on openstreetmap.org's own map, and [`osm_convert`] makes a
+//! whole Mapper map out of the data and either — with, where asked, bus and train lines over it, which
 //! [`bus`] reads from the same data or from a GTFS feed, and [`bundle`]
 //! lays out side by side where they share a street, and the areas of an
 //! event's maps, which [`map_areas`] reads from a list. And it brings the
@@ -137,6 +138,7 @@ pub mod orthophoto;
 pub mod orthophoto_services;
 pub mod osm;
 pub mod osm_convert;
+pub mod osm_orienteering;
 pub mod osm_style;
 pub mod progress;
 pub mod qbezier;

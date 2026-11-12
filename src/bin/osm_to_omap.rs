@@ -1,8 +1,10 @@
-//! Turns OpenStreetMap data into an OpenOrienteering Mapper map that looks
+//! Turns OpenStreetMap data into an OpenOrienteering Mapper map: an
+//! orienteering map drawn to ISSprOM 2019 or ISOM 2017-2, or one that looks
 //! like openstreetmap.org's own Standard map.
 //!
 //! ```text
-//! osm_to_omap [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4]
+//! osm_to_omap [--standard issprom|isom|osm]
+//!             [--bbox min_lon,min_lat,max_lon,max_lat] [--details 0-4]
 //!             [--bus 13,19,...]
 //!             [--train S1,S2A,MEX,...]
 //!             [--gtfs feed.zip ... [--day weekday|saturday|sunday | --date YYYYMMDD]]
@@ -19,7 +21,31 @@
 //! stretch the map far past it (see `OsmData::extent`). The output defaults
 //! to the input's name with `.omap`.
 //!
-//! `--details` picks how much the map shows, and at which scale: carto at
+//! The map is georeferenced in the UTM zone of its centre, turned so that
+//! true north is up.
+//!
+//! # Orienteering maps
+//!
+//! `--standard` picks the symbols the map is drawn with:
+//!
+//! | standard | symbol set | scale |
+//! |---|---|---|
+//! | `issprom` (default) | ISSprOM 2019, sprint | 1:4000 |
+//! | `isom` | ISOM 2017-2, forest | 1:10000 |
+//! | `osm` | openstreetmap-carto, see below | by `--details` |
+//!
+//! With `issprom` or `isom` the map holds the standard's whole symbol set,
+//! as Mapper ships it, and every feature the rules know drawn with it (see
+//! `maur_o::osm_orienteering`): buildings, paved ground and roads, paths,
+//! water, vegetation, walls and fences, land closed to the public, the
+//! point features. OpenStreetMap does not say how runnable a wood is or
+//! whether a wall can be crossed, and has no contours: the map is a base for
+//! field work, not a finished map. The other options are `osm`'s own;
+//! given with another standard they are a usage error.
+//!
+//! # openstreetmap.org's look
+//!
+//! `--standard osm` draws the map like openstreetmap-carto. `--details` picks how much the map shows, and at which scale: carto at
 //! one zoom, a pixel of it 0.28 mm on the paper.
 //!
 //! | level | carto zoom | scale |
@@ -30,8 +56,7 @@
 //! | 3 (default) | 16 | 1:5 000 |
 //! | 4 | 17 | 1:2 500 |
 //!
-//! The map is georeferenced in the UTM zone of its centre, turned so that
-//! true north is up. The resolution printed at the end is the `-r` to give
+//! The resolution printed at the end is the `-r` to give
 //! `map_to_image` for a rendering with one pixel to a carto pixel, as on
 //! openstreetmap.org.
 //!
@@ -95,7 +120,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 use maur_o::bus::{
     gtfs_references, lines_from_gtfs, lines_from_osm, osm_references, BusLine, Day, Mode,
@@ -104,16 +130,47 @@ use maur_o::bus::{
 use maur_o::map_areas::{read_map_areas, single_color};
 use maur_o::osm::{read_osm, BBox};
 use maur_o::osm_convert::convert;
+use maur_o::osm_orienteering::{OrienteeringStyle, Standard};
 use maur_o::osm_style::{
     carto_style_with_overlays, line_color, BusLook, Details, COURSE_PURPLE, MAP_AREA_FILL_ALPHA,
 };
+
+/// The symbols the map is drawn with.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum StandardArg {
+    /// ISSprOM 2019, sprint orienteering, at 1:4000.
+    Issprom,
+    /// ISOM 2017-2, forest orienteering, at 1:10000.
+    Isom,
+    /// openstreetmap.org's Standard style, at the scale of --details.
+    Osm,
+}
+
+/// The options which only `--standard osm` has, by clap id.
+const OSM_ONLY: &[&str] = &[
+    "details",
+    "bus",
+    "bus_exclude",
+    "gtfs",
+    "date",
+    "day",
+    "train",
+    "max_headway",
+    "bundle_width",
+    "stop_merge",
+    "maps",
+    "areas_single_color",
+    "drinking_water",
+    "legend",
+];
 
 #[derive(Parser)]
 #[command(
     name = "osm_to_omap",
     version,
-    about = "Converts OpenStreetMap data (.osm) into an OpenOrienteering Mapper map drawn \
-             like openstreetmap.org's Standard style."
+    about = "Converts OpenStreetMap data (.osm) into an OpenOrienteering Mapper map: an \
+             orienteering map drawn to ISSprOM 2019 or ISOM 2017-2, or one drawn like \
+             openstreetmap.org's Standard style."
 )]
 struct Args {
     /// The OpenStreetMap XML file to convert.
@@ -121,6 +178,12 @@ struct Args {
 
     /// The map to be written. Defaults to the OSM file name with a .omap suffix.
     omap_file: Option<PathBuf>,
+
+    /// The symbols to draw the map with: an orienteering standard (ISSprOM
+    /// 2019 at 1:4000, ISOM 2017-2 at 1:10000), or openstreetmap.org's look.
+    /// Every option below but --bbox is osm's only.
+    #[arg(long, value_enum, default_value = "issprom")]
+    standard: StandardArg,
 
     /// Only convert this area: min_lon,min_lat,max_lon,max_lat in degrees.
     #[arg(long, value_parser = BBox::parse, allow_hyphen_values = true)]
@@ -216,22 +279,60 @@ struct Args {
 }
 
 fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(a) => a,
-        Err(e) => {
-            e.print().ok();
+    let usage = |e: clap::Error| {
+        e.print().ok();
+        (
+            ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
+            String::new(),
+        )
+    };
+    let matches = Args::command().try_get_matches().map_err(usage)?;
+    let args = Args::from_arg_matches(&matches).map_err(usage)?;
+    let standard = match args.standard {
+        StandardArg::Issprom => Some(Standard::Issprom),
+        StandardArg::Isom => Some(Standard::Isom),
+        StandardArg::Osm => None,
+    };
+    if standard.is_some() {
+        if let Some(id) = OSM_ONLY
+            .iter()
+            .find(|id| matches.value_source(id) == Some(ValueSource::CommandLine))
+        {
             return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
+                ExitCode::from(1),
+                format!("Error: --{} needs --standard osm", id.replace('_', "-")),
             ));
         }
-    };
+    }
     let omap_file = args
         .omap_file
         .clone()
         .unwrap_or_else(|| args.osm_file.with_extension("omap"));
 
     let data = read_osm(&args.osm_file).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+    if let Some(standard) = standard {
+        let style = OrienteeringStyle::new(standard);
+        let conversion = convert(&data, &style, args.bbox)
+            .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+        conversion
+            .write_standard(&style, &omap_file)
+            .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        let bbox = conversion.bbox;
+        let (areas, lines, points) = conversion.counts;
+        println!(
+            "{}: {}, map scale 1:{}, EPSG:{}, area {},{},{},{}",
+            omap_file.display(),
+            standard.name(),
+            conversion.scale(),
+            conversion.projection.georeference.epsg,
+            bbox.min_lon,
+            bbox.min_lat,
+            bbox.max_lon,
+            bbox.max_lat,
+        );
+        println!("{areas} areas, {lines} lines, {points} points");
+        return Ok(());
+    }
     let mut maps = match &args.maps {
         Some(path) => {
             read_map_areas(path).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?

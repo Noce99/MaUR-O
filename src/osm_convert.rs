@@ -31,7 +31,7 @@ use crate::bundle;
 use crate::bus::{BusLine, Day, Mode, HEADWAY_HOURS};
 use crate::map::{coord_flag, h_align, v_align, Coord, Object, ObjectKind, PathObject, TextObject};
 use crate::map_areas::{MapArea, MapKind};
-use crate::osm::{BBox, OsmData};
+use crate::osm::{BBox, OsmData, Tags};
 use crate::osm_style::{
     line_width_px, map_key, stop_circle_px, Sample, Style, ARROW_PX, MAP_NAME_PX, PIXEL_MM,
 };
@@ -1359,6 +1359,24 @@ impl Conversion {
         }
     }
 
+    /// Writes the map as an `.omap`, with a standard's colours and symbols
+    /// as its reference map spells them.
+    pub fn write_standard(
+        &self,
+        style: &crate::osm_orienteering::OrienteeringStyle,
+        path: &Path,
+    ) -> Result<(), String> {
+        MapFile {
+            scale_denominator: self.scale(),
+            colors: &style.fragments.colors,
+            symbols: &style.fragments.symbols,
+            objects: &self.objects,
+            rotatable: false,
+            georeferencing: Some(georeferencing_element(&self.projection.georeference)),
+        }
+        .write(path)
+    }
+
     /// Writes the map, with `style`'s colours and symbols, as an `.omap`.
     pub fn write(&self, style: &Style, path: &Path) -> Result<(), String> {
         let fragment = |id: i32, text: String| crate::xml_reader::Fragment { id, text };
@@ -1386,14 +1404,71 @@ impl Conversion {
     }
 }
 
+/// What [`convert`] asks of a symbol set: the scale it is drawn at, and
+/// which of its symbols an OpenStreetMap feature is drawn with.
+///
+/// Carto's [`Style`] is one; [`crate::osm_orienteering::OrienteeringStyle`],
+/// an orienteering standard's symbol set, is the other.
+pub trait OsmRules {
+    /// The map's scale denominator.
+    fn scale(&self) -> i32;
+    /// The area symbol the whole map is laid on, if any.
+    fn background(&self) -> Option<i32>;
+    /// The area symbols a closed way or a multipolygon with these tags is
+    /// drawn with (see [`Style::area_symbols`]).
+    fn area_symbols(&self, tags: &Tags, multipolygon: bool) -> Vec<i32>;
+    /// The line symbols a way with these tags is drawn with.
+    fn line_symbols(&self, tags: &Tags) -> Vec<i32>;
+    /// The point symbols a tagged node is drawn with.
+    fn point_symbols(&self, tags: &Tags) -> Vec<i32>;
+    /// Whether an area in this symbol is land cover, which an area of land
+    /// cover lying on it hides. See [`convert`]. None is, by default.
+    fn ground(&self, _symbol: i32) -> bool {
+        false
+    }
+}
+
+impl OsmRules for Style {
+    fn scale(&self) -> i32 {
+        self.details.scale()
+    }
+    fn background(&self) -> Option<i32> {
+        Some(Style::background(self))
+    }
+    fn area_symbols(&self, tags: &Tags, multipolygon: bool) -> Vec<i32> {
+        Style::area_symbols(self, tags, multipolygon)
+    }
+    fn line_symbols(&self, tags: &Tags) -> Vec<i32> {
+        Style::line_symbols(self, tags)
+    }
+    fn point_symbols(&self, tags: &Tags) -> Vec<i32> {
+        Style::point_symbols(self, tags)
+    }
+}
+
 /// Converts everything in `bbox` (or the whole extract, where `None`) into
 /// objects drawn with `style`.
-pub fn convert(data: &OsmData, style: &Style, bbox: Option<BBox>) -> Result<Conversion, String> {
+///
+/// # Land cover, largest first
+///
+/// Carto draws landcover polygons largest first, so that a park lying in a
+/// residential area shows whatever its colour. Mapper draws by the colour
+/// table instead, which for carto's own symbols is ordered to the same end
+/// (see [`crate::osm_style`]); an orienteering standard's table is fixed,
+/// and has, say, a park's yellow over a wood's white. So the areas whose
+/// symbols `style` calls [`ground`](OsmRules::ground) are cut instead: each
+/// gives up whatever smaller ones cover of it, and every place on the map
+/// is left drawn with the smallest land cover lying on it.
+pub fn convert(
+    data: &OsmData,
+    style: &impl OsmRules,
+    bbox: Option<BBox>,
+) -> Result<Conversion, String> {
     let bbox = bbox
         .or_else(|| data.extent())
         .ok_or("the extract holds nothing to convert")?;
     let (center_lon, center_lat) = bbox.center();
-    let scale = style.details.scale();
+    let scale = style.scale();
     let projection = Projection::new((center_lon, center_lat), scale);
     let paper = |p: (f64, f64)| {
         let (x, y) = projection.to_paper(p);
@@ -1440,15 +1515,29 @@ pub fn convert(data: &OsmData, style: &Style, bbox: Option<BBox>) -> Result<Conv
     let mut areas = Vec::new();
     let mut lines = Vec::new();
     let mut points = Vec::new();
+    // The land cover, cut once every area is known.
+    let mut ground: Vec<Cover> = Vec::new();
+    let mut add_area = |symbols: Vec<i32>, rings: Vec<Vec<(f64, f64)>>| {
+        let (cover, over): (Vec<i32>, Vec<i32>) =
+            symbols.into_iter().partition(|&s| style.ground(s));
+        for symbol in over {
+            areas.push(area_object(symbol, &rings));
+        }
+        if !cover.is_empty() {
+            ground.push((cover, rings));
+        }
+    };
 
-    let corners = vec![
-        (bbox.min_lon, bbox.min_lat),
-        (bbox.max_lon, bbox.min_lat),
-        (bbox.max_lon, bbox.max_lat),
-        (bbox.min_lon, bbox.max_lat),
-        (bbox.min_lon, bbox.min_lat),
-    ];
-    areas.push(area_object(style.background(), &[corners]));
+    if let Some(background) = style.background() {
+        let corners = vec![
+            (bbox.min_lon, bbox.min_lat),
+            (bbox.max_lon, bbox.min_lat),
+            (bbox.max_lon, bbox.max_lat),
+            (bbox.min_lon, bbox.max_lat),
+            (bbox.min_lon, bbox.min_lat),
+        ];
+        add_area(vec![background], vec![corners]);
+    }
 
     for relation in &data.relations {
         if !relation.tags.is("type", "multipolygon") {
@@ -1462,9 +1551,7 @@ pub fn convert(data: &OsmData, style: &Style, bbox: Option<BBox>) -> Result<Conv
         if rings.is_empty() {
             continue;
         }
-        for symbol in symbols {
-            areas.push(area_object(symbol, &rings));
-        }
+        add_area(symbols, rings);
     }
 
     for way in &data.ways {
@@ -1483,9 +1570,7 @@ pub fn convert(data: &OsmData, style: &Style, bbox: Option<BBox>) -> Result<Conv
         if !area_symbols.is_empty() {
             let rings = clip_rings(vec![coords.clone()], &bbox);
             if !rings.is_empty() {
-                for &symbol in &area_symbols {
-                    areas.push(area_object(symbol, &rings));
-                }
+                add_area(area_symbols, rings);
             }
         }
         if !line_symbols.is_empty() {
@@ -1515,6 +1600,15 @@ pub fn convert(data: &OsmData, style: &Style, bbox: Option<BBox>) -> Result<Conv
         }
     }
 
+    let mut cover = Vec::new();
+    for (symbols, rings) in largest_first(ground) {
+        for symbol in symbols {
+            cover.push(area_object(symbol, &rings));
+        }
+    }
+    cover.append(&mut areas);
+    let areas = cover;
+
     let counts = (areas.len(), lines.len(), points.len());
     let mut objects = areas;
     objects.append(&mut lines);
@@ -1525,6 +1619,74 @@ pub fn convert(data: &OsmData, style: &Style, bbox: Option<BBox>) -> Result<Conv
         objects,
         counts,
     })
+}
+
+/// An area of land cover: its symbols, and its rings in degrees.
+type Cover = (Vec<i32>, Vec<Vec<(f64, f64)>>);
+
+/// The land cover areas, each cut to what no smaller one covers of it: what
+/// painting them largest first would leave showing (see [`convert`]).
+///
+/// The rings of an area are read with the even-odd rule, as Mapper fills
+/// them, and come back the same way. An area left with nothing is dropped.
+fn largest_first(areas: Vec<Cover>) -> Vec<Cover> {
+    use geo::{unary_union, Area, BooleanOps, BoundingRect, Intersects};
+    use geo::{LineString, MultiPolygon, Polygon, Rect};
+
+    // A sliver a boolean operation leaves along a shared edge, in square
+    // degrees: about a hundredth of a square meter.
+    const SLIVER: f64 = 1e-12;
+
+    let shape = |rings: &[Vec<(f64, f64)>]| -> MultiPolygon<f64> {
+        rings
+            .iter()
+            .fold(MultiPolygon::new(Vec::new()), |shape, ring| {
+                let ring = Polygon::new(LineString::from(ring.clone()), Vec::new());
+                shape.xor(&ring)
+            })
+    };
+    // Each area as a shape, with the box around it.
+    type Shape = (Vec<i32>, MultiPolygon<f64>, Option<Rect<f64>>);
+    let shapes: Vec<Shape> = areas
+        .into_iter()
+        .map(|(symbols, rings)| {
+            let shape = shape(&rings);
+            let bounds = shape.bounding_rect();
+            (symbols, shape, bounds)
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..shapes.len()).collect();
+    let sizes: Vec<f64> = shapes.iter().map(|s| s.1.unsigned_area()).collect();
+    order.sort_by(|&a, &b| sizes[b].total_cmp(&sizes[a]).then(a.cmp(&b)));
+
+    let mut kept = Vec::new();
+    for (rank, &i) in order.iter().enumerate() {
+        let (symbols, shape, bounds) = &shapes[i];
+        let Some(bounds) = bounds else { continue };
+        let smaller: Vec<&MultiPolygon<f64>> = order[rank + 1..]
+            .iter()
+            .map(|&j| &shapes[j])
+            .filter(|(_, _, other)| other.is_some_and(|other| other.intersects(bounds)))
+            .map(|(_, shape, _)| shape)
+            .collect();
+        let left = if smaller.is_empty() {
+            shape.clone()
+        } else {
+            shape.difference(&unary_union(smaller))
+        };
+        let rings: Vec<Vec<(f64, f64)>> = left
+            .0
+            .iter()
+            .filter(|polygon| polygon.unsigned_area() > SLIVER)
+            .flat_map(|polygon| std::iter::once(polygon.exterior()).chain(polygon.interiors()))
+            .map(|ring| ring.coords().map(|c| (c.x, c.y)).collect::<Vec<_>>())
+            .filter(|ring| ring.len() >= 4)
+            .collect();
+        if !rings.is_empty() {
+            kept.push((symbols.clone(), rings));
+        }
+    }
+    kept
 }
 
 /// A line's name as the legend gives it, after the line's number: without

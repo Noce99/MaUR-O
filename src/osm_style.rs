@@ -432,13 +432,13 @@ fn roads() -> Vec<Road> {
 /// How a footway, cycleway or path is paved, as carto's `int_surface`
 /// groups the `surface` tag.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Surface {
+pub(crate) enum Surface {
     Paved,
     Unpaved,
     Unknown,
 }
 
-fn surface(tags: &Tags) -> Surface {
+pub(crate) fn surface(tags: &Tags) -> Surface {
     const PAVED: &[&str] = &[
         "paved",
         "asphalt",
