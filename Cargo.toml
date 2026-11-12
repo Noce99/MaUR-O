@@ -73,6 +73,10 @@ fontconfig = { version = "0.11", features = ["dlopen"] }
 # the wasm build o-mnia makes of this crate is kept clear of it.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = "3"
+# The terminal user interface a bare `mauro` opens. Native-only like ureq:
+# the library never uses it, and o-mnia's wasm build never sees it.
+# crossterm comes with it, re-exported as ratatui::crossterm.
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 
 [dev-dependencies]
 assert_cmd = "2"

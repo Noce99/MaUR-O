@@ -78,6 +78,40 @@ pub struct Args {
     window: Option<String>,
 }
 
+/// Reads `--window`'s `left,top,right,bottom`, in mm on the paper, into the
+/// rectangle it names. The terminal UI checks a window with it too, so the
+/// two never disagree on what is one.
+pub fn parse_window(text: &str) -> Result<Rect, String> {
+    let invalid = || {
+        format!(
+            "Invalid value for --window: {text} (expected \
+             left,top,right,bottom with right > left and bottom > top)"
+        )
+    };
+    let w: Vec<f64> = text
+        .split(',')
+        .map(|v| v.trim().parse::<f64>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| invalid())?;
+    if w.len() != 4 || !w.iter().all(|v| v.is_finite()) || w[2] <= w[0] || w[3] <= w[1] {
+        return Err(invalid());
+    }
+    Ok(Rect::new(w[0], w[1], w[2] - w[0], w[3] - w[1]))
+}
+
+/// What an exit code of `mauro render` means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "the map could not be read",
+        3 => "the image geometry is invalid",
+        4 => "the image could not be written",
+        _ => return None,
+    })
+}
+
 /// The default output path for the given input path: next to the map file,
 /// with the suffix replaced by ".png".
 fn default_output_path(map_path: &Path) -> PathBuf {
@@ -137,26 +171,10 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
 
     let window = match &args.window {
         None => None,
-        Some(text) => {
-            let invalid = || {
-                (
-                    ExitCode::from(1),
-                    format!(
-                        "Error: Invalid value for --window: {text} (expected \
-                         left,top,right,bottom with right > left and bottom > top)"
-                    ),
-                )
-            };
-            let w: Vec<f64> = text
-                .split(',')
-                .map(|v| v.trim().parse::<f64>())
-                .collect::<Result<_, _>>()
-                .map_err(|_| invalid())?;
-            if w.len() != 4 || !w.iter().all(|v| v.is_finite()) || w[2] <= w[0] || w[3] <= w[1] {
-                return Err(invalid());
-            }
-            Some(Rect::new(w[0], w[1], w[2] - w[0], w[3] - w[1]))
-        }
+        Some(text) => Some(
+            parse_window(text)
+                .map_err(|message| (ExitCode::from(1), format!("Error: {message}")))?,
+        ),
     };
 
     let image_path = args

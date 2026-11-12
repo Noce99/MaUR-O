@@ -19,7 +19,9 @@ and adds it to the map as a template. All of these are subcommands of the one bi
 This crate is consumed by the o-mnia web app from a vendored copy (via
 `crates/maur-o-wasm`, o-mnia's own wasm-bindgen adapter — see that repo's
 `docs/dev/rust-backends.md`). Keep this crate a general-purpose **algorithms
-library plus its own CLI tools** — no UI, no o-mnia app policy (Settings,
+library plus its own CLI tools** — no UI in the library (the `mauro`
+binary's terminal interface, `src/bin/mauro/tui/`, is part of the CLI tools,
+and only ever builds and runs `mauro` command lines), no o-mnia app policy (Settings,
 profiles, project files, extension contracts, worker/store plumbing). A new
 capability an app needs is new library/CLI surface here; the app-facing
 wiring (wasm export, job protocol, UI) belongs in o-mnia, not here.
@@ -56,7 +58,12 @@ Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 
 `src/bin/mauro/main.rs` is only the dispatcher (the clap `Cli`, one module per
 subcommand, each module's `Args` and `pub fn main(args) -> ExitCode`). A usage
-error is exit code 1 for every subcommand, and so is a bare `mauro`. Full CLI
+error is exit code 1 for every subcommand. A bare `mauro` in a terminal opens
+the ratatui interface in `src/bin/mauro/tui/` (elsewhere it prints help, exit
+1). Its rule: a screen never runs a tool itself — it builds the subcommand's
+argument list, checks it with `tui::check` (the same clap `Cli`), and runs
+`mauro` with it as a child process (`tui/job.rs`) — so it can't drift from the
+CLI. A flag change that a screen still emits fails that screen's unit tests. Full CLI
 flags for each are documented in its module's own top-of-file doc comment
 (`src/bin/mauro/*.rs`) and in `README.md`'s Usage section. When changing a
 flag, default or exit code, update both (and `--help` text in the clap

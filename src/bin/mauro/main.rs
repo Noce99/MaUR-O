@@ -12,7 +12,13 @@
 //!
 //! Each subcommand is documented in its own module, exit codes included;
 //! `mauro <subcommand> --help` prints its options. A usage error is exit
-//! code 1 for every subcommand, and so is `mauro` given no subcommand.
+//! code 1 for every subcommand.
+//!
+//! `mauro` given no arguments at all, in a terminal, opens a terminal user
+//! interface instead ([`tui`]): a screen per tool, which builds and runs the
+//! same command lines. Given no arguments anywhere else — in a script, its
+//! input or output redirected — it prints its help and exits with 1, as a
+//! usage error, rather than wait for keys no one will press.
 
 mod benchmark_create;
 mod benchmark_run;
@@ -21,8 +27,10 @@ mod dem_eval;
 mod ortho;
 mod osm;
 mod render;
+mod tui;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -61,6 +69,12 @@ enum BenchmarkCmd {
 }
 
 fn main() -> ExitCode {
+    if std::env::args_os().len() == 1
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+    {
+        return tui::run();
+    }
     // Parsed in two steps, not with `Cli::try_parse`, because `osm` needs its
     // own `ArgMatches` to tell an option given from one left at its default.
     let parsed = Cli::command()

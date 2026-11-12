@@ -91,6 +91,16 @@ pub struct SvgRendering {
     pub warnings: Vec<String>,
 }
 
+/// The map's extent as it is drawn — every object with the width its
+/// symbol gives it, before any frame — in mm on the paper.
+///
+/// [`render_map`] adds the frame to this and multiplies it by the resolution
+/// to size its image, so it tells how large an image will be without
+/// drawing it.
+pub fn drawn_extent(map: &Map) -> Rect {
+    Renderer::new(map).extent()
+}
+
 /// The map's own extent with the white frame added, in mm on the paper.
 ///
 /// Shared so that a map rendered to pixels and the same map written as SVG

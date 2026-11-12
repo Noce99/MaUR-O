@@ -34,6 +34,7 @@ differently.
 | Float TIFF | `tiff` | Writes `mauro dem`'s single-band 32-bit float elevation GeoTIFF, which `image`'s encoder cannot. |
 | Contour geometry | `geo`, `geo-svg` | Polygon buffering and point-in-polygon for `mauro dem`; `geo-svg` draws its `--create_svg` diagnostics. |
 | Scratch space | `tempfile` | The temporary folder a benchmark archive is unpacked into. |
+| Terminal interface | `ratatui` (with its `crossterm`) | The interface a bare `mauro` opens in a terminal. Native-only like `ureq`, and only the binary uses it. |
 | HTTP | `ureq` | `mauro ortho`'s downloads from a mapping agency's WMS: blocking, rustls. Not built for wasm, and never used by the library itself. |
 
 `fontdb` + `rustybuzz` + `ttf-parser` + `tiny-skia` is the same pipeline
@@ -138,7 +139,8 @@ comment:
 
 | File | Contents |
 | --- | --- |
-| `bin/mauro/main.rs` | The `mauro` executable: parses the command line and hands it to the subcommand's module below. |
+| `bin/mauro/main.rs` | The `mauro` executable: parses the command line and hands it to the subcommand's module below — or, given no arguments in a terminal, opens the terminal interface. |
+| `bin/mauro/tui/` | The terminal interface: `home.rs` (the list of tools), `render_form.rs` (`mauro render`'s screen), `job.rs` (runs a built command line as a child `mauro`, its output shown live), `widgets.rs` (text input, file picker). A screen only builds a command line, checked with the same clap parser, so it cannot do what the CLI cannot. |
 | `bin/mauro/render.rs` | `mauro render`: renders a single map to an image or SVG. |
 | `bin/mauro/benchmark_create.rs` | `mauro benchmark create`: builds a benchmark archive: collects the maps, has a ground-truth renderer draw the reference images, and names everything the way `mauro benchmark run` expects. See [Making a benchmark archive](#making-a-benchmark-archive). |
 | `bin/mauro/benchmark_run.rs` | `mauro benchmark run`: runs a whole benchmark suite out of a zip archive, see [Running a benchmark archive](#running-a-benchmark-archive). |

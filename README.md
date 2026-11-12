@@ -43,6 +43,7 @@ together.
 - [Installation](#installation)
   - [Fonts and fontconfig](#fonts-and-fontconfig)
 - [Usage](#usage)
+  - [The terminal interface](#the-terminal-interface)
   - [`mauro render`](#mauro-render)
   - [`mauro benchmark create`](#mauro-benchmark-create)
   - [`mauro benchmark run`](#mauro-benchmark-run)
@@ -92,7 +93,9 @@ tool:
 | [`mauro ortho`](#mauro-ortho) | Adds the aerial orthophoto of a map's ground to it as a template. |
 
 `mauro --help` lists them, and every one of them takes `--help` and
-`--version` (`mauro render --help`).
+`--version` (`mauro render --help`). `mauro` on its own, in a terminal,
+opens [an interactive interface](#the-terminal-interface) to the same
+tools.
 
 To put `mauro` on your `PATH` instead, run `cargo install --path .` from a
 checkout.
@@ -132,6 +135,31 @@ On MacOS, on Windows, and on any other platform without fontconfig, this
 fallback is what runs.
 
 ## Usage
+
+### The terminal interface
+
+Run `mauro` with no arguments, in a terminal, and it opens a full-screen
+interface instead of printing its help: the tools in a list, and for each a
+form to fill in.
+
+```bash
+./target/release/mauro
+```
+
+So far `render` has a screen of its own; the others are listed, and say so.
+Its screen picks the map from the disk (type the start of a name to jump to
+it), shows what the map is — scale, objects, symbols, where it is placed —
+and how large the image will be, in pixels and on the ground, as the options
+change, before anything is drawn. Every screen builds an ordinary `mauro`
+command line, shown at the bottom as it is filled in, and running it runs
+exactly that, its output shown as it comes: what the interface does can
+always be done again from the shell.
+
+`↑`/`↓` move between fields, `←`/`→` change a choice, `Enter` picks or runs,
+`Ctrl+R` runs from anywhere on the form, `Esc` goes back, and `q` (on the
+list) or `Ctrl+C` (anywhere) quits. Given no arguments where there is no
+terminal — in a script, or with its input or output redirected — `mauro`
+prints its help and exits with 1, as before.
 
 ### `mauro render`
 
