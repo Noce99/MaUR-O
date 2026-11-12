@@ -33,10 +33,16 @@
 //! # How a symbol becomes a cell
 //!
 //! Every object drawn with a symbol the caller gave a speed for is drawn onto
-//! the grid, and every cell it touches takes that speed. Objects are drawn in
-//! the order they are collected, with lines last and the slowest line last of
-//! all, so that a path over a marsh reads as a path and the marsh does not
-//! win by being drawn later.
+//! the grid, and every cell it touches takes that speed; where shapes
+//! overlap, the one drawn last wins. Areas go first, in the order the map
+//! itself displays them -- by the topmost colour each fills with, so the area
+//! a reader sees on top is the one whose speed a cell takes -- then points,
+//! then lines, the slowest line last of all, so that a path over a marsh
+//! reads as a path and the marsh does not win by being drawn later.
+//!
+//! A speed which is not a finite number claims its symbols without drawing
+//! them: an entry `("201.1", f64::NAN)` ahead of `("201", 0.05)` leaves
+//! `201.1` off the grid while `201` and its other variants keep their speed.
 //!
 //! A cell is claimed by any coverage at all, not by half of it: a raster of
 //! running speeds is not a picture, and a cliff which clips the corner of a
@@ -73,7 +79,9 @@ use std::collections::HashMap;
 use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Stroke, Transform};
 
 use crate::geometry::{add_ellipse, to_painter_path, Path, Rect};
-use crate::map::{symbol_leaves, Map, Object, Point, Symbol};
+use crate::map::{
+    fill_pattern_type, is_color, symbol_leaves, Map, Object, Point, PointSymbol, Symbol,
+};
 use crate::renderer::to_skia_path;
 
 /// The default ceiling on the number of cells, past which the cell size is
@@ -215,6 +223,10 @@ struct Shape {
     line_width: f64,
     /// How far to pull an area in from its edge, in mm; `0` for not at all.
     shrink: f64,
+    /// Where an area sits in the map's own drawing order: the priority of the
+    /// topmost colour it fills with, smaller being higher (see
+    /// [`display_priority`]). Unused for lines and points.
+    display: i32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -281,6 +293,9 @@ fn collect(map: &Map, options: &Options) -> Vec<Shape> {
         let Some((_, speed)) = singles.iter().find(|(c, _)| matches(code, c)) else {
             continue;
         };
+        if !speed.is_finite() {
+            continue;
+        }
         let Some(kind) = kind_of(symbol, map) else {
             continue;
         };
@@ -323,6 +338,11 @@ fn collect(map: &Map, options: &Options) -> Vec<Shape> {
             kind,
             line_width,
             shrink,
+            display: if kind == Kind::Area {
+                display_priority(symbol, map)
+            } else {
+                i32::MAX
+            },
             path,
             origin: object_origin(object),
             object_index,
@@ -360,24 +380,82 @@ fn object_origin(object: &Object) -> Point {
         .unwrap_or(Point::new(0.0, 0.0))
 }
 
-/// Sorts lines to the end, slowest last.
+/// The colour an area is seen in, for ordering: the topmost (smallest)
+/// priority among its fills and patterns, or `i32::MAX` for an area drawing in
+/// no colour at all. A combined symbol counts its area parts.
+fn display_priority(symbol: &Symbol, map: &Map) -> i32 {
+    let mut leaves = Vec::new();
+    symbol_leaves(symbol, map, &mut leaves);
+    let mut top = i32::MAX;
+    for leaf in leaves {
+        let Symbol::Area(area) = leaf else {
+            continue;
+        };
+        let mut consider = |priority: i32| {
+            if is_color(priority) {
+                top = top.min(priority);
+            }
+        };
+        consider(area.color);
+        for pattern in &area.patterns {
+            if pattern.pattern_type == fill_pattern_type::LINE {
+                consider(pattern.line_color);
+            } else if let Some(point) = &pattern.point {
+                if let Some(priority) = point_color(point) {
+                    consider(priority);
+                }
+            }
+        }
+    }
+    top
+}
+
+/// The colour a point symbol is chiefly drawn in: its inner colour, else its
+/// outer one, else that of its first element with a colour.
+fn point_color(point: &PointSymbol) -> Option<i32> {
+    if is_color(point.inner_color) {
+        return Some(point.inner_color);
+    }
+    if is_color(point.outer_color) {
+        return Some(point.outer_color);
+    }
+    point
+        .elements
+        .iter()
+        .find_map(|element| match &element.symbol {
+            Symbol::Area(area) if is_color(area.color) => Some(area.color),
+            Symbol::Line(line) if is_color(line.color) => Some(line.color),
+            Symbol::Point(point) => point_color(point),
+            _ => None,
+        })
+}
+
+/// Sorts shapes into drawing order: areas by the map's display order, then
+/// points, then lines, slowest last.
 ///
-/// Which shape wins a cell is which is drawn last, and a line is the thing a
-/// runner follows: a track across a marsh has to survive the marsh. Among
-/// lines the slowest goes last, so a fence beats the path it crosses.
-fn lines_last(shapes: &mut [Shape]) {
+/// Which shape wins a cell is which is drawn last. Among areas that is the
+/// one the map shows on top: the colour drawn later (a smaller priority) goes
+/// later, and objects sharing a colour keep the file's order, as they do on
+/// the map. A line is the thing a runner follows: a track across a marsh has
+/// to survive the marsh. Among lines the slowest goes last, so a fence beats
+/// the path it crosses.
+fn drawing_order(shapes: &mut [Shape]) {
+    let rank = |kind: Kind| match kind {
+        Kind::Area => 0,
+        Kind::Point => 1,
+        Kind::Line => 2,
+    };
     shapes.sort_by(|a, b| {
-        let (a_line, b_line) = (a.kind == Kind::Line, b.kind == Kind::Line);
-        match (a_line, b_line) {
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, true) => std::cmp::Ordering::Less,
+        rank(a.kind).cmp(&rank(b.kind)).then_with(|| match a.kind {
+            // Descending priority: the topmost colour is drawn last and wins.
+            Kind::Area => b.display.cmp(&a.display),
             // Descending speed: the slowest line is drawn last and wins.
-            (true, true) => b
+            Kind::Line => b
                 .speed
                 .partial_cmp(&a.speed)
                 .unwrap_or(std::cmp::Ordering::Equal),
-            (false, false) => std::cmp::Ordering::Equal,
-        }
+            Kind::Point => std::cmp::Ordering::Equal,
+        })
     });
 }
 
@@ -683,7 +761,7 @@ pub fn build(map: &Map, options: &Options) -> Result<Raster, String> {
     if shapes.is_empty() {
         return Err("No map objects use a symbol with a configured speed.".to_string());
     }
-    lines_last(&mut shapes);
+    drawing_order(&mut shapes);
 
     // A line is drawn wider than a cell, so the grid has to reach further
     // than the geometry does.
@@ -1005,6 +1083,7 @@ mod tests {
             bounds: Rect::from_ltrb(0.0, 0.0, 0.0, 0.0),
             line_width: 0.0,
             shrink: 0.0,
+            display: i32::MAX,
         }
     }
 

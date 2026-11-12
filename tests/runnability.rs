@@ -233,3 +233,61 @@ fn many_small_objects_on_a_large_grid_are_quick() {
         raster.height
     );
 }
+
+/// Two overlapping squares and a line across them, in a map whose colour
+/// table puts blue above yellow. The file lists the blue square first, so
+/// the order objects are read in and the order the map displays them in
+/// disagree.
+fn layered_map() -> maur_o::map::Map {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<map xmlns="http://openorienteering.org/apps/mapper/xml/v2" version="9">
+<georeferencing scale="10000"/>
+<colors count="2">
+<color priority="0" name="Blue" c="1" m="0.2" y="0" k="0" opacity="1"/>
+<color priority="1" name="Yellow" c="0" m="0.27" y="0.79" k="0" opacity="1"/>
+</colors>
+<symbols count="3">
+<symbol type="4" id="0" code="301" name="Lake"><area_symbol inner_color="0" min_area="0" patterns="0"/></symbol>
+<symbol type="4" id="1" code="401" name="Open land"><area_symbol inner_color="1" min_area="0" patterns="0"/></symbol>
+<symbol type="2" id="2" code="301.1" name="Bank"><line_symbol color="0" line_width="300" minimum_length="0" join_style="2" cap_style="1" start_offset="0" end_offset="0" dashed="false" segment_length="0" end_length="0" show_at_least_one_symbol="false" minimum_mid_symbol_count="0" minimum_mid_symbol_count_when_closed="0" dash_length="0" break_length="0" dashes_in_group="1" in_group_break_length="0" mid_symbols_per_spot="1" mid_symbol_distance="0" suppress_dash_symbol_at_ends="false" scale_dash_symbol="true"/></symbol>
+</symbols>
+<parts count="1"><part name="p"><objects count="3">
+<object type="1" symbol="0"><coords count="5">2000 2000;8000 2000;8000 8000;2000 8000;2000 2000 18;</coords></object>
+<object type="1" symbol="1"><coords count="5">0 0;10000 0;10000 10000;0 10000;0 0 18;</coords></object>
+<object type="1" symbol="2"><coords count="2">0 5000;10000 5000;</coords></object>
+</objects></part></parts>
+</map>"#;
+    maur_o::xml_reader::read_xml_map_str(xml).unwrap().0
+}
+
+#[test]
+fn overlapping_areas_take_the_speed_of_the_one_the_map_shows_on_top() {
+    let map = layered_map();
+    let raster = build(&map, &options(&[("301", 0.0), ("401", 1.0)])).unwrap();
+    // The middle of the lake: under it, the open land drawn later in the file.
+    let (value, code) = raster.sample(5.0, 3.0).unwrap();
+    assert_eq!(code, Some("301"));
+    assert_eq!(value, 0.0);
+    // Outside the lake, the open land.
+    let (value, code) = raster.sample(1.0, 1.0).unwrap();
+    assert_eq!(code, Some("401"));
+    assert_eq!(value, 1.0);
+}
+
+#[test]
+fn a_speed_which_is_not_a_number_claims_its_symbols_and_draws_nothing() {
+    let map = layered_map();
+    let with_bank = build(&map, &options(&[("301", 0.0), ("401", 1.0)])).unwrap();
+    assert!(with_bank.used_codes.iter().any(|u| u.code == "301.1"));
+
+    let raster = build(
+        &map,
+        &options(&[("301.1", f64::NAN), ("301", 0.0), ("401", 1.0)]),
+    )
+    .unwrap();
+    assert!(raster.used_codes.iter().all(|u| u.code != "301.1"));
+    // The lake itself, matched by 301, still draws.
+    assert_eq!(raster.sample(5.0, 3.0).unwrap().1, Some("301"));
+    // Where only the bank crossed the open land, the open land shows.
+    assert_eq!(raster.sample(0.5, 5.0).unwrap(), (1.0, Some("401")));
+}
