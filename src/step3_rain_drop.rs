@@ -962,8 +962,8 @@ mod tests {
             (sx / len, sy / len)
         };
 
-        for k in 0..3usize {
-            let actual = unit_step(&trace.paths[k]);
+        for (k, path) in trace.paths.iter().take(3).enumerate() {
+            let actual = unit_step(path);
             let t = k as f64 / 3.0;
             let (bx, by) = (
                 (1.0 - t) * dir_a.0 + t * dir_b.0,

@@ -1481,8 +1481,8 @@ pub fn locate_on_path(coords: &CoordList, part: &PathPart, length: f64) -> PathL
         let _ = o2;
     }
     if !forward_found {
-        for k in split.upper..size {
-            let candidate = part.points[k] - pos;
+        for point in part.points.iter().take(size).skip(split.upper) {
+            let candidate = *point - pos;
             if significant(candidate) {
                 forward = candidate;
                 forward_found = true;
@@ -1491,8 +1491,8 @@ pub fn locate_on_path(coords: &CoordList, part: &PathPart, length: f64) -> PathL
         }
     }
     if !forward_found && part.closed {
-        for k in 0..split.upper {
-            let candidate = part.points[k] - pos;
+        for point in part.points.iter().take(split.upper) {
+            let candidate = *point - pos;
             if significant(candidate) {
                 forward = candidate;
                 forward_found = true;

@@ -494,10 +494,10 @@ impl ContourRaster {
             return;
         }
         let mut active: Vec<(usize, usize)> = Vec::new();
-        for y in 0..h {
-            for x in 0..w {
+        for (y, row) in self.grid.iter_mut().enumerate() {
+            for (x, pixel) in row.iter_mut().enumerate() {
                 if x == 0 || x == w - 1 || y == 0 || y == h - 1 {
-                    self.grid[y][x] = OUT_OF_BOUND;
+                    *pixel = OUT_OF_BOUND;
                     active.push((x, y));
                 }
             }
@@ -1471,11 +1471,11 @@ mod tests {
                 }
                 _ => contours += 4,
             }
-            for y in 0..h {
-                for x in 0..w {
+            for (y, row) in swept.0.iter().enumerate().take(h) {
+                for (x, expected) in row.iter().enumerate().take(w) {
                     assert_eq!(
                         r.get(x as i64, y as i64),
-                        swept.0[y][x],
+                        *expected,
                         "pixel ({x}, {y}) after round {round}"
                     );
                 }
