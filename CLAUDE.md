@@ -16,7 +16,7 @@ seventh, `add_orthophoto`, downloads the aerial orthophoto of a map's ground
 (from about fifty open national and regional WMS services across Europe)
 and adds it to the map as a template.
 
-This crate is consumed by the o-mnia web app as a git submodule (via
+This crate is consumed by the o-mnia web app from a vendored copy (via
 `crates/maur-o-wasm`, o-mnia's own wasm-bindgen adapter — see that repo's
 `docs/dev/rust-backends.md`). Keep this crate a general-purpose **algorithms
 library plus its own CLI tools** — no UI, no o-mnia app policy (Settings,
