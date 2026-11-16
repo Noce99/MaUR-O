@@ -113,17 +113,15 @@ fn run() -> Result<(), (ExitCode, String)> {
     let bounds = area(&args)?;
     let archive =
         Archive::open(&args.archive).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
-    let table = SymbolTable::isom();
-    if archive.info().layer != table.standard {
-        return Err((
+    let table = SymbolTable::by_name(&archive.info().layer).ok_or_else(|| {
+        (
             ExitCode::from(2),
             format!(
-                "Error: the archive's symbols are {}, this tool knows {}",
-                archive.info().layer,
-                table.standard
+                "Error: the archive's symbols are {}, which this tool does not know",
+                archive.info().layer
             ),
-        ));
-    }
+        )
+    })?;
     let info = archive.info();
     let zoom = args.zoom.unwrap_or(info.max_zoom);
     if !(info.min_zoom..=info.max_zoom).contains(&zoom) {

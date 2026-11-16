@@ -132,6 +132,71 @@ fn a_zoom_the_archive_does_not_have_is_exit_1() {
         .code(1);
 }
 
+/// The sample map drawn to the given `osm_to_omap` standard.
+fn make_map_in(dir: &Path, standard: &str) -> std::path::PathBuf {
+    let map = dir.join(format!("{standard}.omap"));
+    Command::cargo_bin("osm_to_omap")
+        .unwrap()
+        .args(["--standard", standard, BBOX, SAMPLE])
+        .arg(&map)
+        .assert()
+        .success();
+    map
+}
+
+#[test]
+fn maps_of_two_standards_make_two_archives_each_in_its_own_symbols() {
+    let dir = tempfile::tempdir().unwrap();
+    let (forest, sprint) = (
+        make_map_in(dir.path(), "isom"),
+        make_map_in(dir.path(), "issprom"),
+    );
+    let out = dir.path().join("world.pmtiles");
+    Command::cargo_bin("omap_to_tiles")
+        .unwrap()
+        .arg("--output")
+        .arg(&out)
+        .arg(&forest)
+        .arg(&sprint)
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("ISSprOM 2019").and(predicate::str::contains("ISOM 2017-2")),
+        );
+    assert!(
+        !out.exists(),
+        "with two standards the plain name is not written"
+    );
+    for file in ["world.isom.pmtiles", "world.issprom.pmtiles"] {
+        let archive = dir.path().join(file);
+        assert!(archive.exists(), "{file}");
+        // Each is read with its own symbol table.
+        Command::cargo_bin("tiles_query")
+            .unwrap()
+            .args(["--around", HERE, "--size", "300m"])
+            .arg(&archive)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Building"));
+    }
+}
+
+#[test]
+fn a_standard_can_be_asked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let map = make_map_in(dir.path(), "isom");
+    let out = dir.path().join("sprint.pmtiles");
+    Command::cargo_bin("omap_to_tiles")
+        .unwrap()
+        .args(["--standard", "issprom", "--output"])
+        .arg(&out)
+        .arg(&map)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("(ISSprOM 2019)"));
+    assert!(out.exists());
+}
+
 #[test]
 fn a_map_without_a_place_is_skipped_and_with_nothing_left_it_is_an_error() {
     let dir = tempfile::tempdir().unwrap();

@@ -372,8 +372,10 @@ Settled in discussion (recorded here so the codec can rely on them):
    **header parameter**: 1 cm is fine, and **5 cm is acceptable** (it saves ~15%;
    Mercator units are larger than ground units away from the equator, so the
    ground grid is finer than the nominal one).
-2. **Symbol set for the first release: ISOM** (2017-2). The layer machinery is
-   there from the start, but only one symbol table is shipped.
+2. **Symbol sets: ISOM (2017-2) first, then ISSprOM (2019)**, both implemented as
+   tables (`SymbolTable`). A map is stored in the table of the standard it is
+   drawn to, found from what it says or from which table's symbols it uses; one
+   archive holds one symbol set (one layer), so there is an archive per layer.
 3. **Per-symbol zoom rules** (implemented as `ZoomRule`, see [Zoom levels](#zoom-levels)). The symbol table of a layer carries, for each
    symbol, the rules that generalise it for coarse zoom levels, for example:
    the lowest zoom it appears at, a minimum size below which an object is

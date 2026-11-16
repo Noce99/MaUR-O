@@ -63,7 +63,7 @@ use crate::osm_style::{surface, Surface};
 use crate::xml_reader::{read_fragments_str, Fragments};
 
 /// The ISSprOM 2019 symbol set, at 1:4000.
-const ISSPROM: &str = include_str!("../maps/ISSprOM_4k.omap");
+pub(crate) const ISSPROM: &str = include_str!("../maps/ISSprOM_4k.omap");
 /// The ISOM 2017-2 symbol set, at 1:10000.
 pub(crate) const ISOM: &str = include_str!("../maps/ISOM_10k.omap");
 
@@ -86,7 +86,7 @@ impl Standard {
     }
 
     /// The reference map holding the standard's symbol set.
-    fn reference(self) -> &'static str {
+    pub(crate) fn reference(self) -> &'static str {
         match self {
             Standard::Issprom => ISSPROM,
             Standard::Isom => ISOM,
