@@ -126,6 +126,7 @@ one file per step; read that document first.
 | `mot.rs` | MOT, the tiled world-map format (draft, `MOT-Format.md`): Web Mercator tile addressing, the integer grid, and the tile payload codec (objects sorted by symbol, delta/varint nodes in separate streams). Pure: no maps, no files. |
 | `mot_convert.rs` | Makes MOT tiles from a `Map`: places it on the earth from its geographic anchor, turns its coordinates to Mercator, maps its symbols to the layer's table, orders objects along a Z-order curve for their ids, and stores each in every tile it touches (no clipping yet). |
 | `mot_symbols.rs` | A MOT layer's symbol table (ISOM 2017-2, built from the shipped reference map) and the closest-symbol rule: same code, the symbol it is a variant of, or the same name. |
+| `mot_archive.rs` | MOT tiles in a PMTiles v3 archive (the `pmtiles` crate, zstd per tile, the layer's symbol set and grid in the metadata), and reading a tile or a box back. Native only. |
 
 ### Orthophotos
 
@@ -151,6 +152,8 @@ comment:
 | `bin/mauro/dem_eval.rs` | `mauro dem-eval`: scores a predicted DEM against a ground truth. |
 | `bin/mauro/osm.rs` | `mauro osm`: converts an `.osm` file, or the data of an area downloaded from the Overpass API (`--download`, over `ureq`), into an `.omap`, drawn to ISSprOM (the default), ISOM or carto (`--standard`). |
 | `bin/mauro/ortho.rs` | `mauro ortho`: downloads a map's orthophoto tile by tile and adds it to the map as a template. |
+| `bin/omap_to_tiles.rs` | Converts maps into a MOT archive. |
+| `bin/tiles_query.rs` | Lists the objects of a MOT archive around a place, by symbol. |
 
 ## One map per symbol
 

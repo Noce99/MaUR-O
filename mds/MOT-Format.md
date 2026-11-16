@@ -1,8 +1,14 @@
 # MOT — MaUR-O Tiles (draft, version 1 design)
 
-Status: **design draft**. Nothing here is implemented yet; the measurements in
-[Measurements so far](#measurements-so-far) come from the throw-away programs in
-`examples/` (`tile_stats.rs`, `curve_fit.rs`, `hidden_areas.rs`).
+Status: **draft**. A first slice is implemented: the tile payload codec
+(`src/mot.rs`), the ISOM symbol table (`src/mot_symbols.rs`), conversion of a
+map to tiles (`src/mot_convert.rs`) and the PMTiles archive (`src/mot_archive.rs`),
+with the tools `omap_to_tiles` and `tiles_query`. Not yet: clipping of objects
+at tile borders (an object is stored whole in each tile it touches), zoom levels
+other than the one stored, per-symbol zoom rules, coverage, the history, other
+symbol sets. The measurements in [Measurements so far](#measurements-so-far)
+come from the throw-away programs in `examples/` (`tile_stats.rs`, `curve_fit.rs`,
+`hidden_areas.rs`); `examples/mot_try.rs` measures the real codec.
 
 MOT is a compact, tiled, vector format for storing *all* orienteering maps of the
 world as one map, and for fetching "what is around this location" cheaply. It is
@@ -212,6 +218,26 @@ About 9× smaller than the XML and about 1.8× smaller than its gzip. The estima
 leaves out tile-local origins and separate streams (expected to save another 10–20%).
 The bigger win is **per-tile access**: reading one neighbourhood without
 decompressing the whole map.
+
+### Measurements of the codec
+
+`examples/mot_try.rs` on the same two maps, 5 cm grid, zoom 14, each tile
+compressed on its own with zstd -19. Objects of hidden symbols and drawing aids are
+left out (in Corno they are 44,000 of 57,000 objects, the reason it is so much
+smaller than the estimate above); symbols not in the ISOM table are remapped or
+dropped (Bologna is an ISSprOM map, so most of its objects are stored under
+another symbol, which can be wrong).
+
+| | Bologna (ISSprOM, 1:4000) | Corno (ISOM, 1:15000) |
+| --- | --- | --- |
+| Objects stored | 254,663 (15,810 dropped) | 13,333 (83 dropped) |
+| Tiles | 78 | 12 |
+| Raw payload | 14.7 MB | 1.6 MB |
+| Per-tile zstd -19 | 9.1 MB | 1.05 MB |
+| `.omap` | 74.7 MB | 22.7 MB |
+
+Querying a 300 m square in the archive of both maps reads two tiles and takes a few
+milliseconds.
 
 ## Future adaptations
 
