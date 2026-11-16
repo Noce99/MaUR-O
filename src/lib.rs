@@ -52,6 +52,13 @@
 //! Europe), and [`image_template`] adds the
 //! downloaded image to the map file as the template a mapper draws over.
 //!
+//! # A map of the world
+//!
+//! MOT is a compact tiled format for keeping every map of the world as one
+//! map per symbol set (`mds/MOT-Format.md`, a draft). [`mot`] is its tile
+//! addressing and payload codec, [`mot_symbols`] a layer's symbol table, and
+//! [`mot_convert`] makes tiles from a map.
+//!
 //! # From contours to elevation
 //!
 //! A second, largely independent pipeline reconstructs the shape of the
@@ -132,6 +139,9 @@ pub mod gravity_model;
 pub mod image_template;
 pub mod map;
 pub mod map_areas;
+pub mod mot;
+pub mod mot_convert;
+pub mod mot_symbols;
 pub mod naming;
 pub mod ocd;
 pub mod ocd_crs;
