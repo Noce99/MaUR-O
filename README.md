@@ -712,9 +712,11 @@ A tile holds the part of each object inside its box grown by `--buffer` (a
 fraction of the tile's side, 1/32 by default, about 50 m at zoom 14), so a line
 or a symbol at the edge is not cut short; the archive is about `(1 + 2 *
 buffer)^2` times as big as with none. An object that crosses the box has its
-curves flattened and is cut: a line into pieces that say where they were cut and
-how far along the line they start (so its dashes stay in step from tile to tile),
-an area into a ring closed along the edge, with the cut edges flagged.
+curves flattened and is cut: a line into pieces that say where they were cut,
+an area into a ring closed along the edge, with the cut edges flagged. A line
+whose symbol spaces dashes or symbols along its whole length (a dashed line, one
+with symbols along it) is not cut but kept whole in every tile it crosses, as
+Mapper's spacing depends on its length.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -769,8 +771,7 @@ transparent image. The page pans and zooms, can show the tile borders, and
 chooses the symbol scale: a fixed one, or one true to the screen, where a
 millimetre of paper is as big at every zoom. This is a tool to look at an
 archive, not a server to expose: it listens on `127.0.0.1` unless told
-otherwise. A line cut at a tile's border is drawn from the cut, so its dashes
-restart there.
+otherwise.
 
 | Exit code | Meaning |
 | --- | --- |

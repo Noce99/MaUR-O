@@ -22,8 +22,7 @@
 //!
 //! This is a tool for looking at an archive, not a server to expose: it listens
 //! on `127.0.0.1` unless told otherwise and does no more than read requests
-//! of its own kind. A line cut at a tile's border is drawn from the cut, so a
-//! dashed line's dashes restart there.
+//! of its own kind.
 //!
 //! Exit codes: 0 after `--help`, 1 bad usage, 2 the archive cannot be read, 4 the
 //! address cannot be used.

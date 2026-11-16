@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use crate::map::{Map, Symbol};
+use crate::map::{symbol_leaves, Map, Symbol};
 use crate::osm_orienteering::Standard;
 use crate::xml_reader::read_xml_map_str;
 
@@ -123,6 +123,30 @@ fn zoom_rule(code: &str, kind: SymbolKind) -> ZoomRule {
     }
 }
 
+/// Whether a symbol lays things out along the whole of a line: dashes, a
+/// dashed border, or point symbols at its start, along it or at its end.
+fn lays_out_along(symbol: &Symbol, map: &Map) -> bool {
+    let mut leaves = Vec::new();
+    symbol_leaves(symbol, map, &mut leaves);
+    leaves.iter().any(|leaf| match leaf {
+        Symbol::Line(s) => {
+            let drawn = |p: &Option<Box<crate::map::PointSymbol>>| {
+                p.as_deref().is_some_and(|p| !p.is_empty())
+            };
+            // `dash_length` and `break_length` are set on a solid line too, and mean
+            // nothing there: it is `dashed` which says it is dashed.
+            s.dashed
+                || s.border.dashed
+                || s.right_border.dashed
+                || drawn(&s.start_symbol)
+                || drawn(&s.mid_symbol)
+                || drawn(&s.end_symbol)
+                || drawn(&s.dash_symbol)
+        }
+        _ => false,
+    })
+}
+
 /// One symbol of a table.
 #[derive(Clone, Debug)]
 pub struct SymbolEntry {
@@ -134,6 +158,11 @@ pub struct SymbolEntry {
     pub kind: SymbolKind,
     /// How it is generalised for the coarser zoom levels.
     pub rule: ZoomRule,
+    /// Whether an object of it is kept whole in a tile instead of cut: its
+    /// symbol lays dashes or symbols out along the *whole* line, and how Mapper
+    /// spaces them depends on that length, so a piece of the line would not
+    /// meet its neighbour's.
+    pub whole: bool,
 }
 
 /// How [`SymbolTable::closest`] found a symbol, best first.
@@ -187,6 +216,7 @@ impl SymbolTable {
                 name: symbol.name().to_string(),
                 kind,
                 rule: zoom_rule(code, kind),
+                whole: lays_out_along(symbol, &map),
             });
         }
         SymbolTable {
@@ -399,6 +429,20 @@ mod tests {
                 assert!(rule.min_size_px > 0.0 && rule.simplify_px > 0.0);
             }
         }
+    }
+
+    #[test]
+    fn dashed_lines_and_lines_with_symbols_along_them_are_kept_whole() {
+        let table = SymbolTable::isom();
+        let whole = |code: &str| table.get(table.id_of(code).unwrap()).unwrap().whole;
+        // A contour is a plain line; a power line has its pylons along it, a
+        // cliff its ticks, and a fence its dashes.
+        assert!(!whole("101"));
+        assert!(whole("510"));
+        let wholes = (0..table.len() as u16)
+            .filter(|&i| table.get(i).unwrap().whole)
+            .count();
+        assert!(wholes > 5 && wholes < table.len() / 2, "{wholes}");
     }
 
     #[test]

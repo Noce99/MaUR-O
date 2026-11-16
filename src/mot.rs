@@ -217,11 +217,6 @@ pub struct TileObject {
     pub shape: Shape,
     /// Its nodes: a point has one.
     pub nodes: Vec<Node>,
-    /// For a piece of a line cut at its start: how far along the whole line
-    /// that start is, in grid units. A renderer starts the line's dash
-    /// pattern that far into it, so the dashes do not begin again at every
-    /// tile. 0 for everything else.
-    pub dash_offset: u32,
 }
 
 /// The objects of one tile.
@@ -324,7 +319,6 @@ const KIND_PATH: u8 = 1;
 const KIND_TEXT: u8 = 2;
 const HAS_ROTATION: u8 = 1 << 2;
 const HAS_PATTERN: u8 = 1 << 3;
-const HAS_OFFSET: u8 = 1 << 4;
 
 impl Tile {
     /// An empty tile on a grid of `grid_cm` centimetres.
@@ -371,9 +365,6 @@ impl Tile {
             if pattern.is_some() {
                 byte |= HAS_PATTERN;
             }
-            if o.dash_offset != 0 {
-                byte |= HAS_OFFSET;
-            }
             meta.push(byte);
             put_varint(&mut meta, zigzag(o.id as i64 - previous_id as i64));
             previous_id = o.id;
@@ -395,9 +386,6 @@ impl Tile {
 
             if rotation != 0 {
                 extra.extend_from_slice(&rotation.to_le_bytes());
-            }
-            if o.dash_offset != 0 {
-                put_varint(&mut extra, u64::from(o.dash_offset));
             }
             let first = o.nodes.first().map_or((0, 0), |n| (n.x, n.y));
             if let Some(p) = pattern {
@@ -518,11 +506,6 @@ impl Tile {
             } else {
                 0.0
             };
-            let dash_offset = if byte & HAS_OFFSET != 0 {
-                u32::try_from(extra.varint()?).map_err(|_| "dash offset out of range")?
-            } else {
-                0
-            };
             let first = nodes.first().map_or((0, 0), |n| (n.x, n.y));
             let shape = match kind {
                 KIND_POINT => Shape::Point,
@@ -565,7 +548,6 @@ impl Tile {
                 rotation,
                 shape,
                 nodes,
-                dash_offset,
             });
         }
         Ok(Tile { grid_cm, objects })
@@ -593,7 +575,6 @@ mod tests {
             rotation: 0.0,
             shape: Shape::Point,
             nodes: vec![node(100, -50, 0)],
-            dash_offset: 0,
         });
         tile.objects.push(TileObject {
             id: 12,
@@ -608,7 +589,6 @@ mod tests {
                 node(500, 500, node_flag::HOLE_POINT as u8),
                 node(600, 500, 0),
             ],
-            dash_offset: 123_456,
         });
         tile.objects.push(TileObject {
             id: 13,
@@ -619,7 +599,6 @@ mod tests {
                 origin: (-7, 9),
             })),
             nodes: vec![node(-3, 4, 0), node(5, 5, node_flag::CLOSE_POINT as u8)],
-            dash_offset: 0,
         });
         tile.objects.push(TileObject {
             id: 99,
@@ -632,7 +611,6 @@ mod tests {
                 box_size: Some((400, 90)),
             }),
             nodes: vec![node(1_000_000, 2_000_000, 0), node(1_000_400, 2_000_090, 0)],
-            dash_offset: 0,
         });
         tile
     }
@@ -646,10 +624,7 @@ mod tests {
         assert_eq!(back.grid_cm, 5);
         assert_eq!(back.objects.len(), expected.objects.len());
         for (a, b) in back.objects.iter().zip(&expected.objects) {
-            assert_eq!(
-                (a.id, a.symbol, &a.nodes, a.dash_offset),
-                (b.id, b.symbol, &b.nodes, b.dash_offset)
-            );
+            assert_eq!((a.id, a.symbol, &a.nodes), (b.id, b.symbol, &b.nodes));
             assert!(
                 (a.rotation - b.rotation).abs() < 1e-3,
                 "{} vs {}",

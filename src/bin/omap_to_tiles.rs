@@ -36,9 +36,10 @@
 //!
 //! A tile holds the part of each object inside its box grown by the buffer, so
 //! a line or a symbol at the edge is not cut short; an object that crosses the
-//! box has its curves flattened, and its pieces say where they were cut and,
-//! for a line, how far along it they start, so its dashes stay in step from
-//! tile to tile.
+//! box has its curves flattened and is cut: a line into pieces that say where
+//! they were cut, an area into a ring closed along the edge. A line whose symbol
+//! spaces dashes or symbols along its whole length is not cut but kept whole in
+//! every tile it crosses, as Mapper's spacing depends on that length.
 //!
 //! Exit codes: 0 success, 1 bad usage, 2 a map cannot be read or none can be
 //! converted, 4 the archive cannot be written.
