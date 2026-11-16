@@ -201,7 +201,6 @@ mod tests {
                         flags: 0,
                     })
                     .collect(),
-                dash_offset: 0,
             });
         }
         tile

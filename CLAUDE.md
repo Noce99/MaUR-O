@@ -217,7 +217,7 @@ of them a map is drawn to), the
 closest-symbol rule and each symbol's zoom rule (when it appears, how small it
 may be, how much its line may be thinned); `mot_convert.rs` places a `Map` on the earth and stores each
 object in the tiles it touches, cut to each tile's box plus a buffer
-(`mot_clip.rs`: curves flattened, lines into pieces with their dash offset, areas
+(`mot_clip.rs`: curves flattened, lines into pieces, areas
 into rings with their cut edges flagged); `convert_levels` builds the pyramid from the finest level up to a coarser one,
 generalising by those rules; `mot_archive.rs` keeps the
 tiles in a PMTiles file through the `pmtiles` crate (native only, like `ureq`,

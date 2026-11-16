@@ -6,10 +6,7 @@
 //! short): it stores the part of it inside, and says where the cuts are.
 //!
 //! * A **line** (an open path) is cut into pieces by [`clip_line`]. Each piece
-//!   says whether its first and last vertex are real ends of the line or cuts,
-//!   and, for a piece that starts at a cut, how far along the original line it
-//!   starts: that is the dash phase a renderer has to start the piece at, or
-//!   the dashes would restart at every tile.
+//!   says whether its first and last vertex are real ends of the line or cuts.
 //! * An **area** (a closed path) is cut by [`clip_ring`], which keeps it closed
 //!   along the edge of the box. Those new edges are not in the map, so the
 //!   vertex an edge of that kind leaves from carries
@@ -68,9 +65,6 @@ pub struct LinePiece {
     pub start_cut: bool,
     /// Whether the last vertex is a cut rather than the line's own end.
     pub end_cut: bool,
-    /// The length of the original line before the first vertex, in grid
-    /// units: 0 for a piece that starts where the line does.
-    pub offset: f64,
 }
 
 /// The parameters `[t0, t1]` of the part of the segment `p -> q` inside the
@@ -118,12 +112,9 @@ pub fn clip_line(vertices: &[Vertex], rect: &Rect) -> Vec<LinePiece> {
         vertices: vec![*first],
         start_cut: false,
         end_cut: false,
-        offset: 0.0,
     });
-    let mut travelled = 0.0;
     for (i, pair) in vertices.windows(2).enumerate() {
         let (p, q) = (&pair[0], &pair[1]);
-        let length = (q.x - p.x).hypot(q.y - p.y);
         match segment_interval(p, q, rect) {
             None => {
                 if let Some(mut piece) = current.take() {
@@ -142,7 +133,6 @@ pub fn clip_line(vertices: &[Vertex], rect: &Rect) -> Vec<LinePiece> {
                         vertices: vec![entry],
                         start_cut: i > 0 || t0 > 0.0,
                         end_cut: false,
-                        offset: travelled + t0 * length,
                     });
                 }
                 let piece = current.as_mut().expect("a piece was just started");
@@ -157,7 +147,6 @@ pub fn clip_line(vertices: &[Vertex], rect: &Rect) -> Vec<LinePiece> {
                 }
             }
         }
-        travelled += length;
     }
     if let Some(piece) = current {
         pieces.push(piece);
@@ -376,7 +365,6 @@ mod tests {
         let p = &pieces[0];
         assert!(p.start_cut && p.end_cut);
         assert_eq!((p.vertices[0].x, p.vertices[1].x), (0.0, 20.0));
-        assert_eq!(p.offset, 10.0);
     }
 
     #[test]
@@ -385,7 +373,6 @@ mod tests {
         let pieces = clip_line(&line, &rect(0.0, 0.0, 20.0, 10.0));
         assert_eq!(pieces.len(), 1);
         assert!(!pieces[0].start_cut && !pieces[0].end_cut);
-        assert_eq!(pieces[0].offset, 0.0);
         assert_eq!(pieces[0].vertices.len(), 3);
     }
 
@@ -395,19 +382,13 @@ mod tests {
     }
 
     #[test]
-    fn a_line_that_leaves_and_returns_is_two_pieces_and_the_second_knows_its_phase() {
+    fn a_line_that_leaves_and_returns_is_two_pieces_cut_at_the_right_ends() {
         // In at the left, out at the top, back in at the top, out at the right.
         let line = [v(5.0, 5.0), v(5.0, 15.0), v(15.0, 15.0), v(15.0, 5.0)];
         let pieces = clip_line(&line, &rect(0.0, 0.0, 20.0, 10.0));
         assert_eq!(pieces.len(), 2);
         assert!(!pieces[0].start_cut && pieces[0].end_cut);
         assert!(pieces[1].start_cut && !pieces[1].end_cut);
-        // 10 up, 10 across, then 5 down to the box again.
-        assert!(
-            (pieces[1].offset - 25.0).abs() < 1e-9,
-            "{}",
-            pieces[1].offset
-        );
     }
 
     #[test]

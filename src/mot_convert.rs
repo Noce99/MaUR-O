@@ -10,10 +10,12 @@
 //! and a renderer draws each tile clipped to the tile itself. An object
 //! entirely inside the grown box is stored whole, curves and all. One that
 //! crosses it has its curves flattened and is cut by [`crate::mot_clip`]: a
-//! line into pieces (each says where it was cut, and how far along the line it
-//! starts, for its dashes), an area into a ring closed along the edge. All the
-//! pieces have the object's [`TileObject::id`]. A point or a text is in every
-//! tile whose grown box holds it.
+//! line into pieces (each says where it was cut), an area into a ring closed
+//! along the edge. All the pieces have the object's [`TileObject::id`]. A line
+//! whose symbol lays dashes or symbols out along the whole of it
+//! ([`crate::mot_symbols::SymbolEntry::whole`]) is not cut but kept whole in
+//! every tile it crosses. A point or a text is in every tile whose grown box
+//! holds it.
 //!
 //! The map is placed from its [`GeographicAnchor`] (the reference point in
 //! degrees) laid out on the ellipsoid, turned by the map's grivation, as
@@ -282,6 +284,10 @@ pub fn convert(
         converted.next_id += 1;
 
         let rule = table.rule(id_in_table);
+        // Kept whole at the finest level only: a coarser one draws its dashes
+        // too small to tell, and is thinned anyway.
+        let keep_whole = !coarse && table.get(id_in_table).is_some_and(|e| e.whole);
+        let closed = flags_closed(&object.coords);
         if coarse && options.zoom < rule.min_zoom {
             converted.generalized += 1;
             continue;
@@ -358,8 +364,8 @@ pub fn convert(
             let locals: Vec<(f64, f64)> = places.iter().map(|&p| local(p)).collect();
             let inside = |&(x, y): &(f64, f64)| rect.contains(x, y);
 
-            // What goes in this tile: nodes, and for a line piece its dash offset.
-            let mut stored: Vec<(Vec<Node>, u32)> = Vec::new();
+            // What goes in this tile: the nodes of each piece of the object.
+            let mut stored: Vec<Vec<Node>> = Vec::new();
             let whole = |locals: &[(f64, f64)]| -> Vec<Node> {
                 flags
                     .iter()
@@ -393,15 +399,26 @@ pub fn convert(
             match &object.kind {
                 ObjectKind::Point | ObjectKind::Text(_) => {
                     if locals.iter().any(inside) {
-                        stored.push((whole(&locals), 0));
+                        stored.push(whole(&locals));
                     }
                 }
                 ObjectKind::Path(_) if locals.iter().all(inside) => {
-                    stored.push((whole(&locals), 0));
+                    stored.push(whole(&locals));
                 }
-                ObjectKind::Path(_) => {
-                    clip_path(&flags, &locals, &rect, &mut stored);
+                // A line spaced out along its whole length is kept whole in
+                // every tile it passes through; the control polygon of a curve
+                // contains it, so a line it misses does not touch the tile.
+                ObjectKind::Path(_) if keep_whole && !closed => {
+                    let polygon: Vec<Vertex> = locals
+                        .iter()
+                        .map(|&(x, y)| Vertex { x, y, flags: 0 })
+                        .collect();
+                    if locals.iter().any(inside) || !clip_line(&polygon, &rect).is_empty() {
+                        stored.push(whole(&locals));
+                    }
                 }
+                ObjectKind::Path(_) if keep_whole => stored.push(whole(&locals)),
+                ObjectKind::Path(_) => clip_path(&flags, &locals, &rect, &mut stored),
             }
             if stored.is_empty() {
                 continue;
@@ -410,14 +427,13 @@ pub fn convert(
                 .tiles
                 .entry(tile_id)
                 .or_insert_with(|| Tile::new(grid_cm));
-            for (nodes, dash_offset) in stored {
+            for nodes in stored {
                 tile.objects.push(TileObject {
                     id,
                     symbol: id_in_table,
                     rotation,
                     shape: shape.clone(),
                     nodes,
-                    dash_offset,
                 });
             }
         }
@@ -441,6 +457,11 @@ pub fn convert(
         }
     }
     Ok(converted)
+}
+
+/// Whether a path has a closed part: an area, or a ring drawn as a line.
+fn flags_closed(coords: &[crate::map::Coord]) -> bool {
+    coords.iter().any(|c| c.flags & node_flag::CLOSE_POINT != 0)
 }
 
 /// A path's positions, in Mercator meters, and its node flags.
@@ -510,19 +531,13 @@ fn generalize(
     (!out_places.is_empty()).then_some((out_places, out_flags))
 }
 
-/// The parts of a path inside `rect`, as nodes (and the dash offset of each
-/// line piece), pushed to `stored`.
+/// The parts of a path inside `rect`, as the nodes of each, pushed to `stored`.
 ///
 /// `locals` are the path's coordinates in the tile's grid units. The path is
 /// flattened first. A closed part is cut as a ring, and all of them make one
 /// object, as the rings of an area do; an open one is cut into line pieces,
 /// each its own.
-fn clip_path(
-    flags: &[i32],
-    locals: &[(f64, f64)],
-    rect: &Rect,
-    stored: &mut Vec<(Vec<Node>, u32)>,
-) {
+fn clip_path(flags: &[i32], locals: &[(f64, f64)], rect: &Rect, stored: &mut Vec<Vec<Node>>) {
     let node = |v: &Vertex| Node {
         x: v.x.round() as i32,
         y: v.y.round() as i32,
@@ -573,12 +588,7 @@ fn clip_path(
                     let last = nodes.len() - 1;
                     nodes[last].flags |= node_flag::CLIPPED as u8;
                 }
-                let offset = if piece.start_cut {
-                    piece.offset.round() as u32
-                } else {
-                    0
-                };
-                stored.push((nodes, offset));
+                stored.push(nodes);
             }
             run_start = i + 1;
         }
@@ -593,7 +603,7 @@ fn clip_path(
         area.extend(ring);
     }
     if !area.is_empty() {
-        stored.insert(0, (area, 0));
+        stored.insert(0, area);
     }
 }
 
@@ -759,13 +769,13 @@ mod tests {
     }
 
     #[test]
-    fn a_line_across_tiles_is_cut_into_pieces_which_know_their_dash_phase() {
+    fn a_line_across_tiles_is_cut_into_pieces_with_their_ends_marked() {
         let mut map = empty_map();
         // At 1:10000 a millimetre of paper is 10 m, so 500 mm is 5 km: several
         // zoom 14 tiles (about 1.7 km each at this latitude).
-        let line = object_of(
+        let line = object_by_code(
             &map,
-            |s| matches!(s, Symbol::Line(_)),
+            "101",
             ObjectKind::Path(PathObject::default()),
             vec![Coord::new(0.0, 0.0, 0), Coord::new(500.0, 0.0, 0)],
         );
@@ -781,34 +791,90 @@ mod tests {
             converted.tiles.len()
         );
 
-        /// A piece as stored: where it is, its dash offset, and whether its
-        /// first and last nodes are cuts.
-        type Piece = (Vec<(f64, f64)>, u32, bool, bool);
+        /// A piece as stored: where it is, and whether its first and last nodes
+        /// are cuts.
+        type Piece = (Vec<(f64, f64)>, bool, bool);
         let mut pieces: Vec<Piece> = Vec::new();
         for (id, tile) in &converted.tiles {
             for o in &tile.objects {
                 assert_eq!(o.id, 0, "every piece has the object's id");
                 let first = o.nodes[0].flags & node_flag::CLIPPED as u8 != 0;
                 let last = o.nodes[o.nodes.len() - 1].flags & node_flag::CLIPPED as u8 != 0;
-                pieces.push((absolute(tile, *id, &o.nodes), o.dash_offset, first, last));
+                pieces.push((absolute(tile, *id, &o.nodes), first, last));
             }
         }
         // The true ends are the ones that are not cuts.
-        let start = pieces.iter().find(|p| !p.2).expect("a piece has the start");
-        assert_eq!(start.1, 0);
+        let start = pieces.iter().find(|p| !p.1).expect("a piece has the start");
         let start = start.0[0];
-        let end = pieces.iter().find(|p| !p.3).expect("a piece has the end");
+        let end = pieces.iter().find(|p| !p.2).expect("a piece has the end");
         let end = *end.0.last().unwrap();
         let total = (end.0 - start.0).hypot(end.1 - start.1);
         let sum: f64 = pieces.iter().map(|p| path_length(&p.0)).sum();
         assert!((sum - total).abs() < 0.5, "{sum} vs {total}");
-        // A piece cut at its start starts as far along as its offset says.
-        for (points, offset, start_cut, _) in &pieces {
-            let along = (points[0].0 - start.0).hypot(points[0].1 - start.1);
-            let offset_m = f64::from(*offset) * 0.05;
-            assert!(*start_cut == (*offset > 0));
-            assert!((along - offset_m).abs() < 0.5, "{along} vs {offset_m}");
+        // Only the first piece starts at the start, and only the last ends at
+        // the end: the others are cut at both.
+        assert_eq!(pieces.iter().filter(|p| !p.1).count(), 1);
+        assert_eq!(pieces.iter().filter(|p| !p.2).count(), 1);
+    }
+
+    #[test]
+    fn a_line_with_dashes_or_symbols_along_it_is_kept_whole_in_every_tile_it_crosses() {
+        let table = SymbolTable::isom();
+        let of_kind = |whole: bool| {
+            (0..table.len() as u16)
+                .map(|i| table.get(i).unwrap())
+                .find(|e| e.kind == crate::mot_symbols::SymbolKind::Line && e.whole == whole)
+                .unwrap()
+                .code
+                .clone()
+        };
+        let (dashed, plain) = (of_kind(true), of_kind(false));
+        let mut map = empty_map();
+        // 5 km at 1:10000, crossing several tiles.
+        for code in [&dashed, &plain] {
+            let line = object_by_code(
+                &map,
+                code,
+                ObjectKind::Path(PathObject::default()),
+                vec![Coord::new(0.0, 0.0, 0), Coord::new(500.0, 40.0, 0)],
+            );
+            map.objects.push(line);
         }
+        let options = Options {
+            buffer: 0.0,
+            ..Options::default()
+        };
+        let converted = convert_with(&map, &options);
+        let (dashed_id, plain_id) = (table.id_of(&dashed).unwrap(), table.id_of(&plain).unwrap());
+        let nodes_of = |symbol: u16| -> Vec<usize> {
+            converted
+                .tiles
+                .values()
+                .flat_map(|t| &t.objects)
+                .filter(|o| o.symbol == symbol)
+                .map(|o| o.nodes.len())
+                .collect()
+        };
+        // The dashed one is whole in each tile it crosses: its two nodes, in
+        // all of them. The plain one is cut, so a piece has just its two ends too,
+        // but each piece is a different length and none has the line's far end.
+        let dashed_pieces = nodes_of(dashed_id);
+        assert!(dashed_pieces.len() >= 3 && dashed_pieces.iter().all(|&n| n == 2));
+        let whole_ends = |symbol: u16| -> usize {
+            converted
+                .tiles
+                .values()
+                .flat_map(|t| &t.objects)
+                .filter(|o| o.symbol == symbol)
+                .filter(|o| {
+                    o.nodes
+                        .iter()
+                        .all(|n| n.flags & node_flag::CLIPPED as u8 == 0)
+                })
+                .count()
+        };
+        assert_eq!(whole_ends(dashed_id), dashed_pieces.len());
+        assert!(whole_ends(plain_id) < nodes_of(plain_id).len());
     }
 
     #[test]
@@ -1074,9 +1140,9 @@ mod tests {
             ]
         };
         for x in [0.0, 300.0] {
-            let line = object_of(
+            let line = object_by_code(
                 &map,
-                |s| matches!(s, Symbol::Line(_)),
+                "101",
                 ObjectKind::Path(PathObject::default()),
                 curve(x),
             );

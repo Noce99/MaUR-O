@@ -96,17 +96,23 @@ to get ground coordinates.
   - An object entirely inside the grown box is stored **whole**, curves included.
   - One that crosses it has its curves **flattened** (to half a grid cell) and is
     cut. A **line** becomes **pieces**, each its own object with the same id; the
-    first and last node of a piece that is a cut carry `CLIPPED`, and a piece that
-    starts at a cut carries `dash_offset`, how far along the whole line that
-    start is, so a renderer starts the dash pattern that far in. A closed part
+    first and last node of a piece that is a cut carry `CLIPPED`. A closed part
     (an area) is cut into a **ring closed along the box's edge**, and the node
     each edge on the border leaves from carries `CLIPPED`, so a renderer fills
     them but does not stroke them.
+  - A line whose symbol **lays dashes or symbols out along the whole of it**
+    (`dashed`, a dashed border, or a start, mid, end or dash symbol: the
+    symbol's `whole` flag) is **not cut**: Mapper spaces the dashes of a section
+    to fit its whole length, so a piece cut from it would be spaced differently
+    from its neighbour. It is stored whole in every tile it crosses (at the
+    finest level; a coarser one thins it anyway). This costs next to nothing:
+    the Bologna archive is 0.2% smaller than with an offset-less cut of
+    everything, the whole lines being few and mostly short.
   - A **point** or a **text** is not cut: it is in every tile whose grown box
     holds it.
-  - Limits: the dash phase is not carried across a gap in a line, a closed ring
-    drawn as a line gets cut edges but no offsets, and a symbol (or text) bigger
-    than the buffer is cut at the edge of the neighbouring tile that holds it.
+  - Limits: a closed ring drawn as a line gets cut edges which a renderer must
+    know not to stroke, and a symbol (or text) bigger than the buffer is cut at the
+    edge of the neighbouring tile that holds it.
 - Inside a tile, objects are **sorted by symbol draw order** and the symbol id is
   run-length coded, so a renderer walks a tile in layer order without sorting.
 - Coarser zoom levels hold **generalised** tiles (small objects dropped, lines
@@ -187,8 +193,8 @@ A path is a command stream, like MVT's, extended with cubic curves:
 - Mapper's per-node flags are kept: dash point, gap, hole start, close;
 - a flag marks an edge **created by clipping at a tile border**, so a renderer
   does not draw an area's outline along the tile edge;
-- dashed lines keep a consistent dash phase across tiles (store the offset at the
-  cut, or keep a small overlap buffer).
+- a line whose dashes or symbols depend on its whole length is stored whole (see
+  Tiles), not cut, so its dashes meet the neighbouring tile's.
 
 Curves are coded losslessly in version 1. Coarse zoom levels flatten them.
 

@@ -16,10 +16,10 @@
 //! and the tile to draw, which may be a part of it (a view finer than the finest
 //! level is that level, overzoomed).
 //!
-//! Not drawn faithfully yet: a piece of a line cut at a tile border is drawn
-//! from its own start, so a dashed line's dashes restart at the cut (the
-//! renderer has no way to be told [`TileObject::dash_offset`]). The cut is in the
-//! buffer around the tile, outside what is drawn, so only the phase is wrong.
+//! A line whose symbol lays dashes or symbols out along the whole of it is in
+//! the tile whole, not cut ([`crate::mot_symbols::SymbolEntry::whole`]), because
+//! how Mapper spaces them depends on the length of the line: drawn from a piece
+//! they would not meet the neighbouring tile's.
 
 use tiny_skia::{Pixmap, Transform};
 
@@ -203,7 +203,6 @@ mod tests {
                 node(x, y + size, 0),
                 node(x, y, node_flag::CLOSE_POINT as u8),
             ],
-            dash_offset: 0,
         });
         tile
     }
