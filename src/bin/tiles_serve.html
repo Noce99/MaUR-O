@@ -54,6 +54,14 @@ const scaleEl = document.getElementById("scale"), gridEl = document.getElementBy
 let info = null;
 const view = { lat: 44.5, lon: 11.3, zoom: 12 };
 const shown = new Map();          // "z/x/y" -> {img, grid}
+// A view given in the address (#zoom/lat/lon) is read before anything draws
+// and rewrites it.
+const fromHash = (() => {
+  const m = location.hash.match(/^#([\d.]+)\/(-?[\d.]+)\/(-?[\d.]+)$/);
+  if (!m) return false;
+  view.zoom = +m[1]; view.lat = +m[2]; view.lon = +m[3];
+  return true;
+})();
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 function project(lat, lon, z) {
@@ -150,8 +158,7 @@ document.getElementById("fit").onclick = fit;
 fetch("/info.json").then(r => r.json()).then(i => {
   info = i;
   document.getElementById("layer").textContent = `${i.layer}, zoom ${i.min_zoom}–${i.max_zoom}`;
-  const m = location.hash.match(/^#([\d.]+)\/(-?[\d.]+)\/(-?[\d.]+)$/);
-  if (m) { view.zoom = +m[1]; view.lat = +m[2]; view.lon = +m[3]; render(); } else fit();
+  if (!fromHash) fit();
 });
 render();
 </script>
