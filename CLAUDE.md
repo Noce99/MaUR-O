@@ -243,6 +243,8 @@ with them.
 - Unit tests for pure-arithmetic modules (`geometry.rs`, `qbezier.rs`) check
   specific geometric invariants (extents, offset direction, slice round-trips),
   not just "it compiles."
+- The MOT tests (`tests/mot.rs`, `tests/tiles_serve.rs`) share `tests/common/mod.rs`, which makes a small
+  map with `osm_to_omap` and archives from it, so no file of ours holds one.
 - Shared fixtures live in `tests/data/` (`*.xmap` maps, `bologna_sample.osm`, a `gtfs_sample/` feed).
 - `tests/regressions.rs` pins inputs that once broke something, each as a minimal hand-written map.
 - `maps/` holds sample maps used in the README and manual smoke-testing.

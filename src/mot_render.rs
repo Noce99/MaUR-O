@@ -121,20 +121,22 @@ impl TileRenderer {
 
         self.template.scale_denominator = scale.round().clamp(1.0, f64::from(i32::MAX)) as i32;
         let mut objects = Vec::new();
+        // The same window in the tile's own units, to cull objects before the work
+        // of building them: a view into a tile which holds thousands.
+        let (u0, u1) = (near.left() / per_unit, near.right() / per_unit);
+        let (v0, v1) = (near.top() / per_unit, near.bottom() / per_unit);
         for o in &tile.objects {
-            if let Some(object) = self.object(o, per_unit) {
-                let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-                for c in &object.coords {
-                    (x0, x1) = (x0.min(c.x), x1.max(c.x));
-                    (y0, y1) = (y0.min(c.y), y1.max(c.y));
-                }
-                if x1 >= near.left()
-                    && x0 <= near.right()
-                    && y1 >= near.top()
-                    && y0 <= near.bottom()
-                {
-                    objects.push(object);
-                }
+            let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+            for n in &o.nodes {
+                (x0, x1) = (x0.min(n.x), x1.max(n.x));
+                (y0, y1) = (y0.min(n.y), y1.max(n.y));
+            }
+            let outside = f64::from(x1) < u0
+                || f64::from(x0) > u1
+                || f64::from(y1) < v0
+                || f64::from(y0) > v1;
+            if !outside {
+                objects.extend(self.object(o, per_unit));
             }
         }
         self.template.objects = objects;

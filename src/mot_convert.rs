@@ -167,10 +167,12 @@ pub fn paper_extent(map: &Map) -> Option<[f64; 4]> {
     if xs.is_empty() {
         return None;
     }
+    // The value `cut` from each end, found by selection: no need to sort millions.
     let trim = |v: &mut Vec<f64>| -> (f64, f64) {
-        v.sort_by(f64::total_cmp);
         let cut = v.len() / 2000;
-        let (lo, hi) = (v[cut], v[v.len() - 1 - cut]);
+        let top = v.len() - 1 - cut;
+        let hi = *v.select_nth_unstable_by(top, f64::total_cmp).1;
+        let lo = *v.select_nth_unstable_by(cut, f64::total_cmp).1;
         let margin = (hi - lo) * 0.01;
         (lo - margin, hi + margin)
     };

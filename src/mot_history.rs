@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::mot::{Tile, TileObject};
+use crate::mot::{put_varint, zigzag, Reader, Tile, TileObject};
 
 /// The id of a changeset. Changesets are numbered in the order they were made,
 /// from 1; 0 stands for the map as it was first stored, before any.
@@ -52,64 +52,15 @@ pub struct ChangeLog {
     pub changesets: Vec<Changeset>,
 }
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push((v as u8) | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
+/// The text at the cursor: its length, then that many bytes.
+fn string(r: &mut Reader<'_>) -> Result<String, String> {
+    let n = usize::try_from(r.varint()?).map_err(|_| "string too long")?;
+    String::from_utf8(r.take(n)?.to_vec()).map_err(|_| "text is not UTF-8".into())
 }
 
-fn zigzag(v: i64) -> u64 {
-    ((v << 1) ^ (v >> 63)) as u64
-}
-
-/// A cursor over bytes which says what ran out and never panics.
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn varint(&mut self) -> Result<u64, String> {
-        let mut value = 0u64;
-        for shift in (0..70).step_by(7) {
-            let b = *self.bytes.get(self.at).ok_or("history ends too soon")?;
-            self.at += 1;
-            if shift == 63 && b > 1 {
-                return Err("varint too long".into());
-            }
-            value |= u64::from(b & 0x7f) << shift;
-            if b & 0x80 == 0 {
-                return Ok(value);
-            }
-        }
-        Err("varint too long".into())
-    }
-
-    fn signed(&mut self) -> Result<i64, String> {
-        let v = self.varint()?;
-        Ok(((v >> 1) as i64) ^ -((v & 1) as i64))
-    }
-
-    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
-        let end = self.at.checked_add(n).ok_or("length overflows")?;
-        let slice = self
-            .bytes
-            .get(self.at..end)
-            .ok_or("history ends too soon")?;
-        self.at = end;
-        Ok(slice)
-    }
-
-    fn string(&mut self) -> Result<String, String> {
-        let n = usize::try_from(self.varint()?).map_err(|_| "string too long")?;
-        String::from_utf8(self.take(n)?.to_vec()).map_err(|_| "text is not UTF-8".into())
-    }
-
-    fn id(&mut self) -> Result<ChangesetId, String> {
-        ChangesetId::try_from(self.varint()?).map_err(|_| "changeset id out of range".into())
-    }
+/// A changeset id at the cursor.
+fn id(r: &mut Reader<'_>) -> Result<ChangesetId, String> {
+    ChangesetId::try_from(r.varint()?).map_err(|_| "changeset id out of range".into())
 }
 
 impl ChangeLog {
@@ -149,7 +100,7 @@ impl ChangeLog {
     /// A log written by [`ChangeLog::encode`]; an error, never a panic, for
     /// bytes that are not one.
     pub fn decode(bytes: &[u8]) -> Result<ChangeLog, String> {
-        let mut r = Reader { bytes, at: 0 };
+        let mut r = Reader::new(bytes);
         let count = usize::try_from(r.varint()?).map_err(|_| "too many changesets")?;
         // A changeset takes at least five bytes.
         if count > bytes.len() {
@@ -166,8 +117,8 @@ impl ChangeLog {
                 id: ChangesetId::try_from(id).map_err(|_| "changeset id out of range")?,
                 time,
                 author: u32::try_from(r.varint()?).map_err(|_| "author out of range")?,
-                comment: r.string()?,
-                tool: r.string()?,
+                comment: string(&mut r)?,
+                tool: string(&mut r)?,
             });
         }
         Ok(ChangeLog { changesets })
@@ -402,7 +353,7 @@ impl VersionedTile {
         let Some(bytes) = history else {
             return Ok(VersionedTile { grid_cm, versions });
         };
-        let mut r = Reader { bytes, at: 0 };
+        let mut r = Reader::new(bytes);
         let births = usize::try_from(r.varint()?).map_err(|_| "too many births")?;
         if births > bytes.len() {
             return Err("birth count exceeds the size".into());
@@ -413,7 +364,7 @@ impl VersionedTile {
             id = id
                 .checked_add(r.varint()?)
                 .ok_or("object id out of range")?;
-            born.insert(id, r.id()?);
+            born.insert(id, self::id(&mut r)?);
         }
         for v in &mut versions {
             v.from = born.get(&v.object.id).copied().unwrap_or(0);
@@ -427,8 +378,12 @@ impl VersionedTile {
         if count != closed.objects.len() {
             return Err("the history's versions do not match its objects".into());
         }
-        let froms = (0..count).map(|_| r.id()).collect::<Result<Vec<_>, _>>()?;
-        let tos = (0..count).map(|_| r.id()).collect::<Result<Vec<_>, _>>()?;
+        let froms = (0..count)
+            .map(|_| self::id(&mut r))
+            .collect::<Result<Vec<_>, _>>()?;
+        let tos = (0..count)
+            .map(|_| self::id(&mut r))
+            .collect::<Result<Vec<_>, _>>()?;
         for ((object, from), to) in closed.objects.into_iter().zip(froms).zip(tos) {
             versions.push(Version {
                 object,

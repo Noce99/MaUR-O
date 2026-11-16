@@ -8,48 +8,9 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::path::Path;
 
-const SAMPLE: &str = "tests/data/bologna_sample.osm";
-const BBOX: &str = "--bbox=11.3415,44.4925,11.3445,44.4945";
-/// A point inside that box.
-const HERE: &str = "44.4935,11.3430";
-
-fn make_map(dir: &Path) -> std::path::PathBuf {
-    let map = dir.join("sample.omap");
-    Command::cargo_bin("osm_to_omap")
-        .unwrap()
-        .args(["--standard", "isom", BBOX, SAMPLE])
-        .arg(&map)
-        .assert()
-        .success();
-    map
-}
-
-/// The sample map drawn to the given `osm_to_omap` standard.
-fn make_map_in(dir: &Path, standard: &str) -> std::path::PathBuf {
-    let map = dir.join(format!("{standard}.omap"));
-    Command::cargo_bin("osm_to_omap")
-        .unwrap()
-        .args(["--standard", standard, BBOX, SAMPLE])
-        .arg(&map)
-        .assert()
-        .success();
-    map
-}
-
-fn make_archive(dir: &Path) -> std::path::PathBuf {
-    let map = make_map(dir);
-    let archive = dir.join("sample.pmtiles");
-    Command::cargo_bin("omap_to_tiles")
-        .unwrap()
-        .arg("--output")
-        .arg(&archive)
-        .arg(&map)
-        .assert()
-        .success();
-    archive
-}
+mod common;
+use common::{make_archive, make_map, make_map_in, HERE};
 
 #[test]
 fn a_map_goes_into_an_archive_and_a_query_finds_it() {
