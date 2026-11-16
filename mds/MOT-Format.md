@@ -103,9 +103,8 @@ tiles it touches.
 
 ### Coordinates
 
-- Integers on a fixed grid of **1 cm** (decision from the measurements: finer
-  than the drawing precision of any map, and the cost of coarser grids is
-  small), as **deltas** from the previous node, zigzag-coded, varint.
+- Integers on a fixed grid (**1 cm**, or **5 cm**; a header parameter, see
+  [Decisions](#decisions)), as **deltas** from the previous node, zigzag-coded, varint.
 - Relative to the tile's origin, so the first node of an object is a delta from
   the previous object's first node (or the tile origin), not an absolute value.
 - Separate streams for flags, dx and dy compress better than one interleaved
@@ -139,10 +138,10 @@ A path is a command stream, like MVT's, extended with cubic curves:
 
 Curves are coded losslessly in version 1. Coarse zoom levels flatten them.
 
-### Coordinate frame (open question)
+### Coordinate frame
 
-Recommendation: store coordinates in **Web Mercator units of 1 cm**, relative to
-the tile origin. Ground resolution is then at least as fine as 1 cm at every
+Coordinates are stored in **Web Mercator** grid units, relative to
+the tile origin. Ground resolution is then at least as fine as the grid size at every
 latitude, at a small cost in bits at high latitudes. The converter has to
 reproject: ground = paper × map scale, rotated by the grivation, projected from
 the map's CRS to Mercator. Maps without a georeference cannot be placed and are
@@ -265,14 +264,60 @@ issues).
 - A "suggested display scale" per coverage polygon.
 - Raster tiles as a fallback for viewers without a vector renderer.
 
+## Decisions
+
+Settled in discussion (recorded here so the codec can rely on them):
+
+1. **Coordinate frame: Web Mercator**, relative to the tile origin. The grid is a
+   **header parameter**: 1 cm is fine, and **5 cm is acceptable** (it saves ~15%;
+   Mercator units are larger than ground units away from the equator, so the
+   ground grid is finer than the nominal one).
+2. **Symbol set for the first release: ISOM** (2017-2). The layer machinery is
+   there from the start, but only one symbol table is shipped.
+3. **Per-symbol zoom rules.** The symbol table of a layer carries, for each
+   symbol, the rules that generalise it for coarse zoom levels, for example:
+   the lowest zoom it appears at, a minimum size below which an object is
+   dropped, a simplification tolerance, and whether neighbouring objects of the
+   symbol may be merged. The world view depends on these rules, so they are
+   part of the symbol table and not of the converter.
+4. **Objects with no symbol in the global set** are mapped to the **closest
+   symbol** and the converter emits a warning for each such mapping. If there
+   is none, the object is dropped, also with a warning. "Closest" means: the
+   same symbol code first (the ISOM number), then the same kind (point, line or
+   area) with the nearest colour, size and name; the choice is deterministic and
+   the warning names both symbols. If nothing is close enough it is dropped.
+
+5. **Container: PMTiles v3, through the Rust `pmtiles` crate** (`default-features
+   = false` plus `write`, in the CLI tools only, so the library and its wasm
+   build stay free of tokio and the HTTP backends). Whether the crate can also
+   serve the wasm reader is still to be checked; if not, the reader implements
+   the small v3 directory format itself. PMTiles holds one tileset per file, so a
+   layer (and the history sidecar) is either its own archive or a layer inside
+   each tile's payload — see the open questions.
+6. **Zoom range.** The viewer shows anything from the whole world on one screen
+   down to about 10 m across the screen. In slippy-map terms that is zoom 0–2
+   at the top and about zoom 24 at the bottom (about 1 cm per pixel on a
+   ~1000 px screen). *Stored* levels and *displayed* levels are different
+   things: vector tiles are stored only down to about zoom 14 (a tile about 2.4
+   km wide at the equator), and the viewer *overzooms* them, since vectors scale.
+   At the top, symbols have a per-symbol `min_zoom` (see decision 3), so the
+   coarse levels (about zoom 0–10) hold essentially only the **coverage
+   footprints**, which is cheap; objects appear from about zoom 11–12.
+   The 5 cm grid matters only at the deepest zoom (5 cm is about 5 px at 10 m
+   per screen): check on real maps that a polyline and a curve still look smooth
+   there, otherwise use 1 cm.
+
+7. **Symbol-set versioning: one layer per standard, with a versioned symbol
+   table.** Symbol ids are assigned once and never renumbered; each symbol also
+   keeps its standard code (101, 302.1, ...) for crosswalks. A new edition of a
+   standard only adds or deprecates symbols. Maps drawn in an older edition are
+   converted on import with the closest-symbol rule (decision 4), and the layer
+   metadata records the edition each map was drawn in. Stored objects and their
+   history therefore stay valid as the table grows. After ISOM the order is
+   ISSprOM 2019 (its symbol set is already in the repo), then ISSkiOM and
+   ISMTBOM; indoor has no ISO standard and needs its own table; the OSM-carto
+   set comes last, being no orienteering standard.
+
 ## Open questions
 
-1. Coordinate frame: Web Mercator centimetres (recommended) versus a local metric
-   frame per tile.
-2. Container: write our own or reuse PMTiles.
-3. Zoom range of the pyramid and the generalisation rules of the coarse levels.
-4. Which symbol sets the first release supports (ISOM, ISSprOM, ISSkiOM, ISMTBOM,
-   indoor, the OSM-carto set of `osm_to_omap`), and how symbol-set versions are
-   numbered.
-5. How objects that have no symbol in the global set are handled by the converter
-   (nearest symbol, or reject).
+1. How a layer and the history sidecar map onto PMTiles (one archive each, or layers inside the tile payload).
