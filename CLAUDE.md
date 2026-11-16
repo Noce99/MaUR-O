@@ -212,7 +212,8 @@ paths, so CI never depends on anyone's server.
 
 Design and decisions: `mds/MOT-Format.md` (a draft). `mot.rs` is the pure part:
 Web Mercator tile addressing, the integer grid, and the tile payload codec.
-`mot_symbols.rs` is a layer's symbol table (ISOM 2017-2 for now), the
+`mot_symbols.rs` is a layer's symbol table (ISOM 2017-2 or ISSprOM 2019, and which
+of them a map is drawn to), the
 closest-symbol rule and each symbol's zoom rule (when it appears, how small it
 may be, how much its line may be thinned); `mot_convert.rs` places a `Map` on the earth and stores each
 object in the tiles it touches, cut to each tile's box plus a buffer

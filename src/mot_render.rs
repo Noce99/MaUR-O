@@ -1,8 +1,8 @@
 //! Drawing MOT tiles with the crate's own renderer.
 //!
 //! A tile holds objects and the ids of their symbols; what a symbol looks like is
-//! in the layer's symbol set, which this module takes from the ISOM reference map
-//! the crate ships. A tile is turned back into a [`Map`] — its objects, in
+//! in the layer's symbol set, which this module takes from the reference map of the
+//! layer's standard that the crate ships. A tile is turned back into a [`Map`] — its objects, in
 //! millimetres on a paper at the scale asked for — and the renderer that draws
 //! `.omap` files draws it, so a tile looks as Mapper draws the map.
 //!
@@ -27,7 +27,6 @@ use crate::geometry::Rect;
 use crate::map::{Coord, Map, Object, ObjectKind, PathObject, Point, TextObject};
 use crate::mot::{lat_lon, node_flag, Shape, Tile, TileId, TileObject};
 use crate::mot_symbols::SymbolTable;
-use crate::osm_orienteering::ISOM;
 use crate::renderer::Renderer;
 use crate::xml_reader::read_xml_map_str;
 
@@ -45,10 +44,10 @@ pub struct TileRenderer {
 }
 
 impl TileRenderer {
-    /// A renderer for the symbols of `table`, which must be the ISOM one.
+    /// A renderer for the symbols of `table`, drawn as its reference map draws them.
     pub fn new(table: &SymbolTable) -> TileRenderer {
         let (mut template, _) =
-            read_xml_map_str(ISOM).expect("the shipped symbol sets are well-formed");
+            read_xml_map_str(table.reference()).expect("the shipped symbol sets are well-formed");
         template.objects.clear();
         let symbol_index = (0..table.len() as u16)
             .map(|id| {

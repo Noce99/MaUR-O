@@ -10,8 +10,12 @@
 //! placed on the earth; one that is not is skipped with a warning. All the
 //! maps go into one archive, their objects merged tile by tile.
 //!
-//! The symbols are the ISOM 2017-2 table. A symbol of the map that is not in
-//! it is stored as the closest one (same code, the symbol it is a variant of,
+//! The symbols are those of a table: ISOM 2017-2 or ISSprOM 2019, found for each
+//! map from what it says it is drawn to and from the symbols its objects use
+//! (`--standard auto`), or the one asked for. One archive holds one symbol set:
+//! maps of both give two archives, written as `FILE` with `.isom` and `.issprom`
+//! before its extension. A symbol of the map that is not in the table is stored
+//! as the closest one (same code, the symbol it is a variant of,
 //! or the same name) or, where there is none, its objects are dropped; either
 //! is reported as a warning, with how many objects it concerns. Objects of
 //! hidden symbols and drawing aids are left out: they draw nothing.
@@ -40,16 +44,28 @@
 //! converted, 4 the archive cannot be written.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use maur_o::mot::{Tile, TileId};
 use maur_o::mot_archive::{write, ArchiveInfo};
 use maur_o::mot_convert::{convert_levels, merge_tiles, Options};
 use maur_o::mot_symbols::SymbolTable;
 use maur_o::orthophoto::geographic_anchor;
+use maur_o::osm_orienteering::Standard;
 use maur_o::xml_reader::read_xml_map_str;
+
+/// Which symbol set the maps are stored in.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum StandardArg {
+    /// Each map in the standard it is drawn to.
+    Auto,
+    /// Every map in ISOM 2017-2.
+    Isom,
+    /// Every map in ISSprOM 2019.
+    Issprom,
+}
 
 #[derive(Parser)]
 #[command(
@@ -64,6 +80,13 @@ struct Args {
     /// The archive to write.
     #[arg(short, long, value_name = "FILE")]
     output: PathBuf,
+
+    /// The symbol set to store the maps in: each in its own standard, found from
+    /// what it says and what its symbols are (`auto`), or all in one. One
+    /// archive holds one symbol set: with several, the archives are written as
+    /// FILE with `.isom` or `.issprom` before its extension.
+    #[arg(long, value_enum, default_value = "auto")]
+    standard: StandardArg,
 
     /// The finest zoom level, where every object is kept as drawn.
     #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u8).range(1..=20))]
@@ -114,9 +137,8 @@ fn run() -> Result<(), (ExitCode, String)> {
         grid_cm: args.grid_cm,
         buffer: args.buffer,
     };
-    let table = SymbolTable::isom();
-    let mut tiles: BTreeMap<TileId, Tile> = BTreeMap::new();
-    let mut next_id = 0u64;
+    // One archive per symbol set: the tiles and the next id of each so far.
+    let mut groups: Vec<(Standard, BTreeMap<TileId, Tile>, u64)> = Vec::new();
     let mut converted_maps = 0usize;
     for path in &args.maps {
         let text = std::fs::read_to_string(path).map_err(|e| {
@@ -134,20 +156,40 @@ fn run() -> Result<(), (ExitCode, String)> {
         };
         let (map, _) = read_xml_map_str(&text)
             .map_err(|e| (ExitCode::from(2), format!("Error: {}: {e}", path.display())))?;
-        let converted =
-            match convert_levels(&map, &anchor, &table, next_id, args.min_zoom, &options) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Warning: {}: {e}; skipped", path.display());
-                    continue;
-                }
-            };
+        let standard = match args.standard {
+            StandardArg::Isom => Standard::Isom,
+            StandardArg::Issprom => Standard::Issprom,
+            StandardArg::Auto => SymbolTable::detect(&map),
+        };
+        let table = SymbolTable::new(standard);
+        let index = match groups.iter().position(|g| g.0 == standard) {
+            Some(i) => i,
+            None => {
+                groups.push((standard, BTreeMap::new(), 0));
+                groups.len() - 1
+            }
+        };
+        let converted = match convert_levels(
+            &map,
+            &anchor,
+            &table,
+            groups[index].2,
+            args.min_zoom,
+            &options,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Warning: {}: {e}; skipped", path.display());
+                continue;
+            }
+        };
         for warning in &converted.warnings {
             eprintln!("Warning: {}: {warning}", path.display());
         }
         eprintln!(
-            "{}: {} objects stored ({} dropped, {} under another symbol, {} hidden or helper left out)",
+            "{} ({}): {} objects stored ({} dropped, {} under another symbol, {} hidden or helper left out)",
             path.display(),
+            table.standard,
             converted.objects,
             converted.dropped,
             converted.remapped,
@@ -159,8 +201,8 @@ fn run() -> Result<(), (ExitCode, String)> {
                 level.zoom, level.objects, level.generalized, level.tiles
             );
         }
-        next_id = converted.next_id;
-        merge_tiles(&mut tiles, converted.tiles);
+        groups[index].2 = converted.next_id;
+        merge_tiles(&mut groups[index].1, converted.tiles);
         converted_maps += 1;
     }
     if converted_maps == 0 {
@@ -169,15 +211,37 @@ fn run() -> Result<(), (ExitCode, String)> {
             "Error: none of the maps could be converted".into(),
         ));
     }
-    let info = ArchiveInfo {
-        layer: table.standard.to_string(),
-        grid_cm: args.grid_cm,
-        min_zoom: args.min_zoom,
-        max_zoom: args.zoom,
-    };
-    write(&args.output, &tiles, &info).map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
-    eprintln!("{} tiles written to {}", tiles.len(), args.output.display());
+    let several = groups.len() > 1;
+    for (standard, tiles, _) in &groups {
+        let info = ArchiveInfo {
+            layer: standard.name().to_string(),
+            grid_cm: args.grid_cm,
+            min_zoom: args.min_zoom,
+            max_zoom: args.zoom,
+        };
+        let path = if several {
+            suffixed(&args.output, standard)
+        } else {
+            args.output.clone()
+        };
+        write(&path, tiles, &info).map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        eprintln!("{} tiles written to {}", tiles.len(), path.display());
+    }
     Ok(())
+}
+
+/// `world.pmtiles` as `world.isom.pmtiles`.
+fn suffixed(path: &Path, standard: &Standard) -> PathBuf {
+    let tag = match standard {
+        Standard::Isom => "isom",
+        Standard::Issprom => "issprom",
+    };
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+    let name = match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{stem}.{tag}.{ext}"),
+        None => format!("{stem}.{tag}"),
+    };
+    path.with_file_name(name)
 }
 
 fn main() -> ExitCode {

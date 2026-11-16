@@ -15,14 +15,14 @@
 //! be drawn whole at once, so what is kept at each zoom is the symbol's
 //! business, not the converter's.
 //!
-//! For now the only table is ISOM 2017-2, built from the reference map the
-//! crate already ships; its ids are the order of that map's symbols. This is
-//! provisional until the table is frozen as a file of its own.
+//! The tables are ISOM 2017-2 and ISSprOM 2019, each built from the reference
+//! map the crate already ships; its ids are the order of that map's symbols.
+//! This is provisional until the tables are frozen as files of their own.
 
 use std::collections::HashMap;
 
-use crate::map::Symbol;
-use crate::osm_orienteering::ISOM;
+use crate::map::{Map, Symbol};
+use crate::osm_orienteering::Standard;
 use crate::xml_reader::read_xml_map_str;
 
 /// What a symbol draws.
@@ -151,6 +151,7 @@ pub enum Match {
 pub struct SymbolTable {
     /// The standard the table is, e.g. "ISOM 2017-2".
     pub standard: &'static str,
+    which: Standard,
     entries: Vec<SymbolEntry>,
     by_code: HashMap<String, u16>,
 }
@@ -158,7 +159,18 @@ pub struct SymbolTable {
 impl SymbolTable {
     /// The ISOM 2017-2 table.
     pub fn isom() -> SymbolTable {
-        let (map, _) = read_xml_map_str(ISOM).expect("the shipped symbol sets are well-formed");
+        SymbolTable::new(Standard::Isom)
+    }
+
+    /// The ISSprOM 2019 table.
+    pub fn issprom() -> SymbolTable {
+        SymbolTable::new(Standard::Issprom)
+    }
+
+    /// The table of a standard.
+    pub fn new(which: Standard) -> SymbolTable {
+        let (map, _) =
+            read_xml_map_str(which.reference()).expect("the shipped symbol sets are well-formed");
         let mut entries = Vec::new();
         let mut by_code = HashMap::new();
         for symbol in &map.symbols {
@@ -178,9 +190,77 @@ impl SymbolTable {
             });
         }
         SymbolTable {
-            standard: "ISOM 2017-2",
+            standard: which.name(),
+            which,
             entries,
             by_code,
+        }
+    }
+
+    /// The table with this name ("ISOM 2017-2", "ISSprOM 2019"), as an archive
+    /// records the layer it holds.
+    pub fn by_name(name: &str) -> Option<SymbolTable> {
+        [Standard::Isom, Standard::Issprom]
+            .into_iter()
+            .find(|s| s.name() == name)
+            .map(SymbolTable::new)
+    }
+
+    /// The map the table's symbols are defined in, as the text of an `.omap`
+    /// file: what a renderer draws the symbols from.
+    pub fn reference(&self) -> &'static str {
+        self.which.reference()
+    }
+
+    /// Which standard a map is drawn to. What the map says it is, where it says;
+    /// otherwise the table whose symbols its objects use: a symbol with the code
+    /// of a table's counts for it, and again if the name is the same too, by the
+    /// number of objects it has. Failing that, by scale: 1:6000 or larger is
+    /// sprint.
+    pub fn detect(map: &Map) -> Standard {
+        if let Some(set) = &map.symbol_set {
+            let set = set.to_ascii_lowercase();
+            if set.contains("issprom") {
+                return Standard::Issprom;
+            }
+            if set.contains("isom") {
+                return Standard::Isom;
+            }
+        }
+        let mut objects = vec![0usize; map.symbols.len()];
+        for o in &map.objects {
+            if let Some(i) = o.symbol_index {
+                objects[i] += 1;
+            }
+        }
+        let score = |table: &SymbolTable| -> usize {
+            let mut total = 0;
+            for (i, symbol) in map.symbols.iter().enumerate() {
+                if objects[i] == 0 || !symbol.is_visible() {
+                    continue;
+                }
+                let kind = SymbolKind::of(symbol);
+                let Some(entry) = table.id_of(symbol.code()).and_then(|id| table.get(id)) else {
+                    continue;
+                };
+                if !entry.kind.compatible(kind) {
+                    continue;
+                }
+                let same_name = entry.name.eq_ignore_ascii_case(symbol.name());
+                total += objects[i] * (1 + usize::from(same_name));
+            }
+            total
+        };
+        let (isom, issprom) = (score(&SymbolTable::isom()), score(&SymbolTable::issprom()));
+        match isom.cmp(&issprom) {
+            std::cmp::Ordering::Greater => Standard::Isom,
+            std::cmp::Ordering::Less => Standard::Issprom,
+            std::cmp::Ordering::Equal
+                if map.scale_denominator > 0 && map.scale_denominator <= 6000 =>
+            {
+                Standard::Issprom
+            }
+            std::cmp::Ordering::Equal => Standard::Isom,
         }
     }
 
@@ -261,6 +341,42 @@ mod tests {
         assert!(table.len() > 100, "{} symbols", table.len());
         let building = table.id_of("521").expect("buildings are symbol 521");
         assert_eq!(table.get(building).unwrap().kind, SymbolKind::Area);
+    }
+
+    #[test]
+    fn a_table_is_found_by_its_name_and_has_its_own_symbols() {
+        for name in ["ISOM 2017-2", "ISSprOM 2019"] {
+            let table = SymbolTable::by_name(name).unwrap();
+            assert_eq!(table.standard, name);
+            assert!(table.len() > 100);
+        }
+        assert!(SymbolTable::by_name("ISOM 2000").is_none());
+        assert_ne!(
+            SymbolTable::isom().reference().len(),
+            SymbolTable::issprom().reference().len()
+        );
+    }
+
+    #[test]
+    fn the_standard_of_a_map_is_what_it_says_or_what_its_symbols_are() {
+        let (mut map, _) = read_xml_map_str(SymbolTable::issprom().reference()).unwrap();
+        map.symbol_set = Some("ISSprOM 2019".into());
+        assert_eq!(SymbolTable::detect(&map), Standard::Issprom);
+        map.symbol_set = Some("ISOM 2017-2".into());
+        assert_eq!(SymbolTable::detect(&map), Standard::Isom);
+        // Saying nothing, it is the symbols the objects use which decide, and not
+        // the scale.
+        map.symbol_set = None;
+        map.scale_denominator = 15000;
+        if !map.objects.is_empty() {
+            assert_eq!(SymbolTable::detect(&map), Standard::Issprom);
+        }
+        // With no objects either, it is the scale.
+        map.objects.clear();
+        map.scale_denominator = 4000;
+        assert_eq!(SymbolTable::detect(&map), Standard::Issprom);
+        map.scale_denominator = 15000;
+        assert_eq!(SymbolTable::detect(&map), Standard::Isom);
     }
 
     #[test]

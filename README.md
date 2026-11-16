@@ -693,11 +693,18 @@ reached or answered with something other than a photo.
 Converts maps into a MOT archive, the tiled world-map format of
 `mds/MOT-Format.md` (a draft): one PMTiles file whose tiles, Web Mercator
 `z/x/y`, hold the objects of every map that touches them, with the symbols
-stored by id in the ISOM 2017-2 table instead of as definitions.
+stored by id in a table (ISOM 2017-2 or ISSprOM 2019) instead of as definitions.
 
 ```
-omap_to_tiles [--zoom 14] [--min-zoom 11] [--grid-cm 5] [--buffer 0.03125] --output world.pmtiles <map-file>...
+omap_to_tiles [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 11] [--grid-cm 5] [--buffer 0.03125] --output world.pmtiles <map-file>...
 ```
+
+The symbols of a map are stored in the table of the standard it is drawn to:
+`--standard auto` (the default) finds it for each map, from what the map says
+and from which table's symbols its objects use; `isom` or `issprom` stores every
+map in that one. An archive holds one symbol set, so maps of both give two
+archives, written as the output name with `.isom` or `.issprom` before its
+extension.
 
 Each map must have a geographic reference point (`<ref_point_deg>`, which
 Mapper writes for every georeferenced map); one without is skipped with a

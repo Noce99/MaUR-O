@@ -263,17 +263,15 @@ fn run() -> Result<(), (ExitCode, String)> {
     };
     let archive =
         Archive::open(&args.archive).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
-    let table = SymbolTable::isom();
-    if archive.info().layer != table.standard {
-        return Err((
+    let table = SymbolTable::by_name(&archive.info().layer).ok_or_else(|| {
+        (
             ExitCode::from(2),
             format!(
-                "Error: the archive's symbols are {}, this tool knows {}",
-                archive.info().layer,
-                table.standard
+                "Error: the archive's symbols are {}, which this tool does not know",
+                archive.info().layer
             ),
-        ));
-    }
+        )
+    })?;
     let transparent = tiny_skia::Pixmap::new(1, 1)
         .and_then(|p| p.encode_png().ok())
         .unwrap_or_default();
