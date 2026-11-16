@@ -65,7 +65,7 @@ use crate::xml_reader::{read_fragments_str, Fragments};
 /// The ISSprOM 2019 symbol set, at 1:4000.
 const ISSPROM: &str = include_str!("../maps/ISSprOM_4k.omap");
 /// The ISOM 2017-2 symbol set, at 1:10000.
-const ISOM: &str = include_str!("../maps/ISOM_10k.omap");
+pub(crate) const ISOM: &str = include_str!("../maps/ISOM_10k.omap");
 
 /// A mapping standard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

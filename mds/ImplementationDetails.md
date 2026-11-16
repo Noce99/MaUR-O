@@ -123,6 +123,9 @@ one file per step; read that document first.
 | `bus.rs` | Bus and train lines — route, stops, colour and midday headway of each line's main variant — read from OpenStreetMap route relations, or for buses from a GTFS feed (zip or folder), whose calendar and timetable give the headway. |
 | `bundle.rs` | Lines sharing a street laid out side by side: routes matched to the street and rail network, a fixed left-to-right order carried along each bundle, offsets smoothed where a bundle changes, the band capped in width, stops as one bar across it. Pure geometry on the paper, independent of OSM. |
 | `map_areas.rs` | The areas of an event's maps, read from a CSV table (`--maps`): outlines, names, forbidden zones, start and finish. |
+| `mot.rs` | MOT, the tiled world-map format (draft, `MOT-Format.md`): Web Mercator tile addressing, the integer grid, and the tile payload codec (objects sorted by symbol, delta/varint nodes in separate streams). Pure: no maps, no files. |
+| `mot_convert.rs` | Makes MOT tiles from a `Map`: places it on the earth from its geographic anchor, turns its coordinates to Mercator, maps its symbols to the layer's table, orders objects along a Z-order curve for their ids, and stores each in every tile it touches (no clipping yet). |
+| `mot_symbols.rs` | A MOT layer's symbol table (ISOM 2017-2, built from the shipped reference map) and the closest-symbol rule: same code, the symbol it is a variant of, or the same name. |
 
 ### Orthophotos
 

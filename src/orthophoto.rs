@@ -318,7 +318,7 @@ pub fn footprint(
 /// Mapper places a map on the earth by its projected CRS and grivation and
 /// only keeps the declination beside them, so where the CRS is one this
 /// crate can project, that is what to trust.
-fn true_north_rotation(georef: &Georeferencing, anchor: &GeographicAnchor) -> f64 {
+pub(crate) fn true_north_rotation(georef: &Georeferencing, anchor: &GeographicAnchor) -> f64 {
     let zone = match georef.epsg {
         32601..=32660 => georef.epsg - 32600,
         25828..=25838 => georef.epsg - 25800,
@@ -335,7 +335,7 @@ fn true_north_rotation(georef: &Georeferencing, anchor: &GeographicAnchor) -> f6
 /// A point on the ground (unrotated map meters, as [`ground_to_projected`]
 /// takes them) to `(latitude, longitude)` in degrees, laid out from the
 /// anchor on the ellipsoid, `north` degrees between true and map north.
-fn ground_to_geographic(
+pub(crate) fn ground_to_geographic(
     georef: &Georeferencing,
     anchor: &GeographicAnchor,
     north: f64,
