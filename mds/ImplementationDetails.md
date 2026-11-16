@@ -124,9 +124,9 @@ one file per step; read that document first.
 | `bundle.rs` | Lines sharing a street laid out side by side: routes matched to the street and rail network, a fixed left-to-right order carried along each bundle, offsets smoothed where a bundle changes, the band capped in width, stops as one bar across it. Pure geometry on the paper, independent of OSM. |
 | `map_areas.rs` | The areas of an event's maps, read from a CSV table (`--maps`): outlines, names, forbidden zones, start and finish. |
 | `mot.rs` | MOT, the tiled world-map format (draft, `MOT-Format.md`): Web Mercator tile addressing, the integer grid, and the tile payload codec (objects sorted by symbol, delta/varint nodes in separate streams). Pure: no maps, no files. |
-| `mot_convert.rs` | Makes MOT tiles from a `Map`: places it on the earth from its geographic anchor, turns its coordinates to Mercator, maps its symbols to the layer's table, orders objects along a Z-order curve for their ids, and stores each in every tile it touches, cut to the tile's box plus a buffer. |
+| `mot_convert.rs` | Makes MOT tiles from a `Map`: places it on the earth from its geographic anchor, turns its coordinates to Mercator, maps its symbols to the layer's table, orders objects along a Z-order curve for their ids, and stores each in every tile it touches, cut to the tile's box plus a buffer, and builds the coarser zoom levels by the symbols' rules (`convert_levels`). |
 | `mot_clip.rs` | Cutting paths to a tile's box, pure geometry: flattening curves, cutting a line into pieces (with their dash offset), cutting a ring along the box's edge (with the cut edges flagged). |
-| `mot_symbols.rs` | A MOT layer's symbol table (ISOM 2017-2, built from the shipped reference map) and the closest-symbol rule: same code, the symbol it is a variant of, or the same name. |
+| `mot_symbols.rs` | A MOT layer's symbol table (ISOM 2017-2, built from the shipped reference map) the closest-symbol rule (same code, the symbol it is a variant of, or the same name), and each symbol's zoom rule (the zoom it appears at, a size under which it is too small to see, how far its line may be thinned). |
 | `mot_archive.rs` | MOT tiles in a PMTiles v3 archive (the `pmtiles` crate, zstd per tile, the layer's symbol set and grid in the metadata), and reading a tile or a box back. Native only. |
 
 ### Orthophotos

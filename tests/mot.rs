@@ -65,7 +65,9 @@ fn a_query_far_from_the_map_finds_nothing() {
         .arg(&archive)
         .assert()
         .success()
-        .stdout(predicate::str::contains("0 tiles read, 0 objects"));
+        .stdout(predicate::str::contains(
+            "0 tiles read at zoom 14, 0 objects",
+        ));
 }
 
 #[test]
@@ -79,6 +81,55 @@ fn objects_can_be_listed() {
         .assert()
         .success()
         .stdout(predicate::str::contains("object 0:").or(predicate::str::contains("object 1:")));
+}
+
+#[test]
+fn a_coarser_level_keeps_less_than_the_finest() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = make_archive(dir.path());
+    let query = |zoom: &str| {
+        let out = Command::cargo_bin("tiles_query")
+            .unwrap()
+            .args(["--around", HERE, "--size", "300m", "--zoom", zoom])
+            .arg(&archive)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(out).unwrap()
+    };
+    // A building is drawn from zoom 13 on, and at 14 everything is as drawn;
+    // at 12 it is not in the archive's tiles at all.
+    assert!(query("14").contains("Building"));
+    assert!(!query("12").contains("Building"));
+    assert!(query("11").contains("zoom 11"));
+}
+
+#[test]
+fn a_zoom_the_archive_does_not_have_is_exit_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = make_archive(dir.path());
+    Command::cargo_bin("tiles_query")
+        .unwrap()
+        .args(["--around", HERE, "--zoom", "9"])
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("zoom levels 11 to 14"));
+    Command::cargo_bin("omap_to_tiles")
+        .unwrap()
+        .args([
+            "--output",
+            "x",
+            "--zoom",
+            "12",
+            "--min-zoom",
+            "13",
+            "m.omap",
+        ])
+        .assert()
+        .code(1);
 }
 
 #[test]

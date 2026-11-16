@@ -2,8 +2,8 @@
 //! symbol. This is what a viewer asks, as the command line.
 //!
 //! ```text
-//! tiles_query --around lat,lon [--size 1km] [--objects] <archive>
-//! tiles_query --bbox min_lon,min_lat,max_lon,max_lat [--objects] <archive>
+//! tiles_query --around lat,lon [--size 1km] [--zoom Z] [--objects] <archive>
+//! tiles_query --bbox min_lon,min_lat,max_lon,max_lat [--zoom Z] [--objects] <archive>
 //! ```
 //!
 //! `--around` takes a point (latitude first, as a map app copies one) and the
@@ -11,6 +11,10 @@
 //! directly. Only the tiles the area touches are read. The output is one line
 //! per symbol in the area: its code, its name and how many objects; with
 //! `--objects` each object is listed too, with its id and where it starts.
+//!
+//! `--zoom` picks the level to read, the archive's finest by default: a coarser
+//! one has only what its symbols' rules keep at that zoom, so it is smaller and
+//! shows a larger area at a glance.
 //!
 //! An object counts when the box around its nodes in a tile touches the area. A
 //! tile holds the part of an object inside it and a buffer around it, so an
@@ -51,6 +55,11 @@ struct Args {
     /// The area as min_lon,min_lat,max_lon,max_lat in degrees.
     #[arg(long, value_name = "BOX")]
     bbox: Option<String>,
+
+    /// The zoom level to read; the archive's finest by default. A coarser
+    /// level has only what its symbols' rules keep at that zoom.
+    #[arg(long, value_name = "ZOOM")]
+    zoom: Option<u8>,
 
     /// List every object, not only the count per symbol.
     #[arg(long)]
@@ -115,8 +124,16 @@ fn run() -> Result<(), (ExitCode, String)> {
             ),
         ));
     }
+    let info = archive.info();
+    let zoom = args.zoom.unwrap_or(info.max_zoom);
+    if !(info.min_zoom..=info.max_zoom).contains(&zoom) {
+        return Err(usage(&format!(
+            "the archive has zoom levels {} to {}, not {zoom}",
+            info.min_zoom, info.max_zoom
+        )));
+    }
     let tiles = archive
-        .query(bounds)
+        .query(zoom, bounds)
         .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
 
     // Objects are stored whole in every tile they touch, so one id is counted once.
@@ -138,7 +155,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     }
 
     println!(
-        "{} tiles read, {} objects in the area",
+        "{} tiles read at zoom {zoom}, {} objects in the area",
         tiles.len(),
         seen.len()
     );

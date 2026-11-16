@@ -678,7 +678,7 @@ Converts maps into a MOT archive, the tiled world-map format of
 stored by id in the ISOM 2017-2 table instead of as definitions.
 
 ```
-omap_to_tiles [--zoom 14] [--grid-cm 5] --output world.pmtiles <map-file>...
+omap_to_tiles [--zoom 14] [--min-zoom 11] [--grid-cm 5] [--buffer 0.03125] --output world.pmtiles <map-file>...
 ```
 
 Each map must have a geographic reference point (`<ref_point_deg>`, which
@@ -691,6 +691,13 @@ projected reference point far outside its UTM zone is warned about too: the
 map is placed where its geographic reference point says, which is then
 probably not where it is. The nodes are stored on a grid of `--grid-cm`
 centimetres, in tiles of zoom `--zoom` (14 is about 2 km wide).
+
+The levels from `--zoom` (the finest, where every object is kept as drawn)
+up to `--min-zoom` are all written. A coarser level has only what the rules of
+each symbol keep at that zoom (the zoom it appears at, a size under which an
+object is too small to see, how far its line may be moved to have fewer nodes),
+on a coarser grid, so a zoomed-out view reads a little of the archive instead of
+all of it. The objects have the same ids at every level.
 
 A tile holds the part of each object inside its box grown by `--buffer` (a
 fraction of the tile's side, 1/32 by default, about 50 m at zoom 14), so a line
@@ -713,9 +720,13 @@ Says what a MOT archive holds around a place: the objects in an area, by
 symbol, reading only the tiles the area touches.
 
 ```
-tiles_query --around lat,lon [--size 1km] [--objects] <archive>
-tiles_query --bbox min_lon,min_lat,max_lon,max_lat [--objects] <archive>
+tiles_query --around lat,lon [--size 1km] [--zoom Z] [--objects] <archive>
+tiles_query --bbox min_lon,min_lat,max_lon,max_lat [--zoom Z] [--objects] <archive>
 ```
+
+`--zoom` picks the level to read (the archive's finest by default): a coarser one
+has only what its symbols' rules keep at that zoom, so it is smaller and shows a
+larger area at a glance.
 
 The output is a line per symbol in the area (its code, its name and the
 number of objects), or with `--objects` a line per object as well. An

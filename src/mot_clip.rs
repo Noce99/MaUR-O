@@ -281,6 +281,56 @@ pub fn flatten(coords: &[(f64, f64, i32)], tolerance: f64) -> Vec<Vertex> {
     out
 }
 
+/// Fewer vertices for a path, none of them more than `tolerance` from it
+/// (Douglas and Peucker). A vertex with any flag is kept, as are the first
+/// and the last: a dash point, a gap, the end of a hole or a close point is
+/// what the path means there, not just a bend.
+pub fn simplify(vertices: &[Vertex], tolerance: f64) -> Vec<Vertex> {
+    let n = vertices.len();
+    if n < 3 {
+        return vertices.to_vec();
+    }
+    let anchors: Vec<usize> = (0..n)
+        .filter(|&i| i == 0 || i == n - 1 || vertices[i].flags != 0)
+        .collect();
+    let mut keep = vec![false; n];
+    for &a in &anchors {
+        keep[a] = true;
+    }
+    let mut stack: Vec<(usize, usize)> = anchors.windows(2).map(|w| (w[0], w[1])).collect();
+    while let Some((lo, hi)) = stack.pop() {
+        if hi <= lo + 1 {
+            continue;
+        }
+        let (p, q) = (&vertices[lo], &vertices[hi]);
+        let (dx, dy) = (q.x - p.x, q.y - p.y);
+        let l2 = dx * dx + dy * dy;
+        let (mut worst, mut at) = (0.0f64, lo);
+        for (i, v) in vertices.iter().enumerate().take(hi).skip(lo + 1) {
+            let t = if l2 > 0.0 {
+                (((v.x - p.x) * dx + (v.y - p.y) * dy) / l2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let d = (v.x - (p.x + t * dx)).hypot(v.y - (p.y + t * dy));
+            if d > worst {
+                (worst, at) = (d, i);
+            }
+        }
+        if worst > tolerance {
+            keep[at] = true;
+            stack.push((lo, at));
+            stack.push((at, hi));
+        }
+    }
+    vertices
+        .iter()
+        .zip(&keep)
+        .filter(|(_, &k)| k)
+        .map(|(v, _)| *v)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,6 +536,40 @@ mod tests {
                 (x - f.x).hypot(y - f.y) < 0.2
             });
             assert!(near, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn simplifying_drops_what_is_within_the_tolerance_and_keeps_the_flagged() {
+        let mut line: Vec<Vertex> = (0..11).map(|i| v(f64::from(i), 0.0)).collect();
+        line[5].y = 0.4; // a small bump
+        line[7].flags = node_flag::DASH_POINT as u8; // on the line, but meaningful
+        let out = simplify(&line, 0.5);
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert_eq!((out[0].x, out[1].x, out[2].x), (0.0, 7.0, 10.0));
+        let out = simplify(&line, 0.1);
+        assert!(out.iter().any(|p| p.x == 5.0), "the bump is kept at 0.1");
+    }
+
+    #[test]
+    fn nothing_is_further_from_the_simplified_line_than_the_tolerance() {
+        let mut rng = Lcg(5);
+        for _ in 0..100 {
+            let line: Vec<Vertex> = (0..60)
+                .map(|i| v(f64::from(i) * 3.0, rng.next() * 8.0))
+                .collect();
+            let out = simplify(&line, 2.0);
+            assert!(out.len() < line.len());
+            assert_eq!((out[0], out[out.len() - 1]), (line[0], line[59]));
+            for p in &line {
+                let near = out.windows(2).any(|w| {
+                    let (dx, dy) = (w[1].x - w[0].x, w[1].y - w[0].y);
+                    let t = (((p.x - w[0].x) * dx + (p.y - w[0].y) * dy) / (dx * dx + dy * dy))
+                        .clamp(0.0, 1.0);
+                    (p.x - (w[0].x + t * dx)).hypot(p.y - (w[0].y + t * dy)) <= 2.0 + 1e-9
+                });
+                assert!(near, "{p:?}");
+            }
         }
     }
 
