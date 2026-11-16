@@ -52,6 +52,7 @@ geo = "0.33"
 # straight into an SVG for the --create_svg validation dump (Contours-to-Raster.md,
 # "## Visualization"). Depends only on geo-types, which this crate's `geo` uses too.
 geo-svg = "0.8"
+i_overlay = "9.2.0"
 
 # The real fontconfig rather than `fontdb`'s bundled parser: only it resolves a
 # generic family ("Sans Serif") the way Qt and Mapper do. See `crate::text`.
