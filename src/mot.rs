@@ -31,6 +31,12 @@
 //! streams (one byte of flags per node, `dx`, `dy`) is what makes it compress
 //! well afterwards; the container compresses each tile as a whole.
 //!
+//! An object is stored whole in a tile it lies inside, or, where it crosses the
+//! tile's box (grown by a buffer), as the pieces of it inside: see
+//! [`crate::mot_clip`]. A node flagged [`node_flag::CLIPPED`] is a cut: for a
+//! piece of a line, the end of the piece is not the end of the line; for a
+//! ring, the edge leaving the node is not in the map.
+//!
 //! A node is stored the way Mapper stores a coordinate: a position and a set of
 //! flags, a curve being a flag on the vertex it starts at, followed by its two
 //! control points and its end. That is the same information as a command
@@ -54,9 +60,11 @@ pub const MAX_ZOOM: u8 = 30;
 /// byte, so a map's flags are stored as they are.
 pub mod node_flag {
     pub use crate::map::coord_flag::{CLOSE_POINT, CURVE_START, DASH_POINT, GAP_POINT, HOLE_POINT};
-    /// The edge leaving this node was made by cutting an object at a tile
-    /// border, so a renderer must not draw an area's outline along it.
-    /// Reserved: nothing sets it until tiles clip their objects.
+    /// The node is at a cut made at a tile's border (see
+    /// [`crate::mot_clip`]). On the first or last node of a piece of a line it
+    /// means that end is a cut, not the end of the line. On a node of a ring it
+    /// means the edge leaving the node is a cut, not an edge of the map: a
+    /// renderer must not draw an area's outline along it.
     pub const CLIPPED: i32 = 1 << 6;
 }
 
@@ -209,6 +217,11 @@ pub struct TileObject {
     pub shape: Shape,
     /// Its nodes: a point has one.
     pub nodes: Vec<Node>,
+    /// For a piece of a line cut at its start: how far along the whole line
+    /// that start is, in grid units. A renderer starts the line's dash
+    /// pattern that far into it, so the dashes do not begin again at every
+    /// tile. 0 for everything else.
+    pub dash_offset: u32,
 }
 
 /// The objects of one tile.
@@ -311,6 +324,7 @@ const KIND_PATH: u8 = 1;
 const KIND_TEXT: u8 = 2;
 const HAS_ROTATION: u8 = 1 << 2;
 const HAS_PATTERN: u8 = 1 << 3;
+const HAS_OFFSET: u8 = 1 << 4;
 
 impl Tile {
     /// An empty tile on a grid of `grid_cm` centimetres.
@@ -357,6 +371,9 @@ impl Tile {
             if pattern.is_some() {
                 byte |= HAS_PATTERN;
             }
+            if o.dash_offset != 0 {
+                byte |= HAS_OFFSET;
+            }
             meta.push(byte);
             put_varint(&mut meta, zigzag(o.id as i64 - previous_id as i64));
             previous_id = o.id;
@@ -378,6 +395,9 @@ impl Tile {
 
             if rotation != 0 {
                 extra.extend_from_slice(&rotation.to_le_bytes());
+            }
+            if o.dash_offset != 0 {
+                put_varint(&mut extra, u64::from(o.dash_offset));
             }
             let first = o.nodes.first().map_or((0, 0), |n| (n.x, n.y));
             if let Some(p) = pattern {
@@ -498,6 +518,11 @@ impl Tile {
             } else {
                 0.0
             };
+            let dash_offset = if byte & HAS_OFFSET != 0 {
+                u32::try_from(extra.varint()?).map_err(|_| "dash offset out of range")?
+            } else {
+                0
+            };
             let first = nodes.first().map_or((0, 0), |n| (n.x, n.y));
             let shape = match kind {
                 KIND_POINT => Shape::Point,
@@ -540,6 +565,7 @@ impl Tile {
                 rotation,
                 shape,
                 nodes,
+                dash_offset,
             });
         }
         Ok(Tile { grid_cm, objects })
@@ -567,6 +593,7 @@ mod tests {
             rotation: 0.0,
             shape: Shape::Point,
             nodes: vec![node(100, -50, 0)],
+            dash_offset: 0,
         });
         tile.objects.push(TileObject {
             id: 12,
@@ -581,6 +608,7 @@ mod tests {
                 node(500, 500, node_flag::HOLE_POINT as u8),
                 node(600, 500, 0),
             ],
+            dash_offset: 123_456,
         });
         tile.objects.push(TileObject {
             id: 13,
@@ -591,6 +619,7 @@ mod tests {
                 origin: (-7, 9),
             })),
             nodes: vec![node(-3, 4, 0), node(5, 5, node_flag::CLOSE_POINT as u8)],
+            dash_offset: 0,
         });
         tile.objects.push(TileObject {
             id: 99,
@@ -603,6 +632,7 @@ mod tests {
                 box_size: Some((400, 90)),
             }),
             nodes: vec![node(1_000_000, 2_000_000, 0), node(1_000_400, 2_000_090, 0)],
+            dash_offset: 0,
         });
         tile
     }
@@ -616,7 +646,10 @@ mod tests {
         assert_eq!(back.grid_cm, 5);
         assert_eq!(back.objects.len(), expected.objects.len());
         for (a, b) in back.objects.iter().zip(&expected.objects) {
-            assert_eq!((a.id, a.symbol, &a.nodes), (b.id, b.symbol, &b.nodes));
+            assert_eq!(
+                (a.id, a.symbol, &a.nodes, a.dash_offset),
+                (b.id, b.symbol, &b.nodes, b.dash_offset)
+            );
             assert!(
                 (a.rotation - b.rotation).abs() < 1e-3,
                 "{} vs {}",

@@ -708,6 +708,14 @@ map is placed where its geographic reference point says, which is then
 probably not where it is. The nodes are stored on a grid of `--grid-cm`
 centimetres, in tiles of zoom `--zoom` (14 is about 2 km wide).
 
+A tile holds the part of each object inside its box grown by `--buffer` (a
+fraction of the tile's side, 1/32 by default, about 50 m at zoom 14), so a line
+or a symbol at the edge is not cut short; the archive is about `(1 + 2 *
+buffer)^2` times as big as with none. An object that crosses the box has its
+curves flattened and is cut: a line into pieces that say where they were cut and
+how far along the line they start (so its dashes stay in step from tile to tile),
+an area into a ring closed along the edge, with the cut edges flagged.
+
 | Exit code | Meaning |
 | --- | --- |
 | 0 | Success. |
@@ -726,9 +734,9 @@ tiles_query --bbox min_lon,min_lat,max_lon,max_lat [--objects] <archive>
 ```
 
 The output is a line per symbol in the area (its code, its name and the
-number of objects), or with `--objects` a line per object as well. Tiles are
-not clipped yet, so an object is counted when the box of its nodes touches
-the area.
+number of objects), or with `--objects` a line per object as well. An
+object is counted when the box around its nodes in a tile touches the area, and
+once, by its id, however many tiles it was cut across.
 
 | Exit code | Meaning |
 | --- | --- |

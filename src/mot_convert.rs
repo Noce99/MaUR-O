@@ -5,11 +5,15 @@
 //! Mercator, given the id of its symbol in a [`SymbolTable`], and handed to
 //! every tile it touches. See `mds/MOT-Format.md`.
 //!
-//! Version 0 does not clip: an object is stored whole in each tile its box
-//! touches, so one that crosses a border is in both, with the same
-//! [`TileObject::id`], and a reader drawing a tile draws it clipped to the
-//! tile's own edge. The clipped edges and the cut dashes the format reserves
-//! room for come with clipping.
+//! A tile holds the part of an object inside its box grown by a buffer
+//! ([`Options::buffer`]), so a stroke or a symbol at the edge is not cut short
+//! and a renderer draws each tile clipped to the tile itself. An object
+//! entirely inside the grown box is stored whole, curves and all. One that
+//! crosses it has its curves flattened and is cut by [`crate::mot_clip`]: a
+//! line into pieces (each says where it was cut, and how far along the line it
+//! starts, for its dashes), an area into a ring closed along the edge. All the
+//! pieces have the object's [`TileObject::id`]. A point or a text is in every
+//! tile whose grown box holds it.
 //!
 //! The map is placed from its [`GeographicAnchor`] (the reference point in
 //! degrees) laid out on the ellipsoid, turned by the map's grivation, as
@@ -19,8 +23,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::map::{Map, ObjectKind, Symbol};
+use crate::map::{Coord, Map, ObjectKind, Symbol};
+use crate::mot::node_flag;
 use crate::mot::{Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, WORLD_HALF};
+use crate::mot_clip::{clip_line, clip_ring, flatten, Rect, Vertex};
 use crate::mot_symbols::{Match, SymbolTable};
 use crate::orthophoto::{
     ground_to_geographic, true_north_rotation, web_mercator, GeographicAnchor,
@@ -33,6 +39,12 @@ pub struct Options {
     pub zoom: u8,
     /// The resolution of the nodes, in centimetres of Mercator.
     pub grid_cm: u32,
+    /// How far past its edge a tile keeps what it holds, as a fraction of the
+    /// tile's side. 1/32 is about 50 m at zoom 14: more than a line's width or
+    /// a symbol's size at 1:4000 or 1:10000, and about what one is at 1:15000.
+    /// A tile holds roughly `(1 + 2 * buffer)^2` times what it would with none,
+    /// so this is also the size of the archive.
+    pub buffer: f64,
 }
 
 impl Default for Options {
@@ -40,6 +52,7 @@ impl Default for Options {
         Options {
             zoom: 14,
             grid_cm: 5,
+            buffer: 1.0 / 32.0,
         }
     }
 }
@@ -255,27 +268,54 @@ pub fn convert(
         let id = converted.next_id;
         converted.next_id += 1;
         converted.objects += 1;
-        for tile_id in TileId::covering(options.zoom, bounds) {
+
+        let per_unit = 100.0 / f64::from(grid.cm);
+        let side = TileId::size(options.zoom) * per_unit;
+        let margin = options.buffer.max(0.0) * side;
+        let margin_m = options.buffer.max(0.0) * TileId::size(options.zoom);
+        let grown = [
+            bounds[0] - margin_m,
+            bounds[1] - margin_m,
+            bounds[2] + margin_m,
+            bounds[3] + margin_m,
+        ];
+        let rotation = object.rotation + frame;
+
+        for tile_id in TileId::covering(options.zoom, grown) {
             let (west, top) = tile_id.origin();
-            let to_grid = |(x, y): (f64, f64)| (grid.units(x - west), grid.units(top - y));
-            let nodes: Vec<Node> = object
-                .coords
-                .iter()
-                .zip(&places)
-                .map(|(c, &p)| {
-                    let (x, y) = to_grid(p);
-                    Node {
-                        x,
-                        y,
+            let local = |(x, y): (f64, f64)| ((x - west) * per_unit, (top - y) * per_unit);
+            let to_grid = |p: (f64, f64)| {
+                let (x, y) = local(p);
+                (x.round() as i32, y.round() as i32)
+            };
+            let rect = Rect {
+                x0: -margin,
+                y0: -margin,
+                x1: side + margin,
+                y1: side + margin,
+            };
+            let locals: Vec<(f64, f64)> = places.iter().map(|&p| local(p)).collect();
+            let inside = |&(x, y): &(f64, f64)| rect.contains(x, y);
+
+            // What goes in this tile: nodes, and for a line piece its dash offset.
+            let mut stored: Vec<(Vec<Node>, u32)> = Vec::new();
+            let whole = |locals: &[(f64, f64)]| -> Vec<Node> {
+                object
+                    .coords
+                    .iter()
+                    .zip(locals)
+                    .map(|(c, &p)| Node {
+                        x: p.0.round() as i32,
+                        y: p.1.round() as i32,
                         flags: c.flags as u8,
-                    }
-                })
-                .collect();
+                    })
+                    .collect()
+            };
             let shape = match &object.kind {
                 ObjectKind::Point => Shape::Point,
                 ObjectKind::Path(_) => {
-                    Shape::Path(pattern_place.map(|(rotation, origin)| Pattern {
-                        rotation: rotation + frame,
+                    Shape::Path(pattern_place.map(|(pattern_rotation, origin)| Pattern {
+                        rotation: pattern_rotation + frame,
                         origin: to_grid(origin),
                     }))
                 }
@@ -290,18 +330,36 @@ pub fn convert(
                     }),
                 }),
             };
-            converted
+            match &object.kind {
+                ObjectKind::Point | ObjectKind::Text(_) => {
+                    if locals.iter().any(inside) {
+                        stored.push((whole(&locals), 0));
+                    }
+                }
+                ObjectKind::Path(_) if locals.iter().all(inside) => {
+                    stored.push((whole(&locals), 0));
+                }
+                ObjectKind::Path(_) => {
+                    clip_path(&object.coords, &locals, &rect, &mut stored);
+                }
+            }
+            if stored.is_empty() {
+                continue;
+            }
+            let tile = converted
                 .tiles
                 .entry(tile_id)
-                .or_insert_with(|| Tile::new(options.grid_cm))
-                .objects
-                .push(TileObject {
+                .or_insert_with(|| Tile::new(options.grid_cm));
+            for (nodes, dash_offset) in stored {
+                tile.objects.push(TileObject {
                     id,
                     symbol: id_in_table,
-                    rotation: object.rotation + frame,
-                    shape,
+                    rotation,
+                    shape: shape.clone(),
                     nodes,
+                    dash_offset,
                 });
+            }
         }
     }
 
@@ -323,6 +381,93 @@ pub fn convert(
         }
     }
     Ok(converted)
+}
+
+/// The parts of a path inside `rect`, as nodes (and the dash offset of each
+/// line piece), pushed to `stored`.
+///
+/// `locals` are the path's coordinates in the tile's grid units. The path is
+/// flattened first. A closed part is cut as a ring, and all of them make one
+/// object, as the rings of an area do; an open one is cut into line pieces,
+/// each its own.
+fn clip_path(
+    coords: &[Coord],
+    locals: &[(f64, f64)],
+    rect: &Rect,
+    stored: &mut Vec<(Vec<Node>, u32)>,
+) {
+    let node = |v: &Vertex| Node {
+        x: v.x.round() as i32,
+        y: v.y.round() as i32,
+        flags: v.flags,
+    };
+    let structure = (node_flag::CLOSE_POINT | node_flag::HOLE_POINT) as u8;
+    let mut rings: Vec<Vec<Node>> = Vec::new();
+    let mut begin = 0;
+    for end in 0..coords.len() {
+        if !coords[end].is_hole_point() && end + 1 != coords.len() {
+            continue;
+        }
+        let part: Vec<(f64, f64, i32)> = (begin..=end)
+            .map(|i| (locals[i].0, locals[i].1, coords[i].flags))
+            .collect();
+        begin = end + 1;
+        let vertices = flatten(&part, 0.5);
+        if coords[end].is_close_point() {
+            let ring = clip_ring(&vertices, rect);
+            if let Some(first) = ring.first() {
+                let mut nodes: Vec<Node> = ring.iter().map(&node).collect();
+                for n in &mut nodes {
+                    n.flags &= !structure;
+                }
+                nodes.push(Node {
+                    flags: node_flag::CLOSE_POINT as u8,
+                    ..node(first)
+                });
+                rings.push(nodes);
+            }
+            continue;
+        }
+        // An open part: a line, which stops at a gap and goes on after it.
+        let mut run_start = 0;
+        for (i, v) in vertices.iter().enumerate() {
+            if v.flags & node_flag::GAP_POINT as u8 == 0 && i + 1 != vertices.len() {
+                continue;
+            }
+            for piece in clip_line(&vertices[run_start..=i], rect) {
+                let mut nodes: Vec<Node> = piece.vertices.iter().map(&node).collect();
+                for n in &mut nodes {
+                    n.flags &= !structure;
+                }
+                if piece.start_cut {
+                    nodes[0].flags |= node_flag::CLIPPED as u8;
+                }
+                if piece.end_cut {
+                    let last = nodes.len() - 1;
+                    nodes[last].flags |= node_flag::CLIPPED as u8;
+                }
+                let offset = if piece.start_cut {
+                    piece.offset.round() as u32
+                } else {
+                    0
+                };
+                stored.push((nodes, offset));
+            }
+            run_start = i + 1;
+        }
+    }
+    let last = rings.len().saturating_sub(1);
+    let mut area: Vec<Node> = Vec::new();
+    for (i, mut ring) in rings.into_iter().enumerate() {
+        if i != last {
+            let end = ring.len() - 1;
+            ring[end].flags |= node_flag::HOLE_POINT as u8;
+        }
+        area.extend(ring);
+    }
+    if !area.is_empty() {
+        stored.insert(0, (area, 0));
+    }
 }
 
 /// Adds the tiles of `from` to those of `into`: the objects of a tile in both
@@ -415,11 +560,27 @@ mod tests {
         );
     }
 
+    fn convert_with(map: &Map, options: &Options) -> Converted {
+        convert(map, &anchor(), &SymbolTable::isom(), 0, options).unwrap()
+    }
+
+    /// Where a tile's nodes are, in Mercator meters.
+    fn absolute(tile: &Tile, id: TileId, nodes: &[Node]) -> Vec<(f64, f64)> {
+        nodes.iter().map(|n| tile.node_mercator(id, n)).collect()
+    }
+
+    fn path_length(points: &[(f64, f64)]) -> f64 {
+        points
+            .windows(2)
+            .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+            .sum()
+    }
+
     #[test]
-    fn an_object_across_a_border_is_in_both_tiles_with_one_id() {
+    fn a_line_across_tiles_is_cut_into_pieces_which_know_their_dash_phase() {
         let mut map = empty_map();
-        // At 1:10000 a millimetre of paper is 10 m, so 500 mm is 5 km: wider
-        // than a zoom 14 tile (about 1.7 km at this latitude).
+        // At 1:10000 a millimetre of paper is 10 m, so 500 mm is 5 km: several
+        // zoom 14 tiles (about 1.7 km each at this latitude).
         let line = object_of(
             &map,
             |s| matches!(s, Symbol::Line(_)),
@@ -427,26 +588,192 @@ mod tests {
             vec![Coord::new(0.0, 0.0, 0), Coord::new(500.0, 0.0, 0)],
         );
         map.objects.push(line);
-        let converted = convert_map(&map);
+        let options = Options {
+            buffer: 0.0,
+            ..Options::default()
+        };
+        let converted = convert_with(&map, &options);
         assert!(
             converted.tiles.len() >= 3,
             "{} tiles",
             converted.tiles.len()
         );
-        let mut ends = Vec::new();
+
+        /// A piece as stored: where it is, its dash offset, and whether its
+        /// first and last nodes are cuts.
+        type Piece = (Vec<(f64, f64)>, u32, bool, bool);
+        let mut pieces: Vec<Piece> = Vec::new();
         for (id, tile) in &converted.tiles {
-            assert_eq!(tile.objects.len(), 1);
-            assert_eq!(tile.objects[0].id, 0);
-            let n = &tile.objects[0].nodes;
-            ends.push((
-                tile.node_mercator(*id, &n[0]),
-                tile.node_mercator(*id, &n[1]),
-            ));
+            for o in &tile.objects {
+                assert_eq!(o.id, 0, "every piece has the object's id");
+                let first = o.nodes[0].flags & node_flag::CLIPPED as u8 != 0;
+                let last = o.nodes[o.nodes.len() - 1].flags & node_flag::CLIPPED as u8 != 0;
+                pieces.push((absolute(tile, *id, &o.nodes), o.dash_offset, first, last));
+            }
         }
-        // Every tile agrees on where the line is.
-        for e in &ends[1..] {
-            assert!((e.0 .0 - ends[0].0 .0).abs() < 0.1 && (e.1 .0 - ends[0].1 .0).abs() < 0.1);
+        // The true ends are the ones that are not cuts.
+        let start = pieces.iter().find(|p| !p.2).expect("a piece has the start");
+        assert_eq!(start.1, 0);
+        let start = start.0[0];
+        let end = pieces.iter().find(|p| !p.3).expect("a piece has the end");
+        let end = *end.0.last().unwrap();
+        let total = (end.0 - start.0).hypot(end.1 - start.1);
+        let sum: f64 = pieces.iter().map(|p| path_length(&p.0)).sum();
+        assert!((sum - total).abs() < 0.5, "{sum} vs {total}");
+        // A piece cut at its start starts as far along as its offset says.
+        for (points, offset, start_cut, _) in &pieces {
+            let along = (points[0].0 - start.0).hypot(points[0].1 - start.1);
+            let offset_m = f64::from(*offset) * 0.05;
+            assert!(*start_cut == (*offset > 0));
+            assert!((along - offset_m).abs() < 0.5, "{along} vs {offset_m}");
         }
+    }
+
+    #[test]
+    fn an_area_across_tiles_is_cut_to_each_and_the_pieces_add_up() {
+        let mut map = empty_map();
+        let square = vec![
+            Coord::new(-100.0, -100.0, 0),
+            Coord::new(100.0, -100.0, 0),
+            Coord::new(100.0, 100.0, 0),
+            Coord::new(-100.0, 100.0, 0),
+            Coord::new(-100.0, -100.0, coord_flag::CLOSE_POINT),
+        ];
+        let area = object_of(
+            &map,
+            |s| matches!(s, Symbol::Area(_)),
+            ObjectKind::Path(PathObject::default()),
+            square,
+        );
+        map.objects.push(area);
+        let area_of = |converted: &Converted| -> f64 {
+            let mut total = 0.0;
+            for (id, tile) in &converted.tiles {
+                for o in &tile.objects {
+                    let p = absolute(tile, *id, &o.nodes);
+                    total += (0..p.len() - 1)
+                        .map(|i| p[i].0 * p[i + 1].1 - p[i + 1].0 * p[i].1)
+                        .sum::<f64>()
+                        / 2.0;
+                }
+            }
+            total.abs()
+        };
+        // 2 km square: one tile at zoom 10, several at 14.
+        let whole = convert_with(
+            &map,
+            &Options {
+                zoom: 10,
+                buffer: 0.0,
+                ..Options::default()
+            },
+        );
+        assert_eq!(whole.tiles.len(), 1);
+        let cut = convert_with(
+            &map,
+            &Options {
+                buffer: 0.0,
+                ..Options::default()
+            },
+        );
+        assert!(cut.tiles.len() >= 2, "{} tiles", cut.tiles.len());
+        let (a, b) = (area_of(&whole), area_of(&cut));
+        assert!((a - b).abs() / a < 0.005, "{a} vs {b}");
+        // Each cut ring is closed, and has an edge which is not the map's.
+        for tile in cut.tiles.values() {
+            for o in &tile.objects {
+                let last = o.nodes.last().unwrap();
+                assert!(last.flags & node_flag::CLOSE_POINT as u8 != 0);
+                assert!(o
+                    .nodes
+                    .iter()
+                    .any(|n| n.flags & node_flag::CLIPPED as u8 != 0));
+            }
+        }
+    }
+
+    #[test]
+    fn a_curve_which_is_cut_is_flattened_and_one_which_is_not_stays_a_curve() {
+        let mut map = empty_map();
+        let curve = |x: f64| {
+            vec![
+                Coord::new(x, 0.0, coord_flag::CURVE_START),
+                Coord::new(x + 50.0, 80.0, 0),
+                Coord::new(x + 150.0, -80.0, 0),
+                Coord::new(x + 200.0, 0.0, 0),
+            ]
+        };
+        for x in [0.0, 300.0] {
+            let line = object_of(
+                &map,
+                |s| matches!(s, Symbol::Line(_)),
+                ObjectKind::Path(PathObject::default()),
+                curve(x),
+            );
+            map.objects.push(line);
+        }
+        let curves = |converted: &Converted| -> usize {
+            converted
+                .tiles
+                .values()
+                .flat_map(|t| &t.objects)
+                .filter(|o| {
+                    o.nodes
+                        .iter()
+                        .any(|n| n.flags & node_flag::CURVE_START as u8 != 0)
+                })
+                .count()
+        };
+        // In a tile 150 km wide neither is cut.
+        let big = convert_with(
+            &map,
+            &Options {
+                zoom: 8,
+                ..Options::default()
+            },
+        );
+        assert_eq!(curves(&big), 2);
+        // In small ones they cross borders, and the pieces carry no curves.
+        let small = convert_with(
+            &map,
+            &Options {
+                zoom: 16,
+                buffer: 0.0,
+                ..Options::default()
+            },
+        );
+        assert!(small.tiles.len() > 2);
+        assert_eq!(curves(&small), 0);
+    }
+
+    #[test]
+    fn a_point_near_an_edge_is_in_the_tiles_whose_buffer_holds_it() {
+        let mut map = empty_map();
+        let o = object_of(
+            &map,
+            |s| matches!(s, Symbol::Point(_)),
+            ObjectKind::Point,
+            vec![Coord::new(0.0, 0.0, 0)],
+        );
+        map.objects.push(o);
+        let none = convert_with(
+            &map,
+            &Options {
+                buffer: 0.0,
+                ..Options::default()
+            },
+        );
+        assert_eq!(none.tiles.len(), 1);
+        // With half a tile of buffer a point is within reach of a neighbour.
+        let wide = convert_with(
+            &map,
+            &Options {
+                buffer: 0.5,
+                ..Options::default()
+            },
+        );
+        assert!(wide.tiles.len() >= 2, "{} tiles", wide.tiles.len());
+        assert_eq!(wide.objects, 1);
     }
 
     #[test]

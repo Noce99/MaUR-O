@@ -143,6 +143,7 @@ pub mod map_areas;
 pub mod mot;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mot_archive;
+pub mod mot_clip;
 pub mod mot_convert;
 pub mod mot_symbols;
 pub mod naming;

@@ -12,9 +12,10 @@
 //! per symbol in the area: its code, its name and how many objects; with
 //! `--objects` each object is listed too, with its id and where it starts.
 //!
-//! An object counts when its nodes' box touches the area; tiles are not
-//! clipped yet, so a large object is also reported for a place its drawing
-//! does not reach.
+//! An object counts when the box around its nodes in a tile touches the area. A
+//! tile holds the part of an object inside it and a buffer around it, so an
+//! object cut at a tile border is counted once, by its id, whichever tiles the
+//! area touches.
 //!
 //! Exit codes: 0 success, 1 bad usage, 2 the archive cannot be read.
 

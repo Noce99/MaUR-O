@@ -210,7 +210,9 @@ Design and decisions: `mds/MOT-Format.md` (a draft). `mot.rs` is the pure part:
 Web Mercator tile addressing, the integer grid, and the tile payload codec.
 `mot_symbols.rs` is a layer's symbol table (ISOM 2017-2 for now) and the
 closest-symbol rule; `mot_convert.rs` places a `Map` on the earth and stores each
-object in the tiles it touches (no clipping yet); `mot_archive.rs` keeps the
+object in the tiles it touches, cut to each tile's box plus a buffer
+(`mot_clip.rs`: curves flattened, lines into pieces with their dash offset, areas
+into rings with their cut edges flagged); `mot_archive.rs` keeps the
 tiles in a PMTiles file through the `pmtiles` crate (native only, like `ureq`,
 so the wasm build never sees it). Source of truth, logins, servers and the UI
 are o-mnia's, not this crate's; the format only defines tiles and what to do
