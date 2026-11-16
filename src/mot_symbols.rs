@@ -10,6 +10,11 @@
 //! standard code ("101", "302.1"), which is how another edition's, or another
 //! standard's, symbols are matched to it: [`SymbolTable::closest`].
 //!
+//! Each symbol also carries the rules that say how it is generalised for the
+//! zoom levels coarser than the stored detail: [`ZoomRule`]. The world cannot
+//! be drawn whole at once, so what is kept at each zoom is the symbol's
+//! business, not the converter's.
+//!
 //! For now the only table is ISOM 2017-2, built from the reference map the
 //! crate already ships; its ids are the order of that map's symbols. This is
 //! provisional until the table is frozen as a file of its own.
@@ -57,6 +62,67 @@ impl SymbolKind {
     }
 }
 
+/// How a symbol is generalised for the zoom levels coarser than the finest one
+/// stored, where everything is kept as drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoomRule {
+    /// The coarsest zoom the symbol appears at: an object of it is left out of
+    /// every level below this one.
+    pub min_zoom: u8,
+    /// The size, in pixels of a 256 pixel tile, below which an object is
+    /// dropped as too small to see: its longer side for an area, its length for
+    /// a line. 0 keeps every object, as for a point.
+    pub min_size_px: f32,
+    /// How far, in the same pixels, a line or an area may be moved to have fewer
+    /// nodes. 0 leaves the geometry alone.
+    pub simplify_px: f32,
+}
+
+/// The rule of a symbol with this code and kind.
+///
+/// Provisional, like the table: what matters at a zoom is what a reader can
+/// still tell at a glance at that scale, so the large land covers and the roads
+/// come first, then the contours and the buildings, and the small features only
+/// at the finest zoom. By the family of the code, `302.1` being `302`'s.
+fn zoom_rule(code: &str, kind: SymbolKind) -> ZoomRule {
+    let family = code.split('.').next().unwrap_or("");
+    let number: u32 = family.parse().unwrap_or(0);
+    let min_zoom = match number {
+        // Water, marsh.
+        301 => 11,
+        302 | 304 | 306 | 307 => 12,
+        308 => 13,
+        // Vegetation and cultivation, the large areas.
+        401..=415 => 12,
+        416 => 13,
+        // Roads, tracks, paths, railways.
+        501..=503 | 509 | 511 => 12,
+        504 | 505 | 510 | 512 => 13,
+        // Areas that shall not be entered, buildings.
+        520 => 12,
+        521 | 522 => 13,
+        // Contours, cliffs, stony and bare ground.
+        102 => 12,
+        101 | 201 | 210..=212 => 13,
+        // The north lines of a map.
+        601 => 12,
+        _ => match kind {
+            SymbolKind::Area | SymbolKind::Combined => 13,
+            _ => 14,
+        },
+    };
+    let (min_size_px, simplify_px) = match kind {
+        SymbolKind::Area | SymbolKind::Combined => (4.0, 0.5),
+        SymbolKind::Line => (8.0, 0.5),
+        SymbolKind::Point | SymbolKind::Text => (0.0, 0.0),
+    };
+    ZoomRule {
+        min_zoom,
+        min_size_px,
+        simplify_px,
+    }
+}
+
 /// One symbol of a table.
 #[derive(Clone, Debug)]
 pub struct SymbolEntry {
@@ -66,6 +132,8 @@ pub struct SymbolEntry {
     pub name: String,
     /// What it draws.
     pub kind: SymbolKind,
+    /// How it is generalised for the coarser zoom levels.
+    pub rule: ZoomRule,
 }
 
 /// How [`SymbolTable::closest`] found a symbol, best first.
@@ -101,10 +169,12 @@ impl SymbolTable {
                 continue;
             }
             by_code.insert(code.to_string(), entries.len() as u16);
+            let kind = SymbolKind::of(symbol);
             entries.push(SymbolEntry {
                 code: code.to_string(),
                 name: symbol.name().to_string(),
-                kind: SymbolKind::of(symbol),
+                kind,
+                rule: zoom_rule(code, kind),
             });
         }
         SymbolTable {
@@ -127,6 +197,19 @@ impl SymbolTable {
     /// The symbol with this id.
     pub fn get(&self, id: u16) -> Option<&SymbolEntry> {
         self.entries.get(usize::from(id))
+    }
+
+    /// The generalisation rule of the symbol with this id: the neutral one, which
+    /// keeps everything from the finest zoom only, for an id the table lacks.
+    pub fn rule(&self, id: u16) -> ZoomRule {
+        self.get(id).map_or(
+            ZoomRule {
+                min_zoom: 14,
+                min_size_px: 0.0,
+                simplify_px: 0.0,
+            },
+            |e| e.rule,
+        )
     }
 
     /// The id of the symbol with this code.
@@ -178,6 +261,36 @@ mod tests {
         assert!(table.len() > 100, "{} symbols", table.len());
         let building = table.id_of("521").expect("buildings are symbol 521");
         assert_eq!(table.get(building).unwrap().kind, SymbolKind::Area);
+    }
+
+    #[test]
+    fn rules_put_the_large_and_the_important_first() {
+        let table = SymbolTable::isom();
+        let zoom = |code: &str| table.rule(table.id_of(code).unwrap()).min_zoom;
+        // An index contour is read before a plain one, roads before paths, large
+        // water before buildings, and a tree only at the finest zoom.
+        assert!(zoom("102") < zoom("101"));
+        assert!(zoom("503") < zoom("505"));
+        assert!(zoom("301") < zoom("521"));
+        assert_eq!(zoom("418"), 14);
+        for id in 0..table.len() as u16 {
+            let rule = table.rule(id);
+            assert!((11..=14).contains(&rule.min_zoom), "{:?}", table.get(id));
+            let kind = table.get(id).unwrap().kind;
+            if matches!(kind, SymbolKind::Point | SymbolKind::Text) {
+                assert_eq!((rule.min_size_px, rule.simplify_px), (0.0, 0.0));
+            } else {
+                assert!(rule.min_size_px > 0.0 && rule.simplify_px > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_variant_shares_the_rule_of_its_family() {
+        assert_eq!(
+            zoom_rule("301.1", SymbolKind::Area),
+            zoom_rule("301", SymbolKind::Area)
+        );
     }
 
     #[test]

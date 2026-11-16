@@ -23,11 +23,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::map::{Coord, Map, ObjectKind, Symbol};
+use crate::map::{Map, ObjectKind, Symbol};
 use crate::mot::node_flag;
 use crate::mot::{Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, WORLD_HALF};
-use crate::mot_clip::{clip_line, clip_ring, flatten, Rect, Vertex};
-use crate::mot_symbols::{Match, SymbolTable};
+use crate::mot_clip::{clip_line, clip_ring, flatten, simplify, Rect, Vertex};
+use crate::mot_symbols::{Match, SymbolTable, ZoomRule};
 use crate::orthophoto::{
     ground_to_geographic, true_north_rotation, web_mercator, GeographicAnchor,
 };
@@ -37,6 +37,11 @@ use crate::orthophoto::{
 pub struct Options {
     /// The zoom level of the tiles.
     pub zoom: u8,
+    /// The finest zoom level stored, where every object is kept as drawn. A
+    /// level coarser than this one is generalised by the symbols' own rules
+    /// ([`crate::mot_symbols::ZoomRule`]) and on a coarser grid; for the finest,
+    /// `zoom` equals this.
+    pub detail_zoom: u8,
     /// The resolution of the nodes, in centimetres of Mercator.
     pub grid_cm: u32,
     /// How far past its edge a tile keeps what it holds, as a fraction of the
@@ -51,6 +56,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             zoom: 14,
+            detail_zoom: 14,
             grid_cm: 5,
             buffer: 1.0 / 32.0,
         }
@@ -72,11 +78,42 @@ pub struct Converted {
     /// How many objects were left out because their symbol is hidden or a
     /// drawing aid, which draws nothing on the printed map.
     pub hidden: usize,
+    /// How many objects were left out of this level by the rules of their
+    /// symbols: not shown yet at this zoom, or too small to see.
+    pub generalized: usize,
     /// How many objects were stored under another symbol than their own.
     pub remapped: usize,
     /// One line for every symbol that was remapped or dropped, and for
     /// anything else worth knowing.
     pub warnings: Vec<String>,
+    /// For a pyramid ([`convert_levels`]), what each level came to, finest
+    /// first; empty for a single level.
+    pub levels: Vec<LevelSummary>,
+}
+
+/// What one level of a pyramid came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LevelSummary {
+    /// The zoom level.
+    pub zoom: u8,
+    /// How many objects went into its tiles.
+    pub objects: usize,
+    /// How many were left out by the rules of their symbols.
+    pub generalized: usize,
+    /// How many tiles it has.
+    pub tiles: usize,
+}
+
+/// The grid, in centimetres, of the level at `zoom` when the finest, at
+/// `detail_zoom`, is on a grid of `base_cm`. A coarser level has a coarser
+/// grid, as it has coarser geometry: about 4096 cells across a tile, which is
+/// finer than any pixel it is drawn in.
+pub fn level_grid_cm(zoom: u8, detail_zoom: u8, base_cm: u32) -> u32 {
+    if zoom >= detail_zoom {
+        return base_cm.max(1);
+    }
+    let cells = (TileId::size(zoom) * 100.0 / 4096.0).ceil() as u32;
+    cells.max(base_cm).max(1)
 }
 
 /// The position of a Mercator point along a Z-order curve over the world.
@@ -120,7 +157,11 @@ pub fn convert(
     };
     let meters_per_mm = f64::from(scale) / 1000.0;
     let north = true_north_rotation(georef, anchor);
-    let grid = Grid::new(options.grid_cm);
+    let grid_cm = level_grid_cm(options.zoom, options.detail_zoom, options.grid_cm);
+    let grid = Grid::new(grid_cm);
+    let coarse = options.zoom < options.detail_zoom;
+    // A pixel of a 256 pixel tile of this level, in Mercator meters.
+    let pixel = TileId::size(options.zoom) / 256.0;
     // A Mercator meter is longer than a ground meter by this much here.
     let stretch = 1.0 / anchor.lat.to_radians().cos().max(0.05);
 
@@ -174,8 +215,10 @@ pub fn convert(
         objects: 0,
         dropped: 0,
         hidden: 0,
+        generalized: 0,
         remapped: 0,
         warnings: Vec::new(),
+        levels: Vec::new(),
     };
     // A UTM easting a long way outside its zone's strip means the file's
     // georeference is wrong (an easting of 0 is the usual slip), and the map
@@ -233,7 +276,27 @@ pub fn convert(
             remapped_symbols[index] += 1;
         }
 
-        let places: Vec<(f64, f64)> = object.coords.iter().map(|c| project(c.x, c.y)).collect();
+        // Every object has its id whatever a level keeps of it, so that the
+        // levels agree on which object is which.
+        let id = converted.next_id;
+        converted.next_id += 1;
+
+        let rule = table.rule(id_in_table);
+        if coarse && options.zoom < rule.min_zoom {
+            converted.generalized += 1;
+            continue;
+        }
+        let mut places: Vec<(f64, f64)> = object.coords.iter().map(|c| project(c.x, c.y)).collect();
+        let mut flags: Vec<i32> = object.coords.iter().map(|c| c.flags).collect();
+        if coarse && matches!(object.kind, ObjectKind::Path(_)) {
+            match generalize(&places, &flags, pixel, &rule) {
+                Some((p, f)) => (places, flags) = (p, f),
+                None => {
+                    converted.generalized += 1;
+                    continue;
+                }
+            }
+        }
         let mut bounds = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
         for &(x, y) in &places {
             bounds = [
@@ -265,11 +328,9 @@ pub fn convert(
             _ => None,
         };
 
-        let id = converted.next_id;
-        converted.next_id += 1;
         converted.objects += 1;
 
-        let per_unit = 100.0 / f64::from(grid.cm);
+        let per_unit = 100.0 / f64::from(grid_cm);
         let side = TileId::size(options.zoom) * per_unit;
         let margin = options.buffer.max(0.0) * side;
         let margin_m = options.buffer.max(0.0) * TileId::size(options.zoom);
@@ -300,14 +361,13 @@ pub fn convert(
             // What goes in this tile: nodes, and for a line piece its dash offset.
             let mut stored: Vec<(Vec<Node>, u32)> = Vec::new();
             let whole = |locals: &[(f64, f64)]| -> Vec<Node> {
-                object
-                    .coords
+                flags
                     .iter()
                     .zip(locals)
-                    .map(|(c, &p)| Node {
+                    .map(|(&f, &p)| Node {
                         x: p.0.round() as i32,
                         y: p.1.round() as i32,
-                        flags: c.flags as u8,
+                        flags: f as u8,
                     })
                     .collect()
             };
@@ -340,7 +400,7 @@ pub fn convert(
                     stored.push((whole(&locals), 0));
                 }
                 ObjectKind::Path(_) => {
-                    clip_path(&object.coords, &locals, &rect, &mut stored);
+                    clip_path(&flags, &locals, &rect, &mut stored);
                 }
             }
             if stored.is_empty() {
@@ -349,7 +409,7 @@ pub fn convert(
             let tile = converted
                 .tiles
                 .entry(tile_id)
-                .or_insert_with(|| Tile::new(options.grid_cm));
+                .or_insert_with(|| Tile::new(grid_cm));
             for (nodes, dash_offset) in stored {
                 tile.objects.push(TileObject {
                     id,
@@ -383,6 +443,73 @@ pub fn convert(
     Ok(converted)
 }
 
+/// A path's positions, in Mercator meters, and its node flags.
+type Generalized = (Vec<(f64, f64)>, Vec<i32>);
+
+/// A path as a coarser level shows it: `None` where it is too small to see,
+/// otherwise with its curves flattened and its nodes thinned out, never moving
+/// the path further than the rule allows.
+///
+/// `places` are in Mercator meters, `flags` the path's node flags, and `pixel`
+/// is how many meters a pixel of the level is. A part which comes out with too
+/// little left to be a line or a ring goes; the nodes which mean something (a
+/// dash, a gap, the end of a hole, a close point) stay.
+fn generalize(
+    places: &[(f64, f64)],
+    flags: &[i32],
+    pixel: f64,
+    rule: &ZoomRule,
+) -> Option<Generalized> {
+    let closed = flags.iter().any(|f| f & node_flag::CLOSE_POINT != 0);
+    let size = if closed {
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for &(x, y) in places {
+            (x0, x1) = (x0.min(x), x1.max(x));
+            (y0, y1) = (y0.min(y), y1.max(y));
+        }
+        (x1 - x0).max(y1 - y0)
+    } else {
+        places
+            .windows(2)
+            .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+            .sum()
+    };
+    if size < f64::from(rule.min_size_px) * pixel {
+        return None;
+    }
+    if rule.simplify_px <= 0.0 {
+        return Some((places.to_vec(), flags.to_vec()));
+    }
+    let (mut out_places, mut out_flags): Generalized = (Vec::new(), Vec::new());
+    let mut begin = 0;
+    for end in 0..flags.len() {
+        if flags[end] & node_flag::HOLE_POINT == 0 && end + 1 != flags.len() {
+            continue;
+        }
+        let part: Vec<(f64, f64, i32)> = (begin..=end)
+            .map(|i| (places[i].0, places[i].1, flags[i]))
+            .collect();
+        begin = end + 1;
+        let thinned = simplify(
+            &flatten(&part, 0.25 * pixel),
+            f64::from(rule.simplify_px) * pixel,
+        );
+        let closed_part = flags[end] & node_flag::CLOSE_POINT != 0;
+        if thinned.len() < if closed_part { 4 } else { 2 } {
+            continue;
+        }
+        for v in thinned {
+            out_places.push((v.x, v.y));
+            out_flags.push(i32::from(v.flags));
+        }
+    }
+    // A part that went may have been the one after a hole's end.
+    if let Some(last) = out_flags.last_mut() {
+        *last &= !node_flag::HOLE_POINT;
+    }
+    (!out_places.is_empty()).then_some((out_places, out_flags))
+}
+
 /// The parts of a path inside `rect`, as nodes (and the dash offset of each
 /// line piece), pushed to `stored`.
 ///
@@ -391,7 +518,7 @@ pub fn convert(
 /// object, as the rings of an area do; an open one is cut into line pieces,
 /// each its own.
 fn clip_path(
-    coords: &[Coord],
+    flags: &[i32],
     locals: &[(f64, f64)],
     rect: &Rect,
     stored: &mut Vec<(Vec<Node>, u32)>,
@@ -404,16 +531,16 @@ fn clip_path(
     let structure = (node_flag::CLOSE_POINT | node_flag::HOLE_POINT) as u8;
     let mut rings: Vec<Vec<Node>> = Vec::new();
     let mut begin = 0;
-    for end in 0..coords.len() {
-        if !coords[end].is_hole_point() && end + 1 != coords.len() {
+    for end in 0..flags.len() {
+        if flags[end] & node_flag::HOLE_POINT == 0 && end + 1 != flags.len() {
             continue;
         }
         let part: Vec<(f64, f64, i32)> = (begin..=end)
-            .map(|i| (locals[i].0, locals[i].1, coords[i].flags))
+            .map(|i| (locals[i].0, locals[i].1, flags[i]))
             .collect();
         begin = end + 1;
         let vertices = flatten(&part, 0.5);
-        if coords[end].is_close_point() {
+        if flags[end] & node_flag::CLOSE_POINT != 0 {
             let ring = clip_ring(&vertices, rect);
             if let Some(first) = ring.first() {
                 let mut nodes: Vec<Node> = ring.iter().map(&node).collect();
@@ -468,6 +595,61 @@ fn clip_path(
     if !area.is_empty() {
         stored.insert(0, (area, 0));
     }
+}
+
+/// Converts `map` into every level from `options.zoom`, the finest, up to
+/// `min_zoom`: the finest as drawn, each coarser one generalised by the rules of
+/// the symbols and on a coarser grid. The tiles of all the levels are in the one
+/// result, and the objects have the same ids in all of them.
+///
+/// The counts and the warnings are those of the finest level; `levels` says what
+/// each came to.
+pub fn convert_levels(
+    map: &Map,
+    anchor: &GeographicAnchor,
+    table: &SymbolTable,
+    first_id: u64,
+    min_zoom: u8,
+    options: &Options,
+) -> Result<Converted, String> {
+    let detail = options.zoom;
+    let mut result = convert(
+        map,
+        anchor,
+        table,
+        first_id,
+        &Options {
+            detail_zoom: detail,
+            ..*options
+        },
+    )?;
+    result.levels.push(LevelSummary {
+        zoom: detail,
+        objects: result.objects,
+        generalized: result.generalized,
+        tiles: result.tiles.len(),
+    });
+    for zoom in (min_zoom..detail).rev() {
+        let level = convert(
+            map,
+            anchor,
+            table,
+            first_id,
+            &Options {
+                zoom,
+                detail_zoom: detail,
+                ..*options
+            },
+        )?;
+        result.levels.push(LevelSummary {
+            zoom,
+            objects: level.objects,
+            generalized: level.generalized,
+            tiles: level.tiles.len(),
+        });
+        merge_tiles(&mut result.tiles, level.tiles);
+    }
+    Ok(result)
 }
 
 /// Adds the tiles of `from` to those of `into`: the objects of a tile in both
@@ -664,6 +846,7 @@ mod tests {
             &map,
             &Options {
                 zoom: 10,
+                detail_zoom: 10,
                 buffer: 0.0,
                 ..Options::default()
             },
@@ -690,6 +873,193 @@ mod tests {
                     .any(|n| n.flags & node_flag::CLIPPED as u8 != 0));
             }
         }
+    }
+
+    /// An object of the symbol with this code.
+    fn object_by_code(map: &Map, code: &str, kind: ObjectKind, coords: Vec<Coord>) -> Object {
+        let index = map.symbols.iter().position(|s| s.code() == code).unwrap();
+        let mut o = Object::new(kind);
+        o.symbol_id = map.symbol_ids[index];
+        o.symbol_index = Some(index);
+        o.coords = coords;
+        o
+    }
+
+    fn square(x: f64, y: f64, side: f64) -> Vec<Coord> {
+        vec![
+            Coord::new(x, y, 0),
+            Coord::new(x + side, y, 0),
+            Coord::new(x + side, y + side, 0),
+            Coord::new(x, y + side, 0),
+            Coord::new(x, y, coord_flag::CLOSE_POINT),
+        ]
+    }
+
+    /// Water (a large area from zoom 11), a tiny pond of it, and a tree.
+    fn map_for_levels() -> Map {
+        let mut map = empty_map();
+        let lake = object_by_code(
+            &map,
+            "301",
+            ObjectKind::Path(PathObject::default()),
+            square(0.0, 0.0, 100.0),
+        );
+        map.objects.push(lake);
+        // 0.1 mm of paper at 1:10000 is a metre.
+        let pond = object_by_code(
+            &map,
+            "301",
+            ObjectKind::Path(PathObject::default()),
+            square(300.0, 0.0, 0.1),
+        );
+        map.objects.push(pond);
+        let tree = object_by_code(
+            &map,
+            "418",
+            ObjectKind::Point,
+            vec![Coord::new(50.0, 50.0, 0)],
+        );
+        map.objects.push(tree);
+        map
+    }
+
+    fn ids_at(converted: &Converted, zoom: u8) -> Vec<u64> {
+        let mut ids: Vec<u64> = converted
+            .tiles
+            .iter()
+            .filter(|(id, _)| id.z == zoom)
+            .flat_map(|(_, t)| t.objects.iter().map(|o| o.id))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    #[test]
+    fn a_coarser_level_keeps_what_the_rules_of_the_symbols_say() {
+        let map = map_for_levels();
+        let levels = convert_levels(
+            &map,
+            &anchor(),
+            &SymbolTable::isom(),
+            0,
+            11,
+            &Options::default(),
+        )
+        .unwrap();
+        assert_eq!(levels.levels.len(), 4);
+        // Objects get their ids in order along a curve, so find them by symbol.
+        let table = SymbolTable::isom();
+        let (water, tree) = (table.id_of("301").unwrap(), table.id_of("418").unwrap());
+        let symbols_at = |zoom: u8| -> Vec<u16> {
+            let mut v: Vec<u16> = levels
+                .tiles
+                .iter()
+                .filter(|(id, _)| id.z == zoom)
+                .flat_map(|(_, t)| t.objects.iter().map(|o| o.symbol))
+                .collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        // At the finest level everything is kept: the lake, the pond, the tree.
+        assert_eq!(ids_at(&levels, 14).len(), 3);
+        assert_eq!(symbols_at(14), {
+            let mut v = vec![water, tree];
+            v.sort_unstable();
+            v
+        });
+        // Lower down the tree is not shown, and the pond is too small to see.
+        for zoom in [11u8, 12, 13] {
+            assert_eq!(symbols_at(zoom), vec![water], "zoom {zoom}");
+            assert_eq!(ids_at(&levels, zoom).len(), 1, "zoom {zoom}");
+        }
+        let summary = |zoom| levels.levels.iter().find(|l| l.zoom == zoom).unwrap();
+        assert_eq!((summary(14).objects, summary(14).generalized), (3, 0));
+        assert_eq!((summary(12).objects, summary(12).generalized), (1, 2));
+    }
+
+    #[test]
+    fn the_levels_agree_on_the_ids() {
+        let map = map_for_levels();
+        let levels = convert_levels(
+            &map,
+            &anchor(),
+            &SymbolTable::isom(),
+            100,
+            12,
+            &Options::default(),
+        )
+        .unwrap();
+        let fine = ids_at(&levels, 14);
+        assert_eq!(fine.len(), 3);
+        assert!(fine.iter().all(|&i| (100..103).contains(&i)));
+        let coarse = ids_at(&levels, 12);
+        assert!(coarse.iter().all(|i| fine.contains(i)));
+        assert_eq!(levels.next_id, 103);
+    }
+
+    #[test]
+    fn a_coarser_level_is_on_a_coarser_grid_and_means_the_same_place() {
+        assert_eq!(level_grid_cm(14, 14, 5), 5);
+        assert!(level_grid_cm(12, 14, 5) > 100);
+        assert!(level_grid_cm(11, 14, 5) > level_grid_cm(12, 14, 5));
+        let map = map_for_levels();
+        let levels = convert_levels(
+            &map,
+            &anchor(),
+            &SymbolTable::isom(),
+            0,
+            12,
+            &Options::default(),
+        )
+        .unwrap();
+        // The lake's first corner is in the same place at both levels, to the
+        // coarser grid.
+        let corner = |zoom: u8| -> (f64, f64, f64) {
+            let (id, tile) = levels.tiles.iter().find(|(id, _)| id.z == zoom).unwrap();
+            let o = tile
+                .objects
+                .iter()
+                .find(|o| matches!(o.shape, Shape::Path(_)))
+                .unwrap();
+            let (x, y) = tile.node_mercator(*id, &o.nodes[0]);
+            (x, y, f64::from(tile.grid_cm) / 100.0)
+        };
+        let (fx, fy, _) = corner(14);
+        let (cx, cy, cell) = corner(12);
+        assert!(cell > 1.0);
+        assert!((fx - cx).abs() <= cell && (fy - cy).abs() <= cell);
+    }
+
+    #[test]
+    fn a_curve_in_a_coarse_level_is_flattened_and_thinned() {
+        let mut map = empty_map();
+        // A wavy road 1 km long, in many nodes and curves, in a large area's way.
+        let coords: Vec<Coord> = (0..200)
+            .map(|i| Coord::new(f64::from(i) * 0.5, (f64::from(i) * 0.7).sin() * 0.02, 0))
+            .collect();
+        let road = object_by_code(&map, "503", ObjectKind::Path(PathObject::default()), coords);
+        map.objects.push(road);
+        let levels = convert_levels(
+            &map,
+            &anchor(),
+            &SymbolTable::isom(),
+            0,
+            12,
+            &Options::default(),
+        )
+        .unwrap();
+        let nodes = |zoom: u8| -> usize {
+            levels
+                .tiles
+                .iter()
+                .filter(|(id, _)| id.z == zoom)
+                .flat_map(|(_, t)| t.objects.iter().map(|o| o.nodes.len()))
+                .sum()
+        };
+        assert!(nodes(14) >= 200);
+        assert!(nodes(12) > 0 && nodes(12) < 20, "{} nodes", nodes(12));
     }
 
     #[test]
@@ -729,6 +1099,7 @@ mod tests {
             &map,
             &Options {
                 zoom: 8,
+                detail_zoom: 8,
                 ..Options::default()
             },
         );

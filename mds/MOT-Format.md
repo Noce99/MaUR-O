@@ -3,9 +3,11 @@
 Status: **draft**. A first slice is implemented: the tile payload codec
 (`src/mot.rs`), the ISOM symbol table (`src/mot_symbols.rs`), conversion of a
 map to tiles (`src/mot_convert.rs`) and the PMTiles archive (`src/mot_archive.rs`),
-with the tools `omap_to_tiles` and `tiles_query`, and the clipping of objects at
-tile borders (`src/mot_clip.rs`). Not yet: zoom levels other than the one stored, per-symbol zoom rules, coverage, the history, other
-symbol sets. The measurements in [Measurements so far](#measurements-so-far)
+with the tools `omap_to_tiles` and `tiles_query`, the clipping of objects at
+tile borders (`src/mot_clip.rs`) and the zoom levels with the per-symbol rules.
+Not yet: coverage, the history, other symbol sets, the levels coarser than the
+archive's (zoom 0 to 10, which are the coverage footprints), merging of
+neighbouring objects. The measurements in [Measurements so far](#measurements-so-far)
 come from the throw-away programs in `examples/` (`tile_stats.rs`, `curve_fit.rs`,
 `hidden_areas.rs`); `examples/mot_try.rs` measures the real codec.
 
@@ -108,9 +110,38 @@ to get ground coordinates.
 - Inside a tile, objects are **sorted by symbol draw order** and the symbol id is
   run-length coded, so a renderer walks a tile in layer order without sorting.
 - Coarser zoom levels hold **generalised** tiles (small objects dropped, lines
-  simplified) so the whole world can be shown at once.
+  simplified) so the whole world can be shown at once. The finest stored level
+  (14 by default) has every object as drawn; a coarser one is built from the
+  same objects by the rules of their symbols ([Zoom levels](#zoom-levels)).
+  An object has the same id at every level.
 - Each tile is compressed as a unit (zstd or brotli; brotli if the browser
   should decompress it natively).
+
+### Zoom levels
+
+The archive holds a range of levels, `min_zoom` (11 by default) to `max_zoom`
+(14). Each level is converted from the map's objects, not derived from the finer
+level, so cut pieces and ids stay right. A level coarser than the finest:
+
+- is on a **coarser grid**, about 4096 cells across a tile (each tile says its
+  own grid), finer than any pixel it is drawn in;
+- leaves out an object whose symbol has not **appeared yet** (`min_zoom` of the
+  symbol's rule) or that is **too small to see**: its longer side for an area,
+  its length for a line, under `min_size_px` pixels of a 256 pixel tile;
+- **flattens the curves** of the rest and **thins their nodes** (Douglas and
+  Peucker) by up to `simplify_px` pixels; a node that means something (a dash,
+  a gap, the end of a hole, a close point) is kept, and a part left with too
+  little to be a line or a ring goes.
+
+The rule belongs to the symbol, in the symbol table: `ZoomRule { min_zoom,
+min_size_px, simplify_px }`. The ISOM table's rules are provisional, set by the
+family of the code: large water and land cover come first (from zoom 11 or 12),
+then roads and railways, index contours, forbidden areas (12), then contours,
+cliffs, stony ground, buildings (13), and small features (points, text,
+the rest) only at the finest level.
+
+Not yet: merging neighbouring objects of the same symbol (the rule has no field
+for it), and levels coarser than 11, which are the coverage footprints.
 
 ### Container
 
@@ -269,6 +300,19 @@ buffer, as a fraction of the tile's side.
 With no buffer it is smaller than storing every object whole in each tile it
 touches (about 9.1 MB), but a stroke or symbol at a border is then cut short.
 
+Zoom levels, the Bologna archive (PMTiles, zstd per tile, 5 cm grid at the finest
+level), by the coarsest level kept:
+
+| Levels | Archive | Objects at the level added | Tiles at the level added |
+| --- | --- | --- | --- |
+| 14 only | 9.75 MB | 254,663 | 67 |
+| 13 to 14 | 10.57 MB (+0.82) | 35,813 | 22 |
+| 12 to 14 | 10.83 MB (+0.25) | 11,197 | 10 |
+| 11 to 14 | 10.83 MB (+0.001) | 69 | 2 |
+
+The coarse levels cost 11% of the archive, and a 3 km square read at zoom 12
+takes 2 tiles and 1,400 objects where zoom 14 takes 6 and 22,400.
+
 ## Future adaptations
 
 These were measured or discussed and deliberately left out of version 1. The
@@ -330,7 +374,7 @@ Settled in discussion (recorded here so the codec can rely on them):
    ground grid is finer than the nominal one).
 2. **Symbol set for the first release: ISOM** (2017-2). The layer machinery is
    there from the start, but only one symbol table is shipped.
-3. **Per-symbol zoom rules.** The symbol table of a layer carries, for each
+3. **Per-symbol zoom rules** (implemented as `ZoomRule`, see [Zoom levels](#zoom-levels)). The symbol table of a layer carries, for each
    symbol, the rules that generalise it for coarse zoom levels, for example:
    the lowest zoom it appears at, a minimum size below which an object is
    dropped, a simplification tolerance, and whether neighbouring objects of the

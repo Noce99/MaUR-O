@@ -23,20 +23,25 @@ use crate::mot::{lat_lon, Tile, TileId};
 pub struct ArchiveInfo {
     /// The symbol table the objects' symbol ids refer to, e.g. "ISOM 2017-2".
     pub layer: String,
-    /// The grid of the tiles' nodes, in centimetres of Mercator.
+    /// The grid of the finest tiles' nodes, in centimetres of Mercator. A
+    /// coarser level has a coarser grid, which its tiles say themselves.
     pub grid_cm: u32,
-    /// The zoom level of the tiles.
-    pub zoom: u8,
+    /// The coarsest zoom level the archive has.
+    pub min_zoom: u8,
+    /// The finest zoom level the archive has: the one where everything is kept
+    /// as drawn.
+    pub max_zoom: u8,
 }
 
 impl ArchiveInfo {
     fn to_json(&self) -> String {
         format!(
-            "{{\"format\":\"mot\",\"version\":{},\"layer\":\"{}\",\"grid_cm\":{},\"zoom\":{}}}",
+            "{{\"format\":\"mot\",\"version\":{},\"layer\":\"{}\",\"grid_cm\":{},\"min_zoom\":{},\"max_zoom\":{}}}",
             crate::mot::VERSION,
             self.layer.replace('\\', "\\\\").replace('"', "\\\""),
             self.grid_cm,
-            self.zoom
+            self.min_zoom,
+            self.max_zoom
         )
     }
 
@@ -64,7 +69,8 @@ impl ArchiveInfo {
                 .ok_or("the archive's metadata has no \"layer\"")?
                 .to_string(),
             grid_cm: number("grid_cm")?,
-            zoom: number("zoom")? as u8,
+            min_zoom: number("min_zoom")? as u8,
+            max_zoom: number("max_zoom")? as u8,
         })
     }
 }
@@ -73,7 +79,7 @@ fn coord(id: TileId) -> Result<TileCoord, String> {
     TileCoord::new(id.z, id.x, id.y).map_err(|e| e.to_string())
 }
 
-/// Writes `tiles`, all at zoom `info.zoom`, as a PMTiles archive at `path`.
+/// Writes `tiles`, at the zoom levels `info` says, as a PMTiles archive at `path`.
 pub fn write(
     path: &Path,
     tiles: &BTreeMap<TileId, Tile>,
@@ -91,8 +97,8 @@ pub fn write(
     }
     let mut builder = PmTilesWriter::new(TileType::Unknown)
         .tile_compression(Compression::Zstd)
-        .min_zoom(info.zoom)
-        .max_zoom(info.zoom)
+        .min_zoom(info.min_zoom)
+        .max_zoom(info.max_zoom)
         .metadata(info.to_json());
     if !tiles.is_empty() {
         let (south_lat, west_lon) = lat_lon(west, south);
@@ -149,11 +155,11 @@ impl Archive {
         bytes.map(|b| Tile::decode(b.as_ref())).transpose()
     }
 
-    /// Every tile the box `[west, south, east, north]`, in Mercator meters,
-    /// touches and the archive has.
-    pub fn query(&self, bounds: [f64; 4]) -> Result<Vec<(TileId, Tile)>, String> {
+    /// Every tile of zoom level `zoom` the box `[west, south, east, north]`, in
+    /// Mercator meters, touches and the archive has.
+    pub fn query(&self, zoom: u8, bounds: [f64; 4]) -> Result<Vec<(TileId, Tile)>, String> {
         let mut found = Vec::new();
-        for id in TileId::covering(self.info.zoom, bounds) {
+        for id in TileId::covering(zoom, bounds) {
             if let Some(tile) = self.tile(id)? {
                 found.push((id, tile));
             }
@@ -202,7 +208,8 @@ mod tests {
         let info = ArchiveInfo {
             layer: "ISOM 2017-2".into(),
             grid_cm: 5,
-            zoom: 14,
+            min_zoom: 14,
+            max_zoom: 14,
         };
         write(&path, &tiles, &info).unwrap();
 
@@ -241,14 +248,18 @@ mod tests {
         let info = ArchiveInfo {
             layer: "ISOM 2017-2".into(),
             grid_cm: 5,
-            zoom: 14,
+            min_zoom: 14,
+            max_zoom: 14,
         };
         write(&path, &tiles, &info).unwrap();
         let archive = Archive::open(&path).unwrap();
         let (west, north) = here.origin();
         let size = TileId::size(14);
         let found = archive
-            .query([west + 1.0, north - size + 1.0, west + 2.0, north - 1.0])
+            .query(
+                14,
+                [west + 1.0, north - size + 1.0, west + 2.0, north - 1.0],
+            )
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, here);
