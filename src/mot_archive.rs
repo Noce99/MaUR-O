@@ -31,17 +31,89 @@ pub struct ArchiveInfo {
     /// The finest zoom level the archive has: the one where everything is kept
     /// as drawn.
     pub max_zoom: u8,
+    /// Where the maps came from: for the id of each map's coverage (the object
+    /// of the [`crate::mot::COVERAGE_SYMBOL`] in the tiles), the name of its
+    /// file. What a coverage says about itself, as a place to look it up.
+    pub sources: Vec<(u64, String)>,
+}
+
+/// `text` as a JSON string, with its quotes.
+fn json_string(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            c if (c as u32) < 0x20 => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The JSON string at the start of `rest` (after its opening quote), and what
+/// follows it.
+fn read_json_string(rest: &str) -> Option<(String, &str)> {
+    let mut out = String::new();
+    let mut chars = rest.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '"' => return Some((out, &rest[i + 1..])),
+            '\\' => match chars.next()?.1 {
+                'n' => out.push('\n'),
+                other => out.push(other),
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// The `sources` of the metadata `json`.
+fn read_sources(json: &str) -> Vec<(u64, String)> {
+    let mut sources = Vec::new();
+    let Some(at) = json.find("\"sources\":[") else {
+        return sources;
+    };
+    let mut rest = &json[at + "\"sources\":[".len()..];
+    while let Some(id_at) = rest.find("{\"id\":") {
+        if rest[..id_at].contains(']') {
+            break;
+        }
+        rest = &rest[id_at + "{\"id\":".len()..];
+        let Some(end) = rest.find(',') else { break };
+        let Ok(id) = rest[..end].trim().parse::<u64>() else {
+            break;
+        };
+        let Some(name_at) = rest.find("\"name\":\"") else {
+            break;
+        };
+        let Some((name, after)) = read_json_string(&rest[name_at + "\"name\":\"".len()..]) else {
+            break;
+        };
+        sources.push((id, name));
+        rest = after;
+    }
+    sources
 }
 
 impl ArchiveInfo {
     fn to_json(&self) -> String {
+        let sources: Vec<String> = self
+            .sources
+            .iter()
+            .map(|(id, name)| format!("{{\"id\":{id},\"name\":{}}}", json_string(name)))
+            .collect();
         format!(
-            "{{\"format\":\"mot\",\"version\":{},\"layer\":\"{}\",\"grid_cm\":{},\"min_zoom\":{},\"max_zoom\":{}}}",
+            "{{\"format\":\"mot\",\"version\":{},\"layer\":\"{}\",\"grid_cm\":{},\"min_zoom\":{},\"max_zoom\":{},\"sources\":[{}]}}",
             crate::mot::VERSION,
             self.layer.replace('\\', "\\\\").replace('"', "\\\""),
             self.grid_cm,
             self.min_zoom,
-            self.max_zoom
+            self.max_zoom,
+            sources.join(",")
         )
     }
 
@@ -71,6 +143,7 @@ impl ArchiveInfo {
             grid_cm: number("grid_cm")?,
             min_zoom: number("min_zoom")? as u8,
             max_zoom: number("max_zoom")? as u8,
+            sources: read_sources(json),
         })
     }
 }
@@ -89,7 +162,9 @@ pub fn write(
     let mut south = f64::MAX;
     let mut east = f64::MIN;
     let mut north = f64::MIN;
-    for id in tiles.keys() {
+    // The box of the finest level: the coarser ones have the same ground in
+    // bigger tiles, so would say the archive is far larger than it is.
+    for id in tiles.keys().filter(|id| id.z == info.max_zoom) {
         let size = TileId::size(id.z);
         let (x, y) = id.origin();
         (west, east) = (west.min(x), east.max(x + size));
@@ -100,7 +175,7 @@ pub fn write(
         .min_zoom(info.min_zoom)
         .max_zoom(info.max_zoom)
         .metadata(info.to_json());
-    if !tiles.is_empty() {
+    if west < east {
         let (south_lat, west_lon) = lat_lon(west, south);
         let (north_lat, east_lon) = lat_lon(east, north);
         builder = builder.bounds(west_lon, south_lat, east_lon, north_lat);
@@ -144,6 +219,15 @@ impl Archive {
     /// What the archive says about itself.
     pub fn info(&self) -> &ArchiveInfo {
         &self.info
+    }
+
+    /// The file a coverage with this id was made from, where the archive says.
+    pub fn source(&self, coverage_id: u64) -> Option<&str> {
+        self.info
+            .sources
+            .iter()
+            .find(|(id, _)| *id == coverage_id)
+            .map(|(_, name)| name.as_str())
     }
 
     /// The box the archive's tiles cover, as `[west, south, east, north]` in
@@ -222,6 +306,7 @@ mod tests {
             grid_cm: 5,
             min_zoom: 14,
             max_zoom: 14,
+            sources: Vec::new(),
         };
         write(&path, &tiles, &info).unwrap();
 
@@ -262,6 +347,7 @@ mod tests {
             grid_cm: 5,
             min_zoom: 14,
             max_zoom: 14,
+            sources: Vec::new(),
         };
         write(&path, &tiles, &info).unwrap();
         let archive = Archive::open(&path).unwrap();
@@ -275,6 +361,72 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, here);
+    }
+
+    #[test]
+    fn the_sources_of_the_maps_survive_the_metadata() {
+        let info = ArchiveInfo {
+            layer: "ISOM 2017-2".into(),
+            grid_cm: 5,
+            min_zoom: 0,
+            max_zoom: 14,
+            sources: vec![
+                (7, "Corno alle Scale.omap".into()),
+                (12, "with \"quotes\", a \\ and\nnewline é.omap".into()),
+            ],
+        };
+        let json = info.to_json();
+        let back = ArchiveInfo::from_json(&json).unwrap();
+        assert_eq!(back.sources[0], (7, "Corno alle Scale.omap".to_string()));
+        assert_eq!(back.sources[1].0, 12);
+        assert_eq!(
+            back.sources[1].1,
+            "with \"quotes\", a \\ and\nnewline é.omap"
+        );
+        assert_eq!((back.min_zoom, back.max_zoom, back.grid_cm), (0, 14, 5));
+        // An archive made without any says so by having none.
+        let plain = ArchiveInfo {
+            sources: vec![],
+            ..info
+        };
+        assert!(ArchiveInfo::from_json(&plain.to_json())
+            .unwrap()
+            .sources
+            .is_empty());
+    }
+
+    #[test]
+    fn the_bounds_are_those_of_the_finest_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.pmtiles");
+        let mut tiles = BTreeMap::new();
+        tiles.insert(
+            TileId {
+                z: 14,
+                x: 8700,
+                y: 5900,
+            },
+            tile(1),
+        );
+        // A coarser level's tile is much larger than the one it comes from.
+        tiles.insert(
+            TileId {
+                z: 8,
+                x: 135,
+                y: 92,
+            },
+            tile(2),
+        );
+        let info = ArchiveInfo {
+            layer: "ISOM 2017-2".into(),
+            grid_cm: 5,
+            min_zoom: 8,
+            max_zoom: 14,
+            sources: Vec::new(),
+        };
+        write(&path, &tiles, &info).unwrap();
+        let [w, s, e, n] = Archive::open(&path).unwrap().bounds().unwrap();
+        assert!(e - w < 0.05 && n - s < 0.05, "{w} {s} {e} {n}");
     }
 
     #[test]

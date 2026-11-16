@@ -309,6 +309,16 @@ impl SymbolTable {
         self.entries.get(usize::from(id))
     }
 
+    /// The coarsest zoom any symbol appears at: above it a tile has no objects,
+    /// only coverage.
+    pub fn min_object_zoom(&self) -> u8 {
+        self.entries
+            .iter()
+            .map(|e| e.rule.min_zoom)
+            .min()
+            .unwrap_or(14)
+    }
+
     /// The generalisation rule of the symbol with this id: the neutral one, which
     /// keeps everything from the finest zoom only, for an id the table lacks.
     pub fn rule(&self, id: u16) -> ZoomRule {

@@ -14,7 +14,10 @@
 //!
 //! `--zoom` picks the level to read, the archive's finest by default: a coarser
 //! one has only what its symbols' rules keep at that zoom, so it is smaller and
-//! shows a larger area at a glance.
+//! shows a larger area at a glance. Below the zoom any symbol appears at there is
+//! only the coverage. The output also says which maps' coverage the area is in,
+//! by the file each was made from, which tells a place that is mapped but has
+//! nothing in it from one that is not mapped.
 //!
 //! An object counts when the box around its nodes in a tile touches the area. A
 //! tile holds the part of an object inside it and a buffer around it, so an
@@ -24,12 +27,12 @@
 //! Exit codes: 0 success, 1 bad usage, 2 the archive cannot be read.
 
 use std::collections::BTreeMap;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use maur_o::mot::{lat_lon, Tile, TileId};
+use maur_o::mot::{lat_lon, Tile, TileId, COVERAGE_SYMBOL};
 use maur_o::mot_archive::Archive;
 use maur_o::mot_symbols::SymbolTable;
 use maur_o::orthophoto::web_mercator;
@@ -136,11 +139,20 @@ fn run() -> Result<(), (ExitCode, String)> {
 
     // Objects are stored whole in every tile they touch, so one id is counted once.
     let mut seen: HashSet<u64> = HashSet::new();
+    // The maps whose coverage the area touches, by the id of their coverage.
+    let mut covered: BTreeSet<u64> = BTreeSet::new();
     let mut per_symbol: BTreeMap<u16, u64> = BTreeMap::new();
     let mut listed: Vec<(u64, u16, f64, f64, usize)> = Vec::new();
     for (id, tile) in &tiles {
         for object in &tile.objects {
-            if !touches(tile, *id, object, bounds) || !seen.insert(object.id) {
+            if !touches(tile, *id, object, bounds) {
+                continue;
+            }
+            if object.symbol == COVERAGE_SYMBOL {
+                covered.insert(object.id);
+                continue;
+            }
+            if !seen.insert(object.id) {
                 continue;
             }
             *per_symbol.entry(object.symbol).or_default() += 1;
@@ -157,6 +169,19 @@ fn run() -> Result<(), (ExitCode, String)> {
         tiles.len(),
         seen.len()
     );
+    if covered.is_empty() {
+        println!("in no map's coverage");
+    } else {
+        let names: Vec<String> = covered
+            .iter()
+            .map(|&id| {
+                archive
+                    .source(id)
+                    .map_or(format!("map {id}"), str::to_string)
+            })
+            .collect();
+        println!("in the coverage of {}", names.join(", "));
+    }
     let mut rows: Vec<(u16, u64)> = per_symbol.into_iter().collect();
     rows.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
     for (symbol, n) in rows {

@@ -680,7 +680,7 @@ Converts maps into a MOT archive, the tiled world-map format of
 stored by id in a table (ISOM 2017-2 or ISSprOM 2019) instead of as definitions.
 
 ```
-omap_to_tiles [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 11] [--grid-cm 5] [--buffer 0.03125] --output world.pmtiles <map-file>...
+omap_to_tiles [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 0] [--grid-cm 5] [--buffer 0.03125] --output world.pmtiles <map-file>...
 ```
 
 The symbols of a map are stored in the table of the standard it is drawn to:
@@ -702,11 +702,14 @@ probably not where it is. The nodes are stored on a grid of `--grid-cm`
 centimetres, in tiles of zoom `--zoom` (14 is about 2 km wide).
 
 The levels from `--zoom` (the finest, where every object is kept as drawn)
-up to `--min-zoom` are all written. A coarser level has only what the rules of
+up to `--min-zoom` (0 by default) are all written. A coarser level has only what the rules of
 each symbol keep at that zoom (the zoom it appears at, a size under which an
 object is too small to see, how far its line may be moved to have fewer nodes),
 on a coarser grid, so a zoomed-out view reads a little of the archive instead of
-all of it. The objects have the same ids at every level.
+all of it. The objects have the same ids at every level. Every level also has
+the area each map covers (a rectangle in the map's own frame round the objects it
+draws), so the levels too coarse for any symbol (below zoom 11 for ISOM) still
+say where there is a map; the archive remembers which file each came from.
 
 A tile holds the part of each object inside its box grown by `--buffer` (a
 fraction of the tile's side, 1/32 by default, about 50 m at zoom 14), so a line
@@ -739,7 +742,9 @@ tiles_query --bbox min_lon,min_lat,max_lon,max_lat [--zoom Z] [--objects] <archi
 has only what its symbols' rules keep at that zoom, so it is smaller and shows a
 larger area at a glance.
 
-The output is a line per symbol in the area (its code, its name and the
+The output says which maps' coverage the area is in, by the file each was made
+from (so a place that is mapped but empty is told from one that is not mapped),
+and then has a line per symbol in the area (its code, its name and the
 number of objects), or with `--objects` a line per object as well. An
 object is counted when the box around its nodes in a tile touches the area, and
 once, by its id, however many tiles it was cut across.
@@ -767,7 +772,9 @@ until stopped: the page at `/`, the archive's layer, zoom range and bounds at
 `/info.json`, and tiles at `/tiles/{z}/{x}/{y}.png?scale=S&size=P`, drawn at
 1:S (10000 by default) into P pixels (512). A zoom finer than the archive's
 finest is that level overzoomed; a coarser one, or an empty tile, is a
-transparent image. The page pans and zooms, can show the tile borders, and
+transparent image; where the zoom is too coarse for any symbol to appear, a tile
+shows the area the maps cover, tinted, and over the symbols that area is an
+outline. The page pans and zooms, can show the tile borders, and
 chooses the symbol scale: a fixed one, or one true to the screen, where a
 millimetre of paper is as big at every zoom. This is a tool to look at an
 archive, not a server to expose: it listens on `127.0.0.1` unless told

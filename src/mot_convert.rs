@@ -27,7 +27,9 @@ use std::collections::BTreeMap;
 
 use crate::map::{Map, ObjectKind, Symbol};
 use crate::mot::node_flag;
-use crate::mot::{Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, WORLD_HALF};
+use crate::mot::{
+    Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, COVERAGE_SYMBOL, WORLD_HALF,
+};
 use crate::mot_clip::{clip_line, clip_ring, flatten, simplify, Rect, Vertex};
 use crate::mot_symbols::{Match, SymbolTable, ZoomRule};
 use crate::orthophoto::{
@@ -91,6 +93,9 @@ pub struct Converted {
     /// For a pyramid ([`convert_levels`]), what each level came to, finest
     /// first; empty for a single level.
     pub levels: Vec<LevelSummary>,
+    /// The id of the area that says what the map covers, where it has one: the
+    /// object of the [`COVERAGE_SYMBOL`] in the tiles.
+    pub coverage_id: Option<u64>,
 }
 
 /// What one level of a pyramid came to.
@@ -137,6 +142,43 @@ fn describe(symbol: &Symbol) -> String {
     format!("{} \"{}\"", symbol.code(), symbol.name())
 }
 
+/// The box a map covers, as `[west, north, east, south]` in paper millimetres
+/// (`y` down): the box round the nodes of the objects it draws, without the
+/// outermost 0.05% on each side so that a stray object far from the rest does not
+/// stretch it, and a margin of 1% of its size. `None` for a map with nothing on it.
+///
+/// A map is drawn on a page and a page is a rectangle, so a rectangle in the
+/// map's own frame (which the projection turns, as it turns the map) is a fair
+/// footprint of what it covers.
+pub fn paper_extent(map: &Map) -> Option<[f64; 4]> {
+    let (mut xs, mut ys) = (Vec::new(), Vec::new());
+    for o in &map.objects {
+        let visible = o
+            .symbol_index
+            .and_then(|i| map.symbols.get(i))
+            .is_some_and(|s| s.is_visible());
+        if visible {
+            for c in &o.coords {
+                xs.push(c.x);
+                ys.push(c.y);
+            }
+        }
+    }
+    if xs.is_empty() {
+        return None;
+    }
+    let trim = |v: &mut Vec<f64>| -> (f64, f64) {
+        v.sort_by(f64::total_cmp);
+        let cut = v.len() / 2000;
+        let (lo, hi) = (v[cut], v[v.len() - 1 - cut]);
+        let margin = (hi - lo) * 0.01;
+        (lo - margin, hi + margin)
+    };
+    let (x0, x1) = trim(&mut xs);
+    let (y0, y1) = trim(&mut ys);
+    Some([x0, y0, x1, y1])
+}
+
 /// Converts `map`, placed at `anchor`, into tiles of `table`'s symbols.
 ///
 /// Ids are assigned from `first_id`. An error where the map has no
@@ -147,6 +189,21 @@ pub fn convert(
     table: &SymbolTable,
     first_id: u64,
     options: &Options,
+) -> Result<Converted, String> {
+    convert_with_extent(map, anchor, table, first_id, options, paper_extent(map))
+}
+
+/// [`convert`] with the box the map covers given (see [`paper_extent`]), which a
+/// pyramid works out once for all its levels. The box is stored in the tiles
+/// as an area of the [`COVERAGE_SYMBOL`], with an id of its own after the
+/// objects'.
+pub fn convert_with_extent(
+    map: &Map,
+    anchor: &GeographicAnchor,
+    table: &SymbolTable,
+    first_id: u64,
+    options: &Options,
+    extent: Option<[f64; 4]>,
 ) -> Result<Converted, String> {
     let georef = map
         .georeferencing
@@ -221,6 +278,7 @@ pub fn convert(
         remapped: 0,
         warnings: Vec::new(),
         levels: Vec::new(),
+        coverage_id: None,
     };
     // A UTM easting a long way outside its zone's strip means the file's
     // georeference is wrong (an easting of 0 is the usual slip), and the map
@@ -439,6 +497,14 @@ pub fn convert(
         }
     }
 
+    if let Some([x0, y0, x1, y1]) = extent {
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| project(x, y));
+        let id = converted.next_id;
+        converted.next_id += 1;
+        converted.coverage_id = Some(id);
+        store_coverage(&mut converted.tiles, &corners, id, options, grid_cm);
+    }
+
     converted.warnings.extend(
         notes
             .into_iter()
@@ -457,6 +523,70 @@ pub fn convert(
         }
     }
     Ok(converted)
+}
+
+/// Puts the ring `corners` (Mercator meters) in every tile of the level it
+/// touches, cut to the tile's box and its buffer like an area, as an object of
+/// the [`COVERAGE_SYMBOL`].
+fn store_coverage(
+    tiles: &mut BTreeMap<TileId, Tile>,
+    corners: &[(f64, f64); 4],
+    id: u64,
+    options: &Options,
+    grid_cm: u32,
+) {
+    let per_unit = 100.0 / f64::from(grid_cm);
+    let side = TileId::size(options.zoom) * per_unit;
+    let margin = options.buffer.max(0.0) * side;
+    let rect = Rect {
+        x0: -margin,
+        y0: -margin,
+        x1: side + margin,
+        y1: side + margin,
+    };
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for &(x, y) in corners {
+        (x0, x1) = (x0.min(x), x1.max(x));
+        (y0, y1) = (y0.min(y), y1.max(y));
+    }
+    let grow = options.buffer.max(0.0) * TileId::size(options.zoom);
+    for tile_id in TileId::covering(options.zoom, [x0 - grow, y0 - grow, x1 + grow, y1 + grow]) {
+        let (west, top) = tile_id.origin();
+        let ring: Vec<Vertex> = corners
+            .iter()
+            .map(|&(x, y)| Vertex {
+                x: (x - west) * per_unit,
+                y: (top - y) * per_unit,
+                flags: 0,
+            })
+            .collect();
+        let cut = clip_ring(&ring, &rect);
+        let Some(first) = cut.first() else { continue };
+        let mut nodes: Vec<Node> = cut
+            .iter()
+            .map(|v| Node {
+                x: v.x.round() as i32,
+                y: v.y.round() as i32,
+                flags: v.flags,
+            })
+            .collect();
+        nodes.push(Node {
+            x: first.x.round() as i32,
+            y: first.y.round() as i32,
+            flags: node_flag::CLOSE_POINT as u8,
+        });
+        tiles
+            .entry(tile_id)
+            .or_insert_with(|| Tile::new(grid_cm))
+            .objects
+            .push(TileObject {
+                id,
+                symbol: COVERAGE_SYMBOL,
+                rotation: 0.0,
+                shape: Shape::Path(None),
+                nodes,
+            });
+    }
 }
 
 /// Whether a path has a closed part: an area, or a ring drawn as a line.
@@ -623,7 +753,8 @@ pub fn convert_levels(
     options: &Options,
 ) -> Result<Converted, String> {
     let detail = options.zoom;
-    let mut result = convert(
+    let extent = paper_extent(map);
+    let mut result = convert_with_extent(
         map,
         anchor,
         table,
@@ -632,6 +763,7 @@ pub fn convert_levels(
             detail_zoom: detail,
             ..*options
         },
+        extent,
     )?;
     result.levels.push(LevelSummary {
         zoom: detail,
@@ -640,7 +772,7 @@ pub fn convert_levels(
         tiles: result.tiles.len(),
     });
     for zoom in (min_zoom..detail).rev() {
-        let level = convert(
+        let level = convert_with_extent(
             map,
             anchor,
             table,
@@ -650,6 +782,7 @@ pub fn convert_levels(
                 detail_zoom: detail,
                 ..*options
             },
+            extent,
         )?;
         result.levels.push(LevelSummary {
             zoom,
@@ -796,7 +929,7 @@ mod tests {
         type Piece = (Vec<(f64, f64)>, bool, bool);
         let mut pieces: Vec<Piece> = Vec::new();
         for (id, tile) in &converted.tiles {
-            for o in &tile.objects {
+            for o in tile.objects.iter().filter(|o| o.symbol != COVERAGE_SYMBOL) {
                 assert_eq!(o.id, 0, "every piece has the object's id");
                 let first = o.nodes[0].flags & node_flag::CLIPPED as u8 != 0;
                 let last = o.nodes[o.nodes.len() - 1].flags & node_flag::CLIPPED as u8 != 0;
@@ -994,7 +1127,9 @@ mod tests {
             .tiles
             .iter()
             .filter(|(id, _)| id.z == zoom)
-            .flat_map(|(_, t)| t.objects.iter().map(|o| o.id))
+            .flat_map(|(_, t)| t.objects.iter())
+            .filter(|o| o.symbol != COVERAGE_SYMBOL)
+            .map(|o| o.id)
             .collect();
         ids.sort_unstable();
         ids.dedup();
@@ -1023,6 +1158,7 @@ mod tests {
                 .iter()
                 .filter(|(id, _)| id.z == zoom)
                 .flat_map(|(_, t)| t.objects.iter().map(|o| o.symbol))
+                .filter(|&s| s != COVERAGE_SYMBOL)
                 .collect();
             v.sort_unstable();
             v.dedup();
@@ -1062,7 +1198,9 @@ mod tests {
         assert!(fine.iter().all(|&i| (100..103).contains(&i)));
         let coarse = ids_at(&levels, 12);
         assert!(coarse.iter().all(|i| fine.contains(i)));
-        assert_eq!(levels.next_id, 103);
+        // Three objects, and then the id of the map's coverage.
+        assert_eq!(levels.next_id, 104);
+        assert_eq!(levels.coverage_id, Some(103));
     }
 
     #[test]
@@ -1096,6 +1234,83 @@ mod tests {
         let (cx, cy, cell) = corner(12);
         assert!(cell > 1.0);
         assert!((fx - cx).abs() <= cell && (fy - cy).abs() <= cell);
+    }
+
+    fn coverage_at(converted: &Converted, zoom: u8) -> Vec<(TileId, &TileObject)> {
+        converted
+            .tiles
+            .iter()
+            .filter(|(id, _)| id.z == zoom)
+            .flat_map(|(id, t)| t.objects.iter().map(move |o| (*id, o)))
+            .filter(|(_, o)| o.symbol == COVERAGE_SYMBOL)
+            .collect()
+    }
+
+    #[test]
+    fn what_a_map_covers_is_stored_at_every_level_even_where_it_has_no_objects() {
+        let map = map_for_levels();
+        let levels = convert_levels(
+            &map,
+            &anchor(),
+            &SymbolTable::isom(),
+            0,
+            8,
+            &Options {
+                buffer: 0.0,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let id = levels.coverage_id.expect("the map has a coverage");
+        for zoom in 8..=14 {
+            let found = coverage_at(&levels, zoom);
+            assert!(!found.is_empty(), "zoom {zoom}");
+            assert!(found.iter().all(|(_, o)| o.id == id));
+        }
+        // Below the zoom the first symbol appears at, a tile has the coverage and
+        // nothing else.
+        for zoom in 8..11 {
+            let others = levels
+                .tiles
+                .iter()
+                .filter(|(i, _)| i.z == zoom)
+                .flat_map(|(_, t)| &t.objects)
+                .filter(|o| o.symbol != COVERAGE_SYMBOL)
+                .count();
+            assert_eq!(others, 0, "zoom {zoom}");
+        }
+        // The pieces over a level's tiles are the box the objects are in: a
+        // rectangle of the map's frame, so its area is its sides' product.
+        let [x0, y0, x1, y1] = paper_extent(&map).unwrap();
+        let stretch = 1.0 / anchor().lat.to_radians().cos();
+        let expected = (x1 - x0) * (y1 - y0) * (10.0 * stretch) * (10.0 * stretch);
+        let mut area = 0.0;
+        for (tile_id, o) in coverage_at(&levels, 14) {
+            let tile = &levels.tiles[&tile_id];
+            let p = absolute(tile, tile_id, &o.nodes);
+            area += (0..p.len() - 1)
+                .map(|i| p[i].0 * p[i + 1].1 - p[i + 1].0 * p[i].1)
+                .sum::<f64>()
+                / 2.0;
+        }
+        assert!(
+            (area.abs() - expected).abs() / expected < 0.02,
+            "{area} vs {expected}"
+        );
+    }
+
+    #[test]
+    fn the_box_a_map_covers_leaves_out_a_stray_object() {
+        let mut map = empty_map();
+        let mut coords: Vec<Coord> = (0..3000)
+            .map(|i| Coord::new(f64::from(i % 50), f64::from(i / 50), 0))
+            .collect();
+        coords.push(Coord::new(1_000_000.0, 1_000_000.0, 0));
+        let cluster = object_by_code(&map, "101", ObjectKind::Path(PathObject::default()), coords);
+        map.objects.push(cluster);
+        let [x0, y0, x1, y1] = paper_extent(&map).unwrap();
+        assert!(x1 - x0 < 100.0 && y1 - y0 < 100.0, "{x0} {y0} {x1} {y1}");
+        assert!(paper_extent(&empty_map()).is_none());
     }
 
     #[test]
@@ -1297,7 +1512,9 @@ mod tests {
             assert_eq!(back.objects.len(), expected.objects.len());
             for (a, b) in back.objects.iter().zip(&expected.objects) {
                 assert_eq!((a.id, a.symbol, &a.nodes), (b.id, b.symbol, &b.nodes));
-                seen.insert(a.id);
+                if a.symbol != COVERAGE_SYMBOL {
+                    seen.insert(a.id);
+                }
             }
         }
         assert_eq!(seen.len(), 50, "every object is in some tile");

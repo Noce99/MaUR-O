@@ -212,7 +212,10 @@ Web Mercator tile addressing, the integer grid, and the tile payload codec.
 of them a map is drawn to), the
 closest-symbol rule and each symbol's zoom rule (when it appears, how small it
 may be, how much its line may be thinned); `mot_convert.rs` places a `Map` on the earth and stores each
-object in the tiles it touches, cut to each tile's box plus a buffer
+object in the tiles it touches, cut to each tile's box plus a buffer, and the
+area each map covers (`paper_extent`: a box in the map's frame, stored as an object
+of `COVERAGE_SYMBOL` in every level, which is all the levels below the first
+symbol have)
 (`mot_clip.rs`: curves flattened, lines into pieces, areas
 into rings with their cut edges flagged); `convert_levels` builds the pyramid from the finest level up to a coarser one,
 generalising by those rules; `mot_archive.rs` keeps the
