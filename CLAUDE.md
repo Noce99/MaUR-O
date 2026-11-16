@@ -217,7 +217,8 @@ area each map covers (`paper_extent`: a box in the map's frame, stored as an obj
 of `COVERAGE_SYMBOL` in every level, which is all the levels below the first
 symbol have)
 (`mot_clip.rs`: curves flattened, lines into pieces, areas
-into rings with their cut edges flagged); `convert_levels` builds the pyramid from the finest level up to a coarser one,
+into rings with their cut edges flagged); `mot_history.rs` is the pure part of versioning (changesets, a tile's versions, undo
+as a new change; the head stays a plain tile payload). `convert_levels` builds the pyramid from the finest level up to a coarser one,
 generalising by those rules; `mot_archive.rs` keeps the
 tiles in a PMTiles file through the `pmtiles` crate (native only, like `ureq`,
 so the wasm build never sees it). `mot_render.rs` draws a tile by turning it back

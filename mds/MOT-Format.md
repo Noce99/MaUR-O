@@ -6,8 +6,9 @@ map to tiles (`src/mot_convert.rs`) and the PMTiles archive (`src/mot_archive.rs
 with the tools `omap_to_tiles` and `tiles_query`, the clipping of objects at
 tile borders (`src/mot_clip.rs`) and the zoom levels with the per-symbol rules.
 A development viewer, `tiles_serve`, draws the tiles in a browser through the crate's renderer (`src/mot_render.rs`). Coverage and the levels below the first symbol (zoom 0 to 10, which have only
-the coverage) are implemented. Not yet: the history, other symbol sets, merging
-of neighbouring objects. The measurements in [Measurements so far](#measurements-so-far)
+the coverage) are implemented, and so is the pure part of the history
+(`src/mot_history.rs`). Not yet: the history in an archive, other symbol sets,
+merging of neighbouring objects. The measurements in [Measurements so far](#measurements-so-far)
 come from the throw-away programs in `examples/` (`tile_stats.rs`, `curve_fit.rs`,
 `hidden_areas.rs`); `examples/mot_try.rs` measures the real codec.
 
@@ -249,6 +250,20 @@ format: identities and logins are o-mnia's. Optional periodic snapshots (yearly)
 speed up time travel on long histories. The timeline of a viewer comes from the
 changeset table (for example a histogram of changes in the visible area, with
 author and comment).
+
+Implemented (`src/mot_history.rs`, the pure part): a `ChangeLog` of `Changeset`s
+(id, time, author, comment, tool; encoded as bytes, with `at_time` to find the
+changeset which says what the map was at a moment); `VersionedTile`, a tile's
+versions, with `apply` (a changeset's `Add`, `Remove` and `Replace`, all or
+nothing, each later than the last), `at` (the tile as it was after a changeset),
+`head`, and `revert` (the changes which put the tile back as before a changeset,
+to be made as one of their own, so both stay in the history). The head is
+encoded as an ordinary tile payload, so a viewer which knows nothing of history
+reads it unchanged; the history sidecar holds the closed versions and when each
+current object was born (nothing, for one as first stored: a map with no changes
+has a sidecar of a few bytes). Not yet: putting the sidecar in an archive (the
+open question below), snapshots, and anything of authors or logins, which are
+o-mnia's.
 
 ## Responsibilities
 
