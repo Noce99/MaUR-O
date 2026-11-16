@@ -44,11 +44,11 @@ struct Server {
 }
 
 impl Server {
-    fn start(archive: &Path) -> Server {
+    fn start(archives: &[&Path]) -> Server {
         let program = Command::cargo_bin("tiles_serve").unwrap();
         let mut child = std::process::Command::new(program.get_program())
             .args(["--port", "0", "--workers", "2"])
-            .arg(archive)
+            .args(archives)
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
@@ -93,12 +93,46 @@ fn tile_at(z: u8) -> TileId {
     TileId::containing(z, x, y)
 }
 
+/// The archives of the sample drawn to ISSprOM and to ISOM, in that order.
+fn make_two_archives(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let mut maps = Vec::new();
+    for standard in ["issprom", "isom"] {
+        let map = dir.join(format!("{standard}.omap"));
+        Command::cargo_bin("osm_to_omap")
+            .unwrap()
+            .args(["--standard", standard, BBOX, SAMPLE])
+            .arg(&map)
+            .assert()
+            .success();
+        maps.push(map);
+    }
+    Command::cargo_bin("omap_to_tiles")
+        .unwrap()
+        .arg("--output")
+        .arg(dir.join("w.pmtiles"))
+        .args(&maps)
+        .assert()
+        .success();
+    (dir.join("w.issprom.pmtiles"), dir.join("w.isom.pmtiles"))
+}
+
+/// The fraction of the pixels in which two PNGs differ.
+fn differing(a: &[u8], b: &[u8]) -> f64 {
+    let (a, b) = (
+        image::load_from_memory(a).unwrap().to_rgba8(),
+        image::load_from_memory(b).unwrap().to_rgba8(),
+    );
+    assert_eq!(a.dimensions(), b.dimensions());
+    let different = a.pixels().zip(b.pixels()).filter(|(p, q)| p != q).count();
+    different as f64 / (a.width() * a.height()) as f64
+}
+
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 #[test]
 fn it_serves_the_viewer_and_the_description_of_the_archive() {
     let dir = tempfile::tempdir().unwrap();
-    let server = Server::start(&make_archive(dir.path()));
+    let server = Server::start(&[&make_archive(dir.path())]);
     let (status, page) = server.get("/");
     assert!(status.contains("200"), "{status}");
     assert!(String::from_utf8_lossy(&page).contains("MOT viewer"));
@@ -117,7 +151,7 @@ fn it_serves_the_viewer_and_the_description_of_the_archive() {
 #[test]
 fn it_draws_a_tile_and_overzooms_the_finest_level() {
     let dir = tempfile::tempdir().unwrap();
-    let server = Server::start(&make_archive(dir.path()));
+    let server = Server::start(&[&make_archive(dir.path())]);
     let t = tile_at(14);
     let (status, body) = server.get(&format!(
         "/tiles/14/{}/{}.png?scale=4000&size=256",
@@ -139,7 +173,7 @@ fn it_draws_a_tile_and_overzooms_the_finest_level() {
 #[test]
 fn a_tile_too_coarse_for_symbols_shows_what_the_map_covers() {
     let dir = tempfile::tempdir().unwrap();
-    let server = Server::start(&make_archive(dir.path()));
+    let server = Server::start(&[&make_archive(dir.path())]);
     let t = tile_at(9);
     let (status, body) = server.get(&format!("/tiles/9/{}/{}.png?size=128", t.x, t.y));
     assert!(status.contains("200") && body.starts_with(PNG));
@@ -153,7 +187,7 @@ fn a_tile_too_coarse_for_symbols_shows_what_the_map_covers() {
 #[test]
 fn a_tile_with_nothing_is_a_small_transparent_image_and_a_bad_path_is_404() {
     let dir = tempfile::tempdir().unwrap();
-    let server = Server::start(&make_archive(dir.path()));
+    let server = Server::start(&[&make_archive(dir.path())]);
     for path in ["/tiles/14/0/0.png", "/tiles/5/1/1.png"] {
         let (status, body) = server.get(path);
         assert!(status.contains("200"), "{path}: {status}");
@@ -163,6 +197,43 @@ fn a_tile_with_nothing_is_a_small_transparent_image_and_a_bad_path_is_404() {
     assert!(server.get("/tiles/14/99999999/0.png").0.contains("404"));
     assert!(server.get("/tiles/x/y/z.png").0.contains("404"));
     assert!(server.get("/tiles/14/0/0.png?scale=-3").0.contains("400"));
+}
+
+#[test]
+fn archives_are_layers_and_the_first_has_the_priority() {
+    let dir = tempfile::tempdir().unwrap();
+    let (sprint, forest) = make_two_archives(dir.path());
+    let server = Server::start(&[&sprint, &forest]);
+    let (_, info) = server.get("/info.json");
+    let info = String::from_utf8(info).unwrap();
+    let first = info.find("\"layer\":\"ISSprOM 2019\"").unwrap();
+    let second = info.rfind("\"layer\":\"ISOM 2017-2\"").unwrap();
+    assert!(info.contains("\"layers\":[") && first < second, "{info}");
+
+    let t = tile_at(16);
+    let tile = |layers: &str| {
+        let (status, body) = server.get(&format!(
+            "/tiles/16/{}/{}.png?scale=3000&size=256{layers}",
+            t.x, t.y
+        ));
+        assert!(status.contains("200"), "{status}");
+        body
+    };
+    let both = tile("");
+    let (top, bottom) = (tile("&layers=0"), tile("&layers=1"));
+    assert!(both.starts_with(PNG) && both.len() > 1000);
+    // The same ground is mapped in both, so where the first covers only it shows:
+    // the stacked picture is the first's, but for the edge of what it covers,
+    // where the second shows. The two symbol sets draw it differently.
+    let (near, far) = (differing(&both, &top), differing(&top, &bottom));
+    assert!(
+        near < 0.03,
+        "stacked and first differ in {near} of the pixels"
+    );
+    assert!(far > near * 3.0 && far > 0.01, "{near} against {far}");
+    assert_eq!(tile("&layers=0,1"), both);
+    assert!(server.get("/tiles/16/1/1.png?layers=9").0.contains("400"));
+    assert!(server.get("/tiles/16/1/1.png?layers=x").0.contains("400"));
 }
 
 #[test]
@@ -182,4 +253,12 @@ fn it_exits_with_the_documented_codes() {
         .arg(&archive)
         .assert()
         .code(4);
+    // One layer is one archive: the same symbol set twice is refused.
+    Command::cargo_bin("tiles_serve")
+        .unwrap()
+        .arg(&archive)
+        .arg(&archive)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("one layer is one archive"));
 }
