@@ -127,6 +127,7 @@ one file per step; read that document first.
 | `mot_convert.rs` | Makes MOT tiles from a `Map`: places it on the earth from its geographic anchor, turns its coordinates to Mercator, maps its symbols to the layer's table, orders objects along a Z-order curve for their ids, and stores each in every tile it touches, cut to the tile's box plus a buffer, and builds the coarser zoom levels by the symbols' rules (`convert_levels`). |
 | `mot_clip.rs` | Cutting paths to a tile's box, pure geometry: flattening curves, cutting a line into pieces (with their dash offset), cutting a ring along the box's edge (with the cut edges flagged). |
 | `mot_symbols.rs` | A MOT layer's symbol table (ISOM 2017-2, built from the shipped reference map) the closest-symbol rule (same code, the symbol it is a variant of, or the same name), and each symbol's zoom rule (the zoom it appears at, a size under which it is too small to see, how far its line may be thinned). |
+| `mot_render.rs` | Draws a MOT tile with the crate's renderer: turns its objects back into a `Map` with the ISOM symbols, in paper millimetres at the scale asked for (a Mercator meter is `1 / cos(latitude)` ground meters), and paints the window of the tile asked for, which may be a part of it (overzoom). No dash offset yet. |
 | `mot_archive.rs` | MOT tiles in a PMTiles v3 archive (the `pmtiles` crate, zstd per tile, the layer's symbol set and grid in the metadata), and reading a tile or a box back. Native only. |
 
 ### Orthophotos
@@ -155,6 +156,7 @@ comment:
 | `bin/mauro/ortho.rs` | `mauro ortho`: downloads a map's orthophoto tile by tile and adds it to the map as a template. |
 | `bin/omap_to_tiles.rs` | Converts maps into a MOT archive. |
 | `bin/tiles_query.rs` | Lists the objects of a MOT archive around a place, by symbol. |
+| `bin/tiles_serve.rs`, `bin/tiles_serve.html` | A std-only HTTP server for a MOT archive, drawing tiles on request with `mot_render`, and the one-page slippy-map viewer it serves. |
 
 ## One map per symbol
 

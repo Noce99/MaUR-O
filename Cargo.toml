@@ -34,6 +34,10 @@ path = "src/bin/omap_to_tiles.rs"
 name = "tiles_query"
 path = "src/bin/tiles_query.rs"
 
+[[bin]]
+name = "tiles_serve"
+path = "src/bin/tiles_serve.rs"
+
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }

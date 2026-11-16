@@ -5,7 +5,7 @@ Status: **draft**. A first slice is implemented: the tile payload codec
 map to tiles (`src/mot_convert.rs`) and the PMTiles archive (`src/mot_archive.rs`),
 with the tools `omap_to_tiles` and `tiles_query`, the clipping of objects at
 tile borders (`src/mot_clip.rs`) and the zoom levels with the per-symbol rules.
-Not yet: coverage, the history, other symbol sets, the levels coarser than the
+A development viewer, `tiles_serve`, draws the tiles in a browser through the crate's renderer (`src/mot_render.rs`). Not yet: coverage, the history, other symbol sets, the levels coarser than the
 archive's (zoom 0 to 10, which are the coverage footprints), merging of
 neighbouring objects. The measurements in [Measurements so far](#measurements-so-far)
 come from the throw-away programs in `examples/` (`tile_stats.rs`, `curve_fit.rs`,

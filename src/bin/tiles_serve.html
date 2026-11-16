@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MOT viewer</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f3f2ee; --panel: rgba(255,255,255,.92); --ink: #222; --edge: #bbb; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #2b2b2b; --panel: rgba(35,35,35,.92); --ink: #eee; --edge: #555; } }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, sans-serif; }
+  #map { position: fixed; inset: 0; cursor: grab; touch-action: none; user-select: none; background: #fff; }
+  #map.drag { cursor: grabbing; }
+  #tiles { position: absolute; left: 0; top: 0; }
+  #tiles img { position: absolute; image-rendering: auto; }
+  .grid { position: absolute; border: 1px solid rgba(220, 0, 120, .45); box-sizing: border-box; pointer-events: none;
+          color: rgba(220, 0, 120, .8); font-size: 10px; padding: 1px 3px; }
+  #panel { position: fixed; top: 10px; left: 10px; background: var(--panel); border: 1px solid var(--edge); border-radius: 6px;
+           padding: 8px 10px; max-width: 260px; }
+  #panel h1 { font-size: 13px; margin: 0 0 4px; }
+  #panel label { display: block; margin-top: 4px; }
+  #panel select, #panel button { font: inherit; }
+  #status { margin-top: 6px; color: #777; font-variant-numeric: tabular-nums; }
+  #hint { color: #a60; margin-top: 4px; display: none; }
+  #zoom { position: fixed; top: 10px; right: 10px; display: flex; flex-direction: column; gap: 4px; }
+  #zoom button { width: 32px; height: 32px; font-size: 18px; border: 1px solid var(--edge); border-radius: 6px; background: var(--panel); color: var(--ink); cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="map"><div id="tiles"></div></div>
+<div id="panel">
+  <h1>MOT viewer</h1>
+  <div id="layer">…</div>
+  <label>Symbol scale
+    <select id="scale">
+      <option value="auto">true to the screen</option>
+      <option value="4000">1:4000</option>
+      <option value="7500">1:7500</option>
+      <option value="10000">1:10000</option>
+      <option value="15000">1:15000</option>
+    </select>
+  </label>
+  <label><input type="checkbox" id="grid"> tile borders</label>
+  <label><button id="fit">Fit to the data</button></label>
+  <div id="hint"></div>
+  <div id="status"></div>
+</div>
+<div id="zoom"><button id="in" title="Zoom in">+</button><button id="out" title="Zoom out">−</button></div>
+<script>
+"use strict";
+const TILE = 256;
+const mapEl = document.getElementById("map"), tilesEl = document.getElementById("tiles");
+const statusEl = document.getElementById("status"), hintEl = document.getElementById("hint");
+const scaleEl = document.getElementById("scale"), gridEl = document.getElementById("grid");
+let info = null;
+const view = { lat: 44.5, lon: 11.3, zoom: 12 };
+const shown = new Map();          // "z/x/y" -> {img, grid}
+
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+function project(lat, lon, z) {
+  const s = Math.sin(clamp(lat, -85.05, 85.05) * Math.PI / 180), n = 2 ** z * TILE;
+  return { x: (lon + 180) / 360 * n, y: (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n };
+}
+function unproject(x, y, z) {
+  const n = 2 ** z * TILE, lon = x / n * 360 - 180;
+  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI;
+  return { lat, lon };
+}
+// Symbol scale for a tile: fixed, or the one at which a millimetre of paper is
+// as many pixels as on a screen (96 dpi), whatever the zoom.
+function scaleFor(z, ty) {
+  if (scaleEl.value !== "auto") return Number(scaleEl.value);
+  const lat = unproject(0, (ty + 0.5) * TILE, z).lat;
+  const metersPerPixel = 156543.03392 * Math.cos(lat * Math.PI / 180) / 2 ** z;
+  return Math.max(100, Math.round(metersPerPixel * 1000 * 3.78 / 100) * 100);
+}
+
+function render() {
+  const w = mapEl.clientWidth, h = mapEl.clientHeight;
+  const tz = clamp(Math.floor(view.zoom), 0, 24), k = 2 ** (view.zoom - tz), size = TILE * k;
+  const c = project(view.lat, view.lon, tz), n = 2 ** tz;
+  const x0 = Math.floor((c.x - w / 2 / k) / TILE), x1 = Math.floor((c.x + w / 2 / k) / TILE);
+  const y0 = Math.max(0, Math.floor((c.y - h / 2 / k) / TILE)), y1 = Math.min(n - 1, Math.floor((c.y + h / 2 / k) / TILE));
+  const want = new Set();
+  for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
+    const wx = ((tx % n) + n) % n, key = `${tz}/${tx}/${ty}`;
+    want.add(key);
+    let e = shown.get(key);
+    if (!e) {
+      const img = new Image();
+      img.draggable = false;
+      img.src = `/tiles/${tz}/${wx}/${ty}.png?scale=${scaleFor(tz, ty)}`;
+      const grid = document.createElement("div");
+      grid.className = "grid"; grid.textContent = `${tz}/${wx}/${ty}`;
+      tilesEl.append(img, grid);
+      e = { img, grid }; shown.set(key, e);
+    }
+    const left = (tx * TILE - c.x) * k + w / 2, top = (ty * TILE - c.y) * k + h / 2;
+    for (const el of [e.img, e.grid]) { el.style.left = left + "px"; el.style.top = top + "px"; el.style.width = size + "px"; el.style.height = size + "px"; }
+    e.grid.style.display = gridEl.checked ? "block" : "none";
+  }
+  for (const [key, e] of shown) if (!want.has(key)) { e.img.remove(); e.grid.remove(); shown.delete(key); }
+  const below = info && view.zoom < info.min_zoom;
+  hintEl.style.display = below ? "block" : "none";
+  if (below) hintEl.textContent = `The archive has no data below zoom ${info.min_zoom}.`;
+  statusEl.textContent = `zoom ${view.zoom.toFixed(2)} · ${view.lat.toFixed(5)}, ${view.lon.toFixed(5)}`;
+  history.replaceState(null, "", `#${view.zoom.toFixed(2)}/${view.lat.toFixed(5)}/${view.lon.toFixed(5)}`);
+}
+function reload() { for (const e of shown.values()) { e.img.remove(); e.grid.remove(); } shown.clear(); render(); }
+
+function zoomAt(px, py, dz) {
+  const w = mapEl.clientWidth, h = mapEl.clientHeight;
+  const before = project(view.lat, view.lon, view.zoom);
+  const at = unproject(before.x + px - w / 2, before.y + py - h / 2, view.zoom);
+  view.zoom = clamp(view.zoom + dz, 0, 24);
+  const p = project(at.lat, at.lon, view.zoom);
+  const c = unproject(p.x - (px - w / 2), p.y - (py - h / 2), view.zoom);
+  view.lat = clamp(c.lat, -85, 85); view.lon = c.lon;
+  render();
+}
+let drag = null;
+mapEl.addEventListener("pointerdown", e => { drag = { x: e.clientX, y: e.clientY }; mapEl.setPointerCapture(e.pointerId); mapEl.classList.add("drag"); });
+mapEl.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const p = project(view.lat, view.lon, view.zoom);
+  const c = unproject(p.x - (e.clientX - drag.x), p.y - (e.clientY - drag.y), view.zoom);
+  view.lat = clamp(c.lat, -85, 85); view.lon = c.lon; drag = { x: e.clientX, y: e.clientY }; render();
+});
+mapEl.addEventListener("pointerup", () => { drag = null; mapEl.classList.remove("drag"); });
+mapEl.addEventListener("wheel", e => { e.preventDefault(); zoomAt(e.clientX, e.clientY, -Math.sign(e.deltaY) * 0.5); }, { passive: false });
+mapEl.addEventListener("dblclick", e => zoomAt(e.clientX, e.clientY, 1));
+document.getElementById("in").onclick = () => zoomAt(mapEl.clientWidth / 2, mapEl.clientHeight / 2, 1);
+document.getElementById("out").onclick = () => zoomAt(mapEl.clientWidth / 2, mapEl.clientHeight / 2, -1);
+window.addEventListener("keydown", e => { if (e.key === "+" || e.key === "=") document.getElementById("in").click(); if (e.key === "-") document.getElementById("out").click(); });
+window.addEventListener("resize", render);
+scaleEl.onchange = reload;
+gridEl.onchange = render;
+
+function fit() {
+  if (!info || !info.bounds) return;
+  const [w, s, e, n] = info.bounds, W = mapEl.clientWidth, H = mapEl.clientHeight;
+  let z = 0;
+  for (; z < 22; z++) {
+    const a = project(n, w, z + 1), b = project(s, e, z + 1);
+    if (b.x - a.x > W * 0.9 || b.y - a.y > H * 0.9) break;
+  }
+  view.zoom = Math.max(z, info.min_zoom); view.lat = (s + n) / 2; view.lon = (w + e) / 2; render();
+}
+document.getElementById("fit").onclick = fit;
+
+fetch("/info.json").then(r => r.json()).then(i => {
+  info = i;
+  document.getElementById("layer").textContent = `${i.layer}, zoom ${i.min_zoom}–${i.max_zoom}`;
+  const m = location.hash.match(/^#([\d.]+)\/(-?[\d.]+)\/(-?[\d.]+)$/);
+  if (m) { view.zoom = +m[1]; view.lat = +m[2]; view.lon = +m[3]; render(); } else fit();
+});
+render();
+</script>
+</body>
+</html>

@@ -146,6 +146,19 @@ impl Archive {
         &self.info
     }
 
+    /// The box the archive's tiles cover, as `[west, south, east, north]` in
+    /// degrees, where it says (an archive with no tiles does not).
+    pub fn bounds(&self) -> Option<[f64; 4]> {
+        let h = self.reader.get_header();
+        let box_ = [
+            h.min_longitude,
+            h.min_latitude,
+            h.max_longitude,
+            h.max_latitude,
+        ];
+        (box_[0] < box_[2] && box_[1] < box_[3]).then_some(box_)
+    }
+
     /// The tile `id`, or `None` where the archive has nothing there.
     pub fn tile(&self, id: TileId) -> Result<Option<Tile>, String> {
         let bytes = self
