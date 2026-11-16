@@ -31,8 +31,8 @@ It also ships tools that go beyond drawing a map:
 - **`mauro ortho`** downloads the aerial orthophoto of a map's ground from
   a national or regional mapping agency (about fifty open services across
   Europe) and adds it to the map as a georeferenced template;
-- **`omap_to_tiles`** and **`tiles_query`** keep maps in, and read them back
-  from, a MOT archive: a tiled, compact vector format meant to hold every map
+- **`omap_to_tiles`**, **`tiles_query`** and **`tiles_serve`** keep maps in, read
+  them back from, and show on a web page, a MOT archive: a tiled, compact vector format meant to hold every map
   of the world as one map (a draft, see `mds/MOT-Format.md`).
 
 Everything is also usable as a Rust library (`maur_o`): besides rendering, it
@@ -56,6 +56,7 @@ together.
   - [`mauro ortho`](#mauro-ortho)
   - [`omap_to_tiles`](#omap_to_tiles)
   - [`tiles_query`](#tiles_query)
+  - [`tiles_serve`](#tiles_serve)
 - [Using it as a library](#using-it-as-a-library)
 - [Development](#development)
 - [Implementation Details](#implementation-details)
@@ -98,6 +99,7 @@ tool:
 | [`mauro ortho`](#mauro-ortho) | Adds the aerial orthophoto of a map's ground to it as a template. |
 | [`omap_to_tiles`](#omap_to_tiles) | Converts maps into a MOT archive (tiled world map, in PMTiles). |
 | [`tiles_query`](#tiles_query) | Lists the objects of a MOT archive around a place, by symbol. |
+| [`tiles_serve`](#tiles_serve) | Serves a MOT archive as a slippy map to look at in a browser, drawn with the crate's renderer. |
 
 `mauro --help` lists them, and every one of them takes `--help` and
 `--version` (`mauro render --help`). `mauro` on its own, in a terminal,
@@ -739,6 +741,36 @@ once, by its id, however many tiles it was cut across.
 | 1 | Bad usage. |
 | 2 | The archive cannot be read, or holds another symbol set. |
 
+
+### `tiles_serve`
+
+Serves a MOT archive as a slippy map to look at in a browser, with the tiles
+drawn by this crate's own renderer: a tile is turned back into a map (its
+objects, with the symbols of ISOM 2017-2) and drawn as an `.omap` file is, so
+it looks as Mapper draws the map.
+
+```
+tiles_serve [--host 127.0.0.1] [--port 8080] [--workers N] <archive>
+```
+
+It prints the address it listens on (`--port 0` picks a free one) and serves
+until stopped: the page at `/`, the archive's layer, zoom range and bounds at
+`/info.json`, and tiles at `/tiles/{z}/{x}/{y}.png?scale=S&size=P`, drawn at
+1:S (10000 by default) into P pixels (512). A zoom finer than the archive's
+finest is that level overzoomed; a coarser one, or an empty tile, is a
+transparent image. The page pans and zooms, can show the tile borders, and
+chooses the symbol scale: a fixed one, or one true to the screen, where a
+millimetre of paper is as big at every zoom. This is a tool to look at an
+archive, not a server to expose: it listens on `127.0.0.1` unless told
+otherwise. A line cut at a tile's border is drawn from the cut, so its dashes
+restart there.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | After `--help`. |
+| 1 | Bad usage. |
+| 2 | The archive cannot be read, or holds another symbol set. |
+| 4 | The address cannot be used. |
 
 ## Using it as a library
 

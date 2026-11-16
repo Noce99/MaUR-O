@@ -18,6 +18,9 @@ and adds it to the map as a template. All of these are subcommands of the one bi
 and adds it to the map as a template. An eighth and ninth, `omap_to_tiles`
 and `tiles_query`, are the command line of MOT, a draft tiled format for
 keeping all the world's maps as one map (`mds/MOT-Format.md`).
+and adds it to the map as a template. An eighth to tenth, `omap_to_tiles`,
+`tiles_query` and `tiles_serve`, are the command line of MOT, a draft tiled
+format for keeping all the world's maps as one map (`mds/MOT-Format.md`).
 
 This crate is consumed by the o-mnia web app from a vendored copy (via
 `crates/maur-o-wasm`, o-mnia's own wasm-bindgen adapter — see that repo's
@@ -79,6 +82,7 @@ flags for each are documented in its module's own top-of-file doc comment
 (`src/bin/mauro/*.rs`) and in `README.md`'s Usage section. When changing a
 | `omap_to_tiles` | Convert maps into a MOT archive: the tiled, compact world-map format of `mds/MOT-Format.md` (draft), in PMTiles. |
 | `tiles_query` | List the objects of a MOT archive around a place (`--around`/`--bbox`), by symbol, reading only the tiles it touches. |
+| `tiles_serve` | Serve a MOT archive as a slippy map to look at in a browser (a std-only HTTP server, one HTML page embedded in the binary); tiles are drawn server-side by the crate's renderer. A development viewer, not o-mnia's. |
 flag, default or exit code, update both (and `--help` text in the clap
 definition) — they are kept in sync by hand.
 
@@ -212,7 +216,11 @@ object in the tiles it touches, cut to each tile's box plus a buffer
 into rings with their cut edges flagged); `convert_levels` builds the pyramid from the finest level up to a coarser one,
 generalising by those rules; `mot_archive.rs` keeps the
 tiles in a PMTiles file through the `pmtiles` crate (native only, like `ureq`,
-so the wasm build never sees it). Source of truth, logins, servers and the UI
+so the wasm build never sees it). `mot_render.rs` draws a tile by turning it back
+into a `Map` (the ISOM symbols, paper mm at a scale the viewer picks) and handing
+it to the same `Renderer` as `.omap` files; `tiles_serve` puts that behind a
+small HTTP server and a one-page viewer as a way to look at an archive. The
+real viewer is o-mnia's (a wasm build over this crate), not this binary. Source of truth, logins, servers and the UI
 are o-mnia's, not this crate's; the format only defines tiles and what to do
 with them.
 
