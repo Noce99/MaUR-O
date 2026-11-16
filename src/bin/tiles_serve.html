@@ -18,6 +18,8 @@
            padding: 8px 10px; max-width: 260px; }
   #panel h1 { font-size: 13px; margin: 0 0 4px; }
   #panel label { display: block; margin-top: 4px; }
+  #layers label { margin-top: 2px; }
+  #layers .note { color: #777; font-size: 11px; margin-top: 2px; }
   #panel select, #panel button { font: inherit; }
   #status { margin-top: 6px; color: #777; font-variant-numeric: tabular-nums; }
   #hint { color: #a60; margin-top: 4px; display: none; }
@@ -30,6 +32,7 @@
 <div id="panel">
   <h1>MOT viewer</h1>
   <div id="layer">…</div>
+  <div id="layers"></div>
   <label>Symbol scale
     <select id="scale">
       <option value="auto">true to the screen</option>
@@ -73,6 +76,12 @@ function unproject(x, y, z) {
   const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI;
   return { lat, lon };
 }
+// Which layers are on, as the part of a tile's address that says so.
+function layerParam() {
+  const boxes = [...document.querySelectorAll("#layers input")];
+  if (boxes.length < 2 || boxes.every(b => b.checked)) return "";
+  return "&layers=" + boxes.filter(b => b.checked).map(b => b.dataset.index).join(",");
+}
 // Symbol scale for a tile: fixed, or the one at which a millimetre of paper is
 // as many pixels as on a screen (96 dpi), whatever the zoom.
 function scaleFor(z, ty) {
@@ -96,7 +105,7 @@ function render() {
     if (!e) {
       const img = new Image();
       img.draggable = false;
-      img.src = `/tiles/${tz}/${wx}/${ty}.png?scale=${scaleFor(tz, ty)}`;
+      img.src = `/tiles/${tz}/${wx}/${ty}.png?scale=${scaleFor(tz, ty)}${layerParam()}`;
       const grid = document.createElement("div");
       grid.className = "grid"; grid.textContent = `${tz}/${wx}/${ty}`;
       tilesEl.append(img, grid);
@@ -157,7 +166,21 @@ document.getElementById("fit").onclick = fit;
 
 fetch("/info.json").then(r => r.json()).then(i => {
   info = i;
-  document.getElementById("layer").textContent = `${i.layer}, zoom ${i.min_zoom}–${i.max_zoom}`;
+  document.getElementById("layer").textContent = `zoom ${i.min_zoom}–${i.max_zoom}`;
+  // One box per layer, the one with the highest priority first.
+  const list = document.getElementById("layers");
+  i.layers.forEach((l, n) => {
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox"; box.checked = true; box.dataset.index = n; box.onchange = reload;
+    label.append(box, ` ${l.layer}`);
+    list.append(label);
+  });
+  if (i.layers.length > 1) {
+    const note = document.createElement("div");
+    note.className = "note"; note.textContent = "highest priority first; it hides the others where it covers";
+    list.append(note);
+  }
   if (fromHash) render(); else fit();
 });
 render();

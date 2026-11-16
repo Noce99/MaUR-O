@@ -21,7 +21,9 @@
 //! how Mapper spaces them depends on the length of the line: drawn from a piece
 //! they would not meet the neighbouring tile's.
 
-use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{
+    BlendMode, FillRule, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke, Transform,
+};
 
 use crate::geometry::Rect;
 use crate::map::{Coord, Map, Object, ObjectKind, PathObject, Point, TextObject};
@@ -144,16 +146,12 @@ impl TileRenderer {
         Renderer::new(&self.template).paint(&mut pixmap.as_mut(), transform);
         self.template.objects.clear();
         if coverage != CoverageStyle::None {
-            // Tile units to pixels: the tile's own meters, from the view's corner.
-            let grid_m = f64::from(tile.grid_cm) / 100.0;
-            let to_pixel = f64::from(pixels) / view_size;
-            let (dx, dy) = (view_west - data_west, data_north - view_north);
-            draw_coverage(&mut pixmap, tile, coverage, |x, y| {
-                (
-                    ((f64::from(x) * grid_m - dx) * to_pixel) as f32,
-                    ((f64::from(y) * grid_m - dy) * to_pixel) as f32,
-                )
-            });
+            draw_coverage(
+                &mut pixmap,
+                tile,
+                coverage,
+                pixel_map(data, tile, view, pixels),
+            );
         }
         Ok(pixmap)
     }
@@ -199,6 +197,87 @@ impl TileRenderer {
             .collect();
         Some(object)
     }
+}
+
+/// How a node of the tile `data`, in its grid units, falls in the `pixels` square
+/// `view` is drawn into.
+fn pixel_map(
+    data: TileId,
+    tile: &Tile,
+    view: TileId,
+    pixels: u32,
+) -> impl Fn(i32, i32) -> (f32, f32) {
+    let (view_west, view_north) = view.origin();
+    let (data_west, data_north) = data.origin();
+    let grid_m = f64::from(tile.grid_cm) / 100.0;
+    let per_meter = f64::from(pixels) / TileId::size(view.z);
+    let (dx, dy) = (view_west - data_west, data_north - view_north);
+    move |x, y| {
+        (
+            ((f64::from(x) * grid_m - dx) * per_meter) as f32,
+            ((f64::from(y) * grid_m - dy) * per_meter) as f32,
+        )
+    }
+}
+
+/// The area the maps of `tile` cover, as a mask over the `pixels` square `view`
+/// is drawn into: what a layer above hides of the layers below it. `None` where
+/// the tile has no coverage.
+pub fn coverage_mask(data: TileId, tile: &Tile, view: TileId, pixels: u32) -> Option<Mask> {
+    let to_pixel = pixel_map(data, tile, view, pixels);
+    let mut mask = Mask::new(pixels, pixels)?;
+    let mut any = false;
+    for o in tile.objects.iter().filter(|o| o.symbol == COVERAGE_SYMBOL) {
+        if o.nodes.len() < 3 {
+            continue;
+        }
+        let mut path = PathBuilder::new();
+        for (i, n) in o.nodes.iter().enumerate() {
+            let (x, y) = to_pixel(n.x, n.y);
+            if i == 0 {
+                path.move_to(x, y);
+            } else {
+                path.line_to(x, y);
+            }
+        }
+        path.close();
+        if let Some(path) = path.finish() {
+            mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+            any = true;
+        }
+    }
+    any.then_some(mask)
+}
+
+/// Puts the drawings of layers one over another, the one with the lowest
+/// priority first: each hides, inside the coverage it comes with, what is below
+/// it, and is drawn over the rest. Where a place is mapped in two symbol sets,
+/// only the higher shows. `None` for no layers.
+pub fn composite(layers: Vec<(Pixmap, Option<Mask>)>) -> Option<Pixmap> {
+    let mut layers = layers.into_iter();
+    // Nothing is below the lowest, so its coverage hides nothing.
+    let (mut canvas, _) = layers.next()?;
+    let clear = Paint {
+        blend_mode: BlendMode::Clear,
+        ..Paint::default()
+    };
+    for (pixmap, mask) in layers {
+        if let (Some(mask), Some(rect)) = (
+            mask,
+            tiny_skia::Rect::from_xywh(0.0, 0.0, canvas.width() as f32, canvas.height() as f32),
+        ) {
+            canvas.fill_rect(rect, &clear, Transform::identity(), Some(&mask));
+        }
+        canvas.draw_pixmap(
+            0,
+            0,
+            pixmap.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
+    }
+    Some(canvas)
 }
 
 /// Draws the coverage areas of `tile` on `pixmap`, `to_pixel` turning a node into
@@ -365,6 +444,46 @@ mod tests {
         assert_eq!(pixel(&outline, 0.4, 0.5)[3], 0);
         assert!(pixel(&outline, 0.75, 0.5)[3] > 100, "the east edge");
         assert_eq!(pixel(&outline, 0.004, 0.5)[3], 0, "the cut edge");
+    }
+
+    #[test]
+    fn a_layer_hides_the_ones_below_it_inside_its_coverage_only() {
+        let id = TileId {
+            z: 14,
+            x: 8700,
+            y: 5900,
+        };
+        let tile = tile_with_coverage();
+        // Coverage over the middle half, the west edge on the tile's border.
+        let mask = coverage_mask(id, &tile, id, 64).expect("a tile with coverage has a mask");
+        let size = |colour: tiny_skia::Color| {
+            let mut p = Pixmap::new(64, 64).unwrap();
+            p.fill(colour);
+            p
+        };
+        let red = size(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
+        let mut clear = Pixmap::new(64, 64).unwrap();
+        clear.fill(tiny_skia::Color::TRANSPARENT);
+        // The upper layer draws nothing: inside its coverage the lower one is
+        // hidden, outside it, it shows.
+        let stacked = composite(vec![(red.clone(), None), (clear, Some(mask))]).unwrap();
+        assert_eq!(
+            pixel(&stacked, 0.4, 0.5)[3],
+            0,
+            "hidden inside the coverage"
+        );
+        assert_eq!(
+            pixel(&stacked, 0.9, 0.5),
+            [255, 0, 0, 255],
+            "shows outside it"
+        );
+        // And one with something to draw is drawn over what it hides.
+        let blue = size(tiny_skia::Color::from_rgba8(0, 0, 255, 255));
+        let mask = coverage_mask(id, &tile, id, 64).unwrap();
+        let stacked = composite(vec![(red, None), (blue, Some(mask))]).unwrap();
+        assert_eq!(pixel(&stacked, 0.4, 0.5), [0, 0, 255, 255]);
+        assert!(composite(Vec::new()).is_none());
+        assert!(coverage_mask(id, &Tile::new(5), id, 64).is_none());
     }
 
     #[test]

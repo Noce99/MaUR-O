@@ -227,7 +227,8 @@ tiles in a PMTiles file through the `pmtiles` crate (native only, like `ureq`,
 so the wasm build never sees it). `mot_render.rs` draws a tile by turning it back
 into a `Map` (the ISOM symbols, paper mm at a scale the viewer picks) and handing
 it to the same `Renderer` as `.omap` files; `tiles_serve` puts that behind a
-small HTTP server and a one-page viewer as a way to look at an archive. The
+small HTTP server and a one-page viewer, with the layers (one archive per symbol set)
+stacked by priority and masked by each one's coverage (`composite`) as a way to look at an archive. The
 real viewer is o-mnia's (a wasm build over this crate), not this binary. Source of truth, logins, servers and the UI
 are o-mnia's, not this crate's; the format only defines tiles and what to do
 with them.

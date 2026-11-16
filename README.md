@@ -780,13 +780,19 @@ objects, with the symbols of ISOM 2017-2) and drawn as an `.omap` file is, so
 it looks as Mapper draws the map.
 
 ```
-tiles_serve [--host 127.0.0.1] [--port 8080] [--workers N] <archive>
+tiles_serve [--host 127.0.0.1] [--port 8080] [--workers N] <archive>...
 ```
 
 It prints the address it listens on (`--port 0` picks a free one) and serves
-until stopped: the page at `/`, the archive's layer, zoom range and bounds at
-`/info.json`, and tiles at `/tiles/{z}/{x}/{y}.png?scale=S&size=P`, drawn at
-1:S (10000 by default) into P pixels (512). A zoom finer than the archive's
+until stopped: the page at `/`, each layer's symbol set, zoom range and bounds at
+`/info.json`, and tiles at `/tiles/{z}/{x}/{y}.png?scale=S&size=P&layers=I,J`,
+drawn at 1:S (10000 by default) into P pixels (512), of the layers numbered (all
+by default).
+
+An archive is a layer, a symbol set. With several (maps in ISOM and in ISSprOM,
+say) the one named first has the highest priority: where two cover the same
+ground only the higher shows, inside its coverage, and the lower shows elsewhere.
+The page lists the layers, can switch each off, and says which hides which. A zoom finer than the archive's
 finest is that level overzoomed; a coarser one, or an empty tile, is a
 transparent image; where the zoom is too coarse for any symbol to appear, a tile
 shows the area the maps cover, tinted, and over the symbols that area is an

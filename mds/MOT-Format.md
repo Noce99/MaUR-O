@@ -59,6 +59,10 @@ A viewer can:
 
 ### Coverage
 
+(The stacked view is implemented in `tiles_serve`: archives are layers, given in
+priority order; each layer's tile is drawn, hides what is below it inside its own
+coverage, and is drawn over the rest.)
+
 Each layer stores **coverage polygons** (the area actually surveyed), separate
 from the objects. They are needed for two reasons:
 

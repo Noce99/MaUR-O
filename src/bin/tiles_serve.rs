@@ -2,7 +2,7 @@
 //! draws the tiles with this crate's own renderer.
 //!
 //! ```text
-//! tiles_serve [--host 127.0.0.1] [--port 8080] [--workers N] <archive>
+//! tiles_serve [--host 127.0.0.1] [--port 8080] [--workers N] <archive>...
 //! ```
 //!
 //! It prints the address it listens on (`--port 0` picks a free one) and serves
@@ -11,8 +11,13 @@
 //! | path | |
 //! |---|---|
 //! | `/` | the viewer, one HTML page |
-//! | `/info.json` | the archive's layer, zoom range (and the coarsest zoom with symbols) and bounds |
-//! | `/tiles/{z}/{x}/{y}.png?scale=S&size=P` | a tile drawn at 1:S (10000 by default) into P pixels (512) |
+//! | `/info.json` | each layer's symbol set, zoom range (and the coarsest zoom with symbols) and bounds |
+//! | `/tiles/{z}/{x}/{y}.png?scale=S&size=P&layers=I,J` | a tile drawn at 1:S (10000 by default) into P pixels (512), of the layers numbered (all by default) |
+//!
+//! One archive is one layer, one symbol set. With several, the one named first has
+//! the highest priority: where two of them cover the same ground only the higher
+//! shows, inside its coverage, and the lower shows elsewhere. The page can switch
+//! layers on and off.
 //!
 //! A tile of a zoom finer than the archive's finest is that level overzoomed;
 //! one with nothing in it, or coarser than the archive's coarsest, is a
@@ -37,10 +42,12 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tiny_skia::{Mask, Pixmap};
+
 use clap::Parser;
 use maur_o::mot::TileId;
 use maur_o::mot_archive::Archive;
-use maur_o::mot_render::{CoverageStyle, TileRenderer};
+use maur_o::mot_render::{composite, coverage_mask, CoverageStyle, TileRenderer};
 use maur_o::mot_symbols::SymbolTable;
 
 const VIEWER: &str = include_str!("tiles_serve.html");
@@ -51,9 +58,10 @@ const VIEWER: &str = include_str!("tiles_serve.html");
     about = "Serves a MOT archive as a slippy map, drawn with the crate's renderer."
 )]
 struct Args {
-    /// The MOT archive (a PMTiles file written by omap_to_tiles).
-    #[arg(value_name = "ARCHIVE")]
-    archive: PathBuf,
+    /// The MOT archives (PMTiles files written by omap_to_tiles), one per symbol
+    /// set, the one with the highest priority first.
+    #[arg(value_name = "ARCHIVE", required = true)]
+    archives: Vec<PathBuf>,
 
     /// The address to listen on.
     #[arg(long, default_value = "127.0.0.1")]
@@ -68,13 +76,19 @@ struct Args {
     workers: Option<usize>,
 }
 
-/// What the workers share: the archive, the symbols, and the tiles drawn so far.
-struct Shared {
+/// One archive, one symbol set.
+struct Layer {
     archive: Archive,
     table: SymbolTable,
-    transparent: Vec<u8>,
     /// The coarsest zoom at which a symbol appears; coarser tiles have only coverage.
     object_min_zoom: u8,
+}
+
+/// What the workers share: the layers, highest priority first, and the tiles drawn
+/// so far.
+struct Shared {
+    layers: Vec<Layer>,
+    transparent: Vec<u8>,
     cache: Mutex<HashMap<String, Arc<Vec<u8>>>>,
 }
 
@@ -113,22 +127,93 @@ fn param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
         .map(|(_, v)| v)
 }
 
-fn info_json(shared: &Shared) -> String {
-    let info = shared.archive.info();
-    let bounds = shared.archive.bounds().map_or("null".to_string(), |b| {
+fn bounds_json(b: Option<[f64; 4]>) -> String {
+    b.map_or("null".to_string(), |b| {
         format!("[{},{},{},{}]", b[0], b[1], b[2], b[3])
+    })
+}
+
+fn info_json(shared: &Shared) -> String {
+    let layers: Vec<String> = shared
+        .layers
+        .iter()
+        .map(|l| {
+            let info = l.archive.info();
+            format!(
+                "{{\"layer\":\"{}\",\"min_zoom\":{},\"max_zoom\":{},\"object_min_zoom\":{},\"bounds\":{}}}",
+                info.layer.replace('"', "'"),
+                info.min_zoom,
+                info.max_zoom,
+                l.object_min_zoom,
+                bounds_json(l.archive.bounds())
+            )
+        })
+        .collect();
+    let min = |f: fn(&Layer) -> u8| shared.layers.iter().map(f).min().unwrap_or(0);
+    let max = |f: fn(&Layer) -> u8| shared.layers.iter().map(f).max().unwrap_or(0);
+    let boxes = shared.layers.iter().filter_map(|l| l.archive.bounds());
+    let union = boxes.reduce(|a, b| {
+        [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ]
     });
+    let names: Vec<&str> = shared
+        .layers
+        .iter()
+        .map(|l| l.archive.info().layer.as_str())
+        .collect();
     format!(
-        "{{\"layer\":\"{}\",\"min_zoom\":{},\"max_zoom\":{},\"object_min_zoom\":{},\"bounds\":{}}}",
-        info.layer.replace('"', "'"),
-        info.min_zoom,
-        info.max_zoom,
-        shared.object_min_zoom,
-        bounds
+        "{{\"layer\":\"{}\",\"min_zoom\":{},\"max_zoom\":{},\"object_min_zoom\":{},\"bounds\":{},\"layers\":[{}]}}",
+        names.join(" + ").replace('"', "'"),
+        min(|l| l.archive.info().min_zoom),
+        max(|l| l.archive.info().max_zoom),
+        min(|l| l.object_min_zoom),
+        bounds_json(union),
+        layers.join(",")
     )
 }
 
-fn tile_reply(shared: &Shared, renderer: &mut TileRenderer, path: &str, query: &str) -> Reply {
+/// One layer's drawing of `view` and the area it covers there, or `None` where
+/// the layer has nothing for it.
+fn layer_tile(
+    layer: &Layer,
+    renderer: &mut TileRenderer,
+    view: TileId,
+    scale: f64,
+    size: u32,
+) -> Result<Option<(Pixmap, Option<Mask>)>, String> {
+    let info = layer.archive.info();
+    if view.z < info.min_zoom {
+        return Ok(None);
+    }
+    let data = if view.z > info.max_zoom {
+        let up = u32::from(view.z - info.max_zoom);
+        TileId {
+            z: info.max_zoom,
+            x: view.x >> up,
+            y: view.y >> up,
+        }
+    } else {
+        view
+    };
+    let Some(tile) = layer.archive.tile(data)? else {
+        return Ok(None);
+    };
+    // Where the symbols are too small to appear yet, what a map covers is all
+    // there is to see; over a map it is only an outline.
+    let style = if view.z < layer.object_min_zoom {
+        CoverageStyle::Filled
+    } else {
+        CoverageStyle::Outline
+    };
+    let drawing = renderer.render(data, &tile, view, scale, size, style)?;
+    Ok(Some((drawing, coverage_mask(data, &tile, view, size))))
+}
+
+fn tile_reply(shared: &Shared, renderers: &mut [TileRenderer], path: &str, query: &str) -> Reply {
     let parts: Vec<&str> = path
         .trim_start_matches("/tiles/")
         .trim_end_matches(".png")
@@ -153,41 +238,43 @@ fn tile_reply(shared: &Shared, renderer: &mut TileRenderer, path: &str, query: &
     if !(scale >= 1.0 && scale.is_finite()) {
         return text("400 Bad Request", "bad scale");
     }
-    let key = format!("{z}/{x}/{y}/{scale}/{size}");
+    // The layers to show, by their place in the order given: all by default.
+    let shown: Vec<usize> = match param(query, "layers") {
+        None => (0..shared.layers.len()).collect(),
+        Some(list) => {
+            let parsed: Option<Vec<usize>> = list
+                .split(',')
+                .filter(|v| !v.is_empty())
+                .map(|v| v.parse().ok().filter(|&i| i < shared.layers.len()))
+                .collect();
+            match parsed {
+                Some(mut v) => {
+                    v.sort_unstable();
+                    v.dedup();
+                    v
+                }
+                None => return text("400 Bad Request", "bad layers"),
+            }
+        }
+    };
+    let key = format!("{z}/{x}/{y}/{scale}/{size}/{shown:?}");
     if let Some(hit) = shared.cache.lock().unwrap().get(&key) {
         return png(hit.as_ref().clone());
     }
-    let info = shared.archive.info();
     let view = TileId { z, x, y };
-    if z < info.min_zoom {
-        return png(shared.transparent.clone());
-    }
-    let data = if z > info.max_zoom {
-        let up = u32::from(z - info.max_zoom);
-        TileId {
-            z: info.max_zoom,
-            x: x >> up,
-            y: y >> up,
+    // Lowest priority first, as `composite` wants them.
+    let mut drawings = Vec::new();
+    for &i in shown.iter().rev() {
+        match layer_tile(&shared.layers[i], &mut renderers[i], view, scale, size) {
+            Ok(Some(layer)) => drawings.push(layer),
+            Ok(None) => {}
+            Err(e) => return text("500 Internal Server Error", &e),
         }
-    } else {
-        view
+    }
+    let Some(picture) = composite(drawings) else {
+        return png(shared.transparent.clone());
     };
-    let tile = match shared.archive.tile(data) {
-        Ok(Some(tile)) => tile,
-        Ok(None) => return png(shared.transparent.clone()),
-        Err(e) => return text("500 Internal Server Error", &e),
-    };
-    // Where the symbols are too small to appear yet, what a map covers is all
-    // there is to see; over a map it is only an outline.
-    let style = if z < shared.object_min_zoom {
-        CoverageStyle::Filled
-    } else {
-        CoverageStyle::Outline
-    };
-    let body = renderer
-        .render(data, &tile, view, scale, size, style)
-        .and_then(|p| p.encode_png().map_err(|e| e.to_string()));
-    match body {
+    match picture.encode_png() {
         Ok(body) => {
             let mut cache = shared.cache.lock().unwrap();
             if cache.len() > 400 {
@@ -196,11 +283,11 @@ fn tile_reply(shared: &Shared, renderer: &mut TileRenderer, path: &str, query: &
             cache.insert(key, Arc::new(body.clone()));
             png(body)
         }
-        Err(e) => text("500 Internal Server Error", &e),
+        Err(e) => text("500 Internal Server Error", &e.to_string()),
     }
 }
 
-fn handle(shared: &Shared, renderer: &mut TileRenderer, mut stream: TcpStream) {
+fn handle(shared: &Shared, renderers: &mut [TileRenderer], mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut request = Vec::new();
     let mut buffer = [0u8; 1024];
@@ -231,7 +318,7 @@ fn handle(shared: &Shared, renderer: &mut TileRenderer, mut stream: TcpStream) {
                 body: info_json(shared).into_bytes(),
                 cacheable: false,
             },
-            p if p.starts_with("/tiles/") => tile_reply(shared, renderer, p, query),
+            p if p.starts_with("/tiles/") => tile_reply(shared, renderers, p, query),
             _ => text("404 Not Found", "not found"),
         }
     };
@@ -252,11 +339,15 @@ fn handle(shared: &Shared, renderer: &mut TileRenderer, mut stream: TcpStream) {
 }
 
 fn worker(shared: Arc<Shared>, queue: Arc<Mutex<Receiver<TcpStream>>>) {
-    let mut renderer = TileRenderer::new(&shared.table);
+    let mut renderers: Vec<TileRenderer> = shared
+        .layers
+        .iter()
+        .map(|l| TileRenderer::new(&l.table))
+        .collect();
     loop {
         let next = queue.lock().unwrap().recv();
         let Ok(stream) = next else { return };
-        handle(&shared, &mut renderer, stream);
+        handle(&shared, &mut renderers, stream);
     }
 }
 
@@ -271,17 +362,30 @@ fn run() -> Result<(), (ExitCode, String)> {
             ));
         }
     };
-    let archive =
-        Archive::open(&args.archive).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
-    let table = SymbolTable::by_name(&archive.info().layer).ok_or_else(|| {
-        (
-            ExitCode::from(2),
-            format!(
-                "Error: the archive's symbols are {}, which this tool does not know",
-                archive.info().layer
-            ),
-        )
-    })?;
+    let mut layers: Vec<Layer> = Vec::new();
+    for path in &args.archives {
+        let archive =
+            Archive::open(path).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
+        let name = archive.info().layer.clone();
+        let table = SymbolTable::by_name(&name).ok_or_else(|| {
+            (
+                ExitCode::from(2),
+                format!("Error: the archive's symbols are {name}, which this tool does not know"),
+            )
+        })?;
+        if layers.iter().any(|l| l.archive.info().layer == name) {
+            return Err((
+                ExitCode::from(2),
+                format!("Error: two archives have the symbols {name}: one layer is one archive"),
+            ));
+        }
+        let object_min_zoom = archive.info().min_zoom.max(table.min_object_zoom());
+        layers.push(Layer {
+            archive,
+            table,
+            object_min_zoom,
+        });
+    }
     let transparent = tiny_skia::Pixmap::new(1, 1)
         .and_then(|p| p.encode_png().ok())
         .unwrap_or_default();
@@ -294,12 +398,9 @@ fn run() -> Result<(), (ExitCode, String)> {
     let address = listener
         .local_addr()
         .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
-    let object_min_zoom = archive.info().min_zoom.max(table.min_object_zoom());
     let shared = Arc::new(Shared {
-        archive,
-        table,
+        layers,
         transparent,
-        object_min_zoom,
         cache: Mutex::new(HashMap::new()),
     });
     let (send, receive) = channel::<TcpStream>();
@@ -312,7 +413,12 @@ fn run() -> Result<(), (ExitCode, String)> {
         let (shared, queue) = (Arc::clone(&shared), Arc::clone(&queue));
         std::thread::spawn(move || worker(shared, queue));
     }
-    println!("Serving {} on http://{}/", args.archive.display(), address);
+    let names: Vec<String> = args
+        .archives
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    println!("Serving {} on http://{}/", names.join(", "), address);
     let _ = std::io::stdout().flush();
     for stream in listener.incoming().flatten() {
         if send.send(stream).is_err() {
