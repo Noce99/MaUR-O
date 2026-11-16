@@ -14,28 +14,8 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Stdio};
 
-const SAMPLE: &str = "tests/data/bologna_sample.osm";
-const BBOX: &str = "--bbox=11.3415,44.4925,11.3445,44.4945";
-const HERE: (f64, f64) = (44.4935, 11.3430);
-
-fn make_archive(dir: &Path) -> std::path::PathBuf {
-    let map = dir.join("sample.omap");
-    Command::cargo_bin("osm_to_omap")
-        .unwrap()
-        .args(["--standard", "isom", BBOX, SAMPLE])
-        .arg(&map)
-        .assert()
-        .success();
-    let archive = dir.join("sample.pmtiles");
-    Command::cargo_bin("omap_to_tiles")
-        .unwrap()
-        .arg("--output")
-        .arg(&archive)
-        .arg(&map)
-        .assert()
-        .success();
-    archive
-}
+mod common;
+use common::{make_archive, make_two_archives, HERE_LAT_LON};
 
 /// A running server, stopped when dropped.
 struct Server {
@@ -89,31 +69,8 @@ impl Drop for Server {
 }
 
 fn tile_at(z: u8) -> TileId {
-    let (x, y) = web_mercator(HERE.0, HERE.1);
+    let (x, y) = web_mercator(HERE_LAT_LON.0, HERE_LAT_LON.1);
     TileId::containing(z, x, y)
-}
-
-/// The archives of the sample drawn to ISSprOM and to ISOM, in that order.
-fn make_two_archives(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    let mut maps = Vec::new();
-    for standard in ["issprom", "isom"] {
-        let map = dir.join(format!("{standard}.omap"));
-        Command::cargo_bin("osm_to_omap")
-            .unwrap()
-            .args(["--standard", standard, BBOX, SAMPLE])
-            .arg(&map)
-            .assert()
-            .success();
-        maps.push(map);
-    }
-    Command::cargo_bin("omap_to_tiles")
-        .unwrap()
-        .arg("--output")
-        .arg(dir.join("w.pmtiles"))
-        .args(&maps)
-        .assert()
-        .success();
-    (dir.join("w.issprom.pmtiles"), dir.join("w.isom.pmtiles"))
 }
 
 /// The fraction of the pixels in which two PNGs differ.

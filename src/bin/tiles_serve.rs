@@ -88,7 +88,7 @@ struct Layer {
 /// so far.
 struct Shared {
     layers: Vec<Layer>,
-    transparent: Vec<u8>,
+    transparent: Arc<Vec<u8>>,
     cache: Mutex<HashMap<String, Arc<Vec<u8>>>>,
 }
 
@@ -96,7 +96,8 @@ struct Shared {
 struct Reply {
     status: &'static str,
     content_type: &'static str,
-    body: Vec<u8>,
+    /// Shared, so a tile in the cache is sent without copying it.
+    body: Arc<Vec<u8>>,
     cacheable: bool,
 }
 
@@ -104,12 +105,12 @@ fn text(status: &'static str, message: &str) -> Reply {
     Reply {
         status,
         content_type: "text/plain; charset=utf-8",
-        body: message.as_bytes().to_vec(),
+        body: Arc::new(message.as_bytes().to_vec()),
         cacheable: false,
     }
 }
 
-fn png(body: Vec<u8>) -> Reply {
+fn png(body: Arc<Vec<u8>>) -> Reply {
     Reply {
         status: "200 OK",
         content_type: "image/png",
@@ -259,7 +260,7 @@ fn tile_reply(shared: &Shared, renderers: &mut [TileRenderer], path: &str, query
     };
     let key = format!("{z}/{x}/{y}/{scale}/{size}/{shown:?}");
     if let Some(hit) = shared.cache.lock().unwrap().get(&key) {
-        return png(hit.as_ref().clone());
+        return png(Arc::clone(hit));
     }
     let view = TileId { z, x, y };
     // Lowest priority first, as `composite` wants them.
@@ -276,11 +277,12 @@ fn tile_reply(shared: &Shared, renderers: &mut [TileRenderer], path: &str, query
     };
     match picture.encode_png() {
         Ok(body) => {
+            let body = Arc::new(body);
             let mut cache = shared.cache.lock().unwrap();
             if cache.len() > 400 {
                 cache.clear();
             }
-            cache.insert(key, Arc::new(body.clone()));
+            cache.insert(key, Arc::clone(&body));
             png(body)
         }
         Err(e) => text("500 Internal Server Error", &e.to_string()),
@@ -309,13 +311,13 @@ fn handle(shared: &Shared, renderers: &mut [TileRenderer], mut stream: TcpStream
             "/" | "/index.html" => Reply {
                 status: "200 OK",
                 content_type: "text/html; charset=utf-8",
-                body: VIEWER.as_bytes().to_vec(),
+                body: Arc::new(VIEWER.as_bytes().to_vec()),
                 cacheable: false,
             },
             "/info.json" => Reply {
                 status: "200 OK",
                 content_type: "application/json",
-                body: info_json(shared).into_bytes(),
+                body: Arc::new(info_json(shared).into_bytes()),
                 cacheable: false,
             },
             p if p.starts_with("/tiles/") => tile_reply(shared, renderers, p, query),
@@ -386,9 +388,11 @@ fn run() -> Result<(), (ExitCode, String)> {
             object_min_zoom,
         });
     }
-    let transparent = tiny_skia::Pixmap::new(1, 1)
-        .and_then(|p| p.encode_png().ok())
-        .unwrap_or_default();
+    let transparent = Arc::new(
+        tiny_skia::Pixmap::new(1, 1)
+            .and_then(|p| p.encode_png().ok())
+            .unwrap_or_default(),
+    );
     let listener = TcpListener::bind((args.host.as_str(), args.port)).map_err(|e| {
         (
             ExitCode::from(4),

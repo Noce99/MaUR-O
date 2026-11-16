@@ -10,7 +10,7 @@ the coverage) are implemented, and so is the pure part of the history
 (`src/mot_history.rs`). Not yet: the history in an archive, other symbol sets,
 merging of neighbouring objects. The measurements in [Measurements so far](#measurements-so-far)
 come from the throw-away programs in `examples/` (`tile_stats.rs`, `curve_fit.rs`,
-`hidden_areas.rs`); `examples/mot_try.rs` measures the real codec.
+`hidden_areas.rs`); the real codec is measured with `omap_to_tiles` itself.
 
 MOT is a compact, tiled, vector format for storing *all* orienteering maps of the
 world as one map, and for fetching "what is around this location" cheaply. It is
@@ -309,7 +309,7 @@ decompressing the whole map.
 
 ### Measurements of the codec
 
-`examples/mot_try.rs` on the same two maps, 5 cm grid, zoom 14, each tile
+`omap_to_tiles` on the same two maps, 5 cm grid, zoom 14, each tile
 compressed on its own with zstd -19. Objects of hidden symbols and drawing aids are
 left out (in Corno they are 44,000 of 57,000 objects, the reason it is so much
 smaller than the estimate above); symbols not in the ISOM table are remapped or

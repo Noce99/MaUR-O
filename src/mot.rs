@@ -236,7 +236,7 @@ pub struct Tile {
 
 // ---- byte coding ----
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+pub(crate) fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
         out.push((v as u8) | 0x80);
         v >>= 7;
@@ -244,7 +244,7 @@ fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     out.push(v as u8);
 }
 
-fn zigzag(v: i64) -> u64 {
+pub(crate) fn zigzag(v: i64) -> u64 {
     ((v << 1) ^ (v >> 63)) as u64
 }
 
@@ -263,23 +263,23 @@ fn dequantise_angle(q: u16) -> f64 {
 }
 
 /// A cursor over bytes which never panics: every read says what ran out.
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Reader<'a> {
+    pub(crate) fn new(bytes: &'a [u8]) -> Reader<'a> {
         Reader { bytes, at: 0 }
     }
 
     fn byte(&mut self) -> Result<u8, String> {
-        let b = *self.bytes.get(self.at).ok_or("tile ends too soon")?;
+        let b = *self.bytes.get(self.at).ok_or("the bytes end too soon")?;
         self.at += 1;
         Ok(b)
     }
 
-    fn varint(&mut self) -> Result<u64, String> {
+    pub(crate) fn varint(&mut self) -> Result<u64, String> {
         let mut value = 0u64;
         for shift in (0..70).step_by(7) {
             let b = self.byte()?;
@@ -294,13 +294,16 @@ impl<'a> Reader<'a> {
         Err("varint too long".into())
     }
 
-    fn signed(&mut self) -> Result<i64, String> {
+    pub(crate) fn signed(&mut self) -> Result<i64, String> {
         Ok(unzigzag(self.varint()?))
     }
 
-    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
         let end = self.at.checked_add(n).ok_or("length overflows")?;
-        let slice = self.bytes.get(self.at..end).ok_or("tile ends too soon")?;
+        let slice = self
+            .bytes
+            .get(self.at..end)
+            .ok_or("the bytes end too soon")?;
         self.at = end;
         Ok(slice)
     }
