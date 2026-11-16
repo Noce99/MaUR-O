@@ -56,6 +56,12 @@ pub const WORLD_HALF: f64 = 20_037_508.342_789_244;
 /// and the arithmetic below a `u64`.
 pub const MAX_ZOOM: u8 = 30;
 
+/// The symbol of an area that is not on a map but says where a map is: the
+/// footprint of what a map covers. Not an id of any symbol table (those count up
+/// from 0), so it sorts after every symbol of a tile, and a renderer that does
+/// not know it draws nothing.
+pub const COVERAGE_SYMBOL: u16 = u16::MAX;
+
 /// Node flags: the same bits as [`crate::map::coord_flag`], which already fit a
 /// byte, so a map's flags are stored as they are.
 pub mod node_flag {

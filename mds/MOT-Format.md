@@ -5,9 +5,9 @@ Status: **draft**. A first slice is implemented: the tile payload codec
 map to tiles (`src/mot_convert.rs`) and the PMTiles archive (`src/mot_archive.rs`),
 with the tools `omap_to_tiles` and `tiles_query`, the clipping of objects at
 tile borders (`src/mot_clip.rs`) and the zoom levels with the per-symbol rules.
-A development viewer, `tiles_serve`, draws the tiles in a browser through the crate's renderer (`src/mot_render.rs`). Not yet: coverage, the history, other symbol sets, the levels coarser than the
-archive's (zoom 0 to 10, which are the coverage footprints), merging of
-neighbouring objects. The measurements in [Measurements so far](#measurements-so-far)
+A development viewer, `tiles_serve`, draws the tiles in a browser through the crate's renderer (`src/mot_render.rs`). Coverage and the levels below the first symbol (zoom 0 to 10, which have only
+the coverage) are implemented. Not yet: the history, other symbol sets, merging
+of neighbouring objects. The measurements in [Measurements so far](#measurements-so-far)
 come from the throw-away programs in `examples/` (`tile_stats.rs`, `curve_fit.rs`,
 `hidden_areas.rs`); `examples/mot_try.rs` measures the real codec.
 
@@ -68,6 +68,21 @@ from the objects. They are needed for two reasons:
 
 Coverage replaces the "map table" idea: there are no separate maps as visible
 entities, only footprints with provenance (source, date, licence).
+
+Implemented: a map's footprint is a **rectangle in the map's own frame** round the
+nodes of the objects it draws (without the outermost 0.05% on each side, so a
+stray object does not stretch it, and with a margin of 1%), which the projection
+turns as it turns the map. It is stored in every level, clipped to each tile like
+an area, as an object of the reserved symbol `COVERAGE_SYMBOL` (65535) with an id of
+its own, after the objects' (so it is also in the levels below the first symbol,
+which have nothing else). The archive's metadata says, for each coverage id, the
+file the map was made from (`sources`); a query reports the maps whose coverage an
+area is in, which is what tells a place that is mapped but empty from one that
+is not mapped. A viewer draws it tinted where no symbol shows yet, and as an
+outline over the symbols (not along the edges a tile cut it by).
+
+Not yet: provenance beyond the file name (date, licence), and a footprint that
+follows a map's real outline instead of a rectangle.
 
 ### Scale
 

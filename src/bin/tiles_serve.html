@@ -107,9 +107,9 @@ function render() {
     e.grid.style.display = gridEl.checked ? "block" : "none";
   }
   for (const [key, e] of shown) if (!want.has(key)) { e.img.remove(); e.grid.remove(); shown.delete(key); }
-  const below = info && view.zoom < info.min_zoom;
-  hintEl.style.display = below ? "block" : "none";
-  if (below) hintEl.textContent = `The archive has no data below zoom ${info.min_zoom}.`;
+  const coarse = info && view.zoom < info.object_min_zoom;
+  hintEl.style.display = coarse ? "block" : "none";
+  if (coarse) hintEl.textContent = `Below zoom ${info.object_min_zoom} no symbol is drawn yet: the blue areas are what the maps cover.`;
   statusEl.textContent = `zoom ${view.zoom.toFixed(2)} · ${view.lat.toFixed(5)}, ${view.lon.toFixed(5)}`;
   history.replaceState(null, "", `#${view.zoom.toFixed(2)}/${view.lat.toFixed(5)}/${view.lon.toFixed(5)}`);
 }
@@ -158,7 +158,7 @@ document.getElementById("fit").onclick = fit;
 fetch("/info.json").then(r => r.json()).then(i => {
   info = i;
   document.getElementById("layer").textContent = `${i.layer}, zoom ${i.min_zoom}–${i.max_zoom}`;
-  if (!fromHash) fit();
+  if (fromHash) render(); else fit();
 });
 render();
 </script>

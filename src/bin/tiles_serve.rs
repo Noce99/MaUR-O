@@ -11,12 +11,13 @@
 //! | path | |
 //! |---|---|
 //! | `/` | the viewer, one HTML page |
-//! | `/info.json` | the archive's layer, zoom range and bounds |
+//! | `/info.json` | the archive's layer, zoom range (and the coarsest zoom with symbols) and bounds |
 //! | `/tiles/{z}/{x}/{y}.png?scale=S&size=P` | a tile drawn at 1:S (10000 by default) into P pixels (512) |
 //!
 //! A tile of a zoom finer than the archive's finest is that level overzoomed;
-//! one coarser than its coarsest, or with nothing in it, is a transparent
-//! image. The scale is a parameter, as it is the viewer's choice: the page
+//! one with nothing in it, or coarser than the archive's coarsest, is a
+//! transparent image. Where the zoom is too coarse for any symbol to appear, a
+//! tile shows what the maps cover, tinted; over the symbols it is an outline. The scale is a parameter, as it is the viewer's choice: the page
 //! offers fixed ones and one true to the screen, where a millimetre of paper
 //! is as big on screen at every zoom.
 //!
@@ -39,7 +40,7 @@ use std::time::Duration;
 use clap::Parser;
 use maur_o::mot::TileId;
 use maur_o::mot_archive::Archive;
-use maur_o::mot_render::TileRenderer;
+use maur_o::mot_render::{CoverageStyle, TileRenderer};
 use maur_o::mot_symbols::SymbolTable;
 
 const VIEWER: &str = include_str!("tiles_serve.html");
@@ -72,6 +73,8 @@ struct Shared {
     archive: Archive,
     table: SymbolTable,
     transparent: Vec<u8>,
+    /// The coarsest zoom at which a symbol appears; coarser tiles have only coverage.
+    object_min_zoom: u8,
     cache: Mutex<HashMap<String, Arc<Vec<u8>>>>,
 }
 
@@ -116,10 +119,11 @@ fn info_json(shared: &Shared) -> String {
         format!("[{},{},{},{}]", b[0], b[1], b[2], b[3])
     });
     format!(
-        "{{\"layer\":\"{}\",\"min_zoom\":{},\"max_zoom\":{},\"bounds\":{}}}",
+        "{{\"layer\":\"{}\",\"min_zoom\":{},\"max_zoom\":{},\"object_min_zoom\":{},\"bounds\":{}}}",
         info.layer.replace('"', "'"),
         info.min_zoom,
         info.max_zoom,
+        shared.object_min_zoom,
         bounds
     )
 }
@@ -173,8 +177,15 @@ fn tile_reply(shared: &Shared, renderer: &mut TileRenderer, path: &str, query: &
         Ok(None) => return png(shared.transparent.clone()),
         Err(e) => return text("500 Internal Server Error", &e),
     };
+    // Where the symbols are too small to appear yet, what a map covers is all
+    // there is to see; over a map it is only an outline.
+    let style = if z < shared.object_min_zoom {
+        CoverageStyle::Filled
+    } else {
+        CoverageStyle::Outline
+    };
     let body = renderer
-        .render(data, &tile, view, scale, size)
+        .render(data, &tile, view, scale, size, style)
         .and_then(|p| p.encode_png().map_err(|e| e.to_string()));
     match body {
         Ok(body) => {
@@ -283,10 +294,12 @@ fn run() -> Result<(), (ExitCode, String)> {
     let address = listener
         .local_addr()
         .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+    let object_min_zoom = archive.info().min_zoom.max(table.min_object_zoom());
     let shared = Arc::new(Shared {
         archive,
         table,
         transparent,
+        object_min_zoom,
         cache: Mutex::new(HashMap::new()),
     });
     let (send, receive) = channel::<TcpStream>();

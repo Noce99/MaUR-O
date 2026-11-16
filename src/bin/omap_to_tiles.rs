@@ -2,7 +2,8 @@
 //! `mds/MOT-Format.md`, in a PMTiles file.
 //!
 //! ```text
-//! omap_to_tiles [--zoom 14] [--min-zoom 11] [--grid-cm 5] [--buffer 0.03125] --output world.pmtiles <map-file>...
+//! omap_to_tiles [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 0] [--grid-cm 5]
+//!               [--buffer 0.03125] --output world.pmtiles <map-file>...
 //! ```
 //!
 //! Each map must be georeferenced with a geographic reference point (Mapper's
@@ -23,7 +24,7 @@
 //! | option | default | |
 //! |---|---|---|
 //! | `--zoom` | 14 | the finest zoom level, 1 to 20 (14 is about 2 km wide): every object is kept as drawn |
-//! | `--min-zoom` | 11 | the coarsest zoom level |
+//! | `--min-zoom` | 0 | the coarsest zoom level |
 //! | `--grid-cm` | 5 | resolution of the nodes, in centimetres of Mercator |
 //! | `--buffer` | 0.03125 | how far past its edge a tile keeps what it holds, as a fraction of its side |
 //!
@@ -33,6 +34,11 @@
 //! its line may be moved to have fewer nodes) keep at that zoom, on a coarser
 //! grid, so a zoomed-out view reads a little of the archive instead of all of
 //! it. The objects have the same ids at every level.
+//!
+//! Every level also has the area each map covers (a rectangle in the map's own
+//! frame round the objects it draws), as an area of its own in the tiles, so the
+//! levels too coarse for any symbol (below zoom 11 for ISOM) still say where
+//! there is a map. The archive remembers which file each came from.
 //!
 //! A tile holds the part of each object inside its box grown by the buffer, so
 //! a line or a symbol at the edge is not cut short; an object that crosses the
@@ -94,8 +100,9 @@ struct Args {
     zoom: u8,
 
     /// The coarsest zoom level. The levels between are generalised by the
-    /// symbols' own rules.
-    #[arg(long, default_value_t = 11, value_parser = clap::value_parser!(u8).range(1..=20), value_name = "ZOOM")]
+    /// symbols' own rules, and those too coarse for any symbol to appear at have
+    /// only the area each map covers.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=20), value_name = "ZOOM")]
     min_zoom: u8,
 
     /// How far past its edge a tile keeps what it holds, as a fraction of the
@@ -138,8 +145,14 @@ fn run() -> Result<(), (ExitCode, String)> {
         grid_cm: args.grid_cm,
         buffer: args.buffer,
     };
-    // One archive per symbol set: the tiles and the next id of each so far.
-    let mut groups: Vec<(Standard, BTreeMap<TileId, Tile>, u64)> = Vec::new();
+    // One archive per symbol set: what is to go in it so far.
+    struct Group {
+        standard: Standard,
+        tiles: BTreeMap<TileId, Tile>,
+        next_id: u64,
+        sources: Vec<(u64, String)>,
+    }
+    let mut groups: Vec<Group> = Vec::new();
     let mut converted_maps = 0usize;
     for path in &args.maps {
         let text = std::fs::read_to_string(path).map_err(|e| {
@@ -163,10 +176,15 @@ fn run() -> Result<(), (ExitCode, String)> {
             StandardArg::Auto => SymbolTable::detect(&map),
         };
         let table = SymbolTable::new(standard);
-        let index = match groups.iter().position(|g| g.0 == standard) {
+        let index = match groups.iter().position(|g| g.standard == standard) {
             Some(i) => i,
             None => {
-                groups.push((standard, BTreeMap::new(), 0));
+                groups.push(Group {
+                    standard,
+                    tiles: BTreeMap::new(),
+                    next_id: 0,
+                    sources: Vec::new(),
+                });
                 groups.len() - 1
             }
         };
@@ -174,7 +192,7 @@ fn run() -> Result<(), (ExitCode, String)> {
             &map,
             &anchor,
             &table,
-            groups[index].2,
+            groups[index].next_id,
             args.min_zoom,
             &options,
         ) {
@@ -202,8 +220,15 @@ fn run() -> Result<(), (ExitCode, String)> {
                 level.zoom, level.objects, level.generalized, level.tiles
             );
         }
-        groups[index].2 = converted.next_id;
-        merge_tiles(&mut groups[index].1, converted.tiles);
+        groups[index].next_id = converted.next_id;
+        if let Some(id) = converted.coverage_id {
+            let name = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            groups[index].sources.push((id, name));
+        }
+        merge_tiles(&mut groups[index].tiles, converted.tiles);
         converted_maps += 1;
     }
     if converted_maps == 0 {
@@ -213,20 +238,22 @@ fn run() -> Result<(), (ExitCode, String)> {
         ));
     }
     let several = groups.len() > 1;
-    for (standard, tiles, _) in &groups {
+    for group in &groups {
         let info = ArchiveInfo {
-            layer: standard.name().to_string(),
+            layer: group.standard.name().to_string(),
             grid_cm: args.grid_cm,
             min_zoom: args.min_zoom,
             max_zoom: args.zoom,
+            sources: group.sources.clone(),
         };
         let path = if several {
-            suffixed(&args.output, standard)
+            suffixed(&args.output, &group.standard)
         } else {
             args.output.clone()
         };
-        write(&path, tiles, &info).map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
-        eprintln!("{} tiles written to {}", tiles.len(), path.display());
+        write(&path, &group.tiles, &info)
+            .map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+        eprintln!("{} tiles written to {}", group.tiles.len(), path.display());
     }
     Ok(())
 }

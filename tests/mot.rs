@@ -26,6 +26,18 @@ fn make_map(dir: &Path) -> std::path::PathBuf {
     map
 }
 
+/// The sample map drawn to the given `osm_to_omap` standard.
+fn make_map_in(dir: &Path, standard: &str) -> std::path::PathBuf {
+    let map = dir.join(format!("{standard}.omap"));
+    Command::cargo_bin("osm_to_omap")
+        .unwrap()
+        .args(["--standard", standard, BBOX, SAMPLE])
+        .arg(&map)
+        .assert()
+        .success();
+    map
+}
+
 fn make_archive(dir: &Path) -> std::path::PathBuf {
     let map = make_map(dir);
     let archive = dir.join("sample.pmtiles");
@@ -52,7 +64,8 @@ fn a_map_goes_into_an_archive_and_a_query_finds_it() {
         .assert()
         .success()
         .stdout(predicate::str::contains("objects in the area"))
-        .stdout(predicate::str::contains("Building"));
+        .stdout(predicate::str::contains("Building"))
+        .stdout(predicate::str::contains("in the coverage of sample.omap"));
 }
 
 #[test]
@@ -107,16 +120,39 @@ fn a_coarser_level_keeps_less_than_the_finest() {
 }
 
 #[test]
-fn a_zoom_the_archive_does_not_have_is_exit_1() {
+fn a_level_too_coarse_for_any_symbol_has_only_the_coverage_and_says_whose() {
     let dir = tempfile::tempdir().unwrap();
     let archive = make_archive(dir.path());
+    // At zoom 9 no symbol has appeared, but the map's area is there.
     Command::cargo_bin("tiles_query")
         .unwrap()
         .args(["--around", HERE, "--zoom", "9"])
         .arg(&archive)
         .assert()
+        .success()
+        .stdout(predicate::str::contains("0 objects in the area"))
+        .stdout(predicate::str::contains("in the coverage of sample.omap"));
+    // And where it is not, the archive says it is not mapped.
+    Command::cargo_bin("tiles_query")
+        .unwrap()
+        .args(["--around", "10,10", "--zoom", "9"])
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("in no map's coverage"));
+}
+
+#[test]
+fn a_zoom_the_archive_does_not_have_is_exit_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = make_archive(dir.path());
+    Command::cargo_bin("tiles_query")
+        .unwrap()
+        .args(["--around", HERE, "--zoom", "15"])
+        .arg(&archive)
+        .assert()
         .code(1)
-        .stderr(predicate::str::contains("zoom levels 11 to 14"));
+        .stderr(predicate::str::contains("zoom levels 0 to 14"));
     Command::cargo_bin("omap_to_tiles")
         .unwrap()
         .args([
@@ -130,18 +166,6 @@ fn a_zoom_the_archive_does_not_have_is_exit_1() {
         ])
         .assert()
         .code(1);
-}
-
-/// The sample map drawn to the given `osm_to_omap` standard.
-fn make_map_in(dir: &Path, standard: &str) -> std::path::PathBuf {
-    let map = dir.join(format!("{standard}.omap"));
-    Command::cargo_bin("osm_to_omap")
-        .unwrap()
-        .args(["--standard", standard, BBOX, SAMPLE])
-        .arg(&map)
-        .assert()
-        .success();
-    map
 }
 
 #[test]

@@ -106,7 +106,9 @@ fn it_serves_the_viewer_and_the_description_of_the_archive() {
     assert!(status.contains("200"));
     let info = String::from_utf8(info).unwrap();
     assert!(
-        info.contains("\"layer\":\"ISOM 2017-2\"") && info.contains("\"min_zoom\":11"),
+        info.contains("\"layer\":\"ISOM 2017-2\"")
+            && info.contains("\"min_zoom\":0")
+            && info.contains("\"object_min_zoom\":11"),
         "{info}"
     );
     assert!(info.contains("\"bounds\":["), "{info}");
@@ -132,6 +134,20 @@ fn it_draws_a_tile_and_overzooms_the_finest_level() {
     ));
     assert!(status.contains("200") && body.starts_with(PNG));
     assert!(body.len() > 1000, "{} bytes", body.len());
+}
+
+#[test]
+fn a_tile_too_coarse_for_symbols_shows_what_the_map_covers() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::start(&make_archive(dir.path()));
+    let t = tile_at(9);
+    let (status, body) = server.get(&format!("/tiles/9/{}/{}.png?size=128", t.x, t.y));
+    assert!(status.contains("200") && body.starts_with(PNG));
+    // The coverage, tinted: more than an empty image.
+    assert!(body.len() > 150, "{} bytes", body.len());
+    // A tile of the same zoom somewhere else is empty.
+    let (_, body) = server.get("/tiles/9/0/0.png?size=128");
+    assert!(body.len() < 200, "{} bytes", body.len());
 }
 
 #[test]

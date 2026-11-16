@@ -21,11 +21,11 @@
 //! how Mapper spaces them depends on the length of the line: drawn from a piece
 //! they would not meet the neighbouring tile's.
 
-use tiny_skia::{Pixmap, Transform};
+use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::geometry::Rect;
 use crate::map::{Coord, Map, Object, ObjectKind, PathObject, Point, TextObject};
-use crate::mot::{lat_lon, node_flag, Shape, Tile, TileId, TileObject};
+use crate::mot::{lat_lon, node_flag, Shape, Tile, TileId, TileObject, COVERAGE_SYMBOL};
 use crate::mot_symbols::SymbolTable;
 use crate::renderer::Renderer;
 use crate::xml_reader::read_xml_map_str;
@@ -33,6 +33,19 @@ use crate::xml_reader::read_xml_map_str;
 /// How far past the window, in millimetres of paper, an object may reach and
 /// still be drawn into it: the widest symbols are a few millimetres.
 const REACH_MM: f64 = 10.0;
+
+/// How the areas maps cover, which a tile holds as objects of the
+/// [`COVERAGE_SYMBOL`], are drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoverageStyle {
+    /// Not drawn.
+    None,
+    /// As an outline only: the edge of what a map covers, over the map.
+    Outline,
+    /// As a tinted area with an outline: where there are no objects to draw,
+    /// at the zooms too coarse for them, this is all that says a map is there.
+    Filled,
+}
 
 /// Draws tiles. It keeps the symbol set and one map to put each tile's objects
 /// in, so it is made once and used for as many tiles as there are; it is not
@@ -76,6 +89,7 @@ impl TileRenderer {
         view: TileId,
         scale: f64,
         pixels: u32,
+        coverage: CoverageStyle,
     ) -> Result<Pixmap, String> {
         if view.z < data.z
             || view.z > 30
@@ -129,6 +143,18 @@ impl TileRenderer {
             .post_concat(Transform::from_scale(ppm as f32, ppm as f32));
         Renderer::new(&self.template).paint(&mut pixmap.as_mut(), transform);
         self.template.objects.clear();
+        if coverage != CoverageStyle::None {
+            // Tile units to pixels: the tile's own meters, from the view's corner.
+            let grid_m = f64::from(tile.grid_cm) / 100.0;
+            let to_pixel = f64::from(pixels) / view_size;
+            let (dx, dy) = (view_west - data_west, data_north - view_north);
+            draw_coverage(&mut pixmap, tile, coverage, |x, y| {
+                (
+                    ((f64::from(x) * grid_m - dx) * to_pixel) as f32,
+                    ((f64::from(y) * grid_m - dy) * to_pixel) as f32,
+                )
+            });
+        }
         Ok(pixmap)
     }
 
@@ -172,6 +198,57 @@ impl TileRenderer {
             })
             .collect();
         Some(object)
+    }
+}
+
+/// Draws the coverage areas of `tile` on `pixmap`, `to_pixel` turning a node into
+/// a pixel position. The edges a tile cut an area along (flagged
+/// [`node_flag::CLIPPED`]) are not outlined, or the border of every tile would
+/// show.
+fn draw_coverage(
+    pixmap: &mut Pixmap,
+    tile: &Tile,
+    style: CoverageStyle,
+    to_pixel: impl Fn(i32, i32) -> (f32, f32),
+) {
+    let mut fill = Paint::default();
+    fill.set_color_rgba8(30, 110, 230, 40);
+    fill.anti_alias = true;
+    let mut line = Paint::default();
+    line.set_color_rgba8(30, 110, 230, 220);
+    line.anti_alias = true;
+    let stroke = Stroke {
+        width: 2.0,
+        ..Stroke::default()
+    };
+    let cut = node_flag::CLIPPED as u8;
+    for o in tile.objects.iter().filter(|o| o.symbol == COVERAGE_SYMBOL) {
+        let points: Vec<(f32, f32)> = o.nodes.iter().map(|n| to_pixel(n.x, n.y)).collect();
+        if points.len() < 3 {
+            continue;
+        }
+        if style == CoverageStyle::Filled {
+            let mut path = PathBuilder::new();
+            path.move_to(points[0].0, points[0].1);
+            for p in &points[1..] {
+                path.line_to(p.0, p.1);
+            }
+            path.close();
+            if let Some(path) = path.finish() {
+                pixmap.fill_path(&path, &fill, FillRule::Winding, Transform::identity(), None);
+            }
+        }
+        for (i, pair) in points.windows(2).enumerate() {
+            if o.nodes[i].flags & cut != 0 {
+                continue;
+            }
+            let mut edge = PathBuilder::new();
+            edge.move_to(pair[0].0, pair[0].1);
+            edge.line_to(pair[1].0, pair[1].1);
+            if let Some(edge) = edge.finish() {
+                pixmap.stroke_path(&edge, &line, &stroke, Transform::identity(), None);
+            }
+        }
     }
 }
 
@@ -224,7 +301,9 @@ mod tests {
             y: 5900,
         };
         let tile = tile_with_a_building(&table, id);
-        let pixmap = renderer.render(id, &tile, id, SCALE, 512).unwrap();
+        let pixmap = renderer
+            .render(id, &tile, id, SCALE, 512, CoverageStyle::None)
+            .unwrap();
         // The building's middle is at 0.3 + half its width, in a tile whose side
         // is about 2.4 km: 20 m is under 0.01 of it.
         let half = 20.0 / TileId::size(14);
@@ -235,6 +314,57 @@ mod tests {
             0,
             "empty ground is transparent"
         );
+    }
+
+    /// A tile with a coverage ring over the middle half of it, whose west edge
+    /// lies on the tile's own border and is flagged as a cut.
+    fn tile_with_coverage() -> Tile {
+        let side = (TileId::size(14) * 100.0 / 5.0) as i32;
+        let (a, b) = (side / 4, side * 3 / 4);
+        let cut = node_flag::CLIPPED as u8;
+        let mut tile = Tile::new(5);
+        tile.objects.push(TileObject {
+            id: 9,
+            symbol: COVERAGE_SYMBOL,
+            rotation: 0.0,
+            shape: Shape::Path(None),
+            nodes: vec![
+                node(0, a, cut), // the west edge runs down the tile's border
+                node(0, b, 0),
+                node(b, b, 0),
+                node(b, a, 0),
+                node(0, a, node_flag::CLOSE_POINT as u8),
+            ],
+        });
+        tile
+    }
+
+    #[test]
+    fn coverage_is_a_tint_below_the_symbols_and_an_outline_over_them() {
+        let table = SymbolTable::isom();
+        let mut renderer = TileRenderer::new(&table);
+        let id = TileId {
+            z: 14,
+            x: 8700,
+            y: 5900,
+        };
+        let tile = tile_with_coverage();
+        let draw = |renderer: &mut TileRenderer, style| {
+            renderer.render(id, &tile, id, SCALE, 256, style).unwrap()
+        };
+        let none = draw(&mut renderer, CoverageStyle::None);
+        assert!(none.pixels().iter().all(|p| p.alpha() == 0), "not drawn");
+        // Filled: the inside is tinted, outside it is clear.
+        let filled = draw(&mut renderer, CoverageStyle::Filled);
+        let inside = pixel(&filled, 0.4, 0.5);
+        assert!(inside[3] > 10 && inside[2] > inside[0], "{inside:?}");
+        assert_eq!(pixel(&filled, 0.9, 0.5)[3], 0);
+        // Outline: the inside is clear, and the edge is drawn, but not the one
+        // that lies on the tile's border, which is a cut and not the map's.
+        let outline = draw(&mut renderer, CoverageStyle::Outline);
+        assert_eq!(pixel(&outline, 0.4, 0.5)[3], 0);
+        assert!(pixel(&outline, 0.75, 0.5)[3] > 100, "the east edge");
+        assert_eq!(pixel(&outline, 0.004, 0.5)[3], 0, "the cut edge");
     }
 
     #[test]
@@ -254,7 +384,9 @@ mod tests {
             x: 17400,
             y: 11800,
         };
-        let pixmap = renderer.render(data, &tile, view, SCALE, 256).unwrap();
+        let pixmap = renderer
+            .render(data, &tile, view, SCALE, 256, CoverageStyle::None)
+            .unwrap();
         let half = 20.0 / TileId::size(15);
         let [r, _, _, a] = pixel(&pixmap, 0.6 + half, 0.6 + half);
         assert!(a == 255 && r < 60, "{a} {r}");
@@ -264,7 +396,9 @@ mod tests {
             x: 17401,
             y: 11801,
         };
-        let pixmap = renderer.render(data, &tile, view, SCALE, 256).unwrap();
+        let pixmap = renderer
+            .render(data, &tile, view, SCALE, 256, CoverageStyle::None)
+            .unwrap();
         assert_eq!(pixel(&pixmap, 0.5, 0.5)[3], 0);
     }
 
@@ -283,15 +417,21 @@ mod tests {
             x: 8701,
             y: 5900,
         };
-        assert!(renderer.render(data, &tile, elsewhere, SCALE, 64).is_err());
+        assert!(renderer
+            .render(data, &tile, elsewhere, SCALE, 64, CoverageStyle::None)
+            .is_err());
         let coarser = TileId {
             z: 13,
             x: 4350,
             y: 2950,
         };
-        assert!(renderer.render(data, &tile, coarser, SCALE, 64).is_err());
+        assert!(renderer
+            .render(data, &tile, coarser, SCALE, 64, CoverageStyle::None)
+            .is_err());
         tile.objects[0].symbol = 60_000;
-        let pixmap = renderer.render(data, &tile, data, SCALE, 64).unwrap();
+        let pixmap = renderer
+            .render(data, &tile, data, SCALE, 64, CoverageStyle::None)
+            .unwrap();
         assert!(pixmap.pixels().iter().all(|p| p.alpha() == 0));
     }
 
@@ -307,7 +447,7 @@ mod tests {
         let tile = tile_with_a_building(&table, id);
         let mut drawn = |scale: f64| -> usize {
             renderer
-                .render(id, &tile, id, scale, 512)
+                .render(id, &tile, id, scale, 512, CoverageStyle::None)
                 .unwrap()
                 .pixels()
                 .iter()
