@@ -3,9 +3,8 @@
 Status: **draft**. A first slice is implemented: the tile payload codec
 (`src/mot.rs`), the ISOM symbol table (`src/mot_symbols.rs`), conversion of a
 map to tiles (`src/mot_convert.rs`) and the PMTiles archive (`src/mot_archive.rs`),
-with the tools `omap_to_tiles` and `tiles_query`. Not yet: clipping of objects
-at tile borders (an object is stored whole in each tile it touches), zoom levels
-other than the one stored, per-symbol zoom rules, coverage, the history, other
+with the tools `omap_to_tiles` and `tiles_query`, and the clipping of objects at
+tile borders (`src/mot_clip.rs`). Not yet: zoom levels other than the one stored, per-symbol zoom rules, coverage, the history, other
 symbol sets. The measurements in [Measurements so far](#measurements-so-far)
 come from the throw-away programs in `examples/` (`tile_stats.rs`, `curve_fit.rs`,
 `hidden_areas.rs`); `examples/mot_try.rs` measures the real codec.
@@ -86,8 +85,26 @@ to get ground coordinates.
   rejected: 1° is ~111 km, a tile would hold dozens of maps and the viewer would
   download far more than it shows.)
 - Empty tiles cost nothing: the "islands in the ocean" case is free.
-- Objects crossing a tile border are **clipped** to each tile they touch (with
-  the flags below), the way vector tiles do it.
+- Objects crossing a tile border are **clipped**, the way vector tiles do it: a
+  tile holds the part of an object inside its box *grown by a buffer* (1/32 of
+  the tile's side by default, a header parameter of the producer), so a stroke or
+  a symbol at the edge is not cut short; a renderer draws each tile clipped to the
+  tile itself. A tile is about `(1 + 2 * buffer)^2` times as big as with none,
+  which is also what the archive costs (see the measurements).
+  - An object entirely inside the grown box is stored **whole**, curves included.
+  - One that crosses it has its curves **flattened** (to half a grid cell) and is
+    cut. A **line** becomes **pieces**, each its own object with the same id; the
+    first and last node of a piece that is a cut carry `CLIPPED`, and a piece that
+    starts at a cut carries `dash_offset`, how far along the whole line that
+    start is, so a renderer starts the dash pattern that far in. A closed part
+    (an area) is cut into a **ring closed along the box's edge**, and the node
+    each edge on the border leaves from carries `CLIPPED`, so a renderer fills
+    them but does not stroke them.
+  - A **point** or a **text** is not cut: it is in every tile whose grown box
+    holds it.
+  - Limits: the dash phase is not carried across a gap in a line, a closed ring
+    drawn as a line gets cut edges but no offsets, and a symbol (or text) bigger
+    than the buffer is cut at the edge of the neighbouring tile that holds it.
 - Inside a tile, objects are **sorted by symbol draw order** and the symbol id is
   run-length coded, so a renderer walks a tile in layer order without sorting.
 - Coarser zoom levels hold **generalised** tiles (small objects dropped, lines
@@ -238,6 +255,19 @@ another symbol, which can be wrong).
 
 Querying a 300 m square in the archive of both maps reads two tiles and takes a few
 milliseconds.
+
+What clipping costs: the size of the Bologna archive (PMTiles, zstd per tile) by
+buffer, as a fraction of the tile's side.
+
+| Buffer | Archive | Tiles |
+| --- | --- | --- |
+| 0 | 8.6 MB | 64 |
+| 1/64 | 9.2 MB | 65 |
+| 1/32 (default) | 9.8 MB | 67 |
+| 1/16 | 10.9 MB | 67 |
+
+With no buffer it is smaller than storing every object whole in each tile it
+touches (about 9.1 MB), but a stroke or symbol at a border is then cut short.
 
 ## Future adaptations
 

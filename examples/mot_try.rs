@@ -16,6 +16,7 @@ fn main() {
     let options = Options {
         zoom: args.get(3).and_then(|v| v.parse().ok()).unwrap_or(14),
         grid_cm: args.get(4).and_then(|v| v.parse().ok()).unwrap_or(5),
+        ..Options::default()
     };
     let t = std::time::Instant::now();
     let converted = convert(&map, &anchor, &SymbolTable::isom(), 0, &options).expect("convert");

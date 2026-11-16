@@ -2,7 +2,7 @@
 //! `mds/MOT-Format.md`, in a PMTiles file.
 //!
 //! ```text
-//! omap_to_tiles [--zoom 14] [--grid-cm 5] --output world.pmtiles <map-file>...
+//! omap_to_tiles [--zoom 14] [--grid-cm 5] [--buffer 0.03125] --output world.pmtiles <map-file>...
 //! ```
 //!
 //! Each map must be georeferenced with a geographic reference point (Mapper's
@@ -20,6 +20,13 @@
 //! |---|---|---|
 //! | `--zoom` | 14 | zoom of the stored tiles, 1 to 20 (14 is about 2 km wide) |
 //! | `--grid-cm` | 5 | resolution of the nodes, in centimetres of Mercator |
+//! | `--buffer` | 0.03125 | how far past its edge a tile keeps what it holds, as a fraction of its side |
+//!
+//! A tile holds the part of each object inside its box grown by the buffer, so
+//! a line or a symbol at the edge is not cut short; an object that crosses the
+//! box has its curves flattened, and its pieces say where they were cut and,
+//! for a line, how far along it they start, so its dashes stay in step from
+//! tile to tile.
 //!
 //! Exit codes: 0 success, 1 bad usage, 2 a map cannot be read or none can be
 //! converted, 4 the archive cannot be written.
@@ -54,9 +61,21 @@ struct Args {
     #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u8).range(1..=20))]
     zoom: u8,
 
+    /// How far past its edge a tile keeps what it holds, as a fraction of the
+    /// tile's side (0 to 0.5).
+    #[arg(long, default_value_t = 0.03125, value_parser = parse_buffer, value_name = "FRACTION")]
+    buffer: f64,
+
     /// Resolution of the nodes, in centimetres of Mercator.
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=100), value_name = "CM")]
     grid_cm: u32,
+}
+
+fn parse_buffer(text: &str) -> Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(v) if (0.0..=0.5).contains(&v) => Ok(v),
+        _ => Err(format!("not a fraction between 0 and 0.5: {text:?}")),
+    }
 }
 
 fn run() -> Result<(), (ExitCode, String)> {
@@ -73,6 +92,7 @@ fn run() -> Result<(), (ExitCode, String)> {
     let options = Options {
         zoom: args.zoom,
         grid_cm: args.grid_cm,
+        buffer: args.buffer,
     };
     let table = SymbolTable::isom();
     let mut tiles: BTreeMap<TileId, Tile> = BTreeMap::new();
