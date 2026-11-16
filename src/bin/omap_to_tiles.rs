@@ -1,0 +1,145 @@
+//! Converts maps into a MOT archive: the tiled world-map format of
+//! `mds/MOT-Format.md`, in a PMTiles file.
+//!
+//! ```text
+//! omap_to_tiles [--zoom 14] [--grid-cm 5] --output world.pmtiles <map-file>...
+//! ```
+//!
+//! Each map must be georeferenced with a geographic reference point (Mapper's
+//! `<ref_point_deg>`, which every georeferenced map it saves has) so it can be
+//! placed on the earth; one that is not is skipped with a warning. All the
+//! maps go into one archive, their objects merged tile by tile.
+//!
+//! The symbols are the ISOM 2017-2 table. A symbol of the map that is not in
+//! it is stored as the closest one (same code, the symbol it is a variant of,
+//! or the same name) or, where there is none, its objects are dropped; either
+//! is reported as a warning, with how many objects it concerns. Objects of
+//! hidden symbols and drawing aids are left out: they draw nothing.
+//!
+//! | option | default | |
+//! |---|---|---|
+//! | `--zoom` | 14 | zoom of the stored tiles, 1 to 20 (14 is about 2 km wide) |
+//! | `--grid-cm` | 5 | resolution of the nodes, in centimetres of Mercator |
+//!
+//! Exit codes: 0 success, 1 bad usage, 2 a map cannot be read or none can be
+//! converted, 4 the archive cannot be written.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::Parser;
+use maur_o::mot::{Tile, TileId};
+use maur_o::mot_archive::{write, ArchiveInfo};
+use maur_o::mot_convert::{convert, merge_tiles, Options};
+use maur_o::mot_symbols::SymbolTable;
+use maur_o::orthophoto::geographic_anchor;
+use maur_o::xml_reader::read_xml_map_str;
+
+#[derive(Parser)]
+#[command(
+    version,
+    about = "Converts Mapper maps into a MOT archive (tiled world map, in PMTiles)."
+)]
+struct Args {
+    /// The maps to convert (.omap or .xmap).
+    #[arg(value_name = "MAP_FILE", required = true)]
+    maps: Vec<PathBuf>,
+
+    /// The archive to write.
+    #[arg(short, long, value_name = "FILE")]
+    output: PathBuf,
+
+    /// Zoom level of the stored tiles.
+    #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u8).range(1..=20))]
+    zoom: u8,
+
+    /// Resolution of the nodes, in centimetres of Mercator.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=100), value_name = "CM")]
+    grid_cm: u32,
+}
+
+fn run() -> Result<(), (ExitCode, String)> {
+    let args = match Args::try_parse() {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = e.print();
+            return Err((
+                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
+                String::new(),
+            ));
+        }
+    };
+    let options = Options {
+        zoom: args.zoom,
+        grid_cm: args.grid_cm,
+    };
+    let table = SymbolTable::isom();
+    let mut tiles: BTreeMap<TileId, Tile> = BTreeMap::new();
+    let mut next_id = 0u64;
+    let mut converted_maps = 0usize;
+    for path in &args.maps {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            (
+                ExitCode::from(2),
+                format!("Error: cannot read {}: {e}", path.display()),
+            )
+        })?;
+        let Some(anchor) = geographic_anchor(&text) else {
+            eprintln!(
+                "Warning: {} has no geographic reference point; skipped",
+                path.display()
+            );
+            continue;
+        };
+        let (map, _) = read_xml_map_str(&text)
+            .map_err(|e| (ExitCode::from(2), format!("Error: {}: {e}", path.display())))?;
+        let converted = match convert(&map, &anchor, &table, next_id, &options) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Warning: {}: {e}; skipped", path.display());
+                continue;
+            }
+        };
+        for warning in &converted.warnings {
+            eprintln!("Warning: {}: {warning}", path.display());
+        }
+        eprintln!(
+            "{}: {} objects stored ({} dropped, {} under another symbol, {} hidden or helper left out)",
+            path.display(),
+            converted.objects,
+            converted.dropped,
+            converted.remapped,
+            converted.hidden
+        );
+        next_id = converted.next_id;
+        merge_tiles(&mut tiles, converted.tiles);
+        converted_maps += 1;
+    }
+    if converted_maps == 0 {
+        return Err((
+            ExitCode::from(2),
+            "Error: none of the maps could be converted".into(),
+        ));
+    }
+    let info = ArchiveInfo {
+        layer: table.standard.to_string(),
+        grid_cm: args.grid_cm,
+        zoom: args.zoom,
+    };
+    write(&args.output, &tiles, &info).map_err(|e| (ExitCode::from(4), format!("Error: {e}")))?;
+    eprintln!("{} tiles written to {}", tiles.len(), args.output.display());
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err((code, message)) => {
+            if !message.is_empty() {
+                eprintln!("{message}");
+            }
+            code
+        }
+    }
+}

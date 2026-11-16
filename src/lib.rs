@@ -56,8 +56,9 @@
 //!
 //! MOT is a compact tiled format for keeping every map of the world as one
 //! map per symbol set (`mds/MOT-Format.md`, a draft). [`mot`] is its tile
-//! addressing and payload codec, [`mot_symbols`] a layer's symbol table, and
-//! [`mot_convert`] makes tiles from a map.
+//! addressing and payload codec, [`mot_symbols`] a layer's symbol table,
+//! [`mot_convert`] makes tiles from a map, and `mot_archive` keeps them in a
+//! PMTiles file (native builds only).
 //!
 //! # From contours to elevation
 //!
@@ -140,6 +141,8 @@ pub mod image_template;
 pub mod map;
 pub mod map_areas;
 pub mod mot;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mot_archive;
 pub mod mot_convert;
 pub mod mot_symbols;
 pub mod naming;

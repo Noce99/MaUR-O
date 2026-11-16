@@ -15,6 +15,9 @@ OpenStreetMap data (plus optional GTFS transit feeds) into a Mapper map, and
 `mauro ortho` downloads the aerial orthophoto of a map's ground
 (from about fifty open national and regional WMS services across Europe)
 and adds it to the map as a template. All of these are subcommands of the one binary, `mauro`.
+and adds it to the map as a template. An eighth and ninth, `omap_to_tiles`
+and `tiles_query`, are the command line of MOT, a draft tiled format for
+keeping all the world's maps as one map (`mds/MOT-Format.md`).
 
 This crate is consumed by the o-mnia web app from a vendored copy (via
 `crates/maur-o-wasm`, o-mnia's own wasm-bindgen adapter — see that repo's
@@ -74,6 +77,8 @@ subcommand module also has `exit_meaning(code)`, mirroring its doc comment's
 exit codes, which the job screen shows; keep the two in sync. Full CLI
 flags for each are documented in its module's own top-of-file doc comment
 (`src/bin/mauro/*.rs`) and in `README.md`'s Usage section. When changing a
+| `omap_to_tiles` | Convert maps into a MOT archive: the tiled, compact world-map format of `mds/MOT-Format.md` (draft), in PMTiles. |
+| `tiles_query` | List the objects of a MOT archive around a place (`--around`/`--bbox`), by symbol, reading only the tiles it touches. |
 flag, default or exit code, update both (and `--help` text in the clap
 definition) — they are kept in sync by hand.
 
@@ -198,6 +203,18 @@ that the model doesn't. The binary does the HTTP itself (`ureq`, a
 native-only dependency, so o-mnia's wasm build never sees it). Its
 integration tests (`tests/add_orthophoto.rs`) cover only the offline exit
 paths, so CI never depends on anyone's server.
+
+### MOT, the tiled world map (`omap_to_tiles`, `tiles_query`)
+
+Design and decisions: `mds/MOT-Format.md` (a draft). `mot.rs` is the pure part:
+Web Mercator tile addressing, the integer grid, and the tile payload codec.
+`mot_symbols.rs` is a layer's symbol table (ISOM 2017-2 for now) and the
+closest-symbol rule; `mot_convert.rs` places a `Map` on the earth and stores each
+object in the tiles it touches (no clipping yet); `mot_archive.rs` keeps the
+tiles in a PMTiles file through the `pmtiles` crate (native only, like `ureq`,
+so the wasm build never sees it). Source of truth, logins, servers and the UI
+are o-mnia's, not this crate's; the format only defines tiles and what to do
+with them.
 
 ### Benchmark support modules
 

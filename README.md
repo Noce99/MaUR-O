@@ -30,7 +30,10 @@ It also ships tools that go beyond drawing a map:
   optionally with bus and train lines from GTFS feeds;
 - **`mauro ortho`** downloads the aerial orthophoto of a map's ground from
   a national or regional mapping agency (about fifty open services across
-  Europe) and adds it to the map as a georeferenced template.
+  Europe) and adds it to the map as a georeferenced template;
+- **`omap_to_tiles`** and **`tiles_query`** keep maps in, and read them back
+  from, a MOT archive: a tiled, compact vector format meant to hold every map
+  of the world as one map (a draft, see `mds/MOT-Format.md`).
 
 Everything is also usable as a Rust library (`maur_o`): besides rendering, it
 covers OCAD import, course layout, runnability grids and route finding,
@@ -51,6 +54,8 @@ together.
   - [`mauro dem-eval`](#mauro-dem-eval)
   - [`mauro osm`](#mauro-osm)
   - [`mauro ortho`](#mauro-ortho)
+  - [`omap_to_tiles`](#omap_to_tiles)
+  - [`tiles_query`](#tiles_query)
 - [Using it as a library](#using-it-as-a-library)
 - [Development](#development)
 - [Implementation Details](#implementation-details)
@@ -91,6 +96,8 @@ tool:
 | [`mauro dem-eval`](#mauro-dem-eval) | Scores a predicted elevation GeoTIFF against a ground-truth one. |
 | [`mauro osm`](#mauro-osm) | Converts OpenStreetMap data into a Mapper map, drawn to ISSprOM, ISOM or openstreetmap.org's look. |
 | [`mauro ortho`](#mauro-ortho) | Adds the aerial orthophoto of a map's ground to it as a template. |
+| [`omap_to_tiles`](#omap_to_tiles) | Converts maps into a MOT archive (tiled world map, in PMTiles). |
+| [`tiles_query`](#tiles_query) | Lists the objects of a MOT archive around a place, by symbol. |
 
 `mauro --help` lists them, and every one of them takes `--help` and
 `--version` (`mauro render --help`). `mauro` on its own, in a terminal,
@@ -679,6 +686,56 @@ Exit codes: `0` success, `1` a usage error, `2` the map could not be read,
 the photo can be placed in), `4` the image or the map could not be written,
 `5` no service has photos of the map's ground, `6` the service could not be
 reached or answered with something other than a photo.
+### `omap_to_tiles`
+
+Converts maps into a MOT archive, the tiled world-map format of
+`mds/MOT-Format.md` (a draft): one PMTiles file whose tiles, Web Mercator
+`z/x/y`, hold the objects of every map that touches them, with the symbols
+stored by id in the ISOM 2017-2 table instead of as definitions.
+
+```
+omap_to_tiles [--zoom 14] [--grid-cm 5] --output world.pmtiles <map-file>...
+```
+
+Each map must have a geographic reference point (`<ref_point_deg>`, which
+Mapper writes for every georeferenced map); one without is skipped with a
+warning. A symbol that is not in the table is stored as the closest one
+(same code, the symbol it is a variant of, or the same name) or, where there
+is none, its objects are dropped; both are warnings, with the number of
+objects. Objects of hidden symbols and drawing aids are left out. A
+projected reference point far outside its UTM zone is warned about too: the
+map is placed where its geographic reference point says, which is then
+probably not where it is. The nodes are stored on a grid of `--grid-cm`
+centimetres, in tiles of zoom `--zoom` (14 is about 2 km wide).
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Success. |
+| 1 | Bad usage. |
+| 2 | A map cannot be read, or none could be converted. |
+| 4 | The archive cannot be written. |
+
+### `tiles_query`
+
+Says what a MOT archive holds around a place: the objects in an area, by
+symbol, reading only the tiles the area touches.
+
+```
+tiles_query --around lat,lon [--size 1km] [--objects] <archive>
+tiles_query --bbox min_lon,min_lat,max_lon,max_lat [--objects] <archive>
+```
+
+The output is a line per symbol in the area (its code, its name and the
+number of objects), or with `--objects` a line per object as well. Tiles are
+not clipped yet, so an object is counted when the box of its nodes touches
+the area.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Success (also for an area with nothing in it). |
+| 1 | Bad usage. |
+| 2 | The archive cannot be read, or holds another symbol set. |
+
 
 ## Using it as a library
 

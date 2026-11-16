@@ -164,6 +164,17 @@ pub fn convert(
         remapped: 0,
         warnings: Vec::new(),
     };
+    // A UTM easting a long way outside its zone's strip means the file's
+    // georeference is wrong (an easting of 0 is the usual slip), and the map
+    // would be stored where Mapper shows it, not where it is.
+    let utm_zone = matches!(georef.epsg, 32601..=32660 | 32701..=32760 | 25828..=25838);
+    if utm_zone && !(100_000.0..=900_000.0).contains(&georef.ref_point_x) {
+        converted.warnings.push(format!(
+            "the map's projected reference point has an easting of {}, far outside a UTM zone: \
+             its georeference looks wrong, and it is placed at lat {:.4}, lon {:.4}",
+            georef.ref_point_x, anchor.lat, anchor.lon
+        ));
+    }
     let mut remapped_symbols = vec![0usize; map.symbols.len()];
     let mut dropped_symbols = vec![0usize; map.symbols.len()];
 
@@ -314,6 +325,21 @@ pub fn convert(
     Ok(converted)
 }
 
+/// Adds the tiles of `from` to those of `into`: the objects of a tile in both
+/// go into one. Both must be on the same grid.
+pub fn merge_tiles(into: &mut BTreeMap<TileId, Tile>, from: BTreeMap<TileId, Tile>) {
+    for (id, tile) in from {
+        match into.entry(id) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(tile);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                slot.get_mut().objects.extend(tile.objects);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +364,8 @@ mod tests {
         map.georeferencing = Some(Georeferencing {
             scale: 10000,
             epsg: 32632,
+            ref_point_x: 700_000.0,
+            ref_point_y: 4_900_000.0,
             ..Default::default()
         });
         map
@@ -509,6 +537,27 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 50, "every object is in some tile");
+    }
+
+    #[test]
+    fn an_easting_outside_the_zone_is_flagged() {
+        let mut map = empty_map();
+        let o = object_of(
+            &map,
+            |s| matches!(s, Symbol::Point(_)),
+            ObjectKind::Point,
+            vec![Coord::new(0.0, 0.0, 0)],
+        );
+        map.objects.push(o);
+        let fine = convert_map(&map);
+        assert!(fine.warnings.iter().all(|w| !w.contains("easting")));
+        map.georeferencing.as_mut().unwrap().ref_point_x = 0.0;
+        let broken = convert_map(&map);
+        assert!(
+            broken.warnings.iter().any(|w| w.contains("easting")),
+            "{:?}",
+            broken.warnings
+        );
     }
 
     #[test]

@@ -116,6 +116,16 @@ impl TileId {
     }
 }
 
+/// A Mercator position in meters as `(latitude, longitude)` in degrees: the
+/// inverse of [`crate::orthophoto::web_mercator`].
+pub fn lat_lon(x: f64, y: f64) -> (f64, f64) {
+    let radius = WORLD_HALF / PI;
+    (
+        (y / radius).sinh().atan().to_degrees(),
+        (x / radius).to_degrees(),
+    )
+}
+
 /// The resolution of a tile's coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Grid {
@@ -720,6 +730,13 @@ mod tests {
             x: 501,
             y: 302
         }));
+    }
+
+    #[test]
+    fn lat_lon_undoes_web_mercator() {
+        let (x, y) = crate::orthophoto::web_mercator(44.4938, 11.343);
+        let (lat, lon) = lat_lon(x, y);
+        assert!((lat - 44.4938).abs() < 1e-9 && (lon - 11.343).abs() < 1e-9);
     }
 
     #[test]
