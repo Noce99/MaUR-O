@@ -58,8 +58,9 @@
 //! map per symbol set (`mds/MOT-Format.md`, a draft). [`mot`] is its tile
 //! addressing and payload codec, [`mot_symbols`] a layer's symbol table,
 //! [`mot_convert`] makes tiles from a map, `mot_archive` keeps them in a
-//! PMTiles file (native builds only), and [`mot_render`] draws a tile with the
-//! renderer that draws `.omap` files.
+//! PMTiles file (native builds only), [`mot_render`] draws a tile with the
+//! renderer that draws `.omap` files, and [`mot_history`] keeps the versions of a
+//! tile's objects and the changesets that made them.
 //!
 //! # From contours to elevation
 //!
@@ -146,6 +147,7 @@ pub mod mot;
 pub mod mot_archive;
 pub mod mot_clip;
 pub mod mot_convert;
+pub mod mot_history;
 pub mod mot_render;
 pub mod mot_symbols;
 pub mod naming;
