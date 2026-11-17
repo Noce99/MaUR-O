@@ -481,6 +481,25 @@ impl Form {
             let label = format!("{:>width$} ", field.label, width = label_width as usize - 1);
             frame.render_widget(Paragraph::new(Span::styled(label, label_style)), label_area);
 
+            // A path looks like text, so say a picker is behind it: a tag at
+            // the right edge, which the typed text keeps clear of.
+            let tag = match (&field.kind, focused) {
+                (Kind::Path(_) | Kind::Paths(_), true) => " [Enter: browse]",
+                (Kind::Path(_) | Kind::Paths(_), false) => " [...]",
+                _ => "",
+            };
+            let tag_width = tag.chars().count() as u16;
+            let (value_area, tag_area) = if tag_width > 0 && value_area.width > tag_width * 2 {
+                let [v, t] =
+                    Layout::horizontal([Constraint::Min(0), Constraint::Length(tag_width)])
+                        .areas(value_area);
+                (v, Some(t))
+            } else {
+                (value_area, None)
+            };
+            if let Some(t) = tag_area {
+                frame.render_widget(Paragraph::new(Span::raw(tag).dim()), t);
+            }
             let width = value_area.width as usize;
             let (value, cursor) = match &field.kind {
                 Kind::Heading => unreachable!("drawn above"),
