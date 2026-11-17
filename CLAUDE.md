@@ -14,13 +14,10 @@ contour lines. `mauro osm` goes the other way: it turns
 OpenStreetMap data (plus optional GTFS transit feeds) into a Mapper map, and
 `mauro ortho` downloads the aerial orthophoto of a map's ground
 (from about fifty open national and regional WMS services across Europe)
-and adds it to the map as a template. All of these are subcommands of the one binary, `mauro`.
-and adds it to the map as a template. An eighth and ninth, `omap_to_tiles`
-and `tiles_query`, are the command line of MOT, a draft tiled format for
-keeping all the world's maps as one map (`mds/MOT-Format.md`).
-and adds it to the map as a template. An eighth to tenth, `omap_to_tiles`,
-`tiles_query` and `tiles_serve`, are the command line of MOT, a draft tiled
-format for keeping all the world's maps as one map (`mds/MOT-Format.md`).
+and adds it to the map as a template. All of these are subcommands of the one binary,
+`mauro`. `mauro tiles build|query|serve` are the
+command line of MOT, a draft tiled format for keeping all the world's maps as
+one map (`mds/MOT-Format.md`).
 
 This crate is consumed by the o-mnia web app from a vendored copy (via
 `crates/maur-o-wasm`, o-mnia's own wasm-bindgen adapter — see that repo's
@@ -80,9 +77,9 @@ subcommand module also has `exit_meaning(code)`, mirroring its doc comment's
 exit codes, which the job screen shows; keep the two in sync. Full CLI
 flags for each are documented in its module's own top-of-file doc comment
 (`src/bin/mauro/*.rs`) and in `README.md`'s Usage section. When changing a
-| `omap_to_tiles` | Convert maps into a MOT archive: the tiled, compact world-map format of `mds/MOT-Format.md` (draft), in PMTiles. |
-| `tiles_query` | List the objects of a MOT archive around a place (`--around`/`--bbox`), by symbol, reading only the tiles it touches. |
-| `tiles_serve` | Serve a MOT archive as a slippy map to look at in a browser (a std-only HTTP server, one HTML page embedded in the binary); tiles are drawn server-side by the crate's renderer. A development viewer, not o-mnia's. |
+| `mauro tiles build` | Convert maps into a MOT archive: the tiled, compact world-map format of `mds/MOT-Format.md` (draft), in PMTiles. |
+| `mauro tiles query` | List the objects of a MOT archive around a place (`--around`/`--bbox`), by symbol, reading only the tiles it touches. |
+| `mauro tiles serve` | Serve a MOT archive as a slippy map to look at in a browser (a std-only HTTP server, one HTML page embedded in the binary); tiles are drawn server-side by the crate's renderer. A development viewer, not o-mnia's. |
 flag, default or exit code, update both (and `--help` text in the clap
 definition) — they are kept in sync by hand.
 
@@ -208,7 +205,7 @@ native-only dependency, so o-mnia's wasm build never sees it). Its
 integration tests (`tests/add_orthophoto.rs`) cover only the offline exit
 paths, so CI never depends on anyone's server.
 
-### MOT, the tiled world map (`omap_to_tiles`, `tiles_query`)
+### MOT, the tiled world map (`mauro tiles build`, `mauro tiles query`)
 
 Design and decisions: `mds/MOT-Format.md` (a draft). `mot.rs` is the pure part:
 Web Mercator tile addressing, the integer grid, and the tile payload codec.
@@ -227,7 +224,7 @@ generalising by those rules; `mot_archive.rs` keeps the
 tiles in a PMTiles file through the `pmtiles` crate (native only, like `ureq`,
 so the wasm build never sees it). `mot_render.rs` draws a tile by turning it back
 into a `Map` (the ISOM symbols, paper mm at a scale the viewer picks) and handing
-it to the same `Renderer` as `.omap` files; `tiles_serve` puts that behind a
+it to the same `Renderer` as `.omap` files; `mauro tiles serve` puts that behind a
 small HTTP server and a one-page viewer, with the layers (one archive per symbol set)
 stacked by priority and masked by each one's coverage (`composite`) as a way to look at an archive. The
 real viewer is o-mnia's (a wasm build over this crate), not this binary. Source of truth, logins, servers and the UI

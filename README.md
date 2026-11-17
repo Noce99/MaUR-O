@@ -31,7 +31,7 @@ It also ships tools that go beyond drawing a map:
 - **`mauro ortho`** downloads the aerial orthophoto of a map's ground from
   a national or regional mapping agency (about fifty open services across
   Europe) and adds it to the map as a georeferenced template;
-- **`omap_to_tiles`**, **`tiles_query`** and **`tiles_serve`** keep maps in, read
+- **`mauro tiles build`**, **`mauro tiles query`** and **`mauro tiles serve`** keep maps in, read
   them back from, and show on a web page, a MOT archive: a tiled, compact vector format meant to hold every map
   of the world as one map (a draft, see `mds/MOT-Format.md`).
 
@@ -54,9 +54,9 @@ together.
   - [`mauro dem-eval`](#mauro-dem-eval)
   - [`mauro osm`](#mauro-osm)
   - [`mauro ortho`](#mauro-ortho)
-  - [`omap_to_tiles`](#omap_to_tiles)
-  - [`tiles_query`](#tiles_query)
-  - [`tiles_serve`](#tiles_serve)
+  - [`mauro tiles build`](#mauro-tiles-build)
+  - [`mauro tiles query`](#mauro-tiles-query)
+  - [`mauro tiles serve`](#mauro-tiles-serve)
 - [Using it as a library](#using-it-as-a-library)
 - [Development](#development)
 - [Implementation Details](#implementation-details)
@@ -97,9 +97,9 @@ tool:
 | [`mauro dem-eval`](#mauro-dem-eval) | Scores a predicted elevation GeoTIFF against a ground-truth one. |
 | [`mauro osm`](#mauro-osm) | Converts OpenStreetMap data into a Mapper map, drawn to ISSprOM, ISOM or openstreetmap.org's look. |
 | [`mauro ortho`](#mauro-ortho) | Adds the aerial orthophoto of a map's ground to it as a template. |
-| [`omap_to_tiles`](#omap_to_tiles) | Converts maps into a MOT archive (tiled world map, in PMTiles). |
-| [`tiles_query`](#tiles_query) | Lists the objects of a MOT archive around a place, by symbol. |
-| [`tiles_serve`](#tiles_serve) | Serves a MOT archive as a slippy map to look at in a browser, drawn with the crate's renderer. |
+| [`mauro tiles build`](#mauro-tiles-build) | Converts maps into a MOT archive (tiled world map, in PMTiles). |
+| [`mauro tiles query`](#mauro-tiles-query) | Lists the objects of a MOT archive around a place, by symbol. |
+| [`mauro tiles serve`](#mauro-tiles-serve) | Serves a MOT archive as a slippy map to look at in a browser, drawn with the crate's renderer. |
 
 `mauro --help` lists them, and every one of them takes `--help` and
 `--version` (`mauro render --help`). `mauro` on its own, in a terminal,
@@ -688,7 +688,7 @@ Exit codes: `0` success, `1` a usage error, `2` the map could not be read,
 the photo can be placed in), `4` the image or the map could not be written,
 `5` no service has photos of the map's ground, `6` the service could not be
 reached or answered with something other than a photo.
-### `omap_to_tiles`
+### `mauro tiles build`
 
 Converts maps into a MOT archive, the tiled world-map format of
 `mds/MOT-Format.md` (a draft): one PMTiles file whose tiles, Web Mercator
@@ -696,7 +696,7 @@ Converts maps into a MOT archive, the tiled world-map format of
 stored by id in a table (ISOM 2017-2 or ISSprOM 2019) instead of as definitions.
 
 ```
-omap_to_tiles [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 0] [--grid-cm 5] [--buffer 0.03125] --output world.pmtiles <map-file>...
+mauro tiles build [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 0] [--grid-cm 5] [--buffer 0.03125] --output world.pmtiles <map-file>...
 ```
 
 The symbols of a map are stored in the table of the standard it is drawn to:
@@ -744,14 +744,14 @@ Mapper's spacing depends on its length.
 | 2 | A map cannot be read, or none could be converted. |
 | 4 | The archive cannot be written. |
 
-### `tiles_query`
+### `mauro tiles query`
 
 Says what a MOT archive holds around a place: the objects in an area, by
 symbol, reading only the tiles the area touches.
 
 ```
-tiles_query --around lat,lon [--size 1km] [--zoom Z] [--objects] <archive>
-tiles_query --bbox min_lon,min_lat,max_lon,max_lat [--zoom Z] [--objects] <archive>
+mauro tiles query --around lat,lon [--size 1km] [--zoom Z] [--objects] <archive>
+mauro tiles query --bbox min_lon,min_lat,max_lon,max_lat [--zoom Z] [--objects] <archive>
 ```
 
 `--zoom` picks the level to read (the archive's finest by default): a coarser one
@@ -772,7 +772,7 @@ once, by its id, however many tiles it was cut across.
 | 2 | The archive cannot be read, or holds another symbol set. |
 
 
-### `tiles_serve`
+### `mauro tiles serve`
 
 Serves a MOT archive as a slippy map to look at in a browser, with the tiles
 drawn by this crate's own renderer: a tile is turned back into a map (its
@@ -780,7 +780,7 @@ objects, with the symbols of ISOM 2017-2) and drawn as an `.omap` file is, so
 it looks as Mapper draws the map.
 
 ```
-tiles_serve [--host 127.0.0.1] [--port 8080] [--workers N] <archive>...
+mauro tiles serve [--host 127.0.0.1] [--port 8080] [--workers N] <archive>...
 ```
 
 It prints the address it listens on (`--port 0` picks a free one) and serves

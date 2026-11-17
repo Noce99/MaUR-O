@@ -1,8 +1,8 @@
-//! `tiles_serve`: that it serves the viewer, the archive's description and drawn
+//! `mauro tiles serve`: that it serves the viewer, the archive's description and drawn
 //! tiles over HTTP, and exits with the documented code when it cannot.
 //!
 //! The server is started as a process on a free port, as the tool is used.
-//! Like `mot.rs` this makes its map with `osm_to_omap`, so no file of ours
+//! Like `mot.rs` this makes its map with `mauro osm`, so no file of ours
 //! holds one.
 
 use assert_cmd::Command;
@@ -25,9 +25,9 @@ struct Server {
 
 impl Server {
     fn start(archives: &[&Path]) -> Server {
-        let program = Command::cargo_bin("tiles_serve").unwrap();
+        let program = Command::cargo_bin("mauro").unwrap();
         let mut child = std::process::Command::new(program.get_program())
-            .args(["--port", "0", "--workers", "2"])
+            .args(["tiles", "serve", "--port", "0", "--workers", "2"])
             .args(archives)
             .stdout(Stdio::piped())
             .spawn()
@@ -195,24 +195,31 @@ fn archives_are_layers_and_the_first_has_the_priority() {
 
 #[test]
 fn it_exits_with_the_documented_codes() {
-    Command::cargo_bin("tiles_serve").unwrap().assert().code(1);
-    Command::cargo_bin("tiles_serve")
+    Command::cargo_bin("mauro")
         .unwrap()
+        .args(["tiles", "serve"])
+        .assert()
+        .code(1);
+    Command::cargo_bin("mauro")
+        .unwrap()
+        .args(["tiles", "serve"])
         .arg("no_such_file.pmtiles")
         .assert()
         .code(2)
         .stderr(predicate::str::contains("cannot read"));
     let dir = tempfile::tempdir().unwrap();
     let archive = make_archive(dir.path());
-    Command::cargo_bin("tiles_serve")
+    Command::cargo_bin("mauro")
         .unwrap()
+        .args(["tiles", "serve"])
         .args(["--host", "256.256.256.256"])
         .arg(&archive)
         .assert()
         .code(4);
     // One layer is one archive: the same symbol set twice is refused.
-    Command::cargo_bin("tiles_serve")
+    Command::cargo_bin("mauro")
         .unwrap()
+        .args(["tiles", "serve"])
         .arg(&archive)
         .arg(&archive)
         .assert()

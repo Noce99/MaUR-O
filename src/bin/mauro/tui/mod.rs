@@ -201,6 +201,9 @@ mod tests {
             "mauro dem-eval",
             "mauro benchmark create",
             "mauro benchmark run",
+            "mauro tiles build",
+            "mauro tiles query",
+            "mauro tiles serve",
         ];
         for (at, title) in titles.iter().enumerate() {
             let mut app = App::new();
