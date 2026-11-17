@@ -26,8 +26,9 @@
 //! the first validation pictures as *picture | label | answer*, which is the
 //! quickest way to see what the net reads.
 //!
-//! The answer is a tree of curves, not a map: turning it into an `.omap` is
-//! not done yet.
+//! The answer is a tree of curves, not a map: `mauro net image-to-map` turns
+//! it into one, as polygons and without going through pixels (see
+//! [`crate::tree_vector`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
