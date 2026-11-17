@@ -8,6 +8,11 @@
 //! mauro dem-eval         score a predicted DEM GeoTIFF against a ground-truth one
 //! mauro osm              convert OpenStreetMap data into a map
 //! mauro ortho            add a map's aerial orthophoto to it as a template
+//! mauro net dataset      generate a dataset of random maps, with their pixel labels
+//! mauro net grid-to-map  turn a grid of labels back into a map
+//! mauro net train        train a network to read a rendered map back into its symbols
+//! mauro net image-to-map read a picture of a map back into a map with a trained network
+//! mauro net show-batches draw the batches a run would be trained on
 //! ```
 //!
 //! Each subcommand is documented in its own module, exit codes included;
@@ -24,6 +29,11 @@ mod benchmark_create;
 mod benchmark_run;
 mod dem;
 mod dem_eval;
+mod net_dataset;
+mod net_grid_to_map;
+mod net_image_to_map;
+mod net_show_batches;
+mod net_train;
 mod ortho;
 mod osm;
 mod render;
@@ -60,6 +70,18 @@ enum Cmd {
     DemEval(dem_eval::Args),
     Osm(osm::Args),
     Ortho(ortho::Args),
+    /// Makes a dataset of random maps and trains a network to read them back.
+    #[command(subcommand)]
+    Net(NetCmd),
+}
+
+#[derive(Subcommand)]
+enum NetCmd {
+    Dataset(net_dataset::Args),
+    GridToMap(net_grid_to_map::Args),
+    Train(net_train::Args),
+    ImageToMap(net_image_to_map::Args),
+    ShowBatches(net_show_batches::Args),
 }
 
 #[derive(Subcommand)]
@@ -102,5 +124,10 @@ fn main() -> ExitCode {
             osm::main(args, osm_matches)
         }
         Cmd::Ortho(args) => ortho::main(args),
+        Cmd::Net(NetCmd::Dataset(args)) => net_dataset::main(args),
+        Cmd::Net(NetCmd::GridToMap(args)) => net_grid_to_map::main(args),
+        Cmd::Net(NetCmd::Train(args)) => net_train::main(args),
+        Cmd::Net(NetCmd::ImageToMap(args)) => net_image_to_map::main(args),
+        Cmd::Net(NetCmd::ShowBatches(args)) => net_show_batches::main(args),
     }
 }

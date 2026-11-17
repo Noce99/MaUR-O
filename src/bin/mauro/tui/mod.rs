@@ -201,6 +201,11 @@ mod tests {
             "mauro dem-eval",
             "mauro benchmark create",
             "mauro benchmark run",
+            "mauro net dataset",
+            "mauro net grid-to-map",
+            "mauro net train",
+            "mauro net image-to-map",
+            "mauro net show-batches",
         ];
         for (at, title) in titles.iter().enumerate() {
             let mut app = App::new();

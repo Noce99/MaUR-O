@@ -2,7 +2,7 @@
 //! it was drawn with.
 //!
 //! ```text
-//! train [OPTIONS] <dataset> [trainings]
+//! mauro net train [OPTIONS] <dataset> [trainings]
 //! ```
 //!
 //! The dataset is a folder `generate_maps_dataset --just-opaque-areas` wrote:
@@ -15,9 +15,9 @@
 //! a `.bin` — see [`maur_o::net::data`].
 //!
 //! ```bash
-//! cargo run --release --bin generate_maps_dataset -- \
+//! cargo run --release -- net dataset \
 //!     --just-opaque-areas -n 300 maps/ISOM_10k.omap dataset
-//! cargo run --release --bin train -- dataset trainings
+//! cargo run --release -- net train dataset trainings
 //! ```
 //!
 //! The training folder is a history rather than a run: each run writes
@@ -67,7 +67,7 @@ const DEFAULT_TRAININGS: &str = "trainings";
              random from inside them -- which is also most of what stands in for having more \
              maps."
 )]
-struct Args {
+pub struct Args {
     /// The dataset folder: images/, gt/ and classes.json under it.
     dataset: PathBuf,
 
@@ -206,18 +206,7 @@ fn notes_of(dataset: &std::path::Path) -> Result<Classes, String> {
     Ok(classes)
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(a) => a,
-        Err(e) => {
-            e.print().ok();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
-
+fn run(args: Args) -> Result<(), (ExitCode, String)> {
     for (value, name) in [
         (args.epochs, "--epochs"),
         (args.batch_size, "--batch-size"),
@@ -232,7 +221,7 @@ fn run() -> Result<(), (ExitCode, String)> {
             ));
         }
     }
-    if args.crop % (1 << DEPTH) != 0 {
+    if !args.crop.is_multiple_of(1 << DEPTH) {
         return Err((
             ExitCode::from(1),
             format!(
@@ -305,8 +294,20 @@ fn run() -> Result<(), (ExitCode, String)> {
     .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "the run could not be started or could not finish",
+        _ => return None,
+    })
+}
+
+/// Runs `mauro net train`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::from(0),
         Err((code, message)) => {
             if !message.is_empty() {

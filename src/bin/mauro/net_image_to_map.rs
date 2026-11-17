@@ -1,7 +1,7 @@
 //! Reads a picture of a map back into a map file, with a trained network.
 //!
 //! ```text
-//! image_to_map [OPTIONS] <run-folder> <image> [map-file]
+//! mauro net image-to-map [OPTIONS] <run-folder> <image> [map-file]
 //! ```
 //!
 //! This is the whole pipeline in one call, and the other end of
@@ -12,7 +12,7 @@
 //! bezier paths of an `.omap`.
 //!
 //! ```text
-//! image_to_map trainings/UNet_2026_08_18__09_26_59 dataset/images/map_001.png back.omap
+//! mauro net image-to-map trainings/UNet_2026_08_18__09_26_59 dataset/images/map_001.png back.omap
 //! ```
 //!
 //! The run folder is all it is told, because a run folder holds everything:
@@ -67,7 +67,7 @@ use maur_o::net::predict::{
              The map it writes is then drawn again and compared with the picture it was read \
              off, which scores the network and the vectorizer together."
 )]
-struct Args {
+pub struct Args {
     /// A run folder under trainings/: the weights, and the notes copied out
     /// of the dataset the run trained on.
     run: PathBuf,
@@ -124,18 +124,7 @@ struct Args {
     scale: Option<i32>,
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(a) => a,
-        Err(e) => {
-            // clap prints its own usage/help text; forward its exit behavior.
-            e.print().ok();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
+fn run(args: Args) -> Result<(), (ExitCode, String)> {
     let usage = |message: String| (ExitCode::from(1), format!("Error: {message}"));
     let failed = |message: String| (ExitCode::from(2), format!("Error: {message}"));
 
@@ -319,8 +308,20 @@ fn run() -> Result<(), (ExitCode, String)> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "the map could not be made",
+        _ => return None,
+    })
+}
+
+/// Runs `mauro net image-to-map`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::from(0),
         Err((code, message)) => {
             if !message.is_empty() {

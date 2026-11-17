@@ -1,4 +1,4 @@
-//! The folder `generate_maps_dataset` wrote, as something burn can train on.
+//! The folder `mauro net dataset` wrote, as something burn can train on.
 //!
 //! A dataset on disk is three folders and a `classes.json` — see
 //! [`crate::dataset`]. What a learner wants is a stream of batched tensors,
@@ -91,7 +91,9 @@ use burn::data::dataset::Dataset;
 use burn::prelude::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 
-use crate::dataset::{resolution_of, Classes, CLASSES_FILE, GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER};
+use crate::dataset::{
+    resolution_of, Classes, CLASSES_FILE, GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER,
+};
 use crate::ground_truth::{GroundTruth, BACKGROUND};
 use crate::random::Random;
 use crate::symbol_kinds::Catalogue;
@@ -128,7 +130,7 @@ pub struct MapCrop {
     /// The name of the map it was cut out of, without its suffix.
     ///
     /// Nothing in training reads this: it is here for anything looking at a
-    /// crop rather than learning from one — `show_batches` names the map a
+    /// crop rather than learning from one — `mauro net show-batches` names the map a
     /// crop came from, and a crop which looks wrong is worth being able to
     /// find in `images/`.
     pub map: String,
@@ -147,7 +149,7 @@ pub struct MapCrop {
 /// Where one map's labels come from.
 #[derive(Clone, Debug)]
 enum Labels {
-    /// Written to `gt/<name>.bin` by `generate_maps_dataset`, and read back
+    /// Written to `gt/<name>.bin` by `mauro net dataset`, and read back
     /// as they are.
     File(PathBuf),
     /// Not on disk: rasterized afresh from `maps/<name>.omap` every time they
@@ -184,7 +186,7 @@ pub struct MapDataset {
     /// draws, which piles up in the middle of a map and thins towards its
     /// edges. The white frame is a third of a picture and a seventh of what
     /// 256-pixel crops show of it, so the network is trained on a mixture the
-    /// map does not hold and `image_to_map` does not show it.
+    /// map does not hold and `mauro net image-to-map` does not show it.
     ///
     /// Letting a crop hang off and filling what is past the edge with white
     /// is what evens that out, and it is honest rather than a trick: past the
@@ -210,7 +212,7 @@ pub struct MapDataset {
 
 impl MapDataset {
     /// Every map of the dataset in `folder`, which is what
-    /// `generate_maps_dataset` wrote: the images in `images/`, the maps in
+    /// `mauro net dataset` wrote: the images in `images/`, the maps in
     /// `maps/`, and the labels in `gt/`, paired by name.
     ///
     /// A map whose labels are not in `gt/` is not left out for that alone: it
@@ -250,7 +252,7 @@ impl MapDataset {
         if maps.is_empty() {
             return Err(format!(
                 "{} holds no map with labels beside it, on disk or in its own map file: a \
-                 dataset is trained on what generate_maps_dataset --just-opaque-areas writes, \
+                 dataset is trained on what mauro net dataset --just-opaque-areas writes, \
                  which is {IMAGES_FOLDER}/ and either {GROUND_TRUTH_FOLDER}/ or {MAPS_FOLDER}/ \
                  under one set of names",
                 folder.display()
@@ -364,7 +366,7 @@ impl MapDataset {
     /// nothing at all. Half the crop is the figure with a meaning: it makes
     /// the crop's centre uniform over the map, so every pixel of the map is
     /// equally likely to be trained on, which is the mixture a whole picture
-    /// through `image_to_map` shows.
+    /// through `mauro net image-to-map` shows.
     pub fn with_overhang(mut self, overhang: usize) -> MapDataset {
         self.overhang = overhang.min(self.crop.saturating_sub(1));
         self
@@ -450,12 +452,13 @@ impl MapDataset {
                     for column in 0..size {
                         // Off the map is white paper, which is the frame --
                         // and the frame is the last class.
-                        let at = match inside(left + column as isize, top + row as isize, width, height)
-                            .map(|from| truth.class_of[from])
-                        {
-                            None | Some(BACKGROUND) => self.classes,
-                            Some(symbol) => symbol as usize,
-                        };
+                        let at =
+                            match inside(left + column as isize, top + row as isize, width, height)
+                                .map(|from| truth.class_of[from])
+                            {
+                                None | Some(BACKGROUND) => self.classes,
+                                Some(symbol) => symbol as usize,
+                            };
                         counted[at] += 1;
                     }
                 }

@@ -1,7 +1,7 @@
 //! Turns a grid of symbols back into an OpenOrienteering Mapper map.
 //!
 //! ```text
-//! grid_to_map [OPTIONS] <symbol-set> <labels> [map-file]
+//! mauro net grid-to-map [OPTIONS] <symbol-set> <labels> [map-file]
 //! ```
 //!
 //! The labels are what `generate_maps_dataset --just-opaque-areas` wrote into
@@ -19,7 +19,7 @@
 //!
 //! ```text
 //! generate_maps_dataset --just-opaque-areas maps/ISOM_10k.omap dataset
-//! grid_to_map maps/ISOM_10k.omap dataset/gt/map_001.bin back.omap --image back.png
+//! mauro net grid-to-map maps/ISOM_10k.omap dataset/gt/map_001.bin back.omap --image back.png
 //! ```
 //!
 //! `back.png` is then drawn over the very ground `dataset/images/map_001.png`
@@ -66,7 +66,7 @@ use maur_o::xml_reader::read_xml_map;
              How much ground a cell covers is not in a labels file: it comes from the four \
              options a dataset was generated with, which are spelt here as they are there."
 )]
-struct Args {
+pub struct Args {
     /// The map whose symbol set the regions are drawn with (.omap, .xmap).
     /// It has to be the set the labels were written for.
     symbol_set: PathBuf,
@@ -115,18 +115,7 @@ struct Args {
     scale: Option<i32>,
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(a) => a,
-        Err(e) => {
-            // clap prints its own usage/help text; forward its exit behavior.
-            e.print().ok();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
+fn run(args: Args) -> Result<(), (ExitCode, String)> {
     let usage = |message: String| (ExitCode::from(1), format!("Error: {message}"));
     let failed = |message: String| (ExitCode::from(2), format!("Error: {message}"));
 
@@ -263,8 +252,20 @@ fn run() -> Result<(), (ExitCode, String)> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "the map could not be written",
+        _ => return None,
+    })
+}
+
+/// Runs `mauro net grid-to-map`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::from(0),
         Err((code, message)) => {
             if !message.is_empty() {

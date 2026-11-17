@@ -239,7 +239,7 @@ const RAREST_SHARE: f64 = 1e-3;
 ///
 /// Fixing the count is necessary and may not be sufficient — a class the
 /// crops under-show is still a class the crops under-show, and what
-/// `image_to_map` puts through the network is a whole picture where the frame
+/// `mauro net image-to-map` puts through the network is a whole picture where the frame
 /// is a third of it, not a crop where it is a seventh. See
 /// [`MapDataset::class_balance`].
 pub fn class_weights(train: &MapDataset) -> Result<Vec<f32>, String> {
@@ -839,7 +839,7 @@ const BEST_WEIGHTS: &str = "best";
 /// which says how much ground a pixel of a picture covers.
 ///
 /// Reading those back rather than being handed them keeps the sheets and the
-/// `image_to_map` tool looking at the same two files, so a sheet is a preview
+/// `mauro net image-to-map` tool looking at the same two files, so a sheet is a preview
 /// of that tool rather than a second opinion.
 fn image_validation<B: AutodiffBackend>(
     run: &Path,
@@ -1594,7 +1594,11 @@ mod tests {
         // maps, and it is not weighted down for it.
         let frame = weights.len() - 1;
         assert!(
-            shares[frame] > *shares[..frame].iter().max_by(|a, b| a.total_cmp(b)).expect("a class"),
+            shares[frame]
+                > *shares[..frame]
+                    .iter()
+                    .max_by(|a, b| a.total_cmp(b))
+                    .expect("a class"),
             "the frame should be the commonest class here: {shares:?}",
         );
         assert!(

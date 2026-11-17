@@ -47,7 +47,9 @@ const NO_IMAGES: &str = "--no-images";
 const NO_GT: &str = "--no-gt";
 
 fn generate() -> Command {
-    Command::cargo_bin("generate_maps_dataset").unwrap()
+    let mut command = Command::cargo_bin("mauro").unwrap();
+    command.args(["net", "dataset"]);
+    command
 }
 
 /// The n-th map of a dataset, where the tool puts it.
@@ -341,8 +343,9 @@ fn a_generated_map_renders() {
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join("dataset");
     let render = |name: &str| {
-        Command::cargo_bin("map_to_image")
+        Command::cargo_bin("mauro")
             .unwrap()
+            .args(["render"])
             .arg(folder.join(MAPS_FOLDER).join(name))
             .arg(dir.path().join(format!("{name}.png")))
             .args(["--resolution=2", "--frame=5"])
@@ -633,7 +636,9 @@ fn no_gt_writes_the_maps_and_images_but_not_the_labels() {
         .args(["--maps=1", "--just-opaque-areas"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("gt/ nothing: --no-gt was asked for"));
+        .stdout(predicates::str::contains(
+            "gt/ nothing: --no-gt was asked for",
+        ));
 
     assert!(map_at(&folder, 1).is_file());
     assert!(folder.join(IMAGES_FOLDER).join("map_001.png").is_file());

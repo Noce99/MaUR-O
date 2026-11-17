@@ -2,7 +2,7 @@
 //! set, each of them drawn to an image and labelled pixel by pixel.
 //!
 //! ```text
-//! generate_maps_dataset [OPTIONS] <symbol-set> [folder]
+//! mauro net dataset [OPTIONS] <symbol-set> [folder]
 //! ```
 //!
 //! The symbol set is an ordinary map file, and only its symbols and colours
@@ -27,7 +27,7 @@
 //! A dataset is three folders and a file naming what the labels mean:
 //!
 //! ```text
-//! generate_maps_dataset --just-opaque-areas maps/ISOM_10k.omap dataset
+//! mauro net dataset --just-opaque-areas maps/ISOM_10k.omap dataset
 //!
 //! dataset/classes.json       what channel each opaque area owns
 //! dataset/ISOM_10k.omap      the symbol set the maps were drawn with
@@ -75,7 +75,7 @@ const DEFAULT_FOLDER: &str = "dataset";
              training set. classes.json says what the labels mean.\n\n\
              The same options give the same maps: everything random comes from the seed."
 )]
-struct Args {
+pub struct Args {
     /// The map whose symbol set the generated maps are drawn with (.omap,
     /// .xmap). Nothing drawn on it is used, only its symbols and colours.
     symbol_set: PathBuf,
@@ -152,19 +152,7 @@ struct Args {
     seed: u64,
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(a) => a,
-        Err(e) => {
-            // clap prints its own usage/help text; forward its exit behavior.
-            e.print().ok();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
-
+fn run(args: Args) -> Result<(), (ExitCode, String)> {
     for (value, name) in [
         (args.layout_size, "--layout-size"),
         (args.background_cell_size as usize, "--background-cell-size"),
@@ -345,8 +333,20 @@ fn run() -> Result<(), (ExitCode, String)> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "the dataset could not be generated",
+        _ => return None,
+    })
+}
+
+/// Runs `mauro net dataset`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::from(0),
         Err((code, message)) => {
             if !message.is_empty() {

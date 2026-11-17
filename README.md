@@ -52,15 +52,15 @@ together.
   - [`mauro dem-eval`](#mauro-dem-eval)
   - [`mauro osm`](#mauro-osm)
   - [`mauro ortho`](#mauro-ortho)
-  - [`generate_maps_dataset`](#generate_maps_dataset)
+  - [`mauro net dataset`](#mauro-net-dataset)
     - [A training set](#a-training-set)
-  - [`grid_to_map`](#grid_to_map)
+  - [`mauro net grid-to-map`](#mauro-net-grid-to-map)
 - [Reading a map back: the `net` module](#reading-a-map-back-the-net-module)
   - [Image validation](#image-validation)
-  - [`image_to_map`](#image_to_map)
+  - [`mauro net image-to-map`](#mauro-net-image-to-map)
   - [The angle, and why it is folded](#the-angle-and-why-it-is-folded)
   - [Weight decay](#weight-decay)
-  - [`show_batches`](#show_batches)
+  - [`mauro net show-batches`](#mauro-net-show-batches)
 - [Using it as a library](#using-it-as-a-library)
 - [Development](#development)
 - [Implementation Details](#implementation-details)
@@ -101,11 +101,11 @@ tool:
 | [`mauro dem-eval`](#mauro-dem-eval) | Scores a predicted elevation GeoTIFF against a ground-truth one. |
 | [`mauro osm`](#mauro-osm) | Converts OpenStreetMap data into a Mapper map, drawn to ISSprOM, ISOM or openstreetmap.org's look. |
 | [`mauro ortho`](#mauro-ortho) | Adds the aerial orthophoto of a map's ground to it as a template. |
-| [`generate_maps_dataset`](#generate_maps_dataset) | Generates random maps out of an existing symbol set. |
-| [`grid_to_map`](#grid_to_map) | Turns a grid of per-pixel classes back into a map. |
-| [`image_to_map`](#image_to_map) | Reads a map back from its image with the trained net. |
-| `train` | Trains the net: see [Reading a map back](#reading-a-map-back-the-net-module). |
-| [`show_batches`](#show_batches) | Shows the batches the net is trained on. |
+| [`mauro net dataset`](#mauro-net-dataset) | Generates random maps out of an existing symbol set. |
+| [`mauro net grid-to-map`](#mauro-net-grid-to-map) | Turns a grid of per-pixel classes back into a map. |
+| [`mauro net image-to-map`](#mauro-net-image-to-map) | Reads a map back from its image with the trained net. |
+| `mauro net train` | Trains the net: see [Reading a map back](#reading-a-map-back-the-net-module). |
+| [`mauro net show-batches`](#mauro-net-show-batches) | Shows the batches the net is trained on. |
 
 `mauro --help` lists them, and every one of them takes `--help` and
 `--version` (`mauro render --help`). `mauro` on its own, in a terminal,
@@ -174,7 +174,10 @@ the form, what can be known before running:
 - `ortho` finds where the map is on the earth, and which services cover it,
   to choose among;
 - `dem` reads the map; `benchmark run` reads the archive: how many maps and
-  references it holds, and what they were drawn at.
+  references it holds, and what they were drawn at;
+- `net train` and `tiles serve` run until they are done or cancelled (`Esc`):
+  the job screen shows the metrics of a training run, or the address a
+  server listens on, as they come, in place of `net train`'s own `--dashboard`.
 
 Every screen builds an ordinary `mauro` command line, shown at the bottom as
 it is filled in, and running it runs exactly that, its output (progress bars
@@ -679,7 +682,7 @@ the photo can be placed in), `4` the image or the map could not be written,
 `5` no service has photos of the map's ground, `6` the service could not be
 reached or answered with something other than a photo.
 
-### `generate_maps_dataset`
+### `mauro net dataset`
 
 Generates a folder of **random maps**, drawn with the symbols of an existing
 map. The maps which exist are somebody's copyright, cover the terrain
@@ -688,7 +691,7 @@ symbol set holds; generated ones have none of those problems, and can be made
 to put a symbol next to a symbol no surveyor ever would.
 
 ```
-generate_maps_dataset [OPTIONS] <symbol-set> [folder]
+mauro net dataset [OPTIONS] <symbol-set> [folder]
 ```
 
 | Option | Meaning |
@@ -765,8 +768,8 @@ yet.**
 
 ```bash
 cargo build --release
-./target/release/generate_maps_dataset -l 3 -c 150 maps/ISOM_10k.omap dataset
-./target/release/map_to_image -r 3 -f 10 dataset/maps/map_003.omap
+./target/release/mauro net dataset -l 3 -c 150 maps/ISOM_10k.omap dataset
+./target/release/mauro render -r 3 -f 10 dataset/maps/map_003.omap
 ```
 
 ![A generated map: nine pieces of ground cover with wandering boundaries, lines running along most of them, see-through areas over two cells and point symbols scattered about](mds/assets/random_map.png)
@@ -796,11 +799,11 @@ dataset/
 
 The symbol set comes along because a class is a place in the list of that
 set's opaque areas and nothing else says which place: without it, a folder of
-answers is a folder of numbers. `train` copies it and `classes.json` into the
+answers is a folder of numbers. `mauro net train` copies it and `classes.json` into the
 run folder for the same reason.
 
 ```bash
-./target/release/generate_maps_dataset --just-opaque-areas -n 100 \
+./target/release/mauro net dataset --just-opaque-areas -n 100 \
     maps/ISOM_10k.omap dataset
 ```
 
@@ -866,14 +869,14 @@ let shape = [truth.height as usize, truth.width as usize, truth.channels()];
 let target = Tensor::<B, 3>::from_floats(truth.one_hot().as_slice(), device).reshape(shape);
 ```
 
-### `grid_to_map`
+### `mauro net grid-to-map`
 
 The way back. A label file — or what a model said when it was shown the
 picture — is a grid of symbols, one per pixel. This turns that grid into a map
 file again:
 
 ```bash
-grid_to_map maps/ISOM_10k.omap dataset/gt/map_001.bin back.omap --image back.png
+mauro net grid-to-map maps/ISOM_10k.omap dataset/gt/map_001.bin back.omap --image back.png
 ```
 
 The cells are gathered into regions — 4-connected runs which agree about the
@@ -908,7 +911,7 @@ fewer coordinates.
 How much ground a cell covers is not in a labels file, so the four options the
 dataset was generated with have to be given again — `--layout-size`,
 `--background-cell-size`, `--frame` and `--resolution`, spelt as
-`generate_maps_dataset` spells them. The tool checks the grid is the size
+`mauro net dataset` spells them. The tool checks the grid is the size
 those options imply, and says so when it is not.
 
 `--image` draws the map it just wrote over the very ground the dataset's own
@@ -930,15 +933,15 @@ The renderer turns a map file into a picture. The `net` module goes the other
 way — given the picture, which of the symbol set's opaque areas is each pixel,
 and at what angle was its fill pattern turned. It is a **U-Net**, written with
 [burn](https://burn.dev), trained on exactly what
-[`generate_maps_dataset`](#a-training-set) writes.
+[`mauro net dataset`](#a-training-set) writes.
 
 ```bash
 # A few hundred maps, all ground cover, drawn and labelled.
-cargo run --release --bin generate_maps_dataset -- \
+cargo run --release -- net dataset \
     --just-opaque-areas -n 300 maps/ISOM_10k.omap dataset
 
 # And a network read off them.
-cargo run --release --bin train -- dataset trainings
+cargo run --release -- net train dataset trainings
 ```
 
 It lives in the same crate as the renderer, under
@@ -1068,7 +1071,7 @@ cannot tell you. `--image-valid <COUNT>` sets how many pictures (3 by
 default, `0` for none). Only the sheets are kept: the maps themselves are
 written to a scratch folder and thrown away with it, since a run's worth of
 read-back maps is a great deal of disk for something nobody opens. To keep
-one, run `image_to_map` over the picture with the epoch's weights.
+one, run `mauro net image-to-map` over the picture with the epoch's weights.
 
 Three rather than more because of what the early epochs cost. A network which
 has learned nothing yet says noise, and noise vectorizes into as many objects
@@ -1082,7 +1085,7 @@ the number of pictures is the thing to turn down.
 The sheets are kept for exactly the epochs `checkpoint/` keeps — the last five
 and the best — because they are pruned to match it after every epoch rather
 than by a policy of their own. What a sheet shows is exactly what
-[`image_to_map`](#image_to_map) would give from that epoch's weights: both go
+[`mauro net image-to-map`](#mauro-net-image-to-map) would give from that epoch's weights: both go
 through the same `read_back`, so the caption's agreement figure and the tool's
 are the same number.
 
@@ -1098,21 +1101,21 @@ means nothing on its own: which symbol it is, and how much ground a pixel
 covers, are in those two files and nowhere in the weights. A dataset is a
 temporary thing — regenerated with other settings, moved, deleted — and a run
 outlives it, so the run keeps its own. That is what makes a run folder enough
-on its own for [`image_to_map`](#image_to_map).
+on its own for [`mauro net image-to-map`](#mauro-net-image-to-map).
 
-### `image_to_map`
+### `mauro net image-to-map`
 
 The whole chain in one call, and the other end of
-[`map_to_image`](#map_to_image): a picture goes in, a map file comes out.
+[`mauro render`](#mauro-render): a picture goes in, a map file comes out.
 
 ```bash
-cargo run --release --bin image_to_map -- \
+cargo run --release -- net image-to-map \
     trainings/UNet_2026_08_18__09_13_39 dataset/images/map_001.png back.omap
 ```
 
 The network says which of the symbol set's opaque areas each pixel is; the
 regions those pixels form become the path objects of an `.omap`, by exactly
-the vectorizer [`grid_to_map`](#grid_to_map) uses. The run folder is all it is
+the vectorizer [`mauro net grid-to-map`](#mauro-net-grid-to-map) uses. The run folder is all it is
 told, because a run folder holds all of it — the weights, what a class means,
 and the symbols themselves.
 
@@ -1145,13 +1148,13 @@ that earns its keep here, since rounding the staircase off a boundary moves it
 by half a pixel and half a pixel of boundary is exactly an edge effect.
 
 `--tolerance` and `--same-angle` are the vectorizer's, and **both default
-looser here than they do in `grid_to_map`**, because a grid read off a network
+looser here than they do in `mauro net grid-to-map`**, because a grid read off a network
 is not a grid of exact labels. A label file holds one exact angle per object,
 while a network gives a continuous field with noise on it, and a tight
 threshold would read that noise as a difference of angle and shatter every
 turning area into fragments. And a boundary a network drew was never the
 staircase it comes out as: `--tolerance` is one cell here — one pixel of the
-picture, a third of a meter of ground — where `grid_to_map` keeps every node.
+picture, a third of a meter of ground — where `mauro net grid-to-map` keeps every node.
 On a dataset map that is 5,028 coordinates in place of 32,261, for three
 hundredths of a percent of the drawn pixels, which is half a pixel of edge.
 
@@ -1191,7 +1194,7 @@ together angles which really do look different, and there is no recovering
 from that. A symbol this cannot make a case about gets `n = 1`, which folds
 nothing.
 
-`show_batches` prints what it found, so you can check it against the symbol
+`mauro net show-batches` prints what it found, so you can check it against the symbol
 set:
 
 ```text
@@ -1241,24 +1244,24 @@ This is *not* what keeps a checkpoint readable — that is the recorder, which
 writes at full precision because a normalization's running **variance** does
 not fit in an `f16`. The two are separate.
 
-### `show_batches`
+### `mauro net show-batches`
 
 What the network is *shown*, drawn instead of descended. A loss going down
 says the network agrees with the labels; it does not say the labels are right,
 and nothing in a run ever puts a batch in front of you.
 
 ```bash
-cargo run --release --bin show_batches -- dataset batches -n 2 -b 8
+cargo run --release -- net show-batches dataset batches -n 2 -b 8
 ```
 
-It builds the crops the way [`train`](#reading-a-map-back-the-net-module)
+It builds the crops the way [`mauro net train`](#reading-a-map-back-the-net-module)
 does — the same split, crop size, `--crops-per-map` and seed, through the same
 batcher — and writes one sheet per batch, a row per crop: the picture, and the
 labels of that crop. Both panels are read **back out of the tensors** rather
 than out of the files behind them, so a channel swapped or a scale mistaken
 shows up as a picture rather than as a run which will not learn. The labels
 are drawn the whole way round — vectorized into a map and rendered again, as
-[`image_to_map`](#image_to_map) draws what a network says — over the very
+[`mauro net image-to-map`](#mauro-net-image-to-map) draws what a network says — over the very
 ground the crop was cut from, so the fill patterns land where the picture's
 do; the caption names the map and the corner, so a crop worth a second look
 can be found in `images/`.

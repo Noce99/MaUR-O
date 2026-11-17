@@ -79,7 +79,7 @@
 //!
 //! [`read_back`] is all of it in one call: a picture in, the map the network
 //! read out of it written to a file, that map drawn again, and the drawing
-//! measured against the picture it came from. The `image_to_map` tool is that
+//! measured against the picture it came from. The `mauro net image-to-map` tool is that
 //! function with a command line around it, and [`crate::net::image_valid`] is
 //! that function once per epoch of a run — which is the point of it being one
 //! function. A sheet a run leaves behind has to show what the tool would
@@ -764,7 +764,10 @@ mod tests {
         }
         // Everything it can give lands inside the one turn the picture can
         // tell apart, and none of it past it.
-        assert!(grid.rotation.iter().all(|&turn| (0.0..0.25).contains(&turn)));
+        assert!(grid
+            .rotation
+            .iter()
+            .all(|&turn| (0.0..0.25).contains(&turn)));
     }
 
     /// A symbol which folds nothing keeps the angle it was given, which is

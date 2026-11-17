@@ -14,7 +14,9 @@ use assert_cmd::Command;
 use maur_o::dataset::CLASSES_FILE;
 
 fn image_to_map() -> Command {
-    Command::cargo_bin("image_to_map").unwrap()
+    let mut command = Command::cargo_bin("mauro").unwrap();
+    command.args(["net", "image-to-map"]);
+    command
 }
 
 /// A one-pixel PNG in `run`, which is a picture as far as the argument goes:

@@ -28,11 +28,15 @@ const SMALL: [&str; 4] = [
 ];
 
 fn generate() -> Command {
-    Command::cargo_bin("generate_maps_dataset").unwrap()
+    let mut command = Command::cargo_bin("mauro").unwrap();
+    command.args(["net", "dataset"]);
+    command
 }
 
 fn grid_to_map() -> Command {
-    Command::cargo_bin("grid_to_map").unwrap()
+    let mut command = Command::cargo_bin("mauro").unwrap();
+    command.args(["net", "grid-to-map"]);
+    command
 }
 
 /// A dataset of one labelled map in a temporary folder, and the labels of it.

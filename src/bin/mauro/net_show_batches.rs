@@ -1,7 +1,7 @@
 //! Draws the batches a run would be trained on, instead of training on them.
 //!
 //! ```text
-//! show_batches [OPTIONS] <dataset> [into]
+//! mauro net show-batches [OPTIONS] <dataset> [into]
 //! ```
 //!
 //! Everything a network learns it learns from what [`maur_o::net::data`]
@@ -86,7 +86,7 @@ const GAP: u32 = 8;
              With --run, a further panel shows what that run's network says about the same crop, \
              and a confusion matrix over every crop drawn is printed at the end."
 )]
-struct Args {
+pub struct Args {
     /// The dataset folder: images/, gt/ and classes.json under it.
     dataset: PathBuf,
 
@@ -163,8 +163,20 @@ enum Half {
     Valid,
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "the batches could not be drawn",
+        _ => return None,
+    })
+}
+
+/// Runs `mauro net show-batches`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::from(0),
         Err((code, message)) => {
             if !message.is_empty() {
@@ -175,17 +187,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(a) => a,
-        Err(e) => {
-            e.print().ok();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
+fn run(args: Args) -> Result<(), (ExitCode, String)> {
     let usage = |message: String| (ExitCode::from(1), format!("Error: {message}"));
     let failed = |message: String| (ExitCode::from(2), format!("Error: {message}"));
 
@@ -289,7 +291,10 @@ fn run() -> Result<(), (ExitCode, String)> {
                     args.crop,
                 );
             }
-            println!("{}: {BACKEND}, what it says in the last panel", run.display());
+            println!(
+                "{}: {BACKEND}, what it says in the last panel",
+                run.display()
+            );
             Some(model)
         }
     };
@@ -509,7 +514,9 @@ fn picture_of(crop: &MapCrop) -> RgbImage {
     let mut image = RgbImage::new(size.max(1), size.max(1));
     for (at, pixel) in image.pixels_mut().enumerate() {
         let channel = |c: usize| {
-            ((crop.image[c * pixels + at] + 1.0) * 127.5).round().clamp(0.0, 255.0) as u8
+            ((crop.image[c * pixels + at] + 1.0) * 127.5)
+                .round()
+                .clamp(0.0, 255.0) as u8
         };
         *pixel = Rgb([channel(0), channel(1), channel(2)]);
     }

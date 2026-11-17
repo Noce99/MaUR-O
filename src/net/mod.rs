@@ -5,18 +5,18 @@
 //! other way: given the picture, which of the symbol set's opaque areas is
 //! each pixel, and at what angle was its fill pattern turned. It is the
 //! same question a person answers by looking at a legend, and the training
-//! data for it is not a survey anybody had to label — `generate_maps_dataset`
+//! data for it is not a survey anybody had to label — `mauro net dataset`
 //! draws a map out of a list of decisions and writes the list down beside the
 //! image, so the answers were known before the question existed.
 //!
 //! ```bash
 //! # A few hundred maps, all ground cover, drawn and labelled.
-//! cargo run --release --bin generate_maps_dataset -- \
+//! cargo run --release -- net dataset \
 //!     --just-opaque-areas -n 300 maps/ISOM_10k.omap dataset
 //!
 //! # And a network read off them. Each run writes its own timestamped folder
 //! # under `trainings/`.
-//! cargo run --release --bin train -- dataset trainings
+//! cargo run --release -- net train dataset trainings
 //! ```
 //!
 //! Three pieces, and they are meant to be read in this order:

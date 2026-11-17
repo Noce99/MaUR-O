@@ -76,7 +76,7 @@ jobs:
   gpu-backend:
     # The `net` module is built by every job above, but only against the
     # default `ndarray` backend. `wgpu` is additive on top of it -- what it
-    # switches is which device the `train` and `image_to_map` binaries ask
+    # switches is which device `mauro net train` and `mauro net image-to-map` ask
     # for -- so this checks that the switch still compiles. Checked rather
     # than tested: no runner has a GPU to point it at. `cuda` is not here at
     # all, since cudarc wants a CUDA toolkit no runner has either.

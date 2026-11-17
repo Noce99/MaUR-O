@@ -14,7 +14,12 @@ contour lines. `mauro osm` goes the other way: it turns
 OpenStreetMap data (plus optional GTFS transit feeds) into a Mapper map, and
 `mauro ortho` downloads the aerial orthophoto of a map's ground
 (from about fifty open national and regional WMS services across Europe)
-and adds it to the map as a template. All of these are subcommands of the one binary, `mauro`.
+and adds it to the map as a template. `mauro net` is the machine-learning side:
+it generates a dataset of random maps with pixel labels, trains a U-Net (`burn`)
+to read a rendered map back into its opaque area symbols, and turns what it
+reads into a map again (`src/net/`, `vectorize.rs`; the backend is a Cargo
+feature, `ndarray` by default, `wgpu` or `cuda` for a GPU). All of these are
+subcommands of the one binary, `mauro`.
 
 This crate is consumed by the o-mnia web app from a vendored copy (via
 `crates/maur-o-wasm`, o-mnia's own wasm-bindgen adapter — see that repo's
@@ -41,7 +46,7 @@ cargo doc --no-deps --locked                   # doc build; every public item mu
 ```
 
 CI (`.github/workflows/ci.yml`) runs the above across Linux/macOS/Windows plus an
-MSRV check pinned to Rust 1.88 (the floor set by the `image` crate). There is no
+MSRV check pinned to Rust 1.89 (the floor set by `bytemuck`, which `burn` pulls in). There is no
 Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 
 ### The `mauro` subcommands
@@ -55,6 +60,11 @@ Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 | `mauro dem-eval` | Score a predicted DEM GeoTIFF against a ground-truth one (MSE/RMSE/MAE + error maps). |
 | `mauro osm` | Convert OpenStreetMap XML (a file, or downloaded for an area from the Overpass API with `--download`) into an `.omap` drawn to ISSprOM 2019 (default) or ISOM 2017-2, or (`--standard osm`, optionally with GTFS feeds) styled like openstreetmap-carto. |
 | `mauro ortho` | Download a map's aerial orthophoto from the best open WMS for its place (European national/regional agencies) and add it to the map as a georeferenced template. |
+| `mauro net dataset` | Generate a dataset of random maps out of one map's symbol set: maps, images and per-pixel labels (`images/`, `gt/`, `classes.json`). |
+| `mauro net grid-to-map` | Turn a label grid back into a map (the way back from `gt/`). |
+| `mauro net train` | Train a U-Net on such a dataset (`--dashboard` for burn's live terminal dashboard; the TUI's job screen replaces it). |
+| `mauro net image-to-map` | Read a picture of a map back into a map with a trained run, and score it by drawing it again. |
+| `mauro net show-batches` | Draw the batches a run would be trained on, from the tensors, to check the labels. |
 
 `src/bin/mauro/main.rs` is only the dispatcher (the clap `Cli`, one module per
 subcommand, each module's `Args` and `pub fn main(args) -> ExitCode`). A usage

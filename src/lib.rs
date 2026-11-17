@@ -113,7 +113,7 @@
 //!
 //! The maps which exist are never enough, and never put a symbol next to the
 //! symbol which breaks it. [`dataset`] generates new ones out of nothing but
-//! an existing symbol set, and is what the `generate_maps_dataset` tool is
+//! an existing symbol set, and is what the `mauro net dataset` tool is
 //! built on: [`symbol_kinds`] sorts a symbol set into what its symbols are
 //! for and works out what may be drawn over what and still be seen,
 //! [`layout`] divides a square of ground into cells with wandering
@@ -136,7 +136,7 @@
 //! grid of symbols, and this turns that grid back into the map it describes:
 //! the regions its cells form, as bezier paths with the corners rounded off
 //! the staircase, drawn with an existing symbol set and written out by
-//! [`xml_writer`]. It is what the `grid_to_map` tool is built on.
+//! [`xml_writer`]. It is what the `mauro net grid-to-map` tool is built on.
 //!
 //! # Answering for itself
 //!
@@ -144,7 +144,7 @@
 //! U-Net shown a rendered map and asked which of the symbol set's opaque
 //! areas each pixel is, trained on the folders [`dataset`] wrote and scored
 //! against the tensors [`ground_truth`] holds. It is what the `train` and
-//! `image_to_map` tools are built on, and the backend it is built against —
+//! `mauro net image-to-map` tools are built on, and the backend it is built against —
 //! pure Rust by default, `--features wgpu` or `--features cuda` otherwise —
 //! is a Cargo feature, since burn takes its backend as a type parameter.
 
@@ -175,6 +175,7 @@ pub mod layout;
 pub mod map;
 pub mod map_areas;
 pub mod naming;
+pub mod net;
 pub mod ocd;
 pub mod ocd_crs;
 pub mod orthophoto;
@@ -184,7 +185,6 @@ pub mod osm_convert;
 pub mod osm_download;
 pub mod osm_orienteering;
 pub mod osm_style;
-pub mod net;
 pub mod path_builder;
 pub mod progress;
 pub mod qbezier;

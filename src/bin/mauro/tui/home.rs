@@ -10,7 +10,8 @@ use ratatui::Frame;
 use super::form::Tool;
 use super::screens::{
     benchmark_create::BenchmarkCreate, benchmark_run::BenchmarkRun, dem::Dem, dem_eval::DemEval,
-    ortho::Ortho, osm::Osm, render::Render,
+    net_dataset::NetDataset, net_grid_to_map::NetGridToMap, net_image_to_map::NetImageToMap,
+    net_show_batches::NetShowBatches, net_train::NetTrain, ortho::Ortho, osm::Osm, render::Render,
 };
 use super::Action;
 
@@ -25,7 +26,7 @@ struct Entry {
 }
 
 /// The tools in the order the list shows them.
-const TOOLS: [Entry; 7] = [
+const TOOLS: [Entry; 12] = [
     Entry {
         command: "render",
         about: "Render a map to an image (PNG, JPEG, TIFF, BMP) or to SVG",
@@ -60,6 +61,31 @@ const TOOLS: [Entry; 7] = [
         command: "benchmark run",
         about: "Render a benchmark archive and report the differences",
         open: || Box::new(BenchmarkRun::new()),
+    },
+    Entry {
+        command: "net dataset",
+        about: "Generate a dataset of random maps with pixel labels",
+        open: || Box::new(NetDataset::new()),
+    },
+    Entry {
+        command: "net grid-to-map",
+        about: "Turn a grid of labels back into a map",
+        open: || Box::new(NetGridToMap::new()),
+    },
+    Entry {
+        command: "net train",
+        about: "Train a network to read a rendered map",
+        open: || Box::new(NetTrain::new()),
+    },
+    Entry {
+        command: "net image-to-map",
+        about: "Read a picture of a map back into a map",
+        open: || Box::new(NetImageToMap::new()),
+    },
+    Entry {
+        command: "net show-batches",
+        about: "Draw the batches a run is trained on",
+        open: || Box::new(NetShowBatches::new()),
     },
 ];
 

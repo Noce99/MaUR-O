@@ -28,30 +28,6 @@ path = "src/lib.rs"
 name = "mauro"
 path = "src/bin/mauro/main.rs"
 
-[[bin]]
-name = "generate_maps_dataset"
-path = "src/bin/generate_maps_dataset.rs"
-
-[[bin]]
-name = "grid_to_map"
-path = "src/bin/grid_to_map.rs"
-
-# The training side. Which backend these are built against is a Cargo feature
-# rather than an option they take, since burn's is a type parameter.
-[[bin]]
-name = "train"
-path = "src/bin/train.rs"
-
-[[bin]]
-name = "image_to_map"
-path = "src/bin/image_to_map.rs"
-
-# Not a step of the pipeline: what the batches a run is trained on look like,
-# drawn rather than descended.
-[[bin]]
-name = "show_batches"
-path = "src/bin/show_batches.rs"
-
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }

@@ -15,7 +15,7 @@
 //! there has to be a file to draw from — but it is written to a scratch
 //! folder which goes when the epoch is done. A run's worth of read-back maps
 //! is a great deal of disk for something nobody opens, and an early epoch's
-//! is the worst of them; `image_to_map` writes one to keep.
+//! is the worst of them; `mauro net image-to-map` writes one to keep.
 //!
 //! Opened in order, the middle panel of those sheets is a run learning to
 //! read a map, which is the one thing a column of losses cannot tell you.
@@ -98,7 +98,7 @@ pub struct ImageValidation<B: Backend> {
     symbol_set: PathBuf,
     /// Its opaque areas, which is that list.
     symbols: Vec<Entry>,
-    /// How to read a picture back, which is what `image_to_map` would do.
+    /// How to read a picture back, which is what `mauro net image-to-map` would do.
     settings: ReadBackSettings,
     /// Where the network is run.
     device: B::Device,
