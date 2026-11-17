@@ -26,18 +26,6 @@ path = "src/lib.rs"
 name = "mauro"
 path = "src/bin/mauro/main.rs"
 
-[[bin]]
-name = "omap_to_tiles"
-path = "src/bin/omap_to_tiles.rs"
-
-[[bin]]
-name = "tiles_query"
-path = "src/bin/tiles_query.rs"
-
-[[bin]]
-name = "tiles_serve"
-path = "src/bin/tiles_serve.rs"
-
 [dependencies]
 quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }

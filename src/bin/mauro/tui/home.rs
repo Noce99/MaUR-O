@@ -10,7 +10,8 @@ use ratatui::Frame;
 use super::form::Tool;
 use super::screens::{
     benchmark_create::BenchmarkCreate, benchmark_run::BenchmarkRun, dem::Dem, dem_eval::DemEval,
-    ortho::Ortho, osm::Osm, render::Render,
+    ortho::Ortho, osm::Osm, render::Render, tiles_build::TilesBuild, tiles_query::TilesQuery,
+    tiles_serve::TilesServe,
 };
 use super::Action;
 
@@ -25,7 +26,7 @@ struct Entry {
 }
 
 /// The tools in the order the list shows them.
-const TOOLS: [Entry; 7] = [
+const TOOLS: [Entry; 10] = [
     Entry {
         command: "render",
         about: "Render a map to an image (PNG, JPEG, TIFF, BMP) or to SVG",
@@ -60,6 +61,21 @@ const TOOLS: [Entry; 7] = [
         command: "benchmark run",
         about: "Render a benchmark archive and report the differences",
         open: || Box::new(BenchmarkRun::new()),
+    },
+    Entry {
+        command: "tiles build",
+        about: "Put maps into a MOT archive, the tiled world map",
+        open: || Box::new(TilesBuild::new()),
+    },
+    Entry {
+        command: "tiles query",
+        about: "List what a MOT archive holds around a place",
+        open: || Box::new(TilesQuery::new()),
+    },
+    Entry {
+        command: "tiles serve",
+        about: "Look at MOT archives as a map in the browser",
+        open: || Box::new(TilesServe::new()),
     },
 ];
 

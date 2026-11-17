@@ -155,9 +155,9 @@ comment:
 | `bin/mauro/dem_eval.rs` | `mauro dem-eval`: scores a predicted DEM against a ground truth. |
 | `bin/mauro/osm.rs` | `mauro osm`: converts an `.osm` file, or the data of an area downloaded from the Overpass API (`--download`, over `ureq`), into an `.omap`, drawn to ISSprOM (the default), ISOM or carto (`--standard`). |
 | `bin/mauro/ortho.rs` | `mauro ortho`: downloads a map's orthophoto tile by tile and adds it to the map as a template. |
-| `bin/omap_to_tiles.rs` | Converts maps into a MOT archive. |
-| `bin/tiles_query.rs` | Lists the objects of a MOT archive around a place, by symbol. |
-| `bin/tiles_serve.rs`, `bin/tiles_serve.html` | A std-only HTTP server for one or more MOT archives (layers, highest priority first), drawing and stacking tiles on request with `mot_render`, and the one-page slippy-map viewer it serves. |
+| `bin/mauro/tiles_build.rs` | Converts maps into a MOT archive. |
+| `bin/mauro/tiles_query.rs` | Lists the objects of a MOT archive around a place, by symbol. |
+| `bin/mauro/tiles_serve.rs`, `bin/mauro/tiles_serve.html` | A std-only HTTP server for one or more MOT archives (layers, highest priority first), drawing and stacking tiles on request with `mot_render`, and the one-page slippy-map viewer it serves. |
 
 ## One map per symbol
 

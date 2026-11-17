@@ -2,8 +2,8 @@
 //! symbol. This is what a viewer asks, as the command line.
 //!
 //! ```text
-//! tiles_query --around lat,lon [--size 1km] [--zoom Z] [--objects] <archive>
-//! tiles_query --bbox min_lon,min_lat,max_lon,max_lat [--zoom Z] [--objects] <archive>
+//! mauro tiles query --around lat,lon [--size 1km] [--zoom Z] [--objects] <archive>
+//! mauro tiles query --bbox min_lon,min_lat,max_lon,max_lat [--zoom Z] [--objects] <archive>
 //! ```
 //!
 //! `--around` takes a point (latitude first, as a map app copies one) and the
@@ -38,12 +38,9 @@ use maur_o::mot_symbols::SymbolTable;
 use maur_o::orthophoto::web_mercator;
 
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Lists the objects of a MOT archive around a place, by symbol."
-)]
-struct Args {
-    /// The MOT archive (a PMTiles file written by omap_to_tiles).
+#[command(about = "Lists the objects of a MOT archive around a place, by symbol.")]
+pub struct Args {
+    /// The MOT archive (a PMTiles file written by `mauro tiles build`).
     #[arg(value_name = "ARCHIVE")]
     archive: PathBuf,
 
@@ -102,17 +99,7 @@ fn area(args: &Args) -> Result<[f64; 4], (ExitCode, String)> {
     Ok([x - half, y - half, x + half, y + half])
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(args) => args,
-        Err(e) => {
-            let _ = e.print();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
+fn run(args: Args) -> Result<(), (ExitCode, String)> {
     let bounds = area(&args)?;
     let archive =
         Archive::open(&args.archive).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
@@ -211,8 +198,20 @@ fn touches(tile: &Tile, id: TileId, object: &maur_o::mot::TileObject, bounds: [f
     x0 <= bounds[2] && x1 >= bounds[0] && y0 <= bounds[3] && y1 >= bounds[1]
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "the archive could not be read",
+        _ => return None,
+    })
+}
+
+/// Runs `mauro tiles query`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err((code, message)) => {
             if !message.is_empty() {

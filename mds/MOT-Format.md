@@ -3,14 +3,14 @@
 Status: **draft**. A first slice is implemented: the tile payload codec
 (`src/mot.rs`), the ISOM symbol table (`src/mot_symbols.rs`), conversion of a
 map to tiles (`src/mot_convert.rs`) and the PMTiles archive (`src/mot_archive.rs`),
-with the tools `omap_to_tiles` and `tiles_query`, the clipping of objects at
+with the tools `mauro tiles build` and `mauro tiles query`, the clipping of objects at
 tile borders (`src/mot_clip.rs`) and the zoom levels with the per-symbol rules.
-A development viewer, `tiles_serve`, draws the tiles in a browser through the crate's renderer (`src/mot_render.rs`). Coverage and the levels below the first symbol (zoom 0 to 10, which have only
+A development viewer, `mauro tiles serve`, draws the tiles in a browser through the crate's renderer (`src/mot_render.rs`). Coverage and the levels below the first symbol (zoom 0 to 10, which have only
 the coverage) are implemented, and so is the pure part of the history
 (`src/mot_history.rs`). Not yet: the history in an archive, other symbol sets,
 merging of neighbouring objects. The measurements in [Measurements so far](#measurements-so-far)
 come from the throw-away programs in `examples/` (`tile_stats.rs`, `curve_fit.rs`,
-`hidden_areas.rs`); the real codec is measured with `omap_to_tiles` itself.
+`hidden_areas.rs`); the real codec is measured with `mauro tiles build` itself.
 
 MOT is a compact, tiled, vector format for storing *all* orienteering maps of the
 world as one map, and for fetching "what is around this location" cheaply. It is
@@ -60,7 +60,7 @@ A viewer can:
 
 ### Coverage
 
-(The stacked view is implemented in `tiles_serve`: archives are layers, given in
+(The stacked view is implemented in `mauro tiles serve`: archives are layers, given in
 priority order; each layer's tile is drawn, hides what is below it inside its own
 coverage, and is drawn over the rest.)
 
@@ -277,7 +277,7 @@ changeset touches.
 | Encode/decode: objects ↔ tiles, `Map` ↔ tiles | The server or database holding the log and the tiles |
 | "Apply a changeset to a tile", "read this tile at time *T*" | Concurrent edits, permissions, moderation, revert |
 | Bounding-box query | The UI: timeline, layer picker |
-| CLI tools: `omap_to_tiles`, `tiles_query` | Calling the crate to rebuild tiles after a change |
+| CLI tools: `mauro tiles build`, `mauro tiles query` | Calling the crate to rebuild tiles after a change |
 | Rendering from decoded tiles (also in wasm) | |
 
 If the crate also had to ship a store with its own writes (a file or SQLite), that
@@ -309,7 +309,7 @@ decompressing the whole map.
 
 ### Measurements of the codec
 
-`omap_to_tiles` on the same two maps, 5 cm grid, zoom 14, each tile
+`mauro tiles build` on the same two maps, 5 cm grid, zoom 14, each tile
 compressed on its own with zstd -19. Objects of hidden symbols and drawing aids are
 left out (in Corno they are 44,000 of 57,000 objects, the reason it is so much
 smaller than the estimate above); symbols not in the ISOM table are remapped or

@@ -2,7 +2,7 @@
 //! draws the tiles with this crate's own renderer.
 //!
 //! ```text
-//! tiles_serve [--host 127.0.0.1] [--port 8080] [--workers N] <archive>...
+//! mauro tiles serve [--host 127.0.0.1] [--port 8080] [--workers N] <archive>...
 //! ```
 //!
 //! It prints the address it listens on (`--port 0` picks a free one) and serves
@@ -53,12 +53,9 @@ use maur_o::mot_symbols::SymbolTable;
 const VIEWER: &str = include_str!("tiles_serve.html");
 
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Serves a MOT archive as a slippy map, drawn with the crate's renderer."
-)]
-struct Args {
-    /// The MOT archives (PMTiles files written by omap_to_tiles), one per symbol
+#[command(about = "Serves a MOT archive as a slippy map, drawn with the crate's renderer.")]
+pub struct Args {
+    /// The MOT archives (PMTiles files written by `mauro tiles build`), one per symbol
     /// set, the one with the highest priority first.
     #[arg(value_name = "ARCHIVE", required = true)]
     archives: Vec<PathBuf>,
@@ -353,17 +350,7 @@ fn worker(shared: Arc<Shared>, queue: Arc<Mutex<Receiver<TcpStream>>>) {
     }
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(args) => args,
-        Err(e) => {
-            let _ = e.print();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
+fn run(args: Args) -> Result<(), (ExitCode, String)> {
     let mut layers: Vec<Layer> = Vec::new();
     for path in &args.archives {
         let archive =
@@ -432,8 +419,21 @@ fn run() -> Result<(), (ExitCode, String)> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "an archive could not be read",
+        4 => "the address could not be used",
+        _ => return None,
+    })
+}
+
+/// Runs `mauro tiles serve`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err((code, message)) => {
             if !message.is_empty() {

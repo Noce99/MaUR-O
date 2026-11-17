@@ -2,7 +2,7 @@
 //! `mds/MOT-Format.md`, in a PMTiles file.
 //!
 //! ```text
-//! omap_to_tiles [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 0] [--grid-cm 5]
+//! mauro tiles build [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 0] [--grid-cm 5]
 //!               [--buffer 0.03125] --output world.pmtiles <map-file>...
 //! ```
 //!
@@ -75,11 +75,8 @@ enum StandardArg {
 }
 
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Converts Mapper maps into a MOT archive (tiled world map, in PMTiles)."
-)]
-struct Args {
+#[command(about = "Converts Mapper maps into a MOT archive (tiled world map, in PMTiles).")]
+pub struct Args {
     /// The maps to convert (.omap or .xmap).
     #[arg(value_name = "MAP_FILE", required = true)]
     maps: Vec<PathBuf>,
@@ -122,17 +119,7 @@ fn parse_buffer(text: &str) -> Result<f64, String> {
     }
 }
 
-fn run() -> Result<(), (ExitCode, String)> {
-    let args = match Args::try_parse() {
-        Ok(args) => args,
-        Err(e) => {
-            let _ = e.print();
-            return Err((
-                ExitCode::from(if e.exit_code() == 0 { 0 } else { 1 }),
-                String::new(),
-            ));
-        }
-    };
+fn run(args: Args) -> Result<(), (ExitCode, String)> {
     if args.min_zoom > args.zoom {
         return Err((
             ExitCode::from(1),
@@ -272,8 +259,21 @@ fn suffixed(path: &Path, standard: &Standard) -> PathBuf {
     path.with_file_name(name)
 }
 
-fn main() -> ExitCode {
-    match run() {
+/// What an exit code of this subcommand means, as the module's own
+/// documentation lists them.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        0 => "success",
+        1 => "usage error",
+        2 => "a map could not be read, or none could be converted",
+        4 => "the archive could not be written",
+        _ => return None,
+    })
+}
+
+/// Runs `mauro tiles build`.
+pub fn main(args: Args) -> ExitCode {
+    match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err((code, message)) => {
             if !message.is_empty() {

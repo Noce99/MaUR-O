@@ -8,6 +8,9 @@
 //! mauro dem-eval         score a predicted DEM GeoTIFF against a ground-truth one
 //! mauro osm              convert OpenStreetMap data into a map
 //! mauro ortho            add a map's aerial orthophoto to it as a template
+//! mauro tiles build      convert maps into a MOT archive (a tiled world map)
+//! mauro tiles query      list what a MOT archive holds around a place
+//! mauro tiles serve      serve a MOT archive as a slippy map in a browser
 //! ```
 //!
 //! Each subcommand is documented in its own module, exit codes included;
@@ -27,6 +30,9 @@ mod dem_eval;
 mod ortho;
 mod osm;
 mod render;
+mod tiles_build;
+mod tiles_query;
+mod tiles_serve;
 mod tui;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -60,12 +66,22 @@ enum Cmd {
     DemEval(dem_eval::Args),
     Osm(osm::Args),
     Ortho(ortho::Args),
+    /// Keeps maps in, and reads them back from, a MOT archive: a tiled world map.
+    #[command(subcommand)]
+    Tiles(TilesCmd),
 }
 
 #[derive(Subcommand)]
 enum BenchmarkCmd {
     Create(benchmark_create::Args),
     Run(benchmark_run::Args),
+}
+
+#[derive(Subcommand)]
+enum TilesCmd {
+    Build(tiles_build::Args),
+    Query(tiles_query::Args),
+    Serve(tiles_serve::Args),
 }
 
 fn main() -> ExitCode {
@@ -102,5 +118,8 @@ fn main() -> ExitCode {
             osm::main(args, osm_matches)
         }
         Cmd::Ortho(args) => ortho::main(args),
+        Cmd::Tiles(TilesCmd::Build(args)) => tiles_build::main(args),
+        Cmd::Tiles(TilesCmd::Query(args)) => tiles_query::main(args),
+        Cmd::Tiles(TilesCmd::Serve(args)) => tiles_serve::main(args),
     }
 }
