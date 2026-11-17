@@ -24,7 +24,9 @@
 //! Which side of a curve a pixel is on is a step, and a step has no
 //! gradient. So a pixel belongs to a piece to a *degree*: the piece's share
 //! `m` is split between the two halves by `sigmoid(distance / temperature)`,
-//! where the distance is signed (see [`signed_distance`]):
+//! where the distance is to the curve and the sign says which side of it the
+//! pixel is on (see `signed_distance` for why that is the polygon's inside
+//! and not the nearest segment's side):
 //!
 //! ```text
 //! m_first  = m * sigmoid(s / t)
@@ -64,8 +66,12 @@ use crate::net::unet::{DoubleConv, DoubleConvConfig};
 /// by `2^LEVELS`.
 const LEVELS: usize = 4;
 
-/// How far past its two ends a curve is continued, in picture widths.
-const EXTENSION: f32 = 2.0;
+/// How far past its two ends a curve is continued, and how far off the far
+/// side of its half-plane polygon is: the numbers [`crate::tree_vector`] draws
+/// its polygons with, because what the network trains on has to be what is
+/// drawn.
+const EXTENSION: f32 = crate::tree_vector::EXTENSION as f32;
+const FAR: f32 = crate::tree_vector::FAR as f32;
 
 /// What a [`TreeNet`] is built from.
 #[derive(Config, Debug)]
@@ -285,6 +291,11 @@ impl<B: Backend> TreeNet<B> {
         1 << self.depth
     }
 
+    /// Cuts from the root to a leaf.
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
     /// The side of the pictures it was built for, in pixels.
     pub fn size(&self) -> usize {
         self.size
@@ -456,37 +467,114 @@ fn signed_distance<B: Backend>(
         .slice([0..batch, 0..nodes, 0..segments, 0..2])
         .reshape([batch, nodes, 1, segments, 2]);
     let b = line
+        .clone()
         .slice([0..batch, 0..nodes, 1..segments + 1, 0..2])
         .reshape([batch, nodes, 1, segments, 2]);
     let ab = b - a.clone();
-    let ap = pixels - a; // [B, N, P, S, 2]
+    let ap = pixels.clone() - a; // [B, N, P, S, 2]
 
     let ab_x = ab
         .clone()
         .slice([0..batch, 0..nodes, 0..1, 0..segments, 0..1]);
-    let ab_y = ab
-        .clone()
-        .slice([0..batch, 0..nodes, 0..1, 0..segments, 1..2]);
+    let ab_y = ab.slice([0..batch, 0..nodes, 0..1, 0..segments, 1..2]);
     let ap_x = ap
         .clone()
         .slice([0..batch, 0..nodes, 0..area, 0..segments, 0..1]);
-    let ap_y = ap
-        .clone()
-        .slice([0..batch, 0..nodes, 0..area, 0..segments, 1..2]);
+    let ap_y = ap.slice([0..batch, 0..nodes, 0..area, 0..segments, 1..2]);
 
     let along = (ap_x.clone() * ab_x.clone() + ap_y.clone() * ab_y.clone())
         / (ab_x.clone() * ab_x.clone() + ab_y.clone() * ab_y.clone()).add_scalar(1e-9);
     let along = along.clamp(0.0, 1.0);
-    let off_x = ap_x.clone() - along.clone() * ab_x.clone();
-    let off_y = ap_y.clone() - along * ab_y.clone();
+    let off_x = ap_x.clone() - along.clone() * ab_x;
+    let off_y = ap_y.clone() - along * ab_y;
     let squared =
         (off_x.clone() * off_x + off_y.clone() * off_y).reshape([batch, nodes, area, segments]);
-    let cross = (ab_x * ap_y - ab_y * ap_x).reshape([batch, nodes, area, segments]);
+    let distance = squared
+        .min_dim(3)
+        .add_scalar(1e-12)
+        .sqrt()
+        .reshape([batch, nodes, area]);
 
-    let nearest = squared.clone().argmin(3);
-    let side = cross.gather(3, nearest).sign();
-    let distance = squared.min_dim(3).add_scalar(1e-12).sqrt();
-    (distance * side).reshape([batch, nodes, area])
+    // The side: whether the pixel is inside the polygon the cut and its far
+    // side make, by the parity of how many times a ray to the right crosses
+    // it. Unlike the sign of the nearest segment, which flips along the
+    // medial axis of a curve which curls — where there is no cut at all — this
+    // flips only on the cut, so the regions the network trains on are the
+    // regions the polygons of `crate::tree_vector` are.
+    let inside = inside_polygon(line.detach(), pixels, batch, nodes, area);
+    distance * inside.mul_scalar(2.0).sub_scalar(1.0)
+}
+
+/// `1` where a pixel is inside the closed polygon a cut makes with its far
+/// side, `0` where it is not: `[batch, nodes, pixels]`.
+///
+/// `line` is the cut with its two extensions, `[batch, nodes, points, 2]`;
+/// the polygon is that, then a point far off on the positive side of each end
+/// — positive being `(-dy, dx)` from the way the cut runs there — and back.
+/// A pixel is inside where a ray to the right of it crosses the polygon an odd
+/// number of times, which is the even-odd rule.
+fn inside_polygon<B: Backend>(
+    line: Tensor<B, 4>,
+    pixels: Tensor<B, 5>,
+    batch: usize,
+    nodes: usize,
+    area: usize,
+) -> Tensor<B, 3> {
+    let points = line.dims()[2];
+    let at = |i: usize| line.clone().slice([0..batch, 0..nodes, i..i + 1, 0..2]);
+    let normal = |v: Tensor<B, 4>| {
+        let dx = v.clone().slice([0..batch, 0..nodes, 0..1, 0..1]);
+        let dy = v.slice([0..batch, 0..nodes, 0..1, 1..2]);
+        let length = (dx.clone() * dx.clone() + dy.clone() * dy.clone())
+            .add_scalar(1e-12)
+            .sqrt();
+        Tensor::cat(vec![dy.neg() / length.clone(), dx / length], 3)
+    };
+    let (first, last) = (at(0), at(points - 1));
+    let n_first = normal(at(1) - first.clone());
+    let n_last = normal(last.clone() - at(points - 2));
+    let ring = Tensor::cat(
+        vec![
+            line.clone(),
+            last + n_last.mul_scalar(FAR),
+            first.clone() + n_first.mul_scalar(FAR),
+        ],
+        2,
+    );
+    let edges = points + 2;
+    let a = ring.clone();
+    let b = Tensor::cat(
+        vec![ring.slice([0..batch, 0..nodes, 1..edges, 0..2]), first],
+        2,
+    );
+    let column = |t: &Tensor<B, 4>, c: usize| {
+        t.clone()
+            .slice([0..batch, 0..nodes, 0..edges, c..c + 1])
+            .reshape([batch, nodes, 1, edges])
+    };
+    let (a_x, a_y, b_x, b_y) = (column(&a, 0), column(&a, 1), column(&b, 0), column(&b, 1));
+    let px = pixels
+        .clone()
+        .slice([0..1, 0..1, 0..area, 0..1, 0..1])
+        .reshape([1, 1, area, 1]);
+    let py = pixels
+        .slice([0..1, 0..1, 0..area, 0..1, 1..2])
+        .reshape([1, 1, area, 1]);
+
+    // An edge is crossed by the ray where its ends are on either side of the
+    // pixel's row and the edge is to the pixel's right at that row.
+    // Compared at the full shape: a comparison, unlike arithmetic, does not
+    // stretch a dimension of one on every backend.
+    let full = [batch, nodes, area, edges];
+    let py_full = py.clone().expand(full);
+    let above_a = a_y.clone().expand(full).greater(py_full.clone()).float();
+    let above_b = b_y.clone().expand(full).greater(py_full).float();
+    let straddles = (above_a - above_b).abs();
+    let x_at = a_x.clone() + (py - a_y.clone()) / (b_y - a_y) * (b_x - a_x);
+    let to_the_right = x_at.greater(px.expand(full)).float();
+    let crossings = (straddles * to_the_right).sum_dim(3);
+    let parity = crossings.clone() - crossings.div_scalar(2.0).floor().mul_scalar(2.0);
+    parity.reshape([batch, nodes, area])
 }
 
 /// A vector `[.., 2]` scaled to length one.
@@ -562,6 +650,86 @@ mod tests {
         assert_eq!(probabilities.dims(), [2, 3, SIZE, SIZE]);
         let worst: f32 = (probabilities.sum_dim(1) - 1.0).abs().max().into_scalar();
         assert!(worst < 1e-4, "probabilities sum to one, off by {worst}");
+    }
+
+    /// What the whole of the vector export stands on: for cuts which curl and
+    /// cross themselves, the polygons `tree_vector` makes are the regions the
+    /// network assigns its pixels to. Pixel by pixel, over several random
+    /// trees, with every leaf a class of its own so a leaf can be told.
+    #[test]
+    fn the_polygons_of_curled_cuts_are_the_regions_the_net_assigns() {
+        use crate::tree_vector::CutTree;
+        use geo::Contains;
+
+        let device = NdArrayDevice::default();
+        let (depth, points, samples, side) = (3, 8, 24, 48);
+        let net = TreeNetConfig::new(8)
+            .with_size(SIZE)
+            .with_depth(depth)
+            .with_control_points(points)
+            .with_samples(samples)
+            .init::<Plain>(&device);
+        let nodes = (1 << depth) - 1;
+
+        for seed in 1..=6u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut random = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 11) as f64 / (1u64 << 53) as f64
+            };
+            // Control points anywhere from well outside the picture to well
+            // inside: curls, loops and cuts which cross themselves.
+            let values: Vec<f64> = (0..nodes * points * 2)
+                .map(|_| -0.3 + 1.6 * random())
+                .collect();
+            let curves = Tensor::<Plain, 4>::from_data(
+                TensorData::new(
+                    values.iter().map(|&v| v as f32).collect::<Vec<_>>(),
+                    [1, nodes, points, 2],
+                ),
+                &device,
+            );
+            let leaves = net.leaf_map(curves, side, side);
+
+            let tree = CutTree {
+                depth,
+                cuts: (0..nodes)
+                    .map(|n| {
+                        (0..points)
+                            .map(|k| {
+                                (
+                                    values[(n * points + k) * 2],
+                                    values[(n * points + k) * 2 + 1],
+                                )
+                            })
+                            .collect()
+                    })
+                    .collect(),
+                leaf_class: (0..8).collect(),
+            };
+            let regions = tree.regions(samples, 8, 0.0);
+
+            let mut agree = 0;
+            for (at, &leaf) in leaves.iter().enumerate() {
+                let p = geo::Point::new(
+                    ((at % side) as f64 + 0.5) / side as f64,
+                    ((at / side) as f64 + 0.5) / side as f64,
+                );
+                let found = regions.iter().find(|(_, shape)| shape.contains(&p));
+                // A pixel on no polygon is one the sliver filter dropped.
+                if found.is_some_and(|(class, _)| *class == leaf as usize) {
+                    agree += 1;
+                }
+            }
+            let share = agree as f64 / leaves.len() as f64;
+            assert!(
+                share > 0.995,
+                "seed {seed}: only {:.2}% agree",
+                share * 100.0
+            );
+        }
     }
 
     /// The hard tree and the soft one say the same where the cuts are far

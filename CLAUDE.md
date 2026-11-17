@@ -172,6 +172,7 @@ are related but downstream of this pipeline's output, not part of it.
 - **`stats.rs`** — counts of a map's objects/symbols/lengths/areas.
 - **`svg.rs`** — writes the renderer's own renderables out as SVG vector paths instead of rasterizing them.
 - **`validate.rs`** — checks a map against a mapping standard (ISOM/ISSprOM).
+- **`tree_vector.rs`** — a tree-network answer (cuts + a symbol per leaf) as polygons, by clipping with the cuts (`geo` boolean ops); `vectorize::objects_of_regions` writes them as map objects. The network's side-of-a-cut definition (`net::tree::signed_distance`) must stay the polygon parity this uses, or the export stops matching what was trained.
 
 ### OpenStreetMap → map (`mauro osm`)
 

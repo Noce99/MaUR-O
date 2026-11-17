@@ -18,10 +18,12 @@
 //! A run of the tree network (`mauro net train --model tree`, recognised by its
 //! `tree.json`) is read the same way, with a difference in the middle: the
 //! tree answers with the curves which cut the picture and a symbol for each
-//! leaf, so the cuts are made hard and drawn at the picture's own size, and
-//! the grid of symbols that gives goes through the same vectorizer. `--crop`
-//! and `--overlap` are the U-Net's tiles and do not apply to it, and it has
-//! no angle to give.
+//! leaf, which is already a vector drawing, so there is no grid and no
+//! vectorizer. The areas the cuts make are worked out from the curves
+//! themselves (see [`maur_o::tree_vector`]) and written as they are, their
+//! boundaries the curves the network drew. `--crop`, `--overlap` and
+//! `--same-angle` are the U-Net's and do not apply to it, and it has no angle
+//! to give.
 //!
 //! The run folder is all it is told, because a run folder holds everything:
 //! `training.json` says how big the network was, `best.mpk` is its weights,
@@ -59,8 +61,8 @@ use maur_o::xml_reader::read_xml_map;
 use maur_o::vectorize::Simplify;
 
 use maur_o::net::predict::{
-    load, predict_tree_image, read_back, read_back_grid, ReadBackSettings, OVERLAP,
-    PREDICTED_SAME_ANGLE, PREDICTED_TOLERANCE,
+    load, read_back, read_back_tree, ReadBackSettings, OVERLAP, PREDICTED_SAME_ANGLE,
+    PREDICTED_TOLERANCE, TREE_TOLERANCE,
 };
 use maur_o::net::tree_training::load_tree;
 
@@ -98,8 +100,10 @@ pub struct Args {
     /// How far the boundary may be moved to be rid of a node, in cells --
     /// one cell being one pixel of the picture. Nought keeps every node the
     /// staircase asks for, which on a picture this size is a great many.
-    #[arg(short = 't', long, default_value_t = PREDICTED_TOLERANCE, value_name = "PIXELS")]
-    tolerance: f64,
+    /// Defaults to 1 for a U-Net's staircase and to 0.05 for a tree's
+    /// boundaries, which are curves already and have none.
+    #[arg(short = 't', long, value_name = "PIXELS")]
+    tolerance: Option<f64>,
 
     /// How far apart two neighbouring pixels' angles may be and still be one
     /// object's, as a share of a whole turn. `inf` never splits a region on
@@ -138,7 +142,13 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
     let usage = |message: String| (ExitCode::from(1), format!("Error: {message}"));
     let failed = |message: String| (ExitCode::from(2), format!("Error: {message}"));
 
-    if args.tolerance.is_nan() || args.tolerance < 0.0 {
+    let tree = args.run.join("tree.json").is_file();
+    let tolerance = args.tolerance.unwrap_or(if tree {
+        TREE_TOLERANCE
+    } else {
+        PREDICTED_TOLERANCE
+    });
+    if tolerance.is_nan() || tolerance < 0.0 {
         return Err(usage(
             "Invalid value for --tolerance: it cannot be negative.".to_string(),
         ));
@@ -218,13 +228,14 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         .clone()
         .unwrap_or_else(|| args.image.with_extension("omap"));
     let simplify = Simplify {
-        tolerance: args.tolerance,
+        tolerance,
         same_angle: args.same_angle,
     };
 
-    let done = if args.run.join("tree.json").is_file() {
+    let done = if tree {
         // A tree of curves: its answer is a cut of the whole picture and a
-        // symbol for each leaf, so there are no tiles to cut it into.
+        // symbol for each leaf, so there are no tiles to cut it into, and
+        // the areas it makes are worked out from the curves themselves.
         let (model, _) =
             load_tree::<Backend>(&args.run, args.weights.as_deref(), &device()).map_err(failed)?;
         if model.classes() != notes.classes {
@@ -241,7 +252,6 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             model.leaves(),
             model.classes(),
         );
-        let grid = predict_tree_image(&model, &picture, &device());
         let settings = ReadBackSettings {
             tile: 0,
             overlap: 0,
@@ -249,7 +259,16 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             scale_denominator: scale,
             simplify,
         };
-        read_back_grid(grid, &picture, &symbol_set, &map_path, &settings).map_err(failed)?
+        read_back_tree(
+            &model,
+            &picture,
+            &symbol_set,
+            &catalogue.opaque_areas,
+            &map_path,
+            &settings,
+            &device(),
+        )
+        .map_err(failed)?
     } else {
         let (model, config) =
             load::<Backend>(&args.run, args.weights.as_deref(), &device()).map_err(failed)?;

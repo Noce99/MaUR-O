@@ -1082,8 +1082,22 @@ It is trained on the **whole picture**, reduced to `--size` pixels (a divisor of
 `--workers` and `--image-valid` are the U-Net's and are ignored. A run is
 `TreeNet_<date>/` holding `tree.json`, `architecture.txt`, `best.mpk` and
 `valid.png` (*picture | label | answer*). It reports to the terminal interface
-like any other run and can be paused and stopped. `net image-to-map` does not
-read it yet: the curves are not turned into a map.
+like any other run and can be paused and stopped.
+
+`net image-to-map` reads a tree run back into a map **without a pixel in
+between**: the curves are already a vector drawing, so the areas the cuts make
+are worked out from the curves themselves — each piece of the picture clipped
+by the cut that divides it, the leaves of one symbol joined — and written as
+polygons, their boundaries the curves the network drew
+([`maur_o::tree_vector`](src/tree_vector.rs)). That is only faithful because of
+how a pixel's side of a cut is defined in training: as being inside the polygon
+the cut makes with its far side (the parity of a ray's crossings), which flips
+on the cut and nowhere else. The sign of the nearest segment, the obvious
+choice, also flips along the medial axis of a curve which curls, where there is
+no cut, and a network trained on it learns to draw with those phantom
+boundaries — which no vector export can reproduce. `--tolerance` is 0.05 px for
+a tree and `--crop`, `--overlap` and `--same-angle` do not apply to it; it has
+no angle to give.
 
 ### Image validation
 

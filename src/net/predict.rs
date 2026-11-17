@@ -99,11 +99,14 @@ use crate::geometry::Rect;
 use crate::ground_truth::{BACKGROUND, NO_ROTATION};
 use crate::render::{render_map_over, to_rgb_image, Extent};
 use crate::symbol_kinds::Entry;
-use crate::vectorize::{write_map, Placement, Simplify, SymbolGrid};
+use crate::vectorize::{
+    objects_of_regions, write_map, write_objects, Placement, Simplify, SymbolGrid, Written,
+};
 
 use crate::net::training::TrainingConfig;
-use crate::net::tree::TreeNet;
+use crate::net::tree::{TreeAnswer, TreeNet};
 use crate::net::unet::{UNet, UNetConfig, DEPTH};
+use crate::tree_vector::CutTree;
 
 /// The weights of the epoch which validated best, which is what a run folder
 /// holds under this name.
@@ -376,20 +379,17 @@ pub fn read_back<B: Backend>(
     read_back_grid(grid, picture, symbol_set, into, settings)
 }
 
-/// What a tree network says about a whole picture: the cuts it makes, made
-/// hard and drawn at the picture's own size, and the symbol of each leaf.
+/// What the tree network says about a picture: its cuts and the symbol of
+/// each leaf, as plain numbers.
 ///
-/// The picture is reduced to the size the network was trained on to be read,
-/// the way the training reduced its pictures, but the answer is not that
-/// small: the curves are in picture coordinates, so the leaf of every pixel
-/// of the full picture is worked out from them, and a boundary is as smooth
-/// at 1650 pixels as the curve it is. A tree has no angle to give, so every
-/// cell of the grid has none.
-pub fn predict_tree_image<B: Backend>(
+/// The picture is reduced to the size the network was trained on, the way the
+/// training reduced its pictures; the curves it answers with are in picture
+/// coordinates, so they say where to cut a picture of any size.
+pub fn tree_answer<B: Backend>(
     model: &TreeNet<B>,
     picture: &RgbImage,
     device: &B::Device,
-) -> SymbolGrid {
+) -> (CutTree, TreeAnswer<B>) {
     let size = model.size();
     let small = image::imageops::resize(
         picture,
@@ -406,19 +406,136 @@ pub fn predict_tree_image<B: Backend>(
     }
     let input = Tensor::<B, 4>::from_data(TensorData::new(pixels, [1, 3, size, size]), device);
     let answer = model.forward(input);
-    let class_of_leaf = model.leaf_classes(&answer);
 
-    let (width, height) = (picture.width() as usize, picture.height() as usize);
+    let [_, nodes, points, _] = answer.curves.dims();
+    let flat: Vec<f32> = answer
+        .curves
+        .clone()
+        .into_data()
+        .convert::<f32>()
+        .to_vec()
+        .unwrap_or_default();
+    let cuts = (0..nodes)
+        .map(|node| {
+            (0..points)
+                .map(|k| {
+                    let at = (node * points + k) * 2;
+                    (flat[at] as f64, flat[at + 1] as f64)
+                })
+                .collect()
+        })
+        .collect();
+    let tree = CutTree {
+        depth: model.depth(),
+        cuts,
+        leaf_class: model.leaf_classes(&answer),
+    };
+    (tree, answer)
+}
+
+/// What a tree network says about a whole picture as a grid of symbols: the
+/// cuts it makes, made hard and drawn at the picture's own size, and the
+/// symbol of each leaf.
+///
+/// Only for the numbers a grid is good for — how much of the picture is frame,
+/// how many symbols it used — and for a picture to look at. The map a tree
+/// is read into does not go through it: see [`read_back_tree`]. A tree has no
+/// angle to give, so every cell has none.
+pub fn predict_tree_image<B: Backend>(
+    model: &TreeNet<B>,
+    picture: &RgbImage,
+    device: &B::Device,
+) -> SymbolGrid {
+    let (tree, answer) = tree_answer(model, picture, device);
+    tree_grid(
+        model,
+        &tree,
+        answer,
+        picture.width() as usize,
+        picture.height() as usize,
+    )
+}
+
+/// [`predict_tree_image`] from an answer already in hand.
+fn tree_grid<B: Backend>(
+    model: &TreeNet<B>,
+    tree: &CutTree,
+    answer: TreeAnswer<B>,
+    width: usize,
+    height: usize,
+) -> SymbolGrid {
     let leaves = model.leaf_map(answer.curves, width, height);
     let mut grid = SymbolGrid::new(width, height);
     for (class, leaf) in grid.class.iter_mut().zip(leaves) {
-        *class = class_of_leaf
+        *class = tree
+            .leaf_class
             .get(leaf as usize)
             .map_or(BACKGROUND, |&c| c as u16);
     }
     // The frame is the network's last class, and not a symbol of the set.
     grid.frame_is(model.classes() as u16);
     grid
+}
+
+/// How many points a cut's Bézier is sampled at when it is written as a
+/// shape: finer than the network measures its distances at, which is a
+/// matter of cost there and of how smooth a boundary looks here.
+pub const TREE_SAMPLES: usize = 64;
+
+/// How far a boundary of a tree's may be moved to be rid of a node, in
+/// pixels of the picture: a twentieth of one, which takes the nodes a finely
+/// sampled curve does not need and no more. Far below the one pixel
+/// [`PREDICTED_TOLERANCE`] allows a staircase, because there is no staircase.
+pub const TREE_TOLERANCE: f64 = 0.05;
+
+/// A picture through the tree network, out as a map **without a pixel in
+/// between**, and back to a picture to be measured against the one it came
+/// from.
+///
+/// The cuts the network answers with are curves, so the areas they make are
+/// worked out from the curves: each piece of the picture is clipped by the
+/// cut that divides it, the leaves of one symbol are joined, and the polygons
+/// that come out are the map's objects (see [`crate::tree_vector`]). Nothing
+/// is rasterized and rounded off again; the boundary of an area is the curve
+/// the network drew, sampled at [`TREE_SAMPLES`] points. `settings.simplify`'s
+/// tolerance is read in pixels of the picture, as it is for a grid.
+///
+/// `symbols` is `Catalogue::opaque_areas` of `symbol_set`. The grid in the
+/// answer is made for the numbers a grid is good for, and is not what the map
+/// was written from.
+pub fn read_back_tree<B: Backend>(
+    model: &TreeNet<B>,
+    picture: &RgbImage,
+    symbol_set: &Path,
+    symbols: &[Entry],
+    into: &Path,
+    settings: &ReadBackSettings,
+    device: &B::Device,
+) -> Result<ReadBack, String> {
+    let (tree, answer) = tree_answer(model, picture, device);
+    let grid = tree_grid(
+        model,
+        &tree,
+        answer,
+        picture.width() as usize,
+        picture.height() as usize,
+    );
+    let ground = ground_of(picture, settings);
+    let tolerance = settings.simplify.tolerance / (picture.width().max(picture.height()) as f64);
+    let regions = tree.regions(TREE_SAMPLES, model.classes(), tolerance);
+    let placement = Placement {
+        ground,
+        scale_denominator: settings.scale_denominator,
+    };
+    let objects = objects_of_regions(&regions, symbols, &placement)?;
+    let written = write_objects(
+        &objects,
+        symbol_set,
+        into,
+        settings.scale_denominator,
+        vec![],
+    )?;
+    finish(grid, written, picture, into, settings, ground)
 }
 
 /// A grid of symbols, written as a map and drawn again to be measured against
@@ -431,14 +548,7 @@ pub fn read_back_grid(
     into: &Path,
     settings: &ReadBackSettings,
 ) -> Result<ReadBack, String> {
-    let (width, height) = (picture.width() as f64, picture.height() as f64);
-    let (ground_width, ground_height) = (width / settings.resolution, height / settings.resolution);
-    let ground = Rect::from_ltrb(
-        -ground_width / 2.0,
-        -ground_height / 2.0,
-        ground_width / 2.0,
-        ground_height / 2.0,
-    );
+    let ground = ground_of(picture, settings);
     let written = write_map(
         &grid,
         symbol_set,
@@ -449,7 +559,33 @@ pub fn read_back_grid(
         },
         &settings.simplify,
     )?;
+    finish(grid, written, picture, into, settings, ground)
+}
 
+/// The ground a picture covers, in meters: its own size at the resolution,
+/// centred on the origin, which is exactly the square a dataset image covers
+/// and generalizes to a picture of any size.
+fn ground_of(picture: &RgbImage, settings: &ReadBackSettings) -> Rect {
+    let (width, height) = (picture.width() as f64, picture.height() as f64);
+    let (ground_width, ground_height) = (width / settings.resolution, height / settings.resolution);
+    Rect::from_ltrb(
+        -ground_width / 2.0,
+        -ground_height / 2.0,
+        ground_width / 2.0,
+        ground_height / 2.0,
+    )
+}
+
+/// What every read-back ends in: the map just written is drawn again, over
+/// the ground the picture covers, and compared with the picture.
+fn finish(
+    grid: SymbolGrid,
+    written: Written,
+    picture: &RgbImage,
+    into: &Path,
+    settings: &ReadBackSettings,
+    ground: Rect,
+) -> Result<ReadBack, String> {
     // Drawn from the file just written rather than from the objects which
     // went into it: what is scored is the map somebody else can open, and any
     // disagreement between the two is a bug worth tripping over here.

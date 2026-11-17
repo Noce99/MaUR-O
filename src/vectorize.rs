@@ -395,8 +395,6 @@ pub fn write_map(
 ) -> Result<Written, String> {
     let (mut map, warnings) = xml_reader::read_xml_map(source)?;
     map.resolve_references();
-    let fragments = xml_reader::read_fragments(source)?;
-
     let catalogue = Catalogue::of(&map);
     if catalogue.opaque_areas.is_empty() {
         return Err(format!(
@@ -406,14 +404,96 @@ pub fn write_map(
     }
 
     let objects = to_objects(grid, &catalogue.opaque_areas, placement, simplify)?;
+    write_objects(
+        &objects,
+        source,
+        into,
+        placement.scale_denominator,
+        warnings,
+    )
+}
+
+/// The path objects of areas which are already shapes: each region a class
+/// of the symbol list and the polygons it covers, in the picture's own
+/// coordinates — `[0, 1]` across and down — which `placement` lays over the
+/// ground.
+///
+/// A polygon's boundary and its holes are the subpaths of one object, and
+/// every point of them is a node of straight lines: a shape which came from
+/// curves has been sampled finely already, and nothing here rounds it off
+/// again. The fill is even-odd, so a hole is a hole whichever way it runs.
+pub fn objects_of_regions(
+    regions: &[(usize, geo::MultiPolygon<f64>)],
+    symbols: &[Entry],
+    placement: &Placement,
+) -> Result<Vec<Object>, String> {
+    let mm_per_meter = 1000.0 / placement.scale_denominator as f64;
+    let at = |c: &geo::Coord<f64>| {
+        Point::new(
+            placement.ground.left() + c.x * placement.ground.width(),
+            placement.ground.top() + c.y * placement.ground.height(),
+        )
+    };
+    let mut objects = Vec::new();
+    for (class, shape) in regions {
+        let entry = symbols.get(*class).ok_or_else(|| {
+            format!(
+                "a region is of class {class} and the symbol list has {} areas",
+                symbols.len()
+            )
+        })?;
+        for polygon in &shape.0 {
+            let mut builder = PathBuilder::new(mm_per_meter);
+            for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+                // A closed ring repeats its first point at the end.
+                let points: Vec<&geo::Coord<f64>> = ring.0.iter().collect();
+                let points = &points[..points.len().saturating_sub(1)];
+                if points.len() < 3 {
+                    continue;
+                }
+                builder.move_to(at(points[0]));
+                for point in &points[1..] {
+                    builder.line_to(at(point));
+                }
+                builder.close();
+            }
+            if builder.coords.is_empty() {
+                continue;
+            }
+            let mut object = Object::new(ObjectKind::Path(PathObject::default()));
+            object.coords = builder.coords;
+            object.symbol_index = Some(entry.index);
+            object.symbol_id = entry.id;
+            objects.push(object);
+        }
+    }
+    Ok(objects)
+}
+
+/// Writes `objects` as a map file drawn with the symbol set of `source`.
+///
+/// The colours and the symbols go out as the source file's own bytes, whole
+/// and in order — the colour table is the drawing order of a map and a symbol
+/// names a colour by its place in it — and the objects are between them. See
+/// [`crate::xml_reader::Fragments`] for why the symbols are copied rather
+/// than written back out of the parsed model. `warnings` are the source's, as
+/// reading it gave them, and are handed back with what was written.
+pub fn write_objects(
+    objects: &[Object],
+    source: &Path,
+    into: &Path,
+    scale_denominator: i32,
+    warnings: Vec<String>,
+) -> Result<Written, String> {
+    let fragments = xml_reader::read_fragments(source)?;
     let coords = objects.iter().map(|object| object.coords.len()).sum();
     MapFile {
         notes: "",
         georeferencing: None,
-        scale_denominator: placement.scale_denominator,
+        scale_denominator,
         colors: &fragments.colors,
         symbols: &fragments.symbols,
-        objects: &objects,
+        objects,
         // An angle is written only where the symbol has a pattern to turn,
         // so a rotation written here is a rotation something reads.
         rotatable: true,
@@ -875,6 +955,52 @@ mod tests {
                 symmetry: 1,
             })
             .collect()
+    }
+
+    /// Shapes which are shapes already become objects as they are: one
+    /// object a polygon, a hole a subpath of its own, every point a node,
+    /// laid over the ground the placement says.
+    #[test]
+    fn regions_which_are_polygons_are_written_as_they_are() {
+        use geo::{Coord, LineString, MultiPolygon, Polygon};
+
+        let ring = |points: &[(f64, f64)]| {
+            LineString::new(points.iter().map(|&(x, y)| Coord { x, y }).collect())
+        };
+        // The left half of the picture with a square hole in it.
+        let shape = MultiPolygon::new(vec![Polygon::new(
+            ring(&[(0.0, 0.0), (0.5, 0.0), (0.5, 1.0), (0.0, 1.0), (0.0, 0.0)]),
+            vec![ring(&[
+                (0.1, 0.4),
+                (0.1, 0.6),
+                (0.3, 0.6),
+                (0.3, 0.4),
+                (0.1, 0.4),
+            ])],
+        )]);
+        let placement = Placement {
+            ground: Rect::from_ltrb(-100.0, -50.0, 100.0, 50.0),
+            scale_denominator: 10_000,
+        };
+        let objects = objects_of_regions(&[(2, shape)], &symbols(3), &placement).unwrap();
+
+        assert_eq!(objects.len(), 1);
+        let object = &objects[0];
+        assert_eq!(object.symbol_index, Some(2));
+        // Two rings of four points, each closed by a fifth which is the
+        // first again, as a map file writes a closed subpath.
+        assert_eq!(object.coords.len(), 10);
+        // The ground is 200 m wide and 1:10000 puts a meter at 0.1 mm, so the
+        // picture's left edge is at -10 mm and its middle at 0.
+        let xs: Vec<f64> = object.coords.iter().map(|c| c.x).collect();
+        assert!(
+            xs.iter().all(|x| (-10.0 - 1e-6..=0.0 + 1e-6).contains(x)),
+            "{xs:?}"
+        );
+
+        // A class the symbol list does not have is a mistake worth naming.
+        let nothing = MultiPolygon::new(vec![]);
+        assert!(objects_of_regions(&[(9, nothing)], &symbols(3), &placement).is_err());
     }
 
     /// A grid whose cells are given by a picture: `.` is the frame and a
