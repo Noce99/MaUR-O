@@ -10,12 +10,17 @@
 //!
 //! The screens: [`home::Home`] lists the tools; [`screens`] has one per
 //! tool, each a [`form::Tool`] on the shared [`form::Form`]; and the job
-//! screen shows a running command's output as it comes.
+//! screen shows a running command's output as it comes. A long job — a
+//! training — is not run on it: it is started detached ([`jobs`]), listed in
+//! the home screen's jobs panel, and watched on [`watch::Watch`], which
+//! the interface can be closed on without the job noticing.
 
 mod form;
 mod home;
 mod job;
+mod jobs;
 mod screens;
+mod watch;
 mod widgets;
 
 use std::io;
@@ -29,6 +34,7 @@ use ratatui::{DefaultTerminal, Frame};
 use form::Tool;
 use home::Home;
 use job::{Job, JobSpec};
+use watch::Watch;
 
 /// What a key on a screen asks of the interface as a whole.
 pub enum Action {
@@ -40,12 +46,19 @@ pub enum Action {
     Open(Box<dyn Tool>),
     /// Run `mauro` with these arguments, on the job screen.
     Run(JobSpec),
+    /// Start `mauro` with these arguments detached, as a job of this kind
+    /// (see [`jobs`]), and watch it.
+    Launch(&'static str, Vec<String>),
+    /// Watch a job which is already going.
+    Watch(jobs::Job),
 }
 
 /// The screen being shown.
 enum Screen {
     Home(Home),
     Tool(Box<dyn Tool>),
+    /// A detached job, seen from outside.
+    Watch(Box<Watch>),
     /// A job, and the screen to go back to when it is done.
     Job {
         job: Box<Job>,
@@ -76,17 +89,29 @@ impl App {
             Screen::Home(home) => home.handle(key),
             Screen::Tool(tool) => form::handle(tool.as_mut(), key),
             Screen::Job { job, .. } => job.handle(key),
+            Screen::Watch(watch) => watch.handle(key),
         };
         match action {
             Action::None => {}
             Action::Quit => self.quit = true,
             Action::Back => {
                 let left = std::mem::replace(&mut self.screen, Screen::Home(Home::default()));
-                if let Screen::Job { back, .. } = left {
-                    self.screen = *back;
+                match left {
+                    Screen::Job { back, .. } => self.screen = *back,
+                    Screen::Watch(_) => self.screen = Screen::Home(Home::on_jobs()),
+                    _ => {}
                 }
             }
             Action::Open(tool) => self.screen = Screen::Tool(tool),
+            Action::Launch(kind, args) => match jobs::start(kind, &args) {
+                Ok(job) => self.screen = Screen::Watch(Box::new(Watch::new(job))),
+                Err(why) => {
+                    if let Screen::Tool(tool) = &mut self.screen {
+                        tool.form_mut().message = Some(why);
+                    }
+                }
+            },
+            Action::Watch(job) => self.screen = Screen::Watch(Box::new(Watch::new(job))),
             Action::Run(spec) => {
                 let back = std::mem::replace(&mut self.screen, Screen::Home(Home::default()));
                 self.screen = Screen::Job {
@@ -100,9 +125,10 @@ impl App {
     /// What has to happen between keys: output to show, a map read.
     fn tick(&mut self) {
         match &mut self.screen {
-            Screen::Home(_) => {}
+            Screen::Home(home) => home.tick(),
             Screen::Tool(tool) => tool.tick(),
             Screen::Job { job, .. } => job.tick(),
+            Screen::Watch(watch) => watch.tick(),
         }
     }
 
@@ -111,6 +137,7 @@ impl App {
             Screen::Home(home) => home.draw(frame),
             Screen::Tool(tool) => form::draw(tool.as_mut(), frame),
             Screen::Job { job, .. } => job.draw(frame),
+            Screen::Watch(watch) => watch.draw(frame),
         }
     }
 }

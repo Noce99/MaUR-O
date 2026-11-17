@@ -33,6 +33,12 @@
 //! default, which is pure Rust and slow; `--features wgpu` for any GPU with a
 //! Vulkan, Metal or DX12 driver; `--features cuda` for an NVIDIA one.
 //!
+//! Started from the terminal interface, a run is detached, and reports to it
+//! through the folder named by the `MAURO_JOB_DIR` environment variable
+//! (see [`maur_o::net::monitor`]): its progress and losses, and a request to
+//! pause or stop. Without that variable it reports to nobody, and the
+//! command line is all there is to it.
+//!
 //! Exit codes: 0 success, 1 usage error, 2 the run could not be started or
 //! could not finish.
 
@@ -45,6 +51,7 @@ use maur_o::dataset::{Classes, CLASSES_FILE};
 
 use maur_o::net::data::{CROP, DEFAULT_CROPS_PER_MAP};
 use maur_o::net::image_valid::DEFAULT_IMAGE_VALID;
+use maur_o::net::monitor::Monitor;
 use maur_o::net::training::{
     train, TrainingConfig, DEFAULT_ANGLE_WEIGHT, DEFAULT_LEARNING_RATE, DEFAULT_WEIGHT_DECAY,
 };
@@ -283,15 +290,22 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         notes.symbol_set.as_deref().unwrap_or("its symbol set"),
     );
 
-    train::<Backend>(
+    // Told where to report by whoever started this detached — the terminal
+    // interface does — and by nobody else.
+    let monitor = Monitor::from_env();
+    let result = train::<Backend>(
         &args.dataset,
         &args.trainings,
         config,
         device(),
         args.dashboard,
+        monitor.clone(),
     )
-    .map(|_| ())
-    .map_err(|e| (ExitCode::from(2), format!("Error: {e}")))
+    .map(|_| ());
+    if let Some(monitor) = &monitor {
+        monitor.end(&result);
+    }
+    result.map_err(|e| (ExitCode::from(2), format!("Error: {e}")))
 }
 
 /// What an exit code of this subcommand means, as the module's own

@@ -93,6 +93,7 @@ use crate::xml_reader::read_xml_map;
 
 use crate::net::data::{MapBatch, MapBatcher, MapDataset, CROP, DEFAULT_CROPS_PER_MAP};
 use crate::net::image_valid::{ImageValidation, DEFAULT_IMAGE_VALID, IMAGE_VALID};
+use crate::net::monitor::{Gated, Monitor};
 use crate::net::predict::ReadBackSettings;
 use crate::net::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEPTH};
 
@@ -1073,6 +1074,7 @@ pub fn train<B: AutodiffBackend>(
     config: TrainingConfig,
     device: B::Device,
     dashboard: bool,
+    monitor: Option<Monitor>,
 ) -> Result<PathBuf, String> {
     if !config.crop.is_multiple_of(1 << DEPTH) {
         return Err(format!(
@@ -1093,6 +1095,9 @@ pub fn train<B: AutodiffBackend>(
         .save(run.join("training.json"))
         .map_err(|e| format!("cannot write the configuration: {e}"))?;
     copy_dataset_notes(dataset, &run)?;
+    if let Some(monitor) = &monitor {
+        monitor.set_run(&run);
+    }
 
     let all = MapDataset::load(dataset, config.seed)?
         .with_crop(config.crop)?
@@ -1168,16 +1173,19 @@ pub fn train<B: AutodiffBackend>(
     // The training half runs on the autodiff backend, since that is where a
     // gradient comes from; the validation half runs on the plain one under
     // it, which is what makes a validation pass cost no tape.
+    // Behind the monitor's gate, where there is one, which is how a pause
+    // holds the run: no crops, no steps.
+    let gate = monitor.as_ref().map(Monitor::gate).unwrap_or_default();
     let train_loader = burn::data::dataloader::DataLoaderBuilder::<B, _, _>::new(MapBatcher)
         .batch_size(config.batch_size)
         .num_workers(config.workers)
         .shuffle(config.seed)
-        .build(train);
+        .build(Gated::new(train, gate.clone()));
     let valid_loader =
         burn::data::dataloader::DataLoaderBuilder::<B::InnerBackend, _, _>::new(MapBatcher)
             .batch_size(config.batch_size)
             .num_workers(config.workers)
-            .build(valid);
+            .build(Gated::new(valid, gate));
 
     // What the run shows its work on. Built twice — once for the hook, once
     // for the catch-up after `fit` — because the learner takes ownership of
@@ -1223,7 +1231,10 @@ pub fn train<B: AutodiffBackend>(
         // `crate::net::image_valid`.
         .early_stopping(phase)
         .summary();
-    builder = if dashboard {
+    builder = if let Some(monitor) = &monitor {
+        monitor.watch(builder.interrupter());
+        builder.renderer(monitor.renderer())
+    } else if dashboard {
         // The same interrupter the learner would otherwise make for itself,
         // so Ctrl-C still stops the run through the dashboard rather than
         // going around it.

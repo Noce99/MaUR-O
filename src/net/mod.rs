@@ -43,6 +43,7 @@
 
 pub mod data;
 pub mod image_valid;
+pub mod monitor;
 pub mod predict;
 pub mod training;
 pub mod unet;

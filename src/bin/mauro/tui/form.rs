@@ -566,6 +566,12 @@ pub trait Tool {
     fn changed(&mut self, _field: usize) {}
     /// Between keys: whatever is being read in the background.
     fn tick(&mut self) {}
+    /// Whether this tool's job is one that outlives the interface — started
+    /// detached and watched from the home screen — and which kind of job it
+    /// is. The rest run on the job screen and end with it.
+    fn background(&self) -> Option<&'static str> {
+        None
+    }
     /// A panel beside the form: its title and lines.
     fn panel(&self) -> Option<(&'static str, Vec<Line<'static>>)> {
         None
@@ -589,6 +595,9 @@ pub fn handle(tool: &mut dyn Tool, key: KeyEvent) -> Action {
             Action::None
         }
         Event::Run => match command(tool) {
+            Ok(args) if tool.background().is_some() => {
+                Action::Launch(tool.background().unwrap_or_default(), args)
+            }
             Ok(args) => Action::Run(JobSpec {
                 args,
                 explain: tool.explain(),

@@ -74,7 +74,12 @@ the ratatui interface in `src/bin/mauro/tui/` (elsewhere it prints help, exit
 argument list, checks it with `tui::check` (the same clap `Cli`), and runs
 `mauro` with it as a child process (`tui/job.rs`, which sets
 `progress::LIVE_ENV` so progress bars still draw through the pipe) — so it
-can't drift from the CLI. Each screen (`tui/screens/<subcommand>.rs`) is a
+can't drift from the CLI. The one exception to "runs and waits" is a long job
+(`mauro net train`, a `Tool::background()` kind): `tui/jobs.rs` starts it
+detached (own process group, output to a file) with `MAURO_JOB_DIR` set, and
+it reports through that folder (`net/monitor.rs`: `status`, `losses`, and a
+`control` file for pause/stop). The home screen's jobs panel lists those
+folders and `tui/watch.rs` draws one, so closing the TUI never touches the job. Each screen (`tui/screens/<subcommand>.rs`) is a
 `form::Tool` on the shared `form::Form`; a field naming its clap argument
 (`Field::arg("id")`) takes its help and default from clap, so don't copy those
 into the TUI. Adding or renaming a flag: update that subcommand's screen too —

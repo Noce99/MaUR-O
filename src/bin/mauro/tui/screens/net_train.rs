@@ -1,4 +1,4 @@
-//! `mauro net train`'s screen: a dataset, and how a network is trained on it. The job screen is its dashboard, so `--dashboard` is not offered.
+//! `mauro net train`'s screen: a dataset, and how a network is trained on it. It runs detached, and the home screen's job panel is its dashboard, so `--dashboard` is not offered.
 
 use crate::tui::form::{Field, Form, Tool};
 use crate::tui::widgets::Pick;
@@ -62,6 +62,10 @@ impl Tool for NetTrain {
 
     fn explain(&self) -> fn(i32) -> Option<&'static str> {
         crate::net_train::exit_meaning
+    }
+
+    fn background(&self) -> Option<&'static str> {
+        Some(crate::tui::jobs::TRAINING)
     }
 
     fn args(&self) -> Result<Vec<String>, String> {
