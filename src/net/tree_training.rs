@@ -263,6 +263,41 @@ fn write_panel<B: Backend>(
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// The tree network a run folder holds, and the configuration it was
+/// trained with. `weights` is `<run>/best.mpk` where it is `None`.
+pub fn load_tree<B: Backend>(
+    run: &Path,
+    weights: Option<&Path>,
+    device: &B::Device,
+) -> Result<(TreeNet<B>, TreeTrainingConfig), String> {
+    let file = run.join("tree.json");
+    let config = TreeTrainingConfig::load(&file).map_err(|e| {
+        format!(
+            "cannot read {}: {e}\nA run of the tree network is a folder `mauro net train --model \
+             tree` wrote: its tree.json says how big the network it trained was.",
+            file.display(),
+        )
+    })?;
+    let default = run.join(BEST_WEIGHTS).with_extension("mpk");
+    let weights = weights.unwrap_or(&default);
+    let model = TreeNetConfig::new(config.classes)
+        .with_size(config.size)
+        .with_depth(config.depth)
+        .with_control_points(config.control_points)
+        .with_samples(config.samples)
+        .with_base_channels(config.base_channels)
+        .init::<B>(device)
+        .load_file(weights, &DefaultRecorder::new(), device)
+        .map_err(|e| {
+            format!(
+                "cannot read the weights from {}: {e}\nA run which was stopped before it \
+                 finished an epoch has none.",
+                weights.display(),
+            )
+        })?;
+    Ok((model, config))
+}
+
 /// Trains a tree network on `dataset`, writing the run under `into`.
 /// Returns the run's folder.
 pub fn train_tree<B: AutodiffBackend>(

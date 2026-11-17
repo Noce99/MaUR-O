@@ -284,19 +284,108 @@ impl<B: Backend> TreeNet<B> {
     pub fn leaves(&self) -> usize {
         1 << self.depth
     }
+
+    /// The side of the pictures it was built for, in pixels.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// How many opaque areas it tells apart, not counting the frame.
+    pub fn classes(&self) -> usize {
+        self.classes
+    }
+
+    /// The class each leaf of `answer` says, picture 0 of the batch: the
+    /// likeliest of its logits, the frame being [`TreeNet::classes`].
+    pub fn leaf_classes(&self, answer: &TreeAnswer<B>) -> Vec<usize> {
+        let [_, leaves, _] = answer.leaves.dims();
+        answer
+            .leaves
+            .clone()
+            .slice([0..1, 0..leaves, 0..self.classes + 1])
+            .argmax(2)
+            .into_data()
+            .convert::<i64>()
+            .to_vec::<i64>()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|class| class as usize)
+            .collect()
+    }
+
+    /// The leaf every pixel of a `width` by `height` picture is in, row by
+    /// row, with the cuts of picture 0 of `curves` made **hard**: a pixel
+    /// goes to the first half of a cut where its signed distance is above
+    /// nought and to the second where it is not, which is what the soft
+    /// share becomes as the temperature goes to nothing.
+    ///
+    /// The curves are in picture coordinates, so the picture asked about need
+    /// not be the size the network saw: a cut is as sharp at 1650 pixels as
+    /// at 64, which is what makes the answer a vector one. Worked in chunks
+    /// of pixels, since the distance to every sample of every cut of a level
+    /// is a tensor as long as the picture is large.
+    pub fn leaf_map(&self, curves: Tensor<B, 4>, width: usize, height: usize) -> Vec<u32> {
+        const CHUNK: usize = 16_384;
+        let device = curves.device();
+        let basis = bernstein::<B>(self.control_points, self.samples, &device);
+        let total = width * height;
+        let mut leaves = Vec::with_capacity(total);
+        let mut start = 0;
+        while start < total {
+            let end = (start + CHUNK).min(total);
+            let pixels = pixel_centers_of::<B>(width, height, start..end, &device);
+            let count = end - start;
+            // Where each pixel of the chunk is in the level it has come to:
+            // its place among that level's nodes.
+            let mut node = Tensor::<B, 3, Int>::zeros([1, 1, count], &device);
+            for level in 0..self.depth {
+                let first = (1 << level) - 1;
+                let nodes = 1 << level;
+                let cuts = curves.clone().slice([
+                    0..1,
+                    first..first + nodes,
+                    0..self.control_points,
+                    0..2,
+                ]);
+                let s = signed_distance(cuts, basis.clone(), pixels.clone());
+                let here = s.gather(1, node.clone());
+                let second = here.lower_equal_elem(0.0).int();
+                node = node * 2 + second;
+            }
+            let chunk: Vec<i64> = node
+                .into_data()
+                .convert::<i64>()
+                .to_vec::<i64>()
+                .unwrap_or_default();
+            leaves.extend(chunk.into_iter().map(|leaf| leaf as u32));
+            start = end;
+        }
+        leaves
+    }
 }
 
 /// The centre of every pixel of a `size` square in picture coordinates,
 /// `[1, 1, size * size, 1, 2]` (x, then y), row by row.
 fn pixel_centers<B: Backend>(size: usize, device: &B::Device) -> Tensor<B, 5> {
-    let mut xy = Vec::with_capacity(size * size * 2);
-    for row in 0..size {
-        for column in 0..size {
-            xy.push((column as f32 + 0.5) / size as f32);
-            xy.push((row as f32 + 0.5) / size as f32);
-        }
+    pixel_centers_of(size, size, 0..size * size, device)
+}
+
+/// The centres of pixels `range` (counted row by row) of a `width` by
+/// `height` picture, in picture coordinates: `[1, 1, range.len(), 1, 2]`,
+/// x then y, both across `[0, 1]` whatever the picture's shape.
+fn pixel_centers_of<B: Backend>(
+    width: usize,
+    height: usize,
+    range: std::ops::Range<usize>,
+    device: &B::Device,
+) -> Tensor<B, 5> {
+    let count = range.len();
+    let mut xy = Vec::with_capacity(count * 2);
+    for at in range {
+        xy.push(((at % width) as f32 + 0.5) / width as f32);
+        xy.push(((at / width) as f32 + 0.5) / height as f32);
     }
-    Tensor::from_data(TensorData::new(xy, [1, 1, size * size, 1, 2]), device)
+    Tensor::from_data(TensorData::new(xy, [1, 1, count, 1, 2]), device)
 }
 
 /// The Bernstein basis, `[1, 1, samples, points, 1]`: row `m` weighs each
@@ -473,6 +562,46 @@ mod tests {
         assert_eq!(probabilities.dims(), [2, 3, SIZE, SIZE]);
         let worst: f32 = (probabilities.sum_dim(1) - 1.0).abs().max().into_scalar();
         assert!(worst < 1e-4, "probabilities sum to one, off by {worst}");
+    }
+
+    /// The hard tree and the soft one say the same where the cuts are far
+    /// away, and the hard one can be asked at any size.
+    #[test]
+    fn the_hard_tree_assigns_every_pixel_a_leaf_at_any_size() {
+        let device = NdArrayDevice::default();
+        let net = TreeNetConfig::new(2)
+            .with_size(SIZE)
+            .with_depth(3)
+            .init::<Plain>(&device);
+        let answer = net.forward(Tensor::zeros([1, 3, SIZE, SIZE], &device));
+        let leaves = net.leaf_map(answer.curves.clone(), SIZE, SIZE);
+        assert_eq!(leaves.len(), SIZE * SIZE);
+        assert!(leaves.iter().all(|&leaf| leaf < 8));
+
+        // The leaf with the largest share at a pixel is its leaf wherever the
+        // cuts are not blurred together: at a cold temperature nearly all.
+        let share = net.partition(answer.curves.clone(), 0.002);
+        let best: Vec<i64> = share
+            .argmax(1)
+            .into_data()
+            .convert::<i64>()
+            .to_vec()
+            .unwrap();
+        let agree = leaves
+            .iter()
+            .zip(&best)
+            .filter(|(hard, soft)| **hard as i64 == **soft)
+            .count();
+        assert!(
+            agree * 100 >= leaves.len() * 98,
+            "{agree} of {}",
+            leaves.len()
+        );
+
+        // A picture twice the size, not square: a leaf for every pixel still.
+        let bigger = net.leaf_map(answer.curves.clone(), 2 * SIZE, 3 * SIZE);
+        assert_eq!(bigger.len(), 2 * SIZE * 3 * SIZE);
+        assert_eq!(net.leaf_classes(&answer).len(), 8);
     }
 
     /// The distance is a distance and the sign is a side.

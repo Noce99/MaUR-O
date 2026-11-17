@@ -102,6 +102,7 @@ use crate::symbol_kinds::Entry;
 use crate::vectorize::{write_map, Placement, Simplify, SymbolGrid};
 
 use crate::net::training::TrainingConfig;
+use crate::net::tree::TreeNet;
 use crate::net::unet::{UNet, UNetConfig, DEPTH};
 
 /// The weights of the epoch which validated best, which is what a run folder
@@ -137,9 +138,8 @@ pub fn load<B: Backend>(
     let configuration = run.join("training.json");
     if !configuration.exists() && run.join("tree.json").exists() {
         return Err(format!(
-            "{} is a run of the tree network (it has a tree.json, not a training.json). Reading a \
-             picture back into a map is done for the U-Net only so far; the tree's answer, the \
-             curves and the symbols of its leaves, is not turned into a map yet.",
+            "{} is a run of the tree network (it has a tree.json, not a training.json), and this \
+             loads a U-Net: see `tree_training::load_tree` and `predict_tree_image`.",
             run.display(),
         ));
     }
@@ -373,7 +373,64 @@ pub fn read_back<B: Backend>(
     // channels said: left in, that noise is read as a difference of angle and
     // splits the region into fragments.
     resolve_angles(&mut grid, symbols);
+    read_back_grid(grid, picture, symbol_set, into, settings)
+}
 
+/// What a tree network says about a whole picture: the cuts it makes, made
+/// hard and drawn at the picture's own size, and the symbol of each leaf.
+///
+/// The picture is reduced to the size the network was trained on to be read,
+/// the way the training reduced its pictures, but the answer is not that
+/// small: the curves are in picture coordinates, so the leaf of every pixel
+/// of the full picture is worked out from them, and a boundary is as smooth
+/// at 1650 pixels as the curve it is. A tree has no angle to give, so every
+/// cell of the grid has none.
+pub fn predict_tree_image<B: Backend>(
+    model: &TreeNet<B>,
+    picture: &RgbImage,
+    device: &B::Device,
+) -> SymbolGrid {
+    let size = model.size();
+    let small = image::imageops::resize(
+        picture,
+        size as u32,
+        size as u32,
+        image::imageops::FilterType::Nearest,
+    );
+    let mut pixels = vec![0.0f32; 3 * size * size];
+    for (x, y, pixel) in small.enumerate_pixels() {
+        for channel in 0..3 {
+            pixels[channel * size * size + y as usize * size + x as usize] =
+                pixel[channel] as f32 / 255.0;
+        }
+    }
+    let input = Tensor::<B, 4>::from_data(TensorData::new(pixels, [1, 3, size, size]), device);
+    let answer = model.forward(input);
+    let class_of_leaf = model.leaf_classes(&answer);
+
+    let (width, height) = (picture.width() as usize, picture.height() as usize);
+    let leaves = model.leaf_map(answer.curves, width, height);
+    let mut grid = SymbolGrid::new(width, height);
+    for (class, leaf) in grid.class.iter_mut().zip(leaves) {
+        *class = class_of_leaf
+            .get(leaf as usize)
+            .map_or(BACKGROUND, |&c| c as u16);
+    }
+    // The frame is the network's last class, and not a symbol of the set.
+    grid.frame_is(model.classes() as u16);
+    grid
+}
+
+/// A grid of symbols, written as a map and drawn again to be measured against
+/// the picture it was read off: the half of [`read_back`] which does not care
+/// what network the grid came from.
+pub fn read_back_grid(
+    grid: SymbolGrid,
+    picture: &RgbImage,
+    symbol_set: &Path,
+    into: &Path,
+    settings: &ReadBackSettings,
+) -> Result<ReadBack, String> {
     let (width, height) = (picture.width() as f64, picture.height() as f64);
     let (ground_width, ground_height) = (width / settings.resolution, height / settings.resolution);
     let ground = Rect::from_ltrb(
@@ -580,6 +637,26 @@ mod tests {
     use image::Rgb;
 
     type TestBackend = NdArray<f32>;
+
+    /// A tree nobody trained, asked about a picture of a shape it was not
+    /// built for: the grid is the picture's own size, every cell is a symbol
+    /// of the set or the frame, and there is no angle anywhere.
+    #[test]
+    fn a_tree_reads_a_picture_of_any_size_into_a_grid_of_that_size() {
+        use crate::net::tree::TreeNetConfig;
+
+        let device = NdArrayDevice::default();
+        let model = TreeNetConfig::new(3)
+            .with_size(32)
+            .with_depth(2)
+            .init::<TestBackend>(&device);
+        let picture = RgbImage::from_pixel(50, 70, Rgb([200, 30, 30]));
+        let grid = predict_tree_image(&model, &picture, &device);
+        assert_eq!((grid.width, grid.height), (50, 70));
+        assert_eq!(grid.class.len(), 50 * 70);
+        assert!(grid.class.iter().all(|&c| c < 3 || c == BACKGROUND));
+        assert!(grid.rotation.iter().all(|&r| r == NO_ROTATION));
+    }
 
     /// A network nobody trained, which is enough to ask about shapes: what
     /// comes out of it is arbitrary, and it comes out of it for every pixel.

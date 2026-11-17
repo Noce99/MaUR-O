@@ -15,6 +15,14 @@
 //! mauro net image-to-map trainings/UNet_2026_08_18__09_26_59 dataset/images/map_001.png back.omap
 //! ```
 //!
+//! A run of the tree network (`mauro net train --model tree`, recognised by its
+//! `tree.json`) is read the same way, with a difference in the middle: the
+//! tree answers with the curves which cut the picture and a symbol for each
+//! leaf, so the cuts are made hard and drawn at the picture's own size, and
+//! the grid of symbols that gives goes through the same vectorizer. `--crop`
+//! and `--overlap` are the U-Net's tiles and do not apply to it, and it has
+//! no angle to give.
+//!
 //! The run folder is all it is told, because a run folder holds everything:
 //! `training.json` says how big the network was, `best.mpk` is its weights,
 //! and `classes.json` and the symbol set beside them — copied out of the
@@ -51,8 +59,10 @@ use maur_o::xml_reader::read_xml_map;
 use maur_o::vectorize::Simplify;
 
 use maur_o::net::predict::{
-    load, read_back, ReadBackSettings, OVERLAP, PREDICTED_SAME_ANGLE, PREDICTED_TOLERANCE,
+    load, predict_tree_image, read_back, read_back_grid, ReadBackSettings, OVERLAP,
+    PREDICTED_SAME_ANGLE, PREDICTED_TOLERANCE,
 };
+use maur_o::net::tree_training::load_tree;
 
 #[derive(Parser)]
 #[command(
@@ -203,51 +213,83 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
     let picture = open_image(&args.image).map_err(failed)?;
     let (width, height) = (picture.width(), picture.height());
 
-    let (model, config) =
-        load::<Backend>(&args.run, args.weights.as_deref(), &device()).map_err(failed)?;
-    if model.classes() != notes.classes {
-        return Err(failed(format!(
-            "the network tells {} symbols apart and {} was written for {}",
-            model.classes(),
-            notes_file.display(),
-            notes.classes,
-        )));
-    }
-
-    let tile = args.crop.unwrap_or(config.crop);
-    let overlap = args.overlap.unwrap_or((tile as f64 * OVERLAP) as usize);
-    println!(
-        "{BACKEND}: {}x{} pixels through a U-Net of {} symbols, in tiles of {tile} overlapping \
-         by {overlap}",
-        width,
-        height,
-        model.classes(),
-    );
-
-    let settings = ReadBackSettings {
-        tile,
-        overlap,
-        resolution,
-        scale_denominator: scale,
-        simplify: Simplify {
-            tolerance: args.tolerance,
-            same_angle: args.same_angle,
-        },
-    };
     let map_path = args
         .map_file
         .clone()
         .unwrap_or_else(|| args.image.with_extension("omap"));
-    let done = read_back(
-        &model,
-        &picture,
-        &symbol_set,
-        &catalogue.opaque_areas,
-        &map_path,
-        &settings,
-        &device(),
-    )
-    .map_err(failed)?;
+    let simplify = Simplify {
+        tolerance: args.tolerance,
+        same_angle: args.same_angle,
+    };
+
+    let done = if args.run.join("tree.json").is_file() {
+        // A tree of curves: its answer is a cut of the whole picture and a
+        // symbol for each leaf, so there are no tiles to cut it into.
+        let (model, _) =
+            load_tree::<Backend>(&args.run, args.weights.as_deref(), &device()).map_err(failed)?;
+        if model.classes() != notes.classes {
+            return Err(failed(format!(
+                "the network tells {} symbols apart and {} was written for {}",
+                model.classes(),
+                notes_file.display(),
+                notes.classes,
+            )));
+        }
+        println!(
+            "{BACKEND}: {width}x{height} pixels through a tree of {} leaves of {} symbols, its \
+             cuts drawn at the picture's own size",
+            model.leaves(),
+            model.classes(),
+        );
+        let grid = predict_tree_image(&model, &picture, &device());
+        let settings = ReadBackSettings {
+            tile: 0,
+            overlap: 0,
+            resolution,
+            scale_denominator: scale,
+            simplify,
+        };
+        read_back_grid(grid, &picture, &symbol_set, &map_path, &settings).map_err(failed)?
+    } else {
+        let (model, config) =
+            load::<Backend>(&args.run, args.weights.as_deref(), &device()).map_err(failed)?;
+        if model.classes() != notes.classes {
+            return Err(failed(format!(
+                "the network tells {} symbols apart and {} was written for {}",
+                model.classes(),
+                notes_file.display(),
+                notes.classes,
+            )));
+        }
+
+        let tile = args.crop.unwrap_or(config.crop);
+        let overlap = args.overlap.unwrap_or((tile as f64 * OVERLAP) as usize);
+        println!(
+            "{BACKEND}: {}x{} pixels through a U-Net of {} symbols, in tiles of {tile} \
+             overlapping by {overlap}",
+            width,
+            height,
+            model.classes(),
+        );
+
+        let settings = ReadBackSettings {
+            tile,
+            overlap,
+            resolution,
+            scale_denominator: scale,
+            simplify,
+        };
+        read_back(
+            &model,
+            &picture,
+            &symbol_set,
+            &catalogue.opaque_areas,
+            &map_path,
+            &settings,
+            &device(),
+        )
+        .map_err(failed)?
+    };
     for warning in &done.warnings {
         eprintln!("Warning: {warning}");
     }
