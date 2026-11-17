@@ -150,7 +150,7 @@ comment:
 | `bin/mauro/ortho.rs` | `mauro ortho`: downloads a map's orthophoto tile by tile and adds it to the map as a template. |
 | `bin/mauro/net_dataset.rs` | `mauro net dataset`: generates a dataset of random maps with their images and labels. |
 | `bin/mauro/net_grid_to_map.rs` | `mauro net grid-to-map`: turns a label grid back into a map. |
-| `bin/mauro/net_train.rs` | `mauro net train`: trains the U-Net. |
+| `bin/mauro/net_train.rs` | `mauro net train`: trains the U-Net, or with `--model tree` the tree network (`net/tree.rs`, `net/tree_training.rs`). |
 | `bin/mauro/net_image_to_map.rs` | `mauro net image-to-map`: reads a picture back into a map. |
 | `bin/mauro/net_show_batches.rs` | `mauro net show-batches`: draws the batches a run is trained on. |
 

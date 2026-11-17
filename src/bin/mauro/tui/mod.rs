@@ -16,6 +16,7 @@
 //! the interface can be closed on without the job noticing.
 
 mod form;
+mod gpu;
 mod home;
 mod job;
 mod jobs;

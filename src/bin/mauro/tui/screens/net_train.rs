@@ -5,19 +5,45 @@ use crate::tui::widgets::Pick;
 
 const DATASET: usize = 0;
 const TRAININGS: usize = 1;
-const EPOCHS: usize = 2;
-const BATCH_SIZE: usize = 3;
-const CROP: usize = 4;
-const CROPS_PER_MAP: usize = 5;
-const BASE_CHANNELS: usize = 6;
-const LEARNING_RATE: usize = 7;
-const ANGLE_WEIGHT: usize = 8;
-const WEIGHT_DECAY: usize = 9;
-const OVERHANG: usize = 10;
-const TRAIN_SHARE: usize = 11;
-const WORKERS: usize = 12;
-const IMAGE_VALID: usize = 13;
-const SEED: usize = 14;
+const MODEL: usize = 2;
+const EPOCHS: usize = 3;
+const BATCH_SIZE: usize = 4;
+const CROP: usize = 5;
+const CROPS_PER_MAP: usize = 6;
+const BASE_CHANNELS: usize = 7;
+const LEARNING_RATE: usize = 8;
+const ANGLE_WEIGHT: usize = 9;
+const WEIGHT_DECAY: usize = 10;
+const OVERHANG: usize = 11;
+const TRAIN_SHARE: usize = 12;
+const WORKERS: usize = 13;
+const IMAGE_VALID: usize = 14;
+const SEED: usize = 15;
+const SIZE: usize = 16;
+const DEPTH: usize = 17;
+const CONTROL_POINTS: usize = 18;
+const SAMPLES: usize = 19;
+const TEMPERATURE_START: usize = 20;
+const TEMPERATURE_END: usize = 21;
+
+/// The fields only the U-Net has, and the ones only the tree has.
+const UNET_ONLY: [usize; 7] = [
+    CROP,
+    CROPS_PER_MAP,
+    ANGLE_WEIGHT,
+    WEIGHT_DECAY,
+    OVERHANG,
+    WORKERS,
+    IMAGE_VALID,
+];
+const TREE_ONLY: [usize; 6] = [
+    SIZE,
+    DEPTH,
+    CONTROL_POINTS,
+    SAMPLES,
+    TEMPERATURE_START,
+    TEMPERATURE_END,
+];
 
 pub struct NetTrain {
     form: Form,
@@ -31,6 +57,11 @@ impl NetTrain {
             vec![
                 Field::path("Dataset", Pick::Folder).arg("dataset"),
                 Field::path("Trainings", Pick::Folder).arg("trainings"),
+                Field::choice("Model", &["unet", "tree"]).help(
+                    "unet reads a class for every pixel, on crops of the maps; tree answers \
+                     with the curves which cut the picture into areas and a symbol for each, \
+                     on whole pictures reduced to Size.",
+                ),
                 Field::text("Epochs").arg("epochs"),
                 Field::text("Batch size").arg("batch_size").unit("crops"),
                 Field::text("Crop").arg("crop").unit("px"),
@@ -44,10 +75,33 @@ impl NetTrain {
                 Field::text("Workers").arg("workers"),
                 Field::text("Image valid").arg("image_valid"),
                 Field::text("Seed").arg("seed"),
+                Field::text("Size").arg("size").unit("px"),
+                Field::text("Depth").arg("depth").unit("cuts"),
+                Field::text("Control points").arg("control_points"),
+                Field::text("Samples").arg("samples"),
+                Field::text("Temperature start").arg("temperature_start"),
+                Field::text("Temperature end").arg("temperature_end"),
             ],
         );
         form.open_picker(DATASET);
-        Self { form }
+        let mut screen = Self { form };
+        screen.update();
+        screen
+    }
+
+    fn tree(&self) -> bool {
+        self.form.choice(MODEL) == "tree"
+    }
+
+    /// Shows the options of the model picked and hides the other's.
+    fn update(&mut self) {
+        let tree = self.tree();
+        for field in UNET_ONLY {
+            self.form.show(field, !tree);
+        }
+        for field in TREE_ONLY {
+            self.form.show(field, tree);
+        }
     }
 }
 
@@ -62,6 +116,12 @@ impl Tool for NetTrain {
 
     fn explain(&self) -> fn(i32) -> Option<&'static str> {
         crate::net_train::exit_meaning
+    }
+
+    fn changed(&mut self, field: usize) {
+        if field == MODEL {
+            self.update();
+        }
     }
 
     fn background(&self) -> Option<&'static str> {
@@ -82,6 +142,9 @@ impl Tool for NetTrain {
         {
             args.push(trainings.to_string());
         }
+        if self.tree() {
+            args.extend(["--model".to_string(), "tree".to_string()]);
+        }
         form.push_option(&mut args, EPOCHS, "--epochs");
         form.push_option(&mut args, BATCH_SIZE, "--batch-size");
         form.push_option(&mut args, CROP, "--crop");
@@ -95,6 +158,12 @@ impl Tool for NetTrain {
         form.push_option(&mut args, WORKERS, "--workers");
         form.push_option(&mut args, IMAGE_VALID, "--image-valid");
         form.push_option(&mut args, SEED, "--seed");
+        form.push_option(&mut args, SIZE, "--size");
+        form.push_option(&mut args, DEPTH, "--depth");
+        form.push_option(&mut args, CONTROL_POINTS, "--control-points");
+        form.push_option(&mut args, SAMPLES, "--samples");
+        form.push_option(&mut args, TEMPERATURE_START, "--temperature-start");
+        form.push_option(&mut args, TEMPERATURE_END, "--temperature-end");
         Ok(args)
     }
 }
@@ -113,5 +182,27 @@ mod tests {
         assert_eq!(command(&screen).unwrap(), ["net", "train", "data"]);
         type_into(&mut screen.form, EPOCHS, "3");
         assert_eq!(command(&screen).unwrap()[3..], ["--epochs", "3"]);
+    }
+
+    #[test]
+    fn the_tree_has_its_own_options_and_the_unet_loses_its_own() {
+        let mut screen = NetTrain::new();
+        type_into(&mut screen.form, DATASET, "data");
+        assert!(!screen.form.shown(DEPTH));
+        assert!(screen.form.shown(CROP));
+        crate::tui::form::tests::press(
+            &mut screen.form,
+            MODEL,
+            ratatui::crossterm::event::KeyCode::Right,
+        );
+        screen.changed(MODEL);
+        assert_eq!(screen.form.choice(MODEL), "tree");
+        assert!(screen.form.shown(DEPTH) && !screen.form.shown(CROP));
+        type_into(&mut screen.form, DEPTH, "5");
+        type_into(&mut screen.form, CROP, "32");
+        assert_eq!(
+            command(&screen).unwrap(),
+            ["net", "train", "data", "--model", "tree", "--depth", "5"]
+        );
     }
 }

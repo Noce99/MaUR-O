@@ -178,6 +178,11 @@ the form, what can be known before running:
 - `net train` and `tiles serve` run until they are done or cancelled (`Esc`):
   the job screen shows the metrics of a training run, or the address a
   server listens on, as they come, in place of `net train`'s own `--dashboard`.
+  A training which runs on a GPU also gets a bar of that GPU's memory (how much
+  is used of how much there is, and how much of it is this job's) with its load,
+  temperature, power draw and clock in the title. It needs `nvidia-smi`, which
+  an NVIDIA driver installs, and finds the job's GPU by the job's process id;
+  without the program, or for a job on the CPU, there is no bar.
 
 Every screen builds an ordinary `mauro` command line, shown at the bottom as
 it is filled in, and running it runs exactly that, its output (progress bars
@@ -1053,6 +1058,32 @@ back it was, which is what lets `best.mpk` be a *copy* of that epoch's
 best one when the run was still improving when it stopped. The metric logs
 under `train/` and `valid/` are untouched by any of this — every epoch keeps
 its numbers.
+
+### The tree network (`--model tree`)
+
+A second network answers differently. Instead of a class for every pixel it
+cuts the picture in two with a curve, each half again, `--depth` times over;
+the `2^depth` leaves each carry one symbol. A curve only matters inside the
+piece it splits, so every curve runs from a border or an earlier curve to a
+border or an earlier curve, and the leaves tile the picture without overlap or
+gap. The cuts are made soft during training (`sigmoid(distance / temperature)`,
+the temperature annealed from `--temperature-start` to `--temperature-end`) so
+the labels alone, with no vector ground truth, send a gradient to the curves.
+See [`maur_o::net::tree`](src/net/tree.rs).
+
+```bash
+cargo run --release --features cuda -- net train --model tree \
+    -e 70 -b 16 --size 64 dataset trainings
+```
+
+It is trained on the **whole picture**, reduced to `--size` pixels (a divisor of
+16), rather than on crops, so an epoch is short — a few dozen of them make a run.
+`--crop`, `--crops-per-map`, `--angle-weight`, `--weight-decay`, `--overhang`,
+`--workers` and `--image-valid` are the U-Net's and are ignored. A run is
+`TreeNet_<date>/` holding `tree.json`, `architecture.txt`, `best.mpk` and
+`valid.png` (*picture | label | answer*). It reports to the terminal interface
+like any other run and can be paused and stopped. `net image-to-map` does not
+read it yet: the curves are not turned into a map.
 
 ### Image validation
 

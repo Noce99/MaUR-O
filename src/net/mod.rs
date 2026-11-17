@@ -28,6 +28,9 @@
 //! * [`training`] is what it is scored on and the loop which improves it;
 //! * [`predict`] is the other end of it — a run folder read back, and a whole
 //!   picture put through the network it holds, tile by tile;
+//! * [`tree`] is the other network, which answers with the curves which cut a
+//!   picture into areas instead of a class for every pixel, and
+//!   [`tree_training`] is the loop it is trained with;
 //! * [`image_valid`] is that put to work while a run is still going: every
 //!   epoch reads a few of the dataset's pictures back into maps and draws
 //!   them beside the originals, so that a run shows its work rather than only
@@ -46,4 +49,6 @@ pub mod image_valid;
 pub mod monitor;
 pub mod predict;
 pub mod training;
+pub mod tree;
+pub mod tree_training;
 pub mod unet;

@@ -920,7 +920,7 @@ pub fn copy_dataset_notes(dataset: &Path, run: &Path) -> Result<(), String> {
 ///
 /// The name is the model's Rust type and the moment the run started, so that
 /// a training folder is a history rather than one run overwriting the last.
-fn run_directory(into: &Path, model: &str) -> Result<PathBuf, String> {
+pub(crate) fn run_directory(into: &Path, model: &str) -> Result<PathBuf, String> {
     std::fs::create_dir_all(into).map_err(|e| format!("cannot make {}: {e}", into.display()))?;
 
     let base = format!("{model}_{}", chrono::Local::now().format(RUN_STAMP));

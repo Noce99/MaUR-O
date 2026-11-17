@@ -15,6 +15,9 @@
 //! └──────────────────────────────────────────────────────────┘
 //! ```
 //!
+//! Above the bars, while the job runs on a GPU, a bar of that GPU's memory
+//! with its load, temperature and power in the title (see [`super::gpu`]).
+//!
 //! It owns nothing of the job: everything it shows is read from the job's
 //! folder (see [`super::jobs`]) and everything it asks is written there, so
 //! closing it, or the whole interface, changes nothing about the job.
@@ -32,6 +35,7 @@ use ratatui::Frame;
 
 use maur_o::net::monitor::{Control, LossPoint, State, Status, LOSSES_FILE};
 
+use super::gpu::{Gpu, Probe};
 use super::jobs::{Health, Job};
 use super::Action;
 
@@ -49,6 +53,8 @@ pub struct Watch {
     confirming: bool,
     /// What the last command did, if it went wrong.
     message: Option<String>,
+    /// Asks the driver what the GPUs are doing.
+    gpu: Probe,
 }
 
 impl Watch {
@@ -63,6 +69,7 @@ impl Watch {
             partial: String::new(),
             confirming: false,
             message: None,
+            gpu: Probe::start(),
         };
         watch.read_losses();
         watch
@@ -134,8 +141,15 @@ impl Watch {
     }
 
     pub fn draw(&self, frame: &mut Frame) {
-        let [top, epoch, whole] = Layout::vertical([
+        let panel = self.gpu_panel();
+        let gpu_height = match &panel {
+            GpuPanel::Hidden => 0,
+            GpuPanel::Note(_) => 3,
+            GpuPanel::Gpus(rows) => 3 * rows.len() as u16,
+        };
+        let [top, gpu, epoch, whole] = Layout::vertical([
             Constraint::Min(8),
+            Constraint::Length(gpu_height),
             Constraint::Length(3),
             Constraint::Length(3),
         ])
@@ -144,7 +158,38 @@ impl Watch {
             Layout::horizontal([Constraint::Length(46), Constraint::Min(20)]).areas(top);
         self.draw_commands(frame, commands);
         self.draw_loss(frame, loss);
+        draw_gpu(frame, gpu, &panel);
         self.draw_bars(frame, epoch, whole);
+    }
+
+    /// What to show of the GPUs: the ones the job holds memory on, a word
+    /// where it holds none, and nothing where there is no driver to ask or
+    /// the job is over.
+    fn gpu_panel(&self) -> GpuPanel {
+        if !self.running() {
+            return GpuPanel::Hidden;
+        }
+        let snapshot = self.gpu.snapshot();
+        if !snapshot.available {
+            return GpuPanel::Hidden;
+        }
+        let Some(pid) = self.status.as_ref().and_then(|status| status.pid) else {
+            return GpuPanel::Hidden;
+        };
+        let found = snapshot.of_process(pid);
+        if found.is_empty() {
+            return GpuPanel::Note(
+                "this job holds no memory on any GPU: it runs on the CPU, or the driver does \
+                 not list it as a compute process"
+                    .to_string(),
+            );
+        }
+        GpuPanel::Gpus(
+            found
+                .into_iter()
+                .map(|(gpu, job)| GpuRow::of(gpu, job))
+                .collect(),
+        )
     }
 
     fn state_line(&self) -> (String, Color) {
@@ -375,6 +420,93 @@ impl Watch {
     }
 }
 
+/// What the strip of GPU bars holds.
+enum GpuPanel {
+    Hidden,
+    Note(String),
+    Gpus(Vec<GpuRow>),
+}
+
+/// One GPU's bar: its title says how busy it is, the bar how full.
+struct GpuRow {
+    title: String,
+    fraction: f64,
+    label: String,
+}
+
+impl GpuRow {
+    fn of(gpu: &Gpu, job: Option<u64>) -> GpuRow {
+        let mut title = format!(
+            " GPU {} · {}",
+            gpu.index,
+            gpu.name.trim_start_matches("NVIDIA ")
+        );
+        if let Some(load) = gpu.utilization {
+            title.push_str(&format!(" · load {load}%"));
+        }
+        if let Some(degrees) = gpu.temperature {
+            title.push_str(&format!(" · {degrees} °C"));
+        }
+        match (gpu.power, gpu.power_limit) {
+            (Some(power), Some(limit)) => title.push_str(&format!(" · {power:.0}/{limit:.0} W")),
+            (Some(power), None) => title.push_str(&format!(" · {power:.0} W")),
+            _ => {}
+        }
+        if let Some(clock) = gpu.clock {
+            title.push_str(&format!(" · {clock} MHz"));
+        }
+        title.push(' ');
+
+        let (used, total) = (gpu.memory_used.unwrap_or(0), gpu.memory_total.unwrap_or(0));
+        let fraction = if total == 0 {
+            0.0
+        } else {
+            used as f64 / total as f64
+        };
+        let mut label = format!("{used} / {total} MiB ({:.0}%)", fraction * 100.0);
+        if let Some(job) = job {
+            label.push_str(&format!(" · this job {job} MiB"));
+        }
+        GpuRow {
+            title,
+            fraction,
+            label,
+        }
+    }
+}
+
+/// Draws the GPU strip into `area`, three lines to each GPU.
+fn draw_gpu(frame: &mut Frame, area: Rect, panel: &GpuPanel) {
+    match panel {
+        GpuPanel::Hidden => {}
+        GpuPanel::Note(note) => frame.render_widget(
+            Paragraph::new(Line::from(note.clone()).dim())
+                .wrap(Wrap { trim: true })
+                .block(Block::bordered().title(" GPU ")),
+            area,
+        ),
+        GpuPanel::Gpus(rows) => {
+            let slots = Layout::vertical(rows.iter().map(|_| Constraint::Length(3))).split(area);
+            for (row, slot) in rows.iter().zip(slots.iter()) {
+                // Green while there is room, then the colours of a warning:
+                // a GPU out of memory ends a run without a word of why.
+                let color = match row.fraction {
+                    f if f < 0.7 => Color::Green,
+                    f if f < 0.9 => Color::Yellow,
+                    _ => Color::Red,
+                };
+                let mut gauge = bar(
+                    row.fraction,
+                    Block::bordered().title(row.title.clone()),
+                    color,
+                );
+                gauge = gauge.label(row.label.clone());
+                frame.render_widget(gauge, *slot);
+            }
+        }
+    }
+}
+
 /// What the chart draws.
 struct Series {
     train: Vec<(f64, f64)>,
@@ -415,6 +547,9 @@ mod tests {
     fn watch_with(points: &[&str]) -> Watch {
         let dir = tempfile::tempdir().unwrap();
         let mut watch = Watch::new(job_in(dir.path()));
+        // Nobody is asked what the GPUs are doing: a test is the same on a
+        // machine with one and a machine without.
+        watch.gpu = Probe::fixed(Default::default());
         watch.points = points.iter().filter_map(|l| LossPoint::parse(l)).collect();
         watch
     }
@@ -442,6 +577,7 @@ mod tests {
         )
         .unwrap();
         let mut watch = Watch::new(job_in(dir.path()));
+        watch.gpu = Probe::fixed(Default::default());
         // The half line at the end is waited for, not misread.
         assert_eq!(watch.points.len(), 4);
 
@@ -471,6 +607,71 @@ mod tests {
             watch.handle(KeyEvent::from(KeyCode::Esc)),
             Action::Back
         ));
+    }
+
+    /// A running job's screen, drawn against `snapshot`, as text.
+    fn shown_with(pid: Option<u32>, snapshot: crate::tui::gpu::Snapshot) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let dir = tempfile::tempdir().unwrap();
+        let status = Status {
+            state: State::Running,
+            epoch: 1,
+            epochs: 2,
+            pid,
+            ..Status::default()
+        };
+        std::fs::write(dir.path().join("status"), status.to_text()).unwrap();
+        let mut watch = Watch::new(job_in(dir.path()));
+        watch.gpu = Probe::fixed(snapshot);
+        let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
+        terminal.draw(|frame| watch.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer.content.iter().map(|c| c.symbol()).collect()
+    }
+
+    fn two_gpus() -> crate::tui::gpu::Snapshot {
+        use crate::tui::gpu::{parse_apps, parse_gpus, Snapshot};
+        Snapshot {
+            available: true,
+            gpus: parse_gpus(
+                "0, GPU-a, NVIDIA GeForce GTX 1650, 4, 4096, 0, 36, 6.38, 85.00, 300\n\
+                 1, GPU-b, NVIDIA GeForce RTX 4060 Ti, 8190, 16380, 87, 54, 120.5, 165.00, 2310\n",
+            ),
+            apps: parse_apps("GPU-b, 4242, 7900\n"),
+        }
+    }
+
+    #[test]
+    fn the_gpu_a_job_holds_is_drawn_with_its_memory_and_the_other_is_not() {
+        let shown = shown_with(Some(4242), two_gpus());
+        for wanted in [
+            "GPU 1",
+            "RTX 4060 Ti",
+            "load 87%",
+            "54 °C",
+            "120/165 W",
+            "2310 MHz",
+            "8190 / 16380 MiB",
+            "this job 7900 MiB",
+        ] {
+            assert!(shown.contains(wanted), "{wanted} missing from:\n{shown}");
+        }
+        assert!(!shown.contains("GTX 1650"), "{shown}");
+    }
+
+    #[test]
+    fn a_job_the_driver_does_not_list_says_so_and_no_driver_says_nothing() {
+        let shown = shown_with(Some(7), two_gpus());
+        assert!(shown.contains("holds no memory on any GPU"), "{shown}");
+        assert!(!shown.contains("RTX 4060 Ti"), "{shown}");
+
+        let shown = shown_with(Some(4242), Default::default());
+        assert!(!shown.contains("GPU"), "{shown}");
+        // A job which never said what its process is has nothing to look up.
+        let shown = shown_with(None, two_gpus());
+        assert!(!shown.contains("MiB"), "{shown}");
     }
 
     #[test]

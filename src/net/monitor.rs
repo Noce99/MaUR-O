@@ -14,6 +14,9 @@
 //! control     what the watcher asks for: `run`, `pause` or `stop`
 //! ```
 //!
+//! The status carries the run's process id, which is how the watcher finds the
+//! GPU it is using.
+//!
 //! Nothing here needs a signal or a pid, which is what keeps it the same on
 //! every platform: a run that is alive rewrites `status` twice a second
 //! whatever it is doing, so a `status` that has not changed for a while is a
@@ -166,6 +169,9 @@ pub struct Status {
     pub run: Option<PathBuf>,
     /// What went wrong, for [`State::Failed`].
     pub message: Option<String>,
+    /// The process id of the run, which is how a watcher finds the GPU it is
+    /// using: the driver lists the processes on each one.
+    pub pid: Option<u32>,
     /// When this was written, in seconds since the epoch.
     pub updated: u64,
 }
@@ -184,6 +190,7 @@ impl Default for Status {
             valid_loss: None,
             run: None,
             message: None,
+            pid: None,
             updated: now(),
         }
     }
@@ -228,6 +235,9 @@ impl Status {
         if let Some(message) = &self.message {
             text.push_str(&format!("message={}\n", message.replace('\n', " ")));
         }
+        if let Some(pid) = self.pid {
+            text.push_str(&format!("pid={pid}\n"));
+        }
         text
     }
 
@@ -255,6 +265,7 @@ impl Status {
                 "valid_loss" => status.valid_loss = value.parse().ok(),
                 "run" => status.run = Some(PathBuf::from(value)),
                 "message" => status.message = Some(value.to_string()),
+                "pid" => status.pid = value.parse().ok(),
                 _ => {}
             }
         }
@@ -351,7 +362,10 @@ impl Monitor {
         fs::create_dir_all(&dir).ok();
         let monitor = Monitor {
             dir,
-            status: Arc::new(Mutex::new(Status::default())),
+            status: Arc::new(Mutex::new(Status {
+                pid: Some(std::process::id()),
+                ..Status::default()
+            })),
             gate: Gate::default(),
         };
         monitor.write();
@@ -362,6 +376,12 @@ impl Monitor {
     /// read: asks `interrupter` to stop the run on `stop`, and closes or
     /// opens the gate on `pause`. Ends with the run, once it has ended.
     pub fn watch(&self, interrupter: TrainingInterrupter) {
+        self.watch_with(move || interrupter.stop());
+    }
+
+    /// [`Monitor::watch`] for a loop which is not burn's learner: `on_stop`
+    /// is called, every beat, for as long as a `stop` is asked for.
+    pub fn watch_with(&self, on_stop: impl Fn() + Send + 'static) {
         let monitor = self.clone();
         std::thread::spawn(move || loop {
             let control = Control::read(&monitor.dir);
@@ -369,7 +389,7 @@ impl Monitor {
                 let mut status = monitor.status.lock().unwrap();
                 match control {
                     Control::Stop => {
-                        interrupter.stop();
+                        on_stop();
                         monitor.gate.pause(false);
                         if !status.state.ended() {
                             status.state = State::Stopping;
@@ -396,6 +416,46 @@ impl Monitor {
             }
             std::thread::sleep(BEAT);
         });
+    }
+
+    /// Says where a hand-written loop is: epoch `epoch` of `epochs`, `done`
+    /// of its `of` items, `iteration` steps in all. The first call takes the
+    /// run out of `Starting`.
+    pub fn report(&self, epoch: usize, epochs: usize, done: usize, of: usize, iteration: usize) {
+        let mut status = self.status.lock().unwrap();
+        status.epoch = epoch;
+        status.epochs = epochs;
+        status.done = done;
+        status.of = of;
+        status.validating = false;
+        status.iteration = iteration;
+        if status.state == State::Starting {
+            status.state = State::Running;
+        }
+    }
+
+    /// Writes down a loss, a training step's or a validation pass's, for the
+    /// watcher's chart, and keeps it as the latest of its kind.
+    pub fn record_loss(&self, validation: bool, epoch: usize, iteration: usize, loss: f64) {
+        if !loss.is_finite() {
+            return;
+        }
+        {
+            let mut status = self.status.lock().unwrap();
+            if validation {
+                status.valid_loss = Some(loss);
+            } else {
+                status.train_loss = Some(loss);
+            }
+        }
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join(LOSSES_FILE))
+        {
+            let kind = if validation { 'v' } else { 't' };
+            writeln!(file, "{kind} {epoch} {iteration} {loss}").ok();
+        }
     }
 
     /// Writes the status as it stands, stamped with the time.
@@ -582,6 +642,7 @@ mod tests {
             valid_loss: None,
             run: Some(PathBuf::from("trainings/UNet_x")),
             message: None,
+            pid: Some(4242),
             updated: 12,
         };
         assert_eq!(Status::parse(&status.to_text()), Some(status));

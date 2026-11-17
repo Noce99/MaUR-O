@@ -62,7 +62,7 @@ Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 | `mauro ortho` | Download a map's aerial orthophoto from the best open WMS for its place (European national/regional agencies) and add it to the map as a georeferenced template. |
 | `mauro net dataset` | Generate a dataset of random maps out of one map's symbol set: maps, images and per-pixel labels (`images/`, `gt/`, `classes.json`). |
 | `mauro net grid-to-map` | Turn a label grid back into a map (the way back from `gt/`). |
-| `mauro net train` | Train a U-Net on such a dataset (`--dashboard` for burn's live terminal dashboard; the TUI's job screen replaces it). |
+| `mauro net train` | Train a network on such a dataset: a U-Net (`--model unet`, the default) or a tree of curves (`--model tree`, `src/net/tree.rs`, `tree_training.rs`). `--dashboard` for burn's live terminal dashboard (U-Net only); the TUI's job screen replaces it. |
 | `mauro net image-to-map` | Read a picture of a map back into a map with a trained run, and score it by drawing it again. |
 | `mauro net show-batches` | Draw the batches a run would be trained on, from the tensors, to check the labels. |
 

@@ -1,5 +1,12 @@
-//! Trains a U-Net to read a rendered orienteering map back into the symbols
-//! it was drawn with.
+//! Trains a network to read a rendered orienteering map back into the symbols
+//! it was drawn with: a U-Net, which says what every pixel is, or with
+//! `--model tree` a tree of curves, which says where the picture is cut into
+//! areas and what each one is (see [`maur_o::net::tree`]). The tree is trained
+//! on whole pictures reduced to `--size`, and reads with `--depth`,
+//! `--control-points`, `--samples`, `--temperature-start` and
+//! `--temperature-end`; the U-Net's `--crop`, `--crops-per-map`,
+//! `--angle-weight`, `--weight-decay`, `--overhang`, `--workers` and
+//! `--image-valid` do not apply to it.
 //!
 //! ```text
 //! mauro net train [OPTIONS] <dataset> [trainings]
@@ -45,7 +52,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use maur_o::dataset::{Classes, CLASSES_FILE};
 
@@ -55,10 +62,21 @@ use maur_o::net::monitor::Monitor;
 use maur_o::net::training::{
     train, TrainingConfig, DEFAULT_ANGLE_WEIGHT, DEFAULT_LEARNING_RATE, DEFAULT_WEIGHT_DECAY,
 };
+use maur_o::net::tree_training::{train_tree, TreeTrainingConfig};
 use maur_o::net::unet::{DEFAULT_BASE_CHANNELS, DEPTH};
 
 /// Where the runs are written when no folder is named.
 const DEFAULT_TRAININGS: &str = "trainings";
+
+/// Which network a run trains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Model {
+    /// A U-Net: a class and an angle for every pixel, trained on crops.
+    Unet,
+    /// A tree of curves: the picture cut in two by a curve, each half again,
+    /// every leaf one symbol, trained on whole pictures reduced to `--size`.
+    Tree,
+}
 
 #[derive(Parser)]
 #[command(
@@ -84,7 +102,19 @@ pub struct Args {
     #[arg(default_value = DEFAULT_TRAININGS)]
     trainings: PathBuf,
 
-    /// How many passes over the dataset.
+    /// The network to train. The U-Net reads a class for every pixel and is
+    /// trained on crops of the maps; the tree answers with the curves which
+    /// cut the picture into its areas and a symbol for each, and is trained on
+    /// the whole pictures reduced to --size. The options of the other model
+    /// are ignored: --crop, --crops-per-map, --angle-weight, --weight-decay,
+    /// --overhang, --workers and --image-valid are the U-Net's; --size,
+    /// --depth, --control-points, --samples and the two temperatures the
+    /// tree's.
+    #[arg(long, value_enum, default_value_t = Model::Unet)]
+    model: Model,
+
+    /// How many passes over the dataset. A pass of the tree is one step per
+    /// --batch-size pictures, which is short: it wants tens of them.
     #[arg(short = 'e', long, default_value_t = 10, value_name = "COUNT")]
     epochs: usize,
 
@@ -162,6 +192,38 @@ pub struct Args {
     #[arg(short = 's', long, default_value_t = 0)]
     seed: u64,
 
+    /// The tree's: how many pixels square the pictures are reduced to. Must
+    /// divide by sixteen.
+    #[arg(long, default_value_t = 64, value_name = "PIXELS")]
+    size: usize,
+
+    /// The tree's: how many cuts lie between its root and a leaf. The tree has
+    /// two to the power of this many leaves, so this many symbols can be told
+    /// apart by it at most.
+    #[arg(long, default_value_t = 4, value_name = "COUNT")]
+    depth: usize,
+
+    /// The tree's: how many control points the Bézier of each cut has. More
+    /// follow a wandering boundary closer.
+    #[arg(long, default_value_t = 8, value_name = "COUNT")]
+    control_points: usize,
+
+    /// The tree's: how many points a cut is sampled at to measure how far a
+    /// pixel is from it.
+    #[arg(long, default_value_t = 24, value_name = "COUNT")]
+    samples: usize,
+
+    /// The tree's: how blurred its cuts are at the start of the run, in
+    /// picture widths. Warm cuts feel each other, which is how the first of
+    /// them are found.
+    #[arg(long, default_value_t = 0.08, value_name = "WIDTHS")]
+    temperature_start: f32,
+
+    /// The tree's: how blurred its cuts are at the end of the run, which is
+    /// how sharp the curves it ends with are.
+    #[arg(long, default_value_t = 0.012, value_name = "WIDTHS")]
+    temperature_end: f32,
+
     /// Show a live terminal dashboard of the metrics in place of the plain,
     /// scrolling log -- a full-screen view of the loss, the accuracy and the
     /// angle error as they come in, epoch by epoch.
@@ -228,7 +290,39 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             ));
         }
     }
-    if !args.crop.is_multiple_of(1 << DEPTH) {
+    if args.model == Model::Tree {
+        for (value, name) in [
+            (args.size, "--size"),
+            (args.depth, "--depth"),
+            (args.control_points, "--control-points"),
+            (args.samples, "--samples"),
+        ] {
+            if value == 0 {
+                return Err((
+                    ExitCode::from(1),
+                    format!("Error: Invalid value for {name}: it must be greater than zero."),
+                ));
+            }
+        }
+        if !args.size.is_multiple_of(16) {
+            return Err((
+                ExitCode::from(1),
+                format!(
+                    "Error: Invalid value for --size: {} does not divide by 16, which is what \
+                     the encoder halves.",
+                    args.size,
+                ),
+            ));
+        }
+        if args.depth > 8 || args.control_points < 2 || args.samples < 3 {
+            return Err((
+                ExitCode::from(1),
+                "Error: Invalid value for --depth, --control-points or --samples: a depth of at \
+                 most 8, at least 2 control points and at least 3 samples."
+                    .to_string(),
+            ));
+        }
+    } else if !args.crop.is_multiple_of(1 << DEPTH) {
         return Err((
             ExitCode::from(1),
             format!(
@@ -263,6 +357,42 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
 
     let notes = notes_of(&args.dataset).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     let classes = notes.classes;
+
+    if args.model == Model::Tree {
+        let config = TreeTrainingConfig::new(classes)
+            .with_epochs(args.epochs)
+            .with_batch_size(args.batch_size)
+            .with_size(args.size)
+            .with_depth(args.depth)
+            .with_control_points(args.control_points)
+            .with_samples(args.samples)
+            .with_base_channels(args.base_channels)
+            .with_learning_rate(args.learning_rate)
+            .with_temperature_start(args.temperature_start)
+            .with_temperature_end(args.temperature_end)
+            .with_train_share(args.train_share)
+            .with_seed(args.seed);
+        println!(
+            "{BACKEND}: a tree of {} cuts of {} control points, {classes} symbols and the frame \
+             to tell apart, on pictures of {} pixels",
+            (1usize << args.depth) - 1,
+            args.control_points,
+            args.size,
+        );
+        let monitor = Monitor::from_env();
+        let result = train_tree::<Backend>(
+            &args.dataset,
+            &args.trainings,
+            config,
+            device(),
+            monitor.clone(),
+        )
+        .map(|_| ());
+        if let Some(monitor) = &monitor {
+            monitor.end(&result);
+        }
+        return result.map_err(|e| (ExitCode::from(2), format!("Error: {e}")));
+    }
 
     let config = TrainingConfig::new(classes)
         .with_epochs(args.epochs)

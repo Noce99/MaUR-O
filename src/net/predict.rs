@@ -135,6 +135,14 @@ pub fn load<B: Backend>(
     device: &B::Device,
 ) -> Result<(UNet<B>, TrainingConfig), String> {
     let configuration = run.join("training.json");
+    if !configuration.exists() && run.join("tree.json").exists() {
+        return Err(format!(
+            "{} is a run of the tree network (it has a tree.json, not a training.json). Reading a \
+             picture back into a map is done for the U-Net only so far; the tree's answer, the \
+             curves and the symbols of its leaves, is not turned into a map yet.",
+            run.display(),
+        ));
+    }
     // The shape of the module has to be known before a record can be loaded
     // into it, and a record does not carry it.
     let config = TrainingConfig::load(&configuration).map_err(|e| {
