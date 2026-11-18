@@ -271,7 +271,7 @@ pub fn render_map_over(
 /// alpha is the whole of the conversion.
 pub fn to_rgb_image(pixmap: &Pixmap) -> image::RgbImage {
     let mut image = image::RgbImage::new(pixmap.width(), pixmap.height());
-    for (pixel, rgba) in image.pixels_mut().zip(pixmap.data().chunks_exact(4)) {
+    for (pixel, rgba) in image.pixels_mut().zip(pixmap.data().as_chunks::<4>().0) {
         *pixel = image::Rgb([rgba[0], rgba[1], rgba[2]]);
     }
     image
