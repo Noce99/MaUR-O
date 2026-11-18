@@ -25,6 +25,14 @@
 //! `--same-angle` are the U-Net's and do not apply to it, and it has no angle
 //! to give.
 //!
+//! A run whose network has a lines layer (trained on a dataset made with
+//! `mauro net dataset --line-labels`) gives the lines as well: where the
+//! network says a line of a symbol runs, the band is thinned to its middle,
+//! traced into paths, and each path written as a line object of that symbol
+//! — see [`maur_o::line_vector`]. `--line-threshold` is how sure the network
+//! has to be of a pixel, and `--min-line` how long a path has to be; the
+//! lines are simplified by `--tolerance`, like the areas' boundaries.
+//!
 //! The run folder is all it is told, because a run folder holds everything:
 //! `training.json` says how big the network was, `best.bpk` is its weights,
 //! and `classes.json` and the symbol set beside them — copied out of the
@@ -58,11 +66,12 @@ use maur_o::differences::open_image;
 use maur_o::symbol_kinds::Catalogue;
 use maur_o::xml_reader::read_xml_map;
 
+use maur_o::line_vector::LineSettings;
 use maur_o::vectorize::Simplify;
 
 use maur_o::net::predict::{
-    load, read_back, read_back_tree, ReadBackSettings, OVERLAP, PREDICTED_SAME_ANGLE,
-    PREDICTED_TOLERANCE, TREE_TOLERANCE,
+    load, read_back, read_back_tree, ReadBackSettings, DEFAULT_LINE_THRESHOLD, OVERLAP,
+    PREDICTED_SAME_ANGLE, PREDICTED_TOLERANCE, TREE_TOLERANCE,
 };
 use maur_o::net::tree_training::load_tree;
 
@@ -120,6 +129,17 @@ pub struct Args {
     /// Defaults to a quarter of the tile.
     #[arg(short = 'o', long, value_name = "PIXELS")]
     overlap: Option<usize>,
+
+    /// The probability a pixel has to be given for a line to run through it,
+    /// for a run whose network has a lines layer (a dataset made with
+    /// --line-labels). Lower finds more of the lines and more that are not.
+    #[arg(long, default_value_t = DEFAULT_LINE_THRESHOLD, value_name = "PROBABILITY")]
+    line_threshold: f32,
+
+    /// How long a line has to be to be written, in pixels. A shorter one is a
+    /// speck, or the spur a thinning leaves at the end of a band.
+    #[arg(long, default_value_t = LineSettings::default().min_length, value_name = "PIXELS")]
+    min_line: f64,
 
     /// Draw the map which was written, over the very ground the picture
     /// covers, and keep it. It is drawn either way, to score the result.
@@ -258,6 +278,8 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             resolution,
             scale_denominator: scale,
             simplify,
+            line_threshold: DEFAULT_LINE_THRESHOLD,
+            lines: LineSettings::default(),
         };
         read_back_tree(
             &model,
@@ -281,6 +303,16 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             )));
         }
 
+        if model.lines() != catalogue.lines.len() && model.lines() > 0 {
+            return Err(failed(format!(
+                "the network answers for {} line symbols and {} holds {}: the symbol set beside \
+                 a run is not the one it trained on",
+                model.lines(),
+                symbol_set.display(),
+                catalogue.lines.len(),
+            )));
+        }
+
         let tile = args.crop.unwrap_or(config.crop);
         let overlap = args.overlap.unwrap_or((tile as f64 * OVERLAP) as usize);
         println!(
@@ -297,6 +329,13 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             resolution,
             scale_denominator: scale,
             simplify,
+            line_threshold: args.line_threshold,
+            // Simplified as far as the areas' boundaries are: both are a
+            // line of pixels, and a pixel is a pixel.
+            lines: LineSettings {
+                tolerance,
+                min_length: args.min_line,
+            },
         };
         read_back(
             &model,
@@ -323,6 +362,14 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         done.symbols_used(),
         catalogue.opaque_areas.len(),
     );
+    if done.line_symbols > 0 || done.lines > 0 {
+        println!(
+            "  it found {} lines, of {} of the set's {} line symbols",
+            done.lines,
+            done.line_symbols,
+            catalogue.lines.len(),
+        );
+    }
     println!(
         "{}: {} objects, {} coordinates, over {} by {} meters at 1:{scale}",
         map_path.display(),

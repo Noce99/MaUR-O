@@ -14,6 +14,8 @@ const OVERLAP: usize = 7;
 const RENDERED: usize = 8;
 const RESOLUTION: usize = 9;
 const SCALE: usize = 10;
+const LINE_THRESHOLD: usize = 11;
+const MIN_LINE: usize = 12;
 
 pub struct NetImageToMap {
     form: Form,
@@ -40,6 +42,8 @@ impl NetImageToMap {
                 Field::text("Rendered").arg("rendered"),
                 Field::text("Resolution").arg("resolution").unit("px/m"),
                 Field::text("Scale").arg("scale").unit("1:"),
+                Field::text("Line threshold").arg("line_threshold"),
+                Field::text("Min line").arg("min_line").unit("px"),
             ],
         );
         form.open_picker(RUN);
@@ -84,6 +88,8 @@ impl Tool for NetImageToMap {
         form.push_option(&mut args, RENDERED, "--rendered");
         form.push_option(&mut args, RESOLUTION, "--resolution");
         form.push_option(&mut args, SCALE, "--scale");
+        form.push_option(&mut args, LINE_THRESHOLD, "--line-threshold");
+        form.push_option(&mut args, MIN_LINE, "--min-line");
         Ok(args)
     }
 }

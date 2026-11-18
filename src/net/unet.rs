@@ -106,7 +106,7 @@ pub struct UNetConfig {
     /// there was such a layer. Each is one more channel of the head, a logit
     /// for *a line of this symbol runs through this pixel*, scored
     /// independently of the others — two lines may cross — see
-    /// [`crate::net::training::lines_loss`].
+    /// `crate::net::training::lines_loss`.
     #[config(default = 0)]
     pub lines: usize,
     /// What the lines term counts for beside the ground's.

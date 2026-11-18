@@ -175,6 +175,7 @@ pub mod ground_truth;
 pub mod image_template;
 pub mod layout;
 pub mod line_truth;
+pub mod line_vector;
 pub mod map;
 pub mod map_areas;
 pub mod naming;

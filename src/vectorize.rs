@@ -108,6 +108,7 @@ use std::path::Path;
 
 use crate::geometry::Rect;
 use crate::ground_truth::{GroundTruth, BACKGROUND, NO_ROTATION};
+use crate::line_vector::{objects_of_lines, LineGrid, LineSettings};
 use crate::map::{Object, ObjectKind, PathObject, Point};
 use crate::path_builder::PathBuilder;
 use crate::symbol_kinds::{Catalogue, Entry};
@@ -273,6 +274,9 @@ pub struct Written {
     /// How many coordinates those objects hold between them, control points
     /// included — which is the number to watch when choosing a tolerance.
     pub coords: usize,
+    /// How many of the objects are lines. Nought where there is no lines
+    /// layer, which is [`write_map`].
+    pub lines: usize,
     /// Complaints from reading the source map's symbol set.
     pub warnings: Vec<String>,
 }
@@ -393,6 +397,20 @@ pub fn write_map(
     placement: &Placement,
     simplify: &Simplify,
 ) -> Result<Written, String> {
+    write_map_with_lines(grid, None, source, into, placement, simplify)
+}
+
+/// [`write_map`], and the lines of a [`LineGrid`] drawn over the areas: each
+/// path of their skeletons an object drawn with the line symbol of its
+/// channel, in the order of [`Catalogue::lines`].
+pub fn write_map_with_lines(
+    grid: &SymbolGrid,
+    lines: Option<(&LineGrid, &LineSettings)>,
+    source: &Path,
+    into: &Path,
+    placement: &Placement,
+    simplify: &Simplify,
+) -> Result<Written, String> {
     let (mut map, warnings) = xml_reader::read_xml_map(source)?;
     map.resolve_references();
     let catalogue = Catalogue::of(&map);
@@ -403,14 +421,22 @@ pub fn write_map(
         ));
     }
 
-    let objects = to_objects(grid, &catalogue.opaque_areas, placement, simplify)?;
-    write_objects(
+    let mut objects = to_objects(grid, &catalogue.opaque_areas, placement, simplify)?;
+    let mut line_count = 0;
+    if let Some((found, settings)) = lines {
+        let drawn = objects_of_lines(found, &catalogue.lines, placement, settings)?;
+        line_count = drawn.len();
+        objects.extend(drawn);
+    }
+    let mut written = write_objects(
         &objects,
         source,
         into,
         placement.scale_denominator,
         warnings,
-    )
+    )?;
+    written.lines = line_count;
+    Ok(written)
 }
 
 /// The path objects of areas which are already shapes: each region a class
@@ -503,6 +529,7 @@ pub fn write_objects(
     Ok(Written {
         objects: objects.len(),
         coords,
+        lines: 0,
         warnings,
     })
 }

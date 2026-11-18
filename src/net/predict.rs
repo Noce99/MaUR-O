@@ -87,10 +87,12 @@ use image::RgbImage;
 use crate::differences::{difference_mask, Comparison, DEFAULT_TOLERANCE};
 use crate::geometry::Rect;
 use crate::ground_truth::{BACKGROUND, NO_ROTATION};
+use crate::line_vector::{LineGrid, LineSettings};
 use crate::render::{render_map_over, to_rgb_image, Extent};
 use crate::symbol_kinds::Entry;
 use crate::vectorize::{
-    objects_of_regions, write_map, write_objects, Placement, Simplify, SymbolGrid, Written,
+    objects_of_regions, write_map_with_lines, write_objects, Placement, Simplify, SymbolGrid,
+    Written,
 };
 
 use crate::net::training::TrainingConfig;
@@ -229,6 +231,30 @@ pub fn predict_image(
     overlap: usize,
     device: &Device,
 ) -> SymbolGrid {
+    predict_image_with_lines(model, image, tile, overlap, DEFAULT_LINE_THRESHOLD, device).0
+}
+
+/// What a line is found at: the probability a pixel has to be given for a
+/// line of a symbol to run through it. Half, which is where a sigmoid is
+/// as sure of one answer as of the other.
+pub const DEFAULT_LINE_THRESHOLD: f32 = 0.5;
+
+/// [`predict_image`], and where the network says each line symbol runs.
+///
+/// The lines are the second layer of the head — see
+/// [`crate::line_truth`] — and come out as a [`LineGrid`] when the network
+/// has one, and as `None` when it does not. A line is found where its
+/// probability is over `line_threshold`; the tiles are joined the way the
+/// ground's are, the pixel taking the answer of the tile which saw it
+/// furthest from its own edge.
+pub fn predict_image_with_lines(
+    model: &UNet,
+    image: &RgbImage,
+    tile: usize,
+    overlap: usize,
+    line_threshold: f32,
+    device: &Device,
+) -> (SymbolGrid, Option<LineGrid>) {
     let step = 1 << DEPTH;
     let (width, height) = (image.width() as usize, image.height() as usize);
 
@@ -246,6 +272,14 @@ pub fn predict_image(
     let stride = tile.saturating_sub(overlap).max(1);
 
     let mut grid = SymbolGrid::new(width, height);
+    let lines = model.lines();
+    let mut line_grid = (lines > 0).then(|| LineGrid::new(width, height, lines));
+    // A probability over the threshold is a logit over this, and comparing
+    // the logit spares a sigmoid for every pixel of every channel.
+    let line_logit = {
+        let t = line_threshold.clamp(1e-6, 1.0 - 1e-6);
+        (t / (1.0 - t)).ln()
+    };
     // How far from its tile's edge each pixel's answer was found, and one
     // more than that so nought can mean no answer yet. A later tile only
     // overwrites a pixel it saw better than the tile before it did.
@@ -255,9 +289,8 @@ pub fn predict_image(
         for left in starts(padded_width, tile, stride) {
             let input = tile_tensor(image, left, top, tile, device);
             // `classes + 1` class logits, the frame last, then the sine and
-            // the cosine of the angle.
+            // the cosine of the angle, then a logit for each line symbol.
             let raw = model.forward(input);
-            let [_, channels, _, _] = raw.dims();
             let values = raw
                 .into_data()
                 .try_into_vec::<f32>()
@@ -298,7 +331,9 @@ pub fn predict_image(
                         winner as u16
                     };
 
-                    let (sin, cos) = (of(channels - 2), of(channels - 1));
+                    // Not the last two channels: where there are lines, the
+                    // last channels are theirs.
+                    let (sin, cos) = (of(classes + 1), of(classes + 2));
                     grid.rotation[at] = if sin.hypot(cos) <= ANGLE_LENGTH {
                         // Not an angle it got wrong: an angle it declined to
                         // give, which is what the zero vector says.
@@ -307,11 +342,18 @@ pub fn predict_image(
                         let turn = sin.atan2(cos) / std::f32::consts::TAU;
                         turn.rem_euclid(1.0)
                     };
+
+                    if let Some(found) = &mut line_grid {
+                        for line in 0..lines {
+                            found.channel_mut(line)[at] =
+                                (of(classes + 3 + line) > line_logit) as u8;
+                        }
+                    }
                 }
             }
         }
     }
-    grid
+    (grid, line_grid)
 }
 
 /// What one picture came to, on the way through the network and back out as
@@ -319,8 +361,13 @@ pub fn predict_image(
 pub struct ReadBack {
     /// The grid the network said, with the still symbols' angles taken off.
     pub grid: SymbolGrid,
-    /// How many path objects the map came to.
+    /// How many path objects the map came to, lines included.
     pub objects: usize,
+    /// How many of them are lines, and how many line symbols those are drawn
+    /// with: nought of both for a network with no lines layer.
+    pub lines: usize,
+    /// How many different line symbols the lines are drawn with.
+    pub line_symbols: usize,
     /// How many coordinates those objects hold, control points included.
     pub coords: usize,
     /// The map drawn again, over the very ground the picture covers, so that
@@ -395,12 +442,19 @@ pub fn read_back(
     settings: &ReadBackSettings,
     device: &Device,
 ) -> Result<ReadBack, String> {
-    let mut grid = predict_image(model, picture, settings.tile, settings.overlap, device);
+    let (mut grid, lines) = predict_image_with_lines(
+        model,
+        picture,
+        settings.tile,
+        settings.overlap,
+        settings.line_threshold,
+        device,
+    );
     // A symbol with no pattern to turn gets no angle, whatever the two
     // channels said: left in, that noise is read as a difference of angle and
     // splits the region into fragments.
     resolve_angles(&mut grid, symbols);
-    read_back_grid(grid, picture, symbol_set, into, settings)
+    read_back_grid_with_lines(grid, lines, picture, symbol_set, into, settings)
 }
 
 /// What the tree network says about a picture: its cuts and the symbol of
@@ -564,9 +618,22 @@ pub fn read_back_grid(
     into: &Path,
     settings: &ReadBackSettings,
 ) -> Result<ReadBack, String> {
+    read_back_grid_with_lines(grid, None, picture, symbol_set, into, settings)
+}
+
+/// [`read_back_grid`], with the lines of a [`LineGrid`] drawn over the areas.
+pub fn read_back_grid_with_lines(
+    grid: SymbolGrid,
+    lines: Option<LineGrid>,
+    picture: &RgbImage,
+    symbol_set: &Path,
+    into: &Path,
+    settings: &ReadBackSettings,
+) -> Result<ReadBack, String> {
     let ground = ground_of(picture, settings);
-    let written = write_map(
+    let written = write_map_with_lines(
         &grid,
+        lines.as_ref().map(|found| (found, &settings.lines)),
         symbol_set,
         into,
         &Placement {
@@ -575,7 +642,10 @@ pub fn read_back_grid(
         },
         &settings.simplify,
     )?;
-    finish(grid, written, picture, into, settings, ground)
+    let line_symbols = lines.as_ref().map_or(0, LineGrid::symbols_used);
+    let mut done = finish(grid, written, picture, into, settings, ground)?;
+    done.line_symbols = line_symbols;
+    Ok(done)
 }
 
 /// The ground a picture covers, in meters: its own size at the resolution,
@@ -613,6 +683,8 @@ fn finish(
     Ok(ReadBack {
         grid,
         objects: written.objects,
+        lines: written.lines,
+        line_symbols: 0,
         coords: written.coords,
         drawn,
         comparison,
@@ -634,6 +706,12 @@ pub struct ReadBackSettings {
     /// How much of the boundary to keep, and what counts as one object's
     /// angle.
     pub simplify: Simplify,
+    /// The probability a pixel has to be given for a line to run through it,
+    /// where the network has a lines layer.
+    pub line_threshold: f32,
+    /// What to keep of the lines found: how long one has to be, and how far
+    /// it may be moved to be rid of a node.
+    pub lines: LineSettings,
 }
 
 impl ReadBackSettings {
@@ -653,6 +731,8 @@ impl ReadBackSettings {
                 tolerance: PREDICTED_TOLERANCE,
                 same_angle: PREDICTED_SAME_ANGLE,
             },
+            line_threshold: DEFAULT_LINE_THRESHOLD,
+            lines: LineSettings::default(),
         }
     }
 }
@@ -877,6 +957,72 @@ mod tests {
             };
             assert_eq!(grid.class[at], wanted, "at pixel {at}");
         }
+    }
+
+    /// The angle of a pixel is the sine and cosine channels right after the
+    /// class logits, and the lines of a network which has them come after
+    /// *those* — they are not the last two channels of the head.
+    ///
+    /// Taking the angle off the end of the head was right until the head
+    /// grew a lines layer, and then it read two line logits as an angle.
+    #[test]
+    fn the_angle_of_a_pixel_does_not_come_from_the_lines_at_the_end_of_the_head() {
+        let device = Device::flex();
+        let model = UNetConfig::new(3)
+            .with_base_channels(2)
+            .with_lines(2)
+            .init(&device);
+        let image = picture(16, 16);
+        let (grid, lines) = predict_image_with_lines(&model, &image, 16, 0, 0.5, &device);
+        assert_eq!(lines.expect("a lines layer").classes, 2);
+
+        let raw = model.forward(tile_tensor(&image, 0, 0, 16, &device));
+        let values = raw.into_data().try_into_vec::<f32>().expect("floats");
+        let pixels = 16 * 16;
+        for at in 0..pixels {
+            let (sin, cos) = (values[4 * pixels + at], values[5 * pixels + at]);
+            if sin.hypot(cos) <= ANGLE_LENGTH {
+                assert_eq!(grid.rotation[at], NO_ROTATION, "at pixel {at}");
+            } else {
+                let turn = (sin.atan2(cos) / std::f32::consts::TAU).rem_euclid(1.0);
+                assert!((grid.rotation[at] - turn).abs() < 1e-5, "at pixel {at}");
+            }
+        }
+    }
+
+    /// A line is found where its logit is over the threshold's, in the
+    /// channel after the angle's.
+    #[test]
+    fn a_line_is_found_where_its_probability_is_over_the_threshold() {
+        let device = Device::flex();
+        let model = UNetConfig::new(3)
+            .with_base_channels(2)
+            .with_lines(2)
+            .init(&device);
+        let image = picture(16, 16);
+        let raw = model.forward(tile_tensor(&image, 0, 0, 16, &device));
+        let values = raw.into_data().try_into_vec::<f32>().expect("floats");
+        let pixels = 16 * 16;
+
+        // A network with no lines layer says nothing about lines at all.
+        let (_, none) = predict_image_with_lines(&untrained(3).0, &image, 16, 0, 0.5, &device);
+        assert!(none.is_none());
+
+        let (_, found) = predict_image_with_lines(&model, &image, 16, 0, 0.5, &device);
+        let found = found.expect("a lines layer");
+        for line in 0..2 {
+            for at in 0..pixels {
+                let logit = values[(6 + line) * pixels + at];
+                assert_eq!(found.channel(line)[at], (logit > 0.0) as u8);
+            }
+        }
+        // A threshold of nearly one finds almost nothing, and nearly nought
+        // almost everything.
+        let strict = predict_image_with_lines(&model, &image, 16, 0, 0.999, &device).1;
+        let loose = predict_image_with_lines(&model, &image, 16, 0, 0.001, &device).1;
+        let count = |grid: &LineGrid| grid.mask.iter().filter(|&&on| on == 1).count();
+        assert!(count(&strict.unwrap()) <= count(&found));
+        assert!(count(&loose.unwrap()) >= count(&found));
     }
 
     /// A picture which is one tile across is one tile: the tiling has to

@@ -838,9 +838,22 @@ the layout covers plus the frame, known before anything is generated, rather
 than over whatever each map's objects came to — so a folder of them stacks
 into a batch without being cropped first.
 
-Only `--just-opaque-areas` maps are labelled: a pixel's answer is the one
-piece of ground cover under it, and there is no such answer for a pixel a
-line or a point symbol was drawn over.
+Only `--just-opaque-areas` maps and `--line-labels` maps are labelled: a
+pixel's answer is the one piece of ground cover under it, and there is no such
+answer for a pixel a see-through area or a point symbol was drawn over.
+
+**Lines are a second layer.** `--line-labels` draws the lines along the cell
+sides and labels them apart from the ground, which keeps its own label under
+a line — a fence over a meadow is still a meadow between its dashes. Each line
+symbol has a channel of its own, a yes-or-no per pixel, so two lines which
+cross are both on where they cross; the labels come from the line's geometry
+(a dashed line is one unbroken stroke, at least three pixels wide), and are
+rebuilt from `maps/` where they are wanted rather than kept in `gt/`.
+`classes.json` says how many line symbols there are (`lines`) and which.
+It needs `--transparent-areas 0 --point-symbols 0`, since anything else would
+be drawn and left unlabelled. A network trained on such a dataset answers for
+the lines too, and `mauro net train` reports how much of them it found as the
+*Line IoU*.
 
 **On disk it is not that tensor.** A 1650 × 1650 image of a set with thirty
 opaque areas would be 345 MB of mostly zeros; a `gt/*.bin` holds the same
@@ -1204,6 +1217,16 @@ staircase it comes out as: `--tolerance` is one cell here — one pixel of the
 picture, a third of a meter of ground — where `mauro net grid-to-map` keeps every node.
 On a dataset map that is 5,028 coordinates in place of 32,261, for three
 hundredths of a percent of the drawn pixels, which is half a pixel of edge.
+
+A run whose network has a lines layer gives the lines too. Where the network
+says a line of a symbol runs, the band is thinned to its middle, traced into
+paths and simplified, and each path is written as a line object drawn with
+that symbol. `--line-threshold` is how sure the network has to be of a pixel
+(0.5), `--min-line` how long a path has to be to be kept (6 pixels), and the
+lines are simplified by `--tolerance` like the boundaries of the areas. Where
+two lines of one symbol meet they are two objects sharing an end, as a line
+object cannot branch. The output says how many were found and of how many of
+the set's line symbols.
 
 ### The angle, and why it is folded
 
