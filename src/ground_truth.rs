@@ -514,7 +514,7 @@ impl GroundTruth {
 /// which is then rounded into one — which is what keeps a label's pixel grid
 /// exactly the image's, rather than a pixel off from rounding the same square
 /// twice.
-fn page_transform_for(
+pub(crate) fn page_transform_for(
     scale_denominator: i32,
     resolution: f64,
     width: u32,

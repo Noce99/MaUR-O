@@ -117,6 +117,14 @@ pub struct Args {
     #[arg(short = 'j', long)]
     just_opaque_areas: bool,
 
+    /// Label the lines as a second layer over the ground. The lines along
+    /// the cell sides are drawn and the ground keeps its label under them;
+    /// the lines are labelled yes-or-no per line symbol, rebuilt from maps/
+    /// where wanted. Needs --transparent-areas 0 and --point-symbols 0, since
+    /// anything else drawn over the ground would go unlabelled.
+    #[arg(short = 'L', long)]
+    line_labels: bool,
+
     /// How many pixels of image one meter of ground comes to, which decides
     /// how big the images and their labels are.
     #[arg(short = 'r', long, default_value_t = DEFAULT_RESOLUTION, value_name = "PX_PER_M")]
@@ -202,6 +210,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         transparent_areas: args.transparent_areas,
         point_symbols: args.point_symbols,
         just_opaque_areas: args.just_opaque_areas,
+        line_labels: args.line_labels,
         images: !args.no_images,
         ground_truth: !args.no_gt,
         resolution: args.resolution,
@@ -308,7 +317,8 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
                 "--no-gt was asked for".to_string()
             } else {
                 "a pixel's label is the one piece of ground cover under it, so only the images \
-                 of --just-opaque-areas maps are labelled"
+                 of --just-opaque-areas maps are labelled, and of --line-labels maps, whose \
+                 lines are a layer of their own"
                     .to_string()
             }
         );

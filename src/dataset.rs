@@ -185,6 +185,17 @@ pub struct Settings {
     /// answer is the one piece of ground cover under it, and there is no such
     /// answer for a pixel a line or a point symbol was drawn over.
     pub just_opaque_areas: bool,
+    /// Whether the lines along the cell sides are labelled, as a second
+    /// layer over the ground: see [`crate::line_truth`].
+    ///
+    /// The ground keeps its own label under a line, so a map with lines is
+    /// answerable as long as nothing else is drawn over it: this needs
+    /// [`Settings::transparent_areas`] and [`Settings::point_symbols`] at
+    /// nought, and is refused otherwise, since those would be drawn and not
+    /// labelled. With it on, `classes.json` also names the line symbols, and
+    /// the labels of the lines are rebuilt from `maps/` where they are
+    /// wanted rather than kept in a folder of their own.
+    pub line_labels: bool,
     /// Whether to draw each map to an image, and to label that image.
     ///
     /// Drawing is most of the work of generating a dataset — a default map is
@@ -222,6 +233,7 @@ impl Default for Settings {
             transparent_areas: DEFAULT_TRANSPARENT_AREAS,
             point_symbols: DEFAULT_POINT_SYMBOLS,
             just_opaque_areas: false,
+            line_labels: false,
             images: true,
             ground_truth: true,
             resolution: DEFAULT_RESOLUTION,
@@ -352,6 +364,16 @@ pub fn create_dataset(
         }
     }
 
+    if settings.line_labels
+        && !settings.just_opaque_areas
+        && (settings.transparent_areas > 0.0 || settings.point_symbols > 0.0)
+    {
+        return Err(
+            "line labels need the transparent areas and the point symbols at nought: they \
+             would be drawn over the ground and left unlabelled"
+                .to_string(),
+        );
+    }
     let (mut map, warnings) = xml_reader::read_xml_map(source)?;
     map.resolve_references();
     let fragments = xml_reader::read_fragments(source)?;
@@ -373,7 +395,7 @@ pub fn create_dataset(
     // goes out regardless of ground_truth: it is what lets training compute
     // a map's labels from maps/ itself, the one thing a folder without gt/
     // still needs from the dataset.
-    let answerable = settings.images && settings.just_opaque_areas;
+    let answerable = settings.images && (settings.just_opaque_areas || settings.line_labels);
     let labelled = answerable && settings.ground_truth;
 
     let (maps_folder, images_folder, gt_folder) = (
@@ -716,6 +738,14 @@ fn write_classes(
         "  \"background\": {},\n",
         crate::ground_truth::BACKGROUND
     ));
+    // The lines are a second layer, a yes-or-no per symbol, and only a
+    // dataset generated with their labels has one.
+    let lines = if settings.line_labels {
+        catalogue.lines.len()
+    } else {
+        0
+    };
+    json.push_str(&format!("  \"lines\": {lines},\n"));
     json.push_str(&format!("  \"image_size\": {},\n", settings.image_size()));
     json.push_str(&format!("  \"resolution\": {},\n", settings.resolution));
     json.push_str(&format!("  \"frame\": {},\n", settings.frame));
@@ -734,7 +764,22 @@ fn write_classes(
         ));
         json.push_str(if channel + 1 == classes { "\n" } else { ",\n" });
     }
-    json.push_str("  ]\n}\n");
+    json.push_str("  ]");
+    if lines > 0 {
+        json.push_str(",\n  \"line_symbols\": [\n");
+        for (channel, entry) in catalogue.lines.iter().enumerate() {
+            json.push_str(&format!(
+                "    {{\"channel\": {}, \"id\": {}, \"code\": {}, \"name\": {}}}",
+                channel,
+                entry.id,
+                quoted(&entry.code),
+                quoted(&entry.name),
+            ));
+            json.push_str(if channel + 1 == lines { "\n" } else { ",\n" });
+        }
+        json.push_str("  ]");
+    }
+    json.push_str("\n}\n");
     std::fs::write(path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
@@ -751,6 +796,9 @@ fn write_classes(
 pub struct Classes {
     /// How many one-hot channels a label has: the opaque areas of the set.
     pub classes: usize,
+    /// How many line symbols the lines layer has a channel for, or nought for
+    /// a dataset with no labels for its lines — see [`crate::line_truth`].
+    pub lines: usize,
     /// How many pixels across the images of the dataset were drawn.
     pub image_size: u32,
     /// How many pixels of image one meter of ground came to.
@@ -791,6 +839,8 @@ impl Classes {
         };
         Ok(Classes {
             classes: number("classes")? as usize,
+            // A file written before the lines had labels does not say.
+            lines: number("lines").unwrap_or(0.0) as usize,
             image_size: number("image_size")? as u32,
             resolution: number("resolution")?,
             frame: number("frame")?,
@@ -936,6 +986,53 @@ mod tests {
         assert_eq!(read.cell_size, 60);
         assert_eq!(read.layout_size, 2);
         assert_eq!(read.symbol_set.as_deref(), Some("ISOM_10k.omap"));
+    }
+
+    /// A dataset with line labels names its line symbols, and one without
+    /// them reads back as having none.
+    #[test]
+    fn a_classes_file_counts_the_lines_only_where_they_are_labelled() {
+        use crate::symbol_kinds::Entry;
+
+        let line = |index| Entry {
+            index,
+            id: index as i32,
+            code: "305".to_string(),
+            name: "Stream".to_string(),
+            turns: false,
+            symmetry: 1,
+        };
+        let catalogue = Catalogue {
+            opaque_areas: vec![line(0)],
+            lines: vec![line(1), line(2)],
+            ..Catalogue::default()
+        };
+        let file = tempfile::NamedTempFile::new().expect("a temporary file");
+
+        let labelled = Settings {
+            line_labels: true,
+            ..Settings::default()
+        };
+        write_classes(file.path(), &catalogue, &labelled, "set.omap").expect("cannot write");
+        assert_eq!(Classes::read(file.path()).expect("read").lines, 2);
+
+        write_classes(file.path(), &catalogue, &Settings::default(), "set.omap")
+            .expect("cannot write");
+        assert_eq!(Classes::read(file.path()).expect("read").lines, 0);
+    }
+
+    /// Line labels over a map with point symbols would leave them unlabelled.
+    #[test]
+    fn line_labels_are_refused_beside_overlays_they_cannot_label() {
+        let dir = tempfile::tempdir().expect("a folder");
+        let settings = Settings {
+            line_labels: true,
+            ..Settings::default()
+        };
+        let source = std::path::Path::new("tests/data/shapes.xmap");
+        let result = create_dataset(source, dir.path(), &settings, |_, _| {});
+        let message = result.err().expect("refused");
+        assert!(message.contains("line labels"), "{message}");
     }
 
     /// A dataset generated before the set was copied in says nothing about

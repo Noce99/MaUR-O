@@ -42,6 +42,7 @@ impl NetDataset {
                 Field::text("Transparent").arg("transparent_areas"),
                 Field::text("Point symbols").arg("point_symbols"),
                 Field::toggle("Just opaque areas").arg("just_opaque_areas"),
+                Field::toggle("Line labels").arg("line_labels"),
                 Field::text("Resolution").arg("resolution").unit("px/m"),
                 Field::text("Frame").arg("frame").unit("m"),
                 Field::toggle("No images").arg("no_images"),
