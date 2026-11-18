@@ -530,6 +530,12 @@ pub const REFERENCE_CLASSES: usize = 11;
 /// with line labels, which is what the sample datasets are.
 pub const REFERENCE_LINES: usize = 6;
 
+/// Whether the registered U-Net has a scale head: it does, being the one
+/// `mauro net train` builds on a dataset drawn over a range of densities
+/// (`mauro net dataset --min-resolution/--max-resolution`), which is what
+/// it takes for the network to say how dense a picture is.
+pub const REFERENCE_SCALE_HEAD: bool = true;
+
 /// The networks the registry follows, in the order a listing shows them.
 pub const BLESSED: [&str; 2] = ["unet", "tree"];
 
@@ -543,6 +549,7 @@ pub fn blessed(name: &str) -> Option<NetDescriptor> {
         "unet" => Some(
             UNetConfig::new(REFERENCE_CLASSES)
                 .with_lines(REFERENCE_LINES)
+                .with_scale_head(REFERENCE_SCALE_HEAD)
                 .describe(),
         ),
         // `TreeNetConfig`'s own default is six control points; training

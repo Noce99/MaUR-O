@@ -17,7 +17,7 @@
     {
       "scope": "image_to_omap",
       "name": "unet",
-      "latest": "0.3",
+      "latest": "0.4",
       "versions": [
         {
           "version": "0.1",
@@ -36,6 +36,12 @@
           "hash": "10c9f061803454e4",
           "generated_at": "2026-11-18T15:52:06Z",
           "git_commit": "36da04d-dirty"
+        },
+        {
+          "version": "0.4",
+          "hash": "639bcd0f958a01d9",
+          "generated_at": "2026-11-18T22:21:03Z",
+          "git_commit": "1839c4f-dirty"
         }
       ]
     }
