@@ -524,6 +524,12 @@ pub mod layer {
 /// makes a new version of each.
 pub const REFERENCE_CLASSES: usize = 11;
 
+/// How many line symbols the registered U-Net's lines layer has a channel
+/// for: the lines of the same set, `simple_line_and_colors.omap`. The
+/// registered network is the one `mauro net train` builds on a dataset made
+/// with line labels, which is what the sample datasets are.
+pub const REFERENCE_LINES: usize = 6;
+
 /// The networks the registry follows, in the order a listing shows them.
 pub const BLESSED: [&str; 2] = ["unet", "tree"];
 
@@ -534,7 +540,11 @@ pub fn blessed(name: &str) -> Option<NetDescriptor> {
     use crate::net::tree::TreeNetConfig;
     use crate::net::unet::UNetConfig;
     match name {
-        "unet" => Some(UNetConfig::new(REFERENCE_CLASSES).describe()),
+        "unet" => Some(
+            UNetConfig::new(REFERENCE_CLASSES)
+                .with_lines(REFERENCE_LINES)
+                .describe(),
+        ),
         // `TreeNetConfig`'s own default is six control points; training
         // builds it with eight, which is what a run is.
         "tree" => Some(
