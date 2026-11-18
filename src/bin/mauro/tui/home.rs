@@ -16,8 +16,9 @@ use super::form::Tool;
 use super::jobs::{self, Health, Job, KINDS};
 use super::screens::{
     benchmark_create::BenchmarkCreate, benchmark_run::BenchmarkRun, dem::Dem, dem_eval::DemEval,
-    net_dataset::NetDataset, net_grid_to_map::NetGridToMap, net_image_to_map::NetImageToMap,
-    net_show_batches::NetShowBatches, net_train::NetTrain, ortho::Ortho, osm::Osm, render::Render,
+    net_dataset::NetDataset, net_describe::NetDescribe, net_grid_to_map::NetGridToMap,
+    net_image_to_map::NetImageToMap, net_show_batches::NetShowBatches, net_train::NetTrain,
+    ortho::Ortho, osm::Osm, render::Render,
 };
 use super::Action;
 use maur_o::net::monitor::State;
@@ -33,7 +34,7 @@ struct Entry {
 }
 
 /// The tools in the order the list shows them.
-const TOOLS: [Entry; 12] = [
+const TOOLS: [Entry; 13] = [
     Entry {
         command: "render",
         about: "Render a map to an image (PNG, JPEG, TIFF, BMP) or to SVG",
@@ -93,6 +94,11 @@ const TOOLS: [Entry; 12] = [
         command: "net show-batches",
         about: "Draw the batches a run is trained on",
         open: || Box::new(NetShowBatches::new()),
+    },
+    Entry {
+        command: "net describe",
+        about: "Write the networks' architectures into the versioned folder",
+        open: || Box::new(NetDescribe::new()),
     },
 ];
 

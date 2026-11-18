@@ -1,0 +1,23 @@
+#!/bin/sh
+# Refuses a commit which changes the networks without writing the new version
+# of their descriptors (see `mauro net describe`). Turn it on once per clone:
+#
+#     git config core.hooksPath .githooks
+#
+# It only checks; it never writes. CI runs the same check, so a clone without
+# the hook still cannot merge a stale one.
+
+# Nothing to check unless the staged changes touch a network or its folder.
+if ! git diff --cached --name-only | grep -qE '^(src/net/|networks/)'; then
+    exit 0
+fi
+
+# `cargo run` rather than a binary left in target/: that one may predate the
+# change, and the check is only worth anything against the code being committed.
+if ! cargo run --quiet --locked -- net describe --check; then
+    echo >&2
+    echo >&2 "The network descriptors are out of date. Run:"
+    echo >&2 "    cargo run -- net describe"
+    echo >&2 "and add networks/ to the commit."
+    exit 1
+fi

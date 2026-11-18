@@ -61,6 +61,7 @@ together.
   - [The angle, and why it is folded](#the-angle-and-why-it-is-folded)
   - [Weight decay](#weight-decay)
   - [`mauro net show-batches`](#mauro-net-show-batches)
+  - [`mauro net describe`](#mauro-net-describe)
 - [Using it as a library](#using-it-as-a-library)
 - [Development](#development)
 - [Implementation Details](#implementation-details)
@@ -106,6 +107,7 @@ tool:
 | [`mauro net image-to-map`](#mauro-net-image-to-map) | Reads a map back from its image with the trained net. |
 | `mauro net train` | Trains the net: see [Reading a map back](#reading-a-map-back-the-net-module). |
 | [`mauro net show-batches`](#mauro-net-show-batches) | Shows the batches the net is trained on. |
+| [`mauro net describe`](#mauro-net-describe) | Writes the networks' architectures into a folder of versioned descriptors. |
 
 `mauro --help` lists them, and every one of them takes `--help` and
 `--version` (`mauro render --help`). `mauro` on its own, in a terminal,
@@ -1329,6 +1331,54 @@ eighteen times over, so a band around every crop is answered for partly out of
 padding rather than out of picture; leaving it out is what separates that from
 a class the network cannot tell apart anywhere.
 
+### `mauro net describe`
+
+What the networks *are*, written down for something other than burn to read.
+A run folder's `architecture.txt` is burn's own printout of a module: its
+layers, and nothing of how they are joined — the skip connections, the
+concatenations and every tensor's shape live in a hand-written `forward`.
+Each network therefore also *declares* its architecture next to its `forward`
+(`UNetConfig::describe`, `TreeNetConfig::describe`, in
+[`net::describe`](src/net/describe.rs)): a tree of blocks (the whole network,
+its encoder and heads, the double convolutions they are built of, and
+finally the single layers), the edges between them with the shape of what
+flows along each, and the weights each holds. A test runs a real forward pass
+and holds every one of those shapes, and the weight count, to what the code
+does, so a declaration cannot drift from the network it describes.
+
+```bash
+cargo run --release -- net describe            # every network
+cargo run --release -- net describe tree       # one
+cargo run --release -- net describe --check    # write nothing: is the folder up to date?
+cargo run --release -- net describe tree --stdout
+```
+
+The descriptors are kept in `networks/`, tracked in git:
+
+```text
+networks/
+  index.json                     every network and its versions
+  image_to_omap/tree/0.1.json    one file per version
+  image_to_omap/unet/0.1.json
+```
+
+A network is described as `mauro net train` builds it by default, for the
+eleven classes of the sample symbol set. **If the architecture is the same as
+the latest version's, nothing is written; if it differs, the next version is**
+(`0.1`, `0.2`, …, or `1.0` with `--bump-major`) and the older ones stay as
+they were. Sameness is a hash of the architecture alone, so a version is not
+made by a new date or commit. `--check` exits with 3 if a network no longer
+matches its latest version or a version already written was edited, which is
+what CI runs; `git config core.hooksPath .githooks` makes the same check run
+before a commit that touches `src/net/` or `networks/`.
+
+After changing a network, run `mauro net describe` and commit `networks/`
+with the change. The folder is what a viewer reads: it has no other copy.
+
+Exit codes: 0 success (with `--check`, everything is up to date), 1 usage
+error, 2 the folder could not be read or written, 3 `--check` found it out of
+date or altered.
+
 ## Using it as a library
 
 The crate is `maur_o`. Rendering a map takes one call:
@@ -1354,6 +1404,9 @@ cargo fmt --all --check                              # formatting
 cargo clippy --all-targets --locked -- -D warnings   # lints, warnings are errors
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 ```
+
+`git config core.hooksPath .githooks` turns on a pre-commit hook which runs
+`mauro net describe --check` when a commit touches `src/net/` or `networks/`.
 
 These are exactly what CI runs (on Linux, macOS and Windows, plus a check on
 the minimum supported Rust version, 1.88). See

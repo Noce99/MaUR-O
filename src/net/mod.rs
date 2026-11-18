@@ -31,6 +31,10 @@
 //! * [`tree`] is the other network, which answers with the curves which cut a
 //!   picture into areas instead of a class for every pixel, and
 //!   [`tree_training`] is the loop it is trained with;
+//! * [`describe`] and [`registry`] write each network's architecture down as
+//!   a versioned JSON — blocks, the shape of every tensor between them, the
+//!   weights each holds — for a viewer to read, and `mauro net describe` keeps
+//!   the history (`networks/`) up to date;
 //! * [`image_valid`] is that put to work while a run is still going: every
 //!   epoch reads a few of the dataset's pictures back into maps and draws
 //!   them beside the originals, so that a run shows its work rather than only
@@ -45,9 +49,11 @@
 //! NVIDIA one. The `train` binary is built against whichever is on.
 
 pub mod data;
+pub mod describe;
 pub mod image_valid;
 pub mod monitor;
 pub mod predict;
+pub mod registry;
 pub mod training;
 pub mod tree;
 pub mod tree_training;

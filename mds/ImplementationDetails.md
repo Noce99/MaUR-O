@@ -153,6 +153,7 @@ comment:
 | `bin/mauro/net_train.rs` | `mauro net train`: trains the U-Net, or with `--model tree` the tree network (`net/tree.rs`, `net/tree_training.rs`). |
 | `bin/mauro/net_image_to_map.rs` | `mauro net image-to-map`: reads a picture back into a map. |
 | `bin/mauro/net_show_batches.rs` | `mauro net show-batches`: draws the batches a run is trained on. |
+| `bin/mauro/net_describe.rs` | `mauro net describe`: writes the networks' architectures (`net/describe.rs`) into the versioned `networks/` folder (`net/registry.rs`), or with `--check` says whether it is up to date. |
 
 ## One map per symbol
 

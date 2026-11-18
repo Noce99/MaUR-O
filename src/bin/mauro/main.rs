@@ -30,6 +30,7 @@ mod benchmark_run;
 mod dem;
 mod dem_eval;
 mod net_dataset;
+mod net_describe;
 mod net_grid_to_map;
 mod net_image_to_map;
 mod net_show_batches;
@@ -78,6 +79,7 @@ enum Cmd {
 #[derive(Subcommand)]
 enum NetCmd {
     Dataset(net_dataset::Args),
+    Describe(net_describe::Args),
     GridToMap(net_grid_to_map::Args),
     Train(net_train::Args),
     ImageToMap(net_image_to_map::Args),
@@ -125,6 +127,7 @@ fn main() -> ExitCode {
         }
         Cmd::Ortho(args) => ortho::main(args),
         Cmd::Net(NetCmd::Dataset(args)) => net_dataset::main(args),
+        Cmd::Net(NetCmd::Describe(args)) => net_describe::main(args),
         Cmd::Net(NetCmd::GridToMap(args)) => net_grid_to_map::main(args),
         Cmd::Net(NetCmd::Train(args)) => net_train::main(args),
         Cmd::Net(NetCmd::ImageToMap(args)) => net_image_to_map::main(args),

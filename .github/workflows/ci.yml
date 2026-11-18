@@ -59,6 +59,11 @@ jobs:
         run: cargo doc --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
+      # The history of the networks (networks/) is kept by hand with
+      # `mauro net describe`; this is what fails when an architecture was
+      # changed and the new version was not written, or an old one was edited.
+      - name: Network descriptors are up to date
+        run: cargo run --locked -- net describe --check
 
   msrv:
     # Makes the rust-version in Cargo.toml a promise rather than a guess.

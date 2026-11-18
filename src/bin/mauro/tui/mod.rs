@@ -234,6 +234,7 @@ mod tests {
             "mauro net train",
             "mauro net image-to-map",
             "mauro net show-batches",
+            "mauro net describe",
         ];
         for (at, title) in titles.iter().enumerate() {
             let mut app = App::new();

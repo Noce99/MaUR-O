@@ -52,6 +52,8 @@
 //! straight line, which is what lets a cut reach the border of whatever it
 //! cuts however short it is drawn.
 
+use std::collections::BTreeMap;
+
 use burn::config::Config;
 use burn::module::{Module, Param};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
@@ -59,7 +61,10 @@ use burn::nn::{Linear, LinearConfig, Relu};
 use burn::tensor::activation::{sigmoid, softmax};
 use burn::tensor::{Device, Int, Tensor, TensorData};
 
-use crate::net::unet::{DoubleConv, DoubleConvConfig};
+use serde_json::Value;
+
+use crate::net::describe::{layer, NetDescriptor, Node};
+use crate::net::unet::{describe_double_conv, DoubleConv, DoubleConvConfig};
 
 /// Halvings of the encoder, as in the U-Net: the picture's side must divide
 /// by `2^LEVELS`.
@@ -171,6 +176,174 @@ impl TreeNetConfig {
     }
 }
 
+impl TreeNetConfig {
+    /// What this network is, as [`crate::net::describe`] writes it down. Keep
+    /// it beside `TreeNet::forward_tapped`: a test runs one against the
+    /// other.
+    ///
+    /// Only what has weights, or shapes what comes out of it, is here: the
+    /// soft partition and the loss that [`TreeNet::partition`] and
+    /// [`TreeNet::loss`] make of the answer are computed, not learned, and
+    /// belong to the training rather than to the network.
+    pub fn describe(&self) -> NetDescriptor {
+        let side = self.size;
+        let s = side.to_string();
+        let width = |level: usize| self.base_channels << level;
+        let nodes = (1usize << self.depth) - 1;
+        let leaves = 1usize << self.depth;
+        let top = width(LEVELS - 1);
+        let flat = top * (side >> LEVELS) * (side >> LEVELS);
+        let spatial = |level: usize| (side >> level).to_string();
+        let n = |v: usize| v.to_string();
+
+        let mut encoder = Node::new("encoder", "group", "Encoder")
+            .summary(&format!(
+                "{LEVELS} × (double conv, max pool): {}×{} to {}×{}",
+                side,
+                side,
+                side >> LEVELS,
+                side >> LEVELS
+            ))
+            .param("levels", LEVELS);
+        let mut from = 3;
+        for level in 0..LEVELS {
+            let to = width(level);
+            encoder = encoder
+                .child(describe_double_conv(
+                    &format!("down{level}"),
+                    from,
+                    to,
+                    &spatial(level),
+                    &spatial(level),
+                ))
+                .child(layer::max_pool(&format!("pool{level}")));
+            let before = if level == 0 {
+                "@in".to_string()
+            } else {
+                format!("pool{}", level - 1)
+            };
+            encoder = encoder
+                .edge(
+                    &before,
+                    &format!("down{level}"),
+                    &["B", &n(from), &spatial(level), &spatial(level)],
+                )
+                .edge(
+                    &format!("down{level}"),
+                    &format!("pool{level}"),
+                    &["B", &n(to), &spatial(level), &spatial(level)],
+                );
+            from = to;
+        }
+        encoder = encoder.edge(
+            &format!("pool{}", LEVELS - 1),
+            "@out",
+            &["B", &n(top), &spatial(LEVELS), &spatial(LEVELS)],
+        );
+
+        let bottleneck = Node::new("bottleneck", "group", "Bottleneck")
+            .summary(&format!(
+                "flatten to {flat}, dense layer of {}",
+                self.hidden
+            ))
+            .child(
+                Node::new("flatten", "flatten", "Flatten")
+                    .summary("channels and picture into one vector"),
+            )
+            .child(layer::linear("hidden", flat, self.hidden))
+            .child(layer::relu("relu"))
+            .edge(
+                "@in",
+                "flatten",
+                &["B", &n(top), &spatial(LEVELS), &spatial(LEVELS)],
+            )
+            .edge("flatten", "hidden", &["B", &n(flat)])
+            .edge("hidden", "relu", &["B", &n(self.hidden)])
+            .edge("relu", "@out", &["B", &n(self.hidden)]);
+
+        let curve_values = nodes * self.control_points * 2;
+        let curves_head = Node::new("curves_head", "group", "Curves head")
+            .summary(&format!(
+                "{nodes} cuts of {} Bézier control points, in picture coordinates",
+                self.control_points
+            ))
+            .param("cuts", nodes)
+            .param("control_points", self.control_points)
+            .child(layer::linear("linear", self.hidden, curve_values))
+            .child(Node::new("tanh", "tanh", "Tanh"))
+            .child(
+                Node::new("affine", "affine", "× 0.75 + 0.5")
+                    .summary("puts a control point in [-0.25, 1.25]")
+                    .param("scale", 0.75)
+                    .param("shift", 0.5),
+            )
+            .child(
+                Node::new("reshape", "reshape", "Reshape")
+                    .summary("one row of points per cut, root first"),
+            )
+            .edge("@in", "linear", &["B", &n(self.hidden)])
+            .edge("linear", "tanh", &["B", &n(curve_values)])
+            .edge("tanh", "affine", &["B", &n(curve_values)])
+            .edge("affine", "reshape", &["B", &n(curve_values)])
+            .edge(
+                "reshape",
+                "@out",
+                &["B", &n(nodes), &n(self.control_points), "2"],
+            );
+
+        let leaf_values = leaves * (self.classes + 1);
+        let leaves_head = Node::new("leaves_head", "group", "Leaves head")
+            .summary(&format!(
+                "a symbol (or the frame) for each of {leaves} leaves"
+            ))
+            .param("leaves", leaves)
+            .child(layer::linear("linear", self.hidden, leaf_values))
+            .child(Node::new("reshape", "reshape", "Reshape").summary("one row of logits per leaf"))
+            .edge("@in", "linear", &["B", &n(self.hidden)])
+            .edge("linear", "reshape", &["B", &n(leaf_values)])
+            .edge("reshape", "@out", &["B", &n(leaves), &n(self.classes + 1)]);
+
+        let root = Node::new("tree_net", "model", "Tree net")
+            .summary("reads a picture as a tree of cuts and a symbol for each leaf")
+            .param("depth", self.depth)
+            .child(encoder)
+            .child(bottleneck)
+            .child(curves_head)
+            .child(leaves_head)
+            .edge("@in", "encoder", &["B", "3", &s, &s])
+            .edge(
+                "encoder",
+                "bottleneck",
+                &["B", &n(top), &spatial(LEVELS), &spatial(LEVELS)],
+            )
+            .edge("bottleneck", "curves_head", &["B", &n(self.hidden)])
+            .edge("bottleneck", "leaves_head", &["B", &n(self.hidden)])
+            .edge(
+                "curves_head",
+                "@out:curves",
+                &["B", &n(nodes), &n(self.control_points), "2"],
+            )
+            .edge(
+                "leaves_head",
+                "@out:leaves",
+                &["B", &n(leaves), &n(self.classes + 1)],
+            );
+
+        let mut config = BTreeMap::new();
+        config.insert("classes".to_string(), Value::from(self.classes));
+        config.insert("size".to_string(), Value::from(self.size));
+        config.insert("depth".to_string(), Value::from(self.depth));
+        config.insert(
+            "control_points".to_string(),
+            Value::from(self.control_points),
+        );
+        config.insert("samples".to_string(), Value::from(self.samples));
+        config.insert("base_channels".to_string(), Value::from(self.base_channels));
+        config.insert("hidden".to_string(), Value::from(self.hidden));
+        NetDescriptor::new("image_to_omap", "tree", config, root)
+    }
+}
+
 /// The raw values of `nodes` straight cuts of `points` control points, as the
 /// head's bias.
 fn straight_cuts(nodes: usize, points: usize) -> Vec<f32> {
@@ -201,25 +374,55 @@ pub struct TreeAnswer {
 impl TreeNet {
     /// Reads a picture, `[batch, 3, size, size]`.
     pub fn forward(&self, image: Tensor<4>) -> TreeAnswer {
+        self.forward_tapped(image, &mut |_, _| {})
+    }
+
+    /// [`TreeNet::forward`], reporting the shape of every tensor it makes to
+    /// `tap` under the name [`TreeNetConfig::describe`] gives it: what holds
+    /// the descriptor to the code.
+    pub(crate) fn forward_tapped(
+        &self,
+        image: Tensor<4>,
+        tap: &mut dyn FnMut(&str, &[usize]),
+    ) -> TreeAnswer {
         let [batch, ..] = image.dims();
+        tap("tree_net@in", &image.dims());
+        tap("tree_net/encoder@in", &image.dims());
         let mut x = image;
-        for block in &self.down {
-            x = self.pool.forward(block.forward(x));
+        for (level, block) in self.down.iter().enumerate() {
+            x = block.forward_tapped(x, &format!("tree_net/encoder/down{level}"), tap);
+            x = self.pool.forward(x);
+            tap(&format!("tree_net/encoder/pool{level}"), &x.dims());
         }
-        let x: Tensor<2> = self.relu.forward(self.hidden.forward(x.flatten::<2>(1, 3)));
+        tap("tree_net/encoder", &x.dims());
+
+        tap("tree_net/bottleneck@in", &x.dims());
+        let x = x.flatten::<2>(1, 3);
+        tap("tree_net/bottleneck/flatten", &x.dims());
+        let x = self.hidden.forward(x);
+        tap("tree_net/bottleneck/hidden", &x.dims());
+        let x: Tensor<2> = self.relu.forward(x);
+        tap("tree_net/bottleneck/relu", &x.dims());
+        tap("tree_net/bottleneck", &x.dims());
 
         let nodes = (1 << self.depth) - 1;
+        tap("tree_net/curves_head@in", &x.dims());
         let raw = self.curves.forward(x.clone());
-        let curves = raw.tanh().mul_scalar(0.75).add_scalar(0.5).reshape([
-            batch,
-            nodes,
-            self.control_points,
-            2,
-        ]);
-        let leaves = self
-            .leaves
-            .forward(x)
-            .reshape([batch, 1 << self.depth, self.classes + 1]);
+        tap("tree_net/curves_head/linear", &raw.dims());
+        let bounded = raw.tanh();
+        tap("tree_net/curves_head/tanh", &bounded.dims());
+        let placed = bounded.mul_scalar(0.75).add_scalar(0.5);
+        tap("tree_net/curves_head/affine", &placed.dims());
+        let curves = placed.reshape([batch, nodes, self.control_points, 2]);
+        tap("tree_net/curves_head/reshape", &curves.dims());
+        tap("tree_net/curves_head", &curves.dims());
+
+        tap("tree_net/leaves_head@in", &x.dims());
+        let logits = self.leaves.forward(x);
+        tap("tree_net/leaves_head/linear", &logits.dims());
+        let leaves = logits.reshape([batch, 1 << self.depth, self.classes + 1]);
+        tap("tree_net/leaves_head/reshape", &leaves.dims());
+        tap("tree_net/leaves_head", &leaves.dims());
         TreeAnswer { curves, leaves }
     }
 
@@ -830,5 +1033,30 @@ mod tests {
         eprintln!("pixel accuracy {right:.3}");
         assert!(last < first * 0.5, "{first} -> {last}");
         assert!(right > 0.8, "accuracy {right}");
+    }
+
+    /// The descriptor says what the forward pass does: every edge's shape is
+    /// the shape of the tensor the pass made there, and the weights counted
+    /// add up to the module's own.
+    #[test]
+    fn the_descriptor_matches_the_forward_pass() {
+        let device = Device::flex();
+        let config = TreeNetConfig::new(5)
+            .with_size(32)
+            .with_depth(3)
+            .with_control_points(7)
+            .with_base_channels(4)
+            .with_hidden(32);
+        let net = config.init(&device);
+        let descriptor = config.describe();
+
+        let mut reported = Vec::new();
+        let image = Tensor::<4>::zeros([2, 3, 32, 32], &device);
+        net.forward_tapped(image, &mut |key, dims| {
+            reported.push((key.to_string(), dims.to_vec()));
+        });
+        crate::net::describe::assert_matches_forward(&descriptor, &reported, &[("B", 2)]);
+        assert_eq!(descriptor.total_params(), net.num_params() as u64);
+        assert_eq!(descriptor.problems(), Vec::<String>::new());
     }
 }

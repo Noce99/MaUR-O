@@ -42,6 +42,8 @@
 //! the order changes — once, while a batch is built, rather than on every
 //! tensor that passes through here.
 
+use std::collections::BTreeMap;
+
 use burn::config::Config;
 use burn::module::Module;
 use burn::nn::conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig};
@@ -51,6 +53,9 @@ use burn::nn::{BatchNorm, BatchNormConfig, PaddingConfig2d, Relu};
 use burn::tensor::activation::softmax;
 use burn::tensor::{Device, Tensor};
 
+use serde_json::Value;
+
+use crate::net::describe::{halved, layer, NetDescriptor, Node};
 use crate::net::training::DEFAULT_ANGLE_WEIGHT;
 
 /// How many times the picture is halved on the way down and doubled on the
@@ -180,24 +185,39 @@ impl UNet {
     /// the decoder puts them back, and a size which does not divide comes
     /// back a pixel short of what the skip connection expects.
     pub fn forward(&self, image: Tensor<4>) -> Tensor<4> {
+        self.forward_tapped(image, &mut |_, _| {})
+    }
+
+    /// [`UNet::forward`], reporting the shape of every tensor it makes to
+    /// `tap` under the name [`UNetConfig::describe`] gives it: what holds the
+    /// descriptor to the code.
+    pub(crate) fn forward_tapped(
+        &self,
+        image: Tensor<4>,
+        tap: &mut dyn FnMut(&str, &[usize]),
+    ) -> Tensor<4> {
+        tap("unet@in", &image.dims());
         // Down, keeping what each level saw before it was halved: that is
         // what the matching step up is missing.
         let mut skips = Vec::with_capacity(DEPTH);
         let mut x = image;
-        for block in &self.down {
-            x = block.forward(x);
+        for (level, block) in self.down.iter().enumerate() {
+            x = block.forward_tapped(x, &format!("unet/down{level}"), tap);
             skips.push(x.clone());
             x = self.pool.forward(x);
+            tap(&format!("unet/pool{level}"), &x.dims());
         }
 
-        x = self.bottom.forward(x);
+        x = self.bottom.forward_tapped(x, "unet/bottom", tap);
 
         // And up, deepest first, each step handed back the level it lost.
-        for (block, skip) in self.up.iter().zip(skips.into_iter().rev()) {
-            x = block.forward(x, skip);
+        for (step, (block, skip)) in self.up.iter().zip(skips.into_iter().rev()).enumerate() {
+            x = block.forward_tapped(x, skip, &format!("unet/up{step}"), tap);
         }
 
-        self.head.forward(x)
+        let x = self.head.forward(x);
+        tap("unet/head", &x.dims());
+        x
     }
 
     /// The answer in the shape the dataset's labels are in:
@@ -343,11 +363,32 @@ impl DoubleConv {
 
     /// `[batch, in, h, w]` to `[batch, out, h, w]`.
     pub fn forward(&self, x: Tensor<4>) -> Tensor<4> {
-        let x = self
-            .relu
-            .forward(self.first_norm.forward(self.first.forward(x)));
-        self.relu
-            .forward(self.second_norm.forward(self.second.forward(x)))
+        self.forward_tapped(x, "", &mut |_, _| {})
+    }
+
+    /// [`DoubleConv::forward`], reporting each tensor to `tap` as
+    /// `{path}/conv1`, `{path}/norm1`, … — see [`describe_double_conv`].
+    pub(crate) fn forward_tapped(
+        &self,
+        x: Tensor<4>,
+        path: &str,
+        tap: &mut dyn FnMut(&str, &[usize]),
+    ) -> Tensor<4> {
+        tap(&format!("{path}@in"), &x.dims());
+        let x = self.first.forward(x);
+        tap(&format!("{path}/conv1"), &x.dims());
+        let x = self.first_norm.forward(x);
+        tap(&format!("{path}/norm1"), &x.dims());
+        let x = self.relu.forward(x);
+        tap(&format!("{path}/relu1"), &x.dims());
+        let x = self.second.forward(x);
+        tap(&format!("{path}/conv2"), &x.dims());
+        let x = self.second_norm.forward(x);
+        tap(&format!("{path}/norm2"), &x.dims());
+        let x = self.relu.forward(x);
+        tap(&format!("{path}/relu2"), &x.dims());
+        tap(path, &x.dims());
+        x
     }
 }
 
@@ -392,8 +433,188 @@ impl UpBlockConfig {
 impl UpBlock {
     /// Doubles `x`, concatenates `skip` onto it and convolves the two.
     pub fn forward(&self, x: Tensor<4>, skip: Tensor<4>) -> Tensor<4> {
+        self.forward_tapped(x, skip, "", &mut |_, _| {})
+    }
+
+    /// [`UpBlock::forward`], reporting each tensor to `tap` under `path`.
+    pub(crate) fn forward_tapped(
+        &self,
+        x: Tensor<4>,
+        skip: Tensor<4>,
+        path: &str,
+        tap: &mut dyn FnMut(&str, &[usize]),
+    ) -> Tensor<4> {
+        tap(&format!("{path}@in:x"), &x.dims());
+        tap(&format!("{path}@in:skip"), &skip.dims());
         let x = self.upsample.forward(x);
-        self.conv.forward(Tensor::cat(vec![x, skip], 1))
+        tap(&format!("{path}/upsample"), &x.dims());
+        let x = Tensor::cat(vec![x, skip], 1);
+        tap(&format!("{path}/concat"), &x.dims());
+        let x = self.conv.forward_tapped(x, &format!("{path}/conv"), tap);
+        tap(path, &x.dims());
+        x
+    }
+}
+
+/// The descriptor of a [`DoubleConv`] from `from` to `to` channels, on a
+/// picture of `h` by `w` (symbolic or not): what [`DoubleConv::forward_tapped`]
+/// reports, node for node.
+pub(crate) fn describe_double_conv(id: &str, from: usize, to: usize, h: &str, w: &str) -> Node {
+    let shape = |channels: usize| -> [String; 4] {
+        [
+            "B".to_string(),
+            channels.to_string(),
+            h.to_string(),
+            w.to_string(),
+        ]
+    };
+    let [b, c_in, hh, ww] = shape(from);
+    let [_, c_out, _, _] = shape(to);
+    let edge = |node: Node, a: &str, z: &str, dims: &[&str; 4]| node.edge(a, z, dims);
+    let node = Node::new(id, "double_conv", "Double conv")
+        .summary(&format!("2 × (conv 3×3, batch norm, ReLU), {from}→{to}"))
+        .param("in_channels", from)
+        .param("out_channels", to)
+        .child(layer::conv2d("conv1", from, to, 3, false))
+        .child(layer::batch_norm("norm1", to))
+        .child(layer::relu("relu1"))
+        .child(layer::conv2d("conv2", to, to, 3, false))
+        .child(layer::batch_norm("norm2", to))
+        .child(layer::relu("relu2"));
+    let i = [b.as_str(), c_in.as_str(), hh.as_str(), ww.as_str()];
+    let o = [b.as_str(), c_out.as_str(), hh.as_str(), ww.as_str()];
+    let node = edge(node, "@in", "conv1", &i);
+    let node = edge(node, "conv1", "norm1", &o);
+    let node = edge(node, "norm1", "relu1", &o);
+    let node = edge(node, "relu1", "conv2", &o);
+    let node = edge(node, "conv2", "norm2", &o);
+    let node = edge(node, "norm2", "relu2", &o);
+    edge(node, "relu2", "@out", &o)
+}
+
+/// The descriptor of an [`UpBlock`] taking `from` channels at half the
+/// picture of `h` by `w` and the skip connection's `to`, to `to` at full size.
+fn describe_up_block(id: &str, from: usize, to: usize, level: usize) -> Node {
+    let (h, w) = (halved("H", level), halved("W", level));
+    let (h_below, w_below) = (halved("H", level + 1), halved("W", level + 1));
+    let (from_s, to_s, cat_s) = (from.to_string(), to.to_string(), (2 * to).to_string());
+    Node::new(id, "up_block", "Up block")
+        .summary("double the picture, join the skip connection, convolve")
+        .param("in_channels", from)
+        .param("out_channels", to)
+        .child(layer::upsample("upsample", from, to))
+        .child(
+            Node::new("concat", "concat", "Concat")
+                .summary("skip connection beside the doubled picture")
+                .param("axis", 1),
+        )
+        .child(describe_double_conv("conv", 2 * to, to, &h, &w))
+        .edge("@in:x", "upsample", &["B", &from_s, &h_below, &w_below])
+        .edge("upsample", "concat:x", &["B", &to_s, &h, &w])
+        .edge("@in:skip", "concat:skip", &["B", &to_s, &h, &w])
+        .edge("concat", "conv", &["B", &cat_s, &h, &w])
+        .edge("conv", "@out", &["B", &to_s, &h, &w])
+}
+
+impl UNetConfig {
+    /// What this network is, as [`crate::net::describe`] writes it down. Keep
+    /// it beside `UNet::forward_tapped`: a test runs one against the other.
+    pub fn describe(&self) -> NetDescriptor {
+        let width = |level: usize| self.base_channels << level;
+        let shape = |channels: usize, level: usize| -> [String; 4] {
+            [
+                "B".to_string(),
+                channels.to_string(),
+                halved("H", level),
+                halved("W", level),
+            ]
+        };
+
+        let mut root = Node::new("unet", "model", "U-Net")
+            .summary("reads a rendered map, pixel by pixel, into symbols and angles")
+            .param("depth", DEPTH);
+        let mut edges: Vec<(String, String, [String; 4])> = Vec::new();
+
+        let mut from = self.in_channels;
+        edges.push(("@in".into(), "down0".into(), shape(from, 0)));
+        for level in 0..DEPTH {
+            let to = width(level);
+            let (h, w) = (halved("H", level), halved("W", level));
+            root = root.child(describe_double_conv(
+                &format!("down{level}"),
+                from,
+                to,
+                &h,
+                &w,
+            ));
+            root = root.child(layer::max_pool(&format!("pool{level}")));
+            // Out of the block: along to the pool, and across to the matching
+            // step up, which is what the skip connection is.
+            edges.push((
+                format!("down{level}"),
+                format!("pool{level}"),
+                shape(to, level),
+            ));
+            edges.push((
+                format!("down{level}"),
+                format!("up{}:skip", DEPTH - 1 - level),
+                shape(to, level),
+            ));
+            let next = if level + 1 < DEPTH {
+                format!("down{}", level + 1)
+            } else {
+                "bottom".to_string()
+            };
+            edges.push((format!("pool{level}"), next, shape(to, level + 1)));
+            from = to;
+        }
+        root = root.child(describe_double_conv(
+            "bottom",
+            from,
+            width(DEPTH),
+            &halved("H", DEPTH),
+            &halved("W", DEPTH),
+        ));
+        edges.push(("bottom".into(), "up0:x".into(), shape(width(DEPTH), DEPTH)));
+        for step in 0..DEPTH {
+            let level = DEPTH - 1 - step;
+            root = root.child(describe_up_block(
+                &format!("up{step}"),
+                width(level + 1),
+                width(level),
+                level,
+            ));
+            let next = if step + 1 < DEPTH {
+                format!("up{}:x", step + 1)
+            } else {
+                "head".to_string()
+            };
+            edges.push((format!("up{step}"), next, shape(width(level), level)));
+        }
+        root = root.child(
+            layer::conv2d("head", self.base_channels, self.classes + 3, 1, true).summary(&format!(
+                "{} class logits (the frame included), sine and cosine of the angle",
+                self.classes + 1
+            )),
+        );
+        edges.push(("head".into(), "@out".into(), shape(self.classes + 3, 0)));
+
+        // Edges are listed in the order a reader meets them, not the order
+        // the loops produced them: by the block they leave.
+        let order: Vec<String> = std::iter::once("@in".to_string())
+            .chain(root.children.iter().map(|c| c.id.clone()))
+            .collect();
+        edges.sort_by_key(|(from, ..)| order.iter().position(|id| id == from));
+        for (from, to, dims) in edges {
+            let dims: Vec<&str> = dims.iter().map(String::as_str).collect();
+            root = root.edge(&from, &to, &dims);
+        }
+
+        let mut config = BTreeMap::new();
+        config.insert("classes".to_string(), Value::from(self.classes));
+        config.insert("in_channels".to_string(), Value::from(self.in_channels));
+        config.insert("base_channels".to_string(), Value::from(self.base_channels));
+        NetDescriptor::new("image_to_omap", "unet", config, root)
     }
 }
 
@@ -441,5 +662,29 @@ mod tests {
             total < pixels && total > 0.0,
             "{total} over {pixels} pixels"
         );
+    }
+
+    /// The descriptor says what the forward pass does: every edge's shape is
+    /// the shape of the tensor the pass made there, and the weights counted
+    /// add up to the module's own.
+    #[test]
+    fn the_descriptor_matches_the_forward_pass() {
+        let device = Device::flex();
+        let config = UNetConfig::new(5).with_base_channels(4);
+        let net = config.init(&device);
+        let descriptor = config.describe();
+
+        let mut reported = Vec::new();
+        let image = Tensor::<4>::zeros([2, 3, 32, 48], &device);
+        net.forward_tapped(image, &mut |key, dims| {
+            reported.push((key.to_string(), dims.to_vec()));
+        });
+        crate::net::describe::assert_matches_forward(
+            &descriptor,
+            &reported,
+            &[("B", 2), ("H", 32), ("W", 48)],
+        );
+        assert_eq!(descriptor.total_params(), net.num_params() as u64);
+        assert_eq!(descriptor.problems(), Vec::<String>::new());
     }
 }

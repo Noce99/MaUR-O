@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "networks": [
+    {
+      "scope": "image_to_omap",
+      "name": "tree",
+      "latest": "0.1",
+      "versions": [
+        {
+          "version": "0.1",
+          "hash": "e2b2374e5782c4ff",
+          "generated_at": "2026-11-18T11:22:19Z",
+          "git_commit": "0a19be0-dirty"
+        }
+      ]
+    },
+    {
+      "scope": "image_to_omap",
+      "name": "unet",
+      "latest": "0.1",
+      "versions": [
+        {
+          "version": "0.1",
+          "hash": "4239ba809501137b",
+          "generated_at": "2026-11-18T11:22:19Z",
+          "git_commit": "0a19be0-dirty"
+        }
+      ]
+    }
+  ]
+}

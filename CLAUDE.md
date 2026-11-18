@@ -65,6 +65,7 @@ Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 | `mauro net train` | Train a network on such a dataset: a U-Net (`--model unet`, the default) or a tree of curves (`--model tree`, `src/net/tree.rs`, `tree_training.rs`). `--dashboard` for burn's live terminal dashboard (U-Net only); the TUI's job screen replaces it. |
 | `mauro net image-to-map` | Read a picture of a map back into a map with a trained run, and score it by drawing it again. |
 | `mauro net show-batches` | Draw the batches a run would be trained on, from the tensors, to check the labels. |
+| `mauro net describe` | Write each network's architecture (`net/describe.rs`) into the versioned `networks/` folder; `--check` is the CI/hook gate. |
 
 `src/bin/mauro/main.rs` is only the dispatcher (the clap `Cli`, one module per
 subcommand, each module's `Args` and `pub fn main(args) -> ExitCode`). A usage
@@ -215,6 +216,22 @@ paths, so CI never depends on anyone's server.
 
 `archive_info.rs` (reads an archive's `info.txt` back), `progress.rs`
 (tqdm-style progress bar), `report.rs` (word wrapping for the `.txt` reports).
+
+### Network descriptors (`networks/`)
+
+A network's architecture is *declared* beside its `forward` (`UNetConfig::describe`,
+`TreeNetConfig::describe`, built with `net/describe.rs`'s `Node`/`edge` builder)
+and registered as a versioned JSON in `networks/<scope>/<net>/<version>.json`
+by `mauro net describe` (`net/registry.rs`); the o-mnia-independent MauNeVi
+visualizer reads that folder and nothing else. **Changing a network's layers,
+widths or tensor shapes means updating its `describe` and running
+`mauro net describe`, committing `networks/` with the change** — CI, the
+`tests/net_describe.rs` test and the optional `.githooks/pre-commit` all run
+`--check`. A `forward_tapped` reports every tensor's shape under the name its
+edge has, and each network's `the_descriptor_matches_the_forward_pass` test
+holds the declaration to it; a new layer in a `forward` needs a tap and an edge.
+The hash that decides "new version" covers the architecture only (not the date
+or commit), and registered files are never rewritten.
 
 ## Testing conventions
 

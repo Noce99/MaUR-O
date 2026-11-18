@@ -4385,6 +4385,8 @@ dependencies = [
  "quick-xml",
  "ratatui",
  "rustybuzz",
+ "serde",
+ "serde_json",
  "tempfile",
  "tiff",
  "tiny-skia",

@@ -7,6 +7,7 @@ pub mod benchmark_run;
 pub mod dem;
 pub mod dem_eval;
 pub mod net_dataset;
+pub mod net_describe;
 pub mod net_grid_to_map;
 pub mod net_image_to_map;
 pub mod net_show_batches;
