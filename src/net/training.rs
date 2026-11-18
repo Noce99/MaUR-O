@@ -67,25 +67,24 @@ use std::path::{Path, PathBuf};
 use burn::config::Config;
 use burn::data::dataset::Dataset;
 use burn::grad_clipping::GradientClippingConfig;
-use burn::lr_scheduler::LrScheduler;
-use burn::module::{extract_type_name, Module};
-use burn::optim::AdamWConfig;
-use burn::prelude::Backend;
-use burn::record::DefaultRecorder;
-use burn::tensor::backend::AutodiffBackend;
-use burn::tensor::Tensor;
+use burn::lr_scheduler::{LrScheduler, LrSchedulerRecord};
+use burn::module::extract_type_name;
+use burn::optim::{AdamWConfig, LearningRate};
+use burn::tensor::{Device, ExecutionError, Tensor, TensorReadError};
 use burn::train::checkpoint::{
     ComposedCheckpointingStrategy, KeepLastNCheckpoints, MetricCheckpointingStrategy,
 };
 use burn::train::metric::state::{FormatOptions, NumericMetricState};
 use burn::train::metric::store::{Aggregate, Direction, Split};
 use burn::train::metric::{
-    Adaptor, ItemLazy, LossInput, LossMetric, Metric, MetricEntry, MetricMetadata, Numeric,
+    Adaptor, ItemLazy, LossInput, LossMetric, Metric, MetricAttributes, MetricMetadata, MetricName,
+    Numeric, NumericAttributes, NumericEntry, SerializedEntry,
 };
-use burn::train::renderer::tui::TuiMetricsRenderer;
-use burn::train::renderer::{MetricState, MetricsRenderer, TrainingProgress};
-use burn::train::{LearnerBuilder, LearnerSummary, TrainOutput, TrainStep, ValidStep};
-use burn::LearningRate;
+use burn::train::renderer::tui::TuiMetricsRendererWrapper;
+use burn::train::renderer::CliMetricsRenderer;
+use burn::train::{
+    InferenceStep, Learner, LearnerSummary, SupervisedTraining, TrainOutput, TrainStep,
+};
 
 use crate::dataset::{Classes, CLASSES_FILE};
 use crate::symbol_kinds::Catalogue;
@@ -94,7 +93,7 @@ use crate::xml_reader::read_xml_map;
 use crate::net::data::{MapBatch, MapBatcher, MapDataset, CROP, DEFAULT_CROPS_PER_MAP};
 use crate::net::image_valid::{ImageValidation, DEFAULT_IMAGE_VALID, IMAGE_VALID};
 use crate::net::monitor::{Gated, Monitor};
-use crate::net::predict::ReadBackSettings;
+use crate::net::predict::{save_weights, ReadBackSettings};
 use crate::net::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEPTH};
 
 /// How much the angle term counts for beside the classes. See
@@ -112,11 +111,6 @@ use crate::net::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEPTH};
 /// the same at several angles a question with one answer rather than none;
 /// see [`crate::symbol_kinds::pattern_symmetry`].
 pub const DEFAULT_ANGLE_WEIGHT: f64 = 0.2;
-
-/// The backend the metrics run on, which is the host: a metric reads numbers
-/// rather than trains on them, so everything in [`MapOutput`] is brought back
-/// here before it is looked at.
-type MetricBackend = burn::backend::NdArray;
 
 /// The rate the warmup climbs to, and so the largest rate a run takes a step
 /// at -- see [`WarmupCosine`].
@@ -319,9 +313,6 @@ impl WarmupCosine {
 }
 
 impl LrScheduler for WarmupCosine {
-    /// How many steps have been taken, which is the whole of the state.
-    type Record<B: Backend> = usize;
-
     fn step(&mut self) -> LearningRate {
         self.taken += 1;
 
@@ -341,13 +332,15 @@ impl LrScheduler for WarmupCosine {
         self.peak * (FINAL_SHARE + (1.0 - FINAL_SHARE) * cosine)
     }
 
-    fn to_record<B: Backend>(&self) -> Self::Record<B> {
-        self.taken
+    /// How many steps have been taken, which is the whole of the state.
+    fn to_record(&self) -> LrSchedulerRecord {
+        LrSchedulerRecord::new().with_scalar("taken", self.taken as u64)
     }
 
-    fn load_record<B: Backend>(mut self, record: Self::Record<B>) -> Self {
-        self.taken = record;
-        self
+    fn load_record(&mut self, record: LrSchedulerRecord) {
+        if let Some(taken) = record.scalar::<u64>("taken") {
+            self.taken = taken as usize;
+        }
     }
 }
 
@@ -357,45 +350,46 @@ impl LrScheduler for WarmupCosine {
 /// Nothing here is per-pixel. The pixels were counted where they were, which
 /// is what keeps a step's report to twenty bytes instead of the eighty
 /// megabytes of logits they were counted out of.
-pub struct MapOutput<B: Backend> {
+pub struct MapOutput {
     /// The loss, both terms together.
-    pub loss: Tensor<B, 1>,
+    pub loss: Tensor<1>,
     /// How many pixels of the batch were given the right symbol.
-    pub correct: Tensor<B, 1>,
+    pub correct: Tensor<1>,
     /// How many pixels the batch held.
-    pub pixels: Tensor<B, 1>,
+    pub pixels: Tensor<1>,
     /// How much the predicted directions agreed with the labelled ones,
     /// summed over the pixels which had one: a cosine each, so one per pixel
     /// where they point the same way and minus one where they are opposed.
-    pub agreement: Tensor<B, 1>,
+    pub agreement: Tensor<1>,
     /// How many pixels had an angle at all.
-    pub angled: Tensor<B, 1>,
+    pub angled: Tensor<1>,
 }
 
-impl<B: Backend> ItemLazy for MapOutput<B> {
-    type ItemSync = MapOutput<MetricBackend>;
-
-    fn sync(self) -> MapOutput<MetricBackend> {
-        let device = &Default::default();
-        let bring = |t: Tensor<B, 1>| Tensor::from_data(t.into_data(), device);
-        MapOutput {
-            loss: bring(self.loss),
-            correct: bring(self.correct),
-            pixels: bring(self.pixels),
-            agreement: bring(self.agreement),
-            angled: bring(self.angled),
-        }
+impl ItemLazy for MapOutput {
+    /// Takes the tensors off the autodiff tape and dispatches what is still
+    /// queued, so the metrics' own thread reads numbers rather than carrying
+    /// the graph. Nothing is read back here: the five scalars are read where
+    /// the metrics look at them.
+    fn sync(self) -> Result<Self, ExecutionError> {
+        self.loss.device().flush()?;
+        Ok(MapOutput {
+            loss: self.loss.without_autodiff(),
+            correct: self.correct.without_autodiff(),
+            pixels: self.pixels.without_autodiff(),
+            agreement: self.agreement.without_autodiff(),
+            angled: self.angled.without_autodiff(),
+        })
     }
 }
 
-impl<B: Backend> Adaptor<LossInput<B>> for MapOutput<B> {
-    fn adapt(&self) -> LossInput<B> {
+impl Adaptor<LossInput> for MapOutput {
+    fn adapt(&self) -> LossInput {
         LossInput::new(self.loss.clone())
     }
 }
 
-impl<B: Backend> Adaptor<PixelInput<B>> for MapOutput<B> {
-    fn adapt(&self) -> PixelInput<B> {
+impl Adaptor<PixelInput> for MapOutput {
+    fn adapt(&self) -> PixelInput {
         PixelInput {
             correct: self.correct.clone(),
             pixels: self.pixels.clone(),
@@ -403,8 +397,8 @@ impl<B: Backend> Adaptor<PixelInput<B>> for MapOutput<B> {
     }
 }
 
-impl<B: Backend> Adaptor<AngleInput<B>> for MapOutput<B> {
-    fn adapt(&self) -> AngleInput<B> {
+impl Adaptor<AngleInput> for MapOutput {
+    fn adapt(&self) -> AngleInput {
         AngleInput {
             agreement: self.agreement.clone(),
             angled: self.angled.clone(),
@@ -413,56 +407,78 @@ impl<B: Backend> Adaptor<AngleInput<B>> for MapOutput<B> {
 }
 
 /// The one number a scalar tensor holds.
-fn scalar<B: Backend>(tensor: &Tensor<B, 1>) -> f64 {
-    tensor
+fn scalar(tensor: &Tensor<1>) -> Result<f64, TensorReadError> {
+    Ok(tensor
         .clone()
-        .into_data()
+        .try_into_data_as::<f64>()?
         .iter::<f64>()
         .next()
-        .unwrap_or(0.0)
+        .unwrap_or(0.0))
 }
 
 /// What [`PixelAccuracyMetric`] is fed.
-pub struct PixelInput<B: Backend> {
-    correct: Tensor<B, 1>,
-    pixels: Tensor<B, 1>,
+pub struct PixelInput {
+    correct: Tensor<1>,
+    pixels: Tensor<1>,
 }
 
 /// The share of pixels given the right symbol.
-#[derive(Default)]
-pub struct PixelAccuracyMetric<B: Backend> {
+#[derive(Clone)]
+pub struct PixelAccuracyMetric {
+    name: MetricName,
     state: NumericMetricState,
-    _backend: std::marker::PhantomData<B>,
 }
 
-impl<B: Backend> PixelAccuracyMetric<B> {
+impl Default for PixelAccuracyMetric {
+    fn default() -> Self {
+        PixelAccuracyMetric {
+            name: std::sync::Arc::new("Pixel accuracy".to_string()),
+            state: NumericMetricState::default(),
+        }
+    }
+}
+
+impl PixelAccuracyMetric {
     /// Creates the metric.
-    pub fn new() -> PixelAccuracyMetric<B> {
+    pub fn new() -> PixelAccuracyMetric {
         PixelAccuracyMetric::default()
     }
 }
 
-impl<B: Backend> Metric for PixelAccuracyMetric<B> {
-    type Input = PixelInput<B>;
+impl Metric for PixelAccuracyMetric {
+    type Input = PixelInput;
 
-    fn name(&self) -> String {
-        "Pixel accuracy".to_string()
+    fn name(&self) -> MetricName {
+        self.name.clone()
     }
 
-    fn update(&mut self, input: &PixelInput<B>, _metadata: &MetricMetadata) -> MetricEntry {
-        let pixels = scalar(&input.pixels);
+    fn attributes(&self) -> MetricAttributes {
+        NumericAttributes {
+            unit: Some("%".to_string()),
+            higher_is_better: true,
+        }
+        .into()
+    }
+
+    fn update(
+        &mut self,
+        input: &PixelInput,
+        _metadata: &MetricMetadata,
+    ) -> Result<SerializedEntry, TensorReadError> {
+        let pixels = scalar(&input.pixels)?;
         let share = if pixels > 0.0 {
-            100.0 * scalar(&input.correct) / pixels
+            100.0 * scalar(&input.correct)? / pixels
         } else {
             0.0
         };
         // Weighted by the pixels it was measured over, so an epoch's figure
         // is the share over its pixels rather than the mean of its batches'.
-        self.state.update(
-            share,
-            pixels as usize,
-            FormatOptions::new(self.name()).unit("%").precision(2),
-        )
+        self.state.update(share, pixels as usize);
+        Ok(self.state.compute_update(self.format()))
+    }
+
+    fn compute(&mut self) -> Result<SerializedEntry, TensorReadError> {
+        Ok(self.state.compute_final(self.format()))
     }
 
     fn clear(&mut self) {
@@ -470,16 +486,30 @@ impl<B: Backend> Metric for PixelAccuracyMetric<B> {
     }
 }
 
-impl<B: Backend> Numeric for PixelAccuracyMetric<B> {
-    fn value(&self) -> f64 {
-        self.state.value()
+impl PixelAccuracyMetric {
+    fn format(&self) -> FormatOptions {
+        FormatOptions::new(self.name.clone()).unit("%").precision(2)
+    }
+}
+
+impl Numeric for PixelAccuracyMetric {
+    fn value(&self) -> Option<NumericEntry> {
+        Some(self.state.current_value())
+    }
+
+    fn running_value(&self) -> Option<NumericEntry> {
+        Some(self.state.running_value())
+    }
+
+    fn final_value(&self) -> NumericEntry {
+        self.state.final_value()
     }
 }
 
 /// What [`AngleMetric`] is fed.
-pub struct AngleInput<B: Backend> {
-    agreement: Tensor<B, 1>,
-    angled: Tensor<B, 1>,
+pub struct AngleInput {
+    agreement: Tensor<1>,
+    angled: Tensor<1>,
 }
 
 /// What a batch with no angle in it is reported as.
@@ -516,31 +546,56 @@ pub const NO_ANGLE_MEASURED: f64 = 90.0;
 /// what burn's own summary computes from the entries this writes, so the
 /// number on the progress line and the number in the table at the end are the
 /// same number.
-#[derive(Default)]
-pub struct AngleMetric<B: Backend> {
+#[derive(Clone)]
+pub struct AngleMetric {
+    name: MetricName,
     /// Each batch's angle times the pixels it was measured over, summed.
     weighted: f64,
     /// Those weights, summed.
     counted: f64,
-    _backend: std::marker::PhantomData<B>,
+    /// The last batch's figure, and the weight it came with.
+    last: (f64, f64),
 }
 
-impl<B: Backend> AngleMetric<B> {
+impl Default for AngleMetric {
+    fn default() -> Self {
+        AngleMetric {
+            name: std::sync::Arc::new("Angle error".to_string()),
+            weighted: 0.0,
+            counted: 0.0,
+            last: (NO_ANGLE_MEASURED, 1.0),
+        }
+    }
+}
+
+impl AngleMetric {
     /// Creates the metric.
-    pub fn new() -> AngleMetric<B> {
+    pub fn new() -> AngleMetric {
         AngleMetric::default()
     }
 }
 
-impl<B: Backend> Metric for AngleMetric<B> {
-    type Input = AngleInput<B>;
+impl Metric for AngleMetric {
+    type Input = AngleInput;
 
-    fn name(&self) -> String {
-        "Angle error".to_string()
+    fn name(&self) -> MetricName {
+        self.name.clone()
     }
 
-    fn update(&mut self, input: &AngleInput<B>, _metadata: &MetricMetadata) -> MetricEntry {
-        let (agreement, angled) = (scalar(&input.agreement), scalar(&input.angled));
+    fn attributes(&self) -> MetricAttributes {
+        NumericAttributes {
+            unit: Some("deg".to_string()),
+            higher_is_better: false,
+        }
+        .into()
+    }
+
+    fn update(
+        &mut self,
+        input: &AngleInput,
+        _metadata: &MetricMetadata,
+    ) -> Result<SerializedEntry, TensorReadError> {
+        let (agreement, angled) = (scalar(&input.agreement)?, scalar(&input.angled)?);
 
         // How far out this batch was, and over how many pixels. A batch with
         // no angle in it counts as one pixel of chance — see
@@ -555,6 +610,7 @@ impl<B: Backend> Metric for AngleMetric<B> {
         };
         self.weighted += batch * weight;
         self.counted += weight;
+        self.last = (batch, weight);
 
         let measured = if angled > 0.0 {
             format!("{batch:.2} deg")
@@ -563,24 +619,37 @@ impl<B: Backend> Metric for AngleMetric<B> {
             // in it is a thing to notice about the dataset, not a gap.
             "no angle".to_string()
         };
-        MetricEntry::new(
-            self.name(),
-            format!("epoch {:.2} deg - batch {measured}", self.value()),
+        Ok(SerializedEntry::new(
+            format!("epoch {:.2} deg - batch {measured}", self.mean()),
             // What burn stores a numeric entry as: this batch's value, then
             // the elements it was measured over. Per batch and not running,
             // since the summary re-aggregates these itself.
-            format!("{batch},{}", weight as usize),
-        )
+            NumericEntry::Aggregated {
+                aggregated_value: batch,
+                count: weight as usize,
+            }
+            .serialize(),
+        ))
+    }
+
+    fn compute(&mut self) -> Result<SerializedEntry, TensorReadError> {
+        let value = self.mean();
+        Ok(SerializedEntry::new(
+            format!("epoch {value:.2} deg"),
+            NumericEntry::Final(value).serialize(),
+        ))
     }
 
     fn clear(&mut self) {
         self.weighted = 0.0;
         self.counted = 0.0;
+        self.last = (NO_ANGLE_MEASURED, 1.0);
     }
 }
 
-impl<B: Backend> Numeric for AngleMetric<B> {
-    fn value(&self) -> f64 {
+impl AngleMetric {
+    /// The pixel-weighted mean angle so far.
+    fn mean(&self) -> f64 {
         // Before the first batch there is nothing to divide, which is the one
         // moment this is asked for with no answer.
         if self.counted > 0.0 {
@@ -591,10 +660,30 @@ impl<B: Backend> Numeric for AngleMetric<B> {
     }
 }
 
-impl<B: Backend> UNet<B> {
+impl Numeric for AngleMetric {
+    fn value(&self) -> Option<NumericEntry> {
+        Some(NumericEntry::Aggregated {
+            aggregated_value: self.last.0,
+            count: self.last.1 as usize,
+        })
+    }
+
+    fn running_value(&self) -> Option<NumericEntry> {
+        Some(NumericEntry::Aggregated {
+            aggregated_value: self.mean(),
+            count: self.counted as usize,
+        })
+    }
+
+    fn final_value(&self) -> NumericEntry {
+        NumericEntry::Final(self.mean())
+    }
+}
+
+impl UNet {
     /// One forward pass scored against the labels: the loss to descend, and
     /// the counts the metrics divide.
-    pub fn forward_step(&self, batch: MapBatch<B>) -> MapOutput<B> {
+    pub fn forward_step(&self, batch: MapBatch) -> MapOutput {
         let device = batch.image.device();
         let raw = self.forward(batch.image);
         let [size, channels, height, width] = raw.dims();
@@ -666,18 +755,14 @@ impl<B: Backend> UNet<B> {
 /// to turn — has no direction to agree with, and `has_angle` is the nought it
 /// is multiplied by: the caller worked out which those were to mask the loss
 /// with, and the same mask serves here rather than being found twice.
-fn agreement<B: Backend>(
-    predicted: Tensor<B, 2>,
-    wanted: Tensor<B, 2>,
-    has_angle: Tensor<B, 1>,
-) -> Tensor<B, 1> {
+fn agreement(predicted: Tensor<2>, wanted: Tensor<2>, has_angle: Tensor<1>) -> Tensor<1> {
     // A prediction shorter than this has no direction worth measuring, and
     // dividing by its length would be dividing by nothing. Clamping the
     // divisor leaves such a pixel with an agreement near zero, which is the
     // honest score for a vector pointing nowhere.
     const TINY: f32 = 1e-6;
 
-    let length = |v: Tensor<B, 2>| v.powi_scalar(2).sum_dim(1).sqrt();
+    let length = |v: Tensor<2>| v.powi_scalar(2).sum_dim(1).sqrt();
     let (predicted_length, wanted_length) = (length(predicted.clone()), length(wanted.clone()));
 
     let cosine = predicted.mul(wanted).sum_dim(1).div(
@@ -690,21 +775,27 @@ fn agreement<B: Backend>(
     cosine.reshape([pixels]).mul(has_angle).sum()
 }
 
-impl<B: AutodiffBackend> TrainStep<MapBatch<B>, MapOutput<B>> for UNet<B> {
-    fn step(&self, batch: MapBatch<B>) -> TrainOutput<MapOutput<B>> {
+impl TrainStep for UNet {
+    type Input = MapBatch;
+    type Output = MapOutput;
+
+    fn step(&self, batch: MapBatch) -> TrainOutput<MapOutput> {
         let output = self.forward_step(batch);
         TrainOutput::new(self, output.loss.backward(), output)
     }
 }
 
-impl<B: Backend> ValidStep<MapBatch<B>, MapOutput<B>> for UNet<B> {
-    fn step(&self, batch: MapBatch<B>) -> MapOutput<B> {
+impl InferenceStep for UNet {
+    type Input = MapBatch;
+    type Output = MapOutput;
+
+    fn step(&self, batch: MapBatch) -> MapOutput {
         self.forward_step(batch)
     }
 }
 
 /// What a training run is to be.
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct TrainingConfig {
     /// How many opaque areas the symbol set holds, which the dataset's
     /// `classes.json` says.
@@ -767,27 +858,6 @@ pub struct TrainingConfig {
     pub seed: u64,
 }
 
-/// What `train` renders to without `--dashboard`: one line of debug output
-/// per step, printed rather than drawn. Burn's own equivalent,
-/// `CliMetricsRenderer`, is not exported by the crate, and building with the
-/// `tui` feature on -- which the dashboard needs -- would otherwise leave
-/// burn's own terminal detection picking the dashboard the moment this runs
-/// somewhere with a terminal, whether `--dashboard` was asked for or not.
-struct PlainRenderer;
-
-impl MetricsRenderer for PlainRenderer {
-    fn update_train(&mut self, _state: MetricState) {}
-    fn update_valid(&mut self, _state: MetricState) {}
-
-    fn render_train(&mut self, item: TrainingProgress) {
-        println!("{item:?}");
-    }
-
-    fn render_valid(&mut self, item: TrainingProgress) {
-        println!("{item:?}");
-    }
-}
-
 /// How the moment a run was started is written into its folder's name. Fixed
 /// width and biggest unit first, so that a listing of the training folder is
 /// in the order the runs happened.
@@ -797,7 +867,7 @@ const RUN_STAMP: &str = "%Y_%m_%d__%H_%M_%S";
 /// it its number.
 const BURN_EPOCH_PREFIX: &str = "epoch-";
 
-/// Which metric decides the epoch `best.mpk` is taken from: the validation
+/// Which metric decides the epoch `best.bpk` is taken from: the validation
 /// loss, which is the one figure the whole of a run is descending.
 const BEST_METRIC: &str = "Loss";
 
@@ -818,21 +888,19 @@ pub const KEPT_CHECKPOINTS: usize = 5;
 /// The weights of the epoch which validated best, at the top of the run
 /// folder.
 ///
-/// A file rather than a folder because [`DefaultRecorder`] writes a whole
-/// model as one; a recorder which needed more than one would want a folder of
-/// this name instead, which is why the name carries no extension of its own
-/// until it is saved.
+/// A file rather than a folder because a burnpack record holds a whole model
+/// as one, which is why the name carries no extension of its own until it is
+/// saved ([`crate::net::predict::save_weights`] gives it `.bpk`).
 ///
-/// [`DefaultRecorder`] and not burn's `CompactRecorder`, which is the same
-/// named-messagepack file at **half** precision. A weight fits in an `f16`
-/// and so does a batch normalization's running mean; its running **variance**
-/// does not. This network's reach 1e5 by the fourth level, `f16` tops out at
-/// 65504, and everything past that is written down as an infinity — which
-/// reads back as a channel whose output is its own bias and nothing else.
-/// Nothing goes wrong while the run is going, since training normalizes by
-/// the batch it is holding and the model in memory is `f32` throughout; what
-/// breaks is every use of the file afterwards. See the module documentation
-/// of [`crate::net::predict`].
+/// Written at the precision the model holds, which is `f32`, and not at half
+/// precision. A weight fits in an `f16` and so does a batch normalization's
+/// running mean; its running **variance** does not. This network's reach 1e5
+/// by the fourth level, `f16` tops out at 65504, and everything past that is
+/// written down as an infinity — which reads back as a channel whose output
+/// is its own bias and nothing else. Nothing goes wrong while the run is
+/// going, since training normalizes by the batch it is holding and the model
+/// in memory is `f32` throughout; what breaks is every use of the file
+/// afterwards. See the module documentation of [`crate::net::predict`].
 const BEST_WEIGHTS: &str = "best";
 
 /// The phase a run shows its work with, built out of what its folder now
@@ -842,12 +910,12 @@ const BEST_WEIGHTS: &str = "best";
 /// Reading those back rather than being handed them keeps the sheets and the
 /// `mauro net image-to-map` tool looking at the same two files, so a sheet is a preview
 /// of that tool rather than a second opinion.
-fn image_validation<B: AutodiffBackend>(
+fn image_validation(
     run: &Path,
     pictures: Vec<PathBuf>,
     config: &TrainingConfig,
-    device: &B::Device,
-) -> Result<ImageValidation<B::InnerBackend>, String> {
+    device: &Device,
+) -> Result<ImageValidation, String> {
     // Nothing to draw, so nothing to read: a run asked for no sheets should
     // not fail over a symbol set it will never open.
     if pictures.is_empty() {
@@ -973,7 +1041,7 @@ fn number_epochs(directory: &Path, width: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Moves burn's `checkpoint/model-3.mpk` into `checkpoint/003/model.mpk`, the
+/// Moves burn's `checkpoint/model-3.bpk` into `checkpoint/003/model.bpk`, the
 /// epoch numbers padded as [`number_epochs`] pads them.
 ///
 /// What an epoch left behind is the weights, the optimizer's state and the
@@ -990,8 +1058,8 @@ fn group_checkpoints(directory: &Path, width: usize) -> Result<(), String> {
             continue;
         }
 
-        // `model-3.mpk` is the model of epoch three; the recorder chose the
-        // extension, so it is carried over rather than assumed.
+        // `model-3.bpk` is the model of epoch three; the checkpointer chose
+        // the extension, so it is carried over rather than assumed.
         let Some((name, epoch)) = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -1060,7 +1128,7 @@ fn best_epoch(run: &Path) -> Option<usize> {
 /// * `train/001/` and `valid/001/`, the metrics of **every** epoch on each
 ///   split;
 /// * `experiment.log`, what the run logged as it went;
-/// * `best.mpk`, the weights of the epoch which validated best;
+/// * `best.bpk`, the weights of the epoch which validated best;
 /// * `classes.json` and the symbol set, copied out of the dataset — see
 ///   [`copy_dataset_notes`].
 ///
@@ -1068,11 +1136,11 @@ fn best_epoch(run: &Path) -> Option<usize> {
 /// terminal dashboard; it says nothing about the run itself, which is why
 /// it is a parameter here rather than a field of [`TrainingConfig`], the
 /// part of a run's setup that gets written to disk.
-pub fn train<B: AutodiffBackend>(
+pub fn train(
     dataset: &Path,
     into: &Path,
     config: TrainingConfig,
-    device: B::Device,
+    device: Device,
     dashboard: bool,
     monitor: Option<Monitor>,
 ) -> Result<PathBuf, String> {
@@ -1090,7 +1158,7 @@ pub fn train<B: AutodiffBackend>(
     let mut config = config;
     config.overhang = Some(config.overhang.unwrap_or(config.crop / 2));
 
-    let run = run_directory(into, extract_type_name::<UNet<B>>())?;
+    let run = run_directory(into, extract_type_name::<UNet>())?;
     config
         .save(run.join("training.json"))
         .map_err(|e| format!("cannot write the configuration: {e}"))?;
@@ -1158,7 +1226,10 @@ pub fn train<B: AutodiffBackend>(
         .with_base_channels(config.base_channels)
         .with_angle_weight(config.angle_weight)
         .with_class_weights(Some(weights))
-        .init::<B>(&device);
+        // On a device with a gradient tape: it is where a parameter is made
+        // that decides whether it is tracked, and the learner forks the
+        // model onto the device it trains on but does not make it track.
+        .init(&device.clone().autodiff());
     let architecture = run.join("architecture.txt");
     std::fs::write(&architecture, format!("{model}\n"))
         .map_err(|e| format!("cannot write {}: {e}", architecture.display()))?;
@@ -1176,21 +1247,20 @@ pub fn train<B: AutodiffBackend>(
     // Behind the monitor's gate, where there is one, which is how a pause
     // holds the run: no crops, no steps.
     let gate = monitor.as_ref().map(Monitor::gate).unwrap_or_default();
-    let train_loader = burn::data::dataloader::DataLoaderBuilder::<B, _, _>::new(MapBatcher)
+    let train_loader = burn::data::dataloader::DataLoaderBuilder::new(MapBatcher)
         .batch_size(config.batch_size)
         .num_workers(config.workers)
         .shuffle(config.seed)
         .build(Gated::new(train, gate.clone()));
-    let valid_loader =
-        burn::data::dataloader::DataLoaderBuilder::<B::InnerBackend, _, _>::new(MapBatcher)
-            .batch_size(config.batch_size)
-            .num_workers(config.workers)
-            .build(Gated::new(valid, gate));
+    let valid_loader = burn::data::dataloader::DataLoaderBuilder::new(MapBatcher)
+        .batch_size(config.batch_size)
+        .num_workers(config.workers)
+        .build(Gated::new(valid, gate));
 
     // What the run shows its work on. Built twice — once for the hook, once
     // for the catch-up after `fit` — because the learner takes ownership of
     // the first.
-    let phase = image_validation::<B>(&run, pictures.clone(), &config, &device)?;
+    let phase = image_validation(&run, pictures.clone(), &config, &device)?;
     if phase.wanted() {
         println!(
             "{}/: {} pictures read back into maps each epoch, drawn beside the originals",
@@ -1199,58 +1269,10 @@ pub fn train<B: AutodiffBackend>(
         );
     }
 
-    let mut builder = LearnerBuilder::new(&run)
-        .metric_train_numeric(LossMetric::<MetricBackend>::new())
-        .metric_valid_numeric(LossMetric::<MetricBackend>::new())
-        .metric_train_numeric(PixelAccuracyMetric::<MetricBackend>::new())
-        .metric_valid_numeric(PixelAccuracyMetric::<MetricBackend>::new())
-        .metric_train_numeric(AngleMetric::<MetricBackend>::new())
-        .metric_valid_numeric(AngleMetric::<MetricBackend>::new())
-        .with_file_checkpointer(DefaultRecorder::new())
-        // burn's own default, with a longer tail: the last few epochs, so
-        // that a run can be carried on from where it stopped, and the epoch
-        // which validated best however far back it was, so that `best.mpk`
-        // has something to be copied from. Composed rather than chosen
-        // between — a composition deletes an epoch only when every strategy
-        // in it has finished with that epoch.
-        .with_checkpointing_strategy(
-            ComposedCheckpointingStrategy::builder()
-                .add(KeepLastNCheckpoints::new(KEPT_CHECKPOINTS))
-                .add(MetricCheckpointingStrategy::new(
-                    &LossMetric::<MetricBackend>::new(),
-                    Aggregate::Mean,
-                    Direction::Lowest,
-                    Split::Valid,
-                ))
-                .build(),
-        )
-        .devices(vec![device.clone()])
-        .num_epochs(config.epochs)
-        // Not a stopping strategy: the one hook burn calls once an epoch. It
-        // always answers that the run should carry on — see
-        // `crate::net::image_valid`.
-        .early_stopping(phase)
-        .summary();
-    builder = if let Some(monitor) = &monitor {
-        monitor.watch(builder.interrupter());
-        builder.renderer(monitor.renderer())
-    } else if dashboard {
-        // The same interrupter the learner would otherwise make for itself,
-        // so Ctrl-C still stops the run through the dashboard rather than
-        // going around it.
-        let interrupter = builder.interrupter();
-        builder.renderer(TuiMetricsRenderer::new(interrupter, None))
-    } else {
-        // Chosen explicitly rather than left to burn's own terminal
-        // detection, which would switch the plain log for the dashboard on
-        // its own the moment this runs in a terminal -- the opposite of
-        // --dashboard being what turns it on.
-        builder.renderer(PlainRenderer)
-    };
     // How many steps the run is, which is what the annealing is spread over:
     // one step per batch, every batch of every epoch.
     let steps = config.epochs * train_batches;
-    let learner = builder.build(
+    let learner = Learner::new(
         model,
         // Clipped rather than bare. Adam scales a step by the gradient's own
         // recent size and so survives a large one, but not the step after a
@@ -1270,7 +1292,59 @@ pub fn train<B: AutodiffBackend>(
         WarmupCosine::new(config.learning_rate, steps),
     );
 
-    let trained = learner.fit(train_loader, valid_loader);
+    let training = SupervisedTraining::new(&run, train_loader, valid_loader)
+        .metric_train_numeric(LossMetric::new())
+        .metric_valid_numeric(LossMetric::new())
+        .metric_train_numeric(PixelAccuracyMetric::new())
+        .metric_valid_numeric(PixelAccuracyMetric::new())
+        .metric_train_numeric(AngleMetric::new())
+        .metric_valid_numeric(AngleMetric::new())
+        .with_default_checkpointers()
+        // burn's own default, with a longer tail: the last few epochs, so
+        // that a run can be carried on from where it stopped, and the epoch
+        // which validated best however far back it was, so that `best.bpk`
+        // has something to be copied from. Composed rather than chosen
+        // between — a composition deletes an epoch only when every strategy
+        // in it has finished with that epoch.
+        .with_checkpointing_strategy(
+            ComposedCheckpointingStrategy::builder()
+                .add(KeepLastNCheckpoints::new(KEPT_CHECKPOINTS))
+                .add(MetricCheckpointingStrategy::new(
+                    &LossMetric::new(),
+                    Aggregate::Mean,
+                    Direction::Lowest,
+                    Split::Valid,
+                ))
+                .build(),
+        )
+        .num_epochs(config.epochs)
+        // Not a stopping strategy: the one hook burn calls once an epoch. It
+        // always answers that the run should carry on — see
+        // `crate::net::image_valid`.
+        .early_stopping(phase)
+        .summary();
+    let training = if let Some(monitor) = &monitor {
+        monitor.watch(training.interrupter());
+        training.renderer(Box::new(monitor.renderer()))
+    } else if dashboard {
+        // The same interrupter the learner would otherwise make for itself,
+        // so Ctrl-C still stops the run through the dashboard rather than
+        // going around it.
+        let interrupter = training.interrupter();
+        training.renderer(Box::new(TuiMetricsRendererWrapper::new(interrupter, None)))
+    } else {
+        // Chosen explicitly rather than left to burn's own terminal
+        // detection, which would switch the plain log for the dashboard on
+        // its own the moment this runs in a terminal -- the opposite of
+        // --dashboard being what turns it on.
+        training.renderer(Box::new(CliMetricsRenderer::new()))
+    };
+
+    let result = training.launch(learner);
+    if let Some(error) = &result.error {
+        return Err(format!("the run failed: {error}"));
+    }
+    let trained = result.model;
 
     // While the folders are still the `epoch-N` burn reads back, and before
     // they are renumbered under it.
@@ -1280,7 +1354,7 @@ pub fn train<B: AutodiffBackend>(
     // here; and a run which was interrupted may be missing more. Every
     // checkpoint which survived gets its sheets now that the checkpointer's
     // thread has been joined and its writes are all on disk.
-    let phase = image_validation::<B>(&run, pictures, &config, &device)?;
+    let phase = image_validation(&run, pictures, &config, &device)?;
     if let Err(message) = phase.catch_up() {
         eprintln!("Warning: cannot draw the last epochs: {message}");
     }
@@ -1297,13 +1371,13 @@ pub fn train<B: AutodiffBackend>(
         }
     }
 
-    let weights = run.join(BEST_WEIGHTS).with_extension("mpk");
+    let weights = run.join(BEST_WEIGHTS).with_extension("bpk");
     let kept = best
         .map(|epoch| {
             let from = run
                 .join("checkpoint")
                 .join(format!("{epoch:0width$}"))
-                .join("model.mpk");
+                .join("model.bpk");
             (epoch, from)
         })
         .filter(|(_, from)| from.is_file());
@@ -1329,9 +1403,7 @@ pub fn train<B: AutodiffBackend>(
         // not be read back — or its epoch has no checkpoint left. The model in
         // hand is the last epoch, and it is then the only answer there is.
         None => {
-            trained
-                .save_file(run.join(BEST_WEIGHTS), &DefaultRecorder::new())
-                .map_err(|e| format!("cannot write the weights: {e}"))?;
+            save_weights(trained, &run.join(BEST_WEIGHTS))?;
             println!(
                 "{}: the weights of the last epoch, there being no best epoch's checkpoint to \
                  take them from",
@@ -1406,26 +1478,26 @@ mod tests {
     #[test]
     fn an_epochs_checkpoint_files_are_gathered_into_its_own_folder() {
         let directory = folder(&[
-            "model-1.mpk",
-            "optim-1.mpk",
-            "scheduler-1.mpk",
-            "model-12.mpk",
+            "model-1.bpk",
+            "optim-1.bpk",
+            "scheduler-1.bpk",
+            "model-12.bpk",
         ]);
 
         group_checkpoints(directory.path(), 2).expect("the checkpoints grouped");
         assert_eq!(
             listing(directory.path()),
             [
-                "01/model.mpk",
-                "01/optim.mpk",
-                "01/scheduler.mpk",
-                "12/model.mpk",
+                "01/model.bpk",
+                "01/optim.bpk",
+                "01/scheduler.bpk",
+                "12/model.bpk",
             ],
         );
     }
 
     /// The epoch is what follows the *last* dash, and the extension is the
-    /// recorder's rather than this module's to choose.
+    /// checkpointer's rather than this module's to choose.
     #[test]
     fn a_checkpoint_keeps_its_name_and_its_extension() {
         let directory = folder(&["model-ema-3.bin", "model-3", "loose.txt"]);
@@ -1503,11 +1575,11 @@ mod tests {
         for _ in 0..250 {
             schedule.step();
         }
-        let record = schedule.to_record::<MetricBackend>();
+        let record = schedule.to_record();
         let wanted = schedule.step();
 
-        let loaded = WarmupCosine::new(3.0e-4, 1_000).load_record::<MetricBackend>(record);
-        let mut loaded = loaded;
+        let mut loaded = WarmupCosine::new(3.0e-4, 1_000);
+        loaded.load_record(record);
         assert_eq!(loaded.step(), wanted);
     }
 
@@ -1625,20 +1697,17 @@ mod tests {
     /// learned to do everywhere.
     #[test]
     fn a_crop_with_no_angle_in_it_is_scored_on_its_classes_alone() {
-        use burn::backend::ndarray::{NdArray, NdArrayDevice};
-        type TestBackend = NdArray<f32>;
-
-        let device = NdArrayDevice::default();
+        let device = Device::flex();
         let classes = 3;
         // Weighted heavily towards the angle, so that a term which was still
         // being taken over the unangled pixels could not hide in the rounding.
         let net = UNetConfig::new(classes)
             .with_base_channels(4)
             .with_angle_weight(100.0)
-            .init::<TestBackend>(&device);
+            .init(&device);
 
-        let image = Tensor::<TestBackend, 4>::zeros([1, 3, 16, 16], &device);
-        let class = Tensor::<TestBackend, 3, burn::tensor::Int>::zeros([1, 16, 16], &device);
+        let image = Tensor::<4>::zeros([1, 3, 16, 16], &device);
+        let class = Tensor::<3, burn::tensor::Int>::zeros([1, 16, 16], &device);
 
         // Every label the zero vector: no pixel of this crop has an angle.
         let none = MapBatch {

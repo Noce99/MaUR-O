@@ -46,15 +46,13 @@
 //! long as the loader has workers to do it in. Caching decoded maps would be
 //! the first thing to try if the loader ever became the slow half.
 //!
-//! # Why nothing here returns `None`
+//! # Why nothing here returns an error mid-run
 //!
-//! Because burn would believe it. Its loader walks a dataset as
-//! `while let Some(item) = dataset.get(index)`, so an item which declines to
-//! exist does not get skipped — it **ends the epoch**, silently, wherever it
-//! happens to be. One map that failed to decode would quietly cut a run short
-//! at whatever fraction of the data came before it, and a failure at the
-//! first index would leave the epoch empty and every metric dividing by no
-//! pixels.
+//! Because a loader which meets one does not skip the item: it stops the
+//! epoch, wherever it happens to be. One map that failed to decode would cut a
+//! run short at whatever fraction of the data came before it, and a failure
+//! at the first index would leave the epoch empty and every metric dividing by
+//! no pixels.
 //!
 //! So the checking happens in [`MapDataset::load`], which reads the header of
 //! every labels file — thirty-two bytes each — and refuses a folder whose
@@ -87,9 +85,8 @@
 use std::path::{Path, PathBuf};
 
 use burn::data::dataloader::batcher::Batcher;
-use burn::data::dataset::Dataset;
-use burn::prelude::Backend;
-use burn::tensor::{Int, Tensor, TensorData};
+use burn::data::dataset::{Dataset, DatasetError};
+use burn::tensor::{Device, Int, Tensor, TensorData};
 
 use crate::dataset::{
     resolution_of, Classes, CLASSES_FILE, GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER,
@@ -619,13 +616,16 @@ impl Dataset<MapCrop> for MapDataset {
 
     /// The `index`-th crop.
     ///
-    /// `None` only past the end of the dataset, which is what burn reads it
-    /// as. Anything else that could go wrong here went wrong in
+    /// An error only past the end of the dataset, which is what burn reads it
+    /// as the end by. Anything else that could go wrong here went wrong in
     /// [`MapDataset::load`] instead, or is a file which changed under a
     /// running loader — and that panics, because the alternative burn offers
     /// is an epoch which stops early and says nothing.
-    fn get(&self, index: usize) -> Option<MapCrop> {
-        let (image_path, labels) = self.maps.get(index / self.crops_per_map)?;
+    fn get(&self, index: usize) -> Result<MapCrop, DatasetError> {
+        let (image_path, labels) = self
+            .maps
+            .get(index / self.crops_per_map)
+            .ok_or_else(|| DatasetError::new(std::io::Error::other("past the end")))?;
 
         let truth = self
             .labels(labels)
@@ -701,7 +701,7 @@ impl Dataset<MapCrop> for MapDataset {
             }
         }
 
-        Some(MapCrop {
+        Ok(MapCrop {
             image: rgb,
             class,
             angle,
@@ -718,22 +718,22 @@ impl Dataset<MapCrop> for MapDataset {
 
 /// A batch of crops, as the tensors a training step takes.
 #[derive(Clone, Debug)]
-pub struct MapBatch<B: Backend> {
+pub struct MapBatch {
     /// The images, `[batch, 3, crop, crop]`.
-    pub image: Tensor<B, 4>,
+    pub image: Tensor<4>,
     /// The class of every pixel, `[batch, crop, crop]`, the frame's included.
-    pub class: Tensor<B, 3, Int>,
+    pub class: Tensor<3, Int>,
     /// The sine and the cosine of every pixel's angle,
     /// `[batch, 2, crop, crop]`.
-    pub angle: Tensor<B, 4>,
+    pub angle: Tensor<4>,
 }
 
 /// Stacks [`MapCrop`]s into a [`MapBatch`].
 #[derive(Clone, Default)]
 pub struct MapBatcher;
 
-impl<B: Backend> Batcher<B, MapCrop, MapBatch<B>> for MapBatcher {
-    fn batch(&self, items: Vec<MapCrop>, device: &B::Device) -> MapBatch<B> {
+impl Batcher<MapCrop, MapBatch> for MapBatcher {
+    fn batch(&self, items: Vec<MapCrop>, device: &Device) -> MapBatch {
         let size = items.first().map(|item| item.size).unwrap_or(CROP);
         let batch = items.len();
 
@@ -760,9 +760,6 @@ impl<B: Backend> Batcher<B, MapCrop, MapBatch<B>> for MapBatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::{NdArray, NdArrayDevice};
-
-    type TestBackend = NdArray<f32>;
 
     fn crop_of(value: f32, class: i32, size: usize) -> MapCrop {
         MapCrop {
@@ -778,8 +775,8 @@ mod tests {
 
     #[test]
     fn a_batch_is_the_crops_end_to_end() {
-        let device = NdArrayDevice::default();
-        let batch: MapBatch<TestBackend> =
+        let device = Device::flex();
+        let batch: MapBatch =
             MapBatcher.batch(vec![crop_of(1.0, 0, 4), crop_of(-1.0, 2, 4)], &device);
 
         assert_eq!(batch.image.dims(), [2, 3, 4, 4]);

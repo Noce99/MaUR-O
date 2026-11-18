@@ -48,9 +48,8 @@ use burn::nn::conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfi
 use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
 use burn::nn::{BatchNorm, BatchNormConfig, PaddingConfig2d, Relu};
-use burn::prelude::Backend;
 use burn::tensor::activation::softmax;
-use burn::tensor::Tensor;
+use burn::tensor::{Device, Tensor};
 
 use crate::net::training::DEFAULT_ANGLE_WEIGHT;
 
@@ -101,7 +100,7 @@ pub struct UNetConfig {
 
 impl UNetConfig {
     /// Builds the network on `device`, with its weights initialized.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> UNet<B> {
+    pub fn init(&self, device: &Device) -> UNet {
         let width = |level: usize| self.base_channels << level;
 
         let mut down = Vec::with_capacity(DEPTH);
@@ -146,28 +145,28 @@ impl UNetConfig {
 /// A U-Net which reads a rendered map back into the symbols it was drawn
 /// with.
 #[derive(Module, Debug)]
-pub struct UNet<B: Backend> {
+pub struct UNet {
     /// The encoder, one block per level, full resolution first.
-    down: Vec<DoubleConv<B>>,
+    down: Vec<DoubleConv>,
     /// What halves the picture between one level and the next.
     pool: MaxPool2d,
     /// The block at the bottom, between the last halving and the first
     /// doubling.
-    bottom: DoubleConv<B>,
+    bottom: DoubleConv,
     /// The decoder, deepest first.
-    up: Vec<UpBlock<B>>,
+    up: Vec<UpBlock>,
     /// The 1x1 convolution which turns features into an answer.
-    head: Conv2d<B>,
+    head: Conv2d,
     /// How many opaque areas the symbol set holds — see [`UNetConfig`].
     classes: usize,
     /// The cross-entropy the class logits are scored with, its per-class
     /// weights already in it — see [`UNetConfig::class_weights`].
-    class_loss: CrossEntropyLoss<B>,
+    class_loss: CrossEntropyLoss,
     /// What the angle term counts for — see [`UNetConfig::angle_weight`].
     angle_weight: f64,
 }
 
-impl<B: Backend> UNet<B> {
+impl UNet {
     /// The raw head, `[batch, classes + 3, height, width]`: the `classes + 1`
     /// class logits, the frame's among them, then the sine and the cosine of
     /// the angle.
@@ -180,7 +179,7 @@ impl<B: Backend> UNet<B> {
     /// must both divide by `2^DEPTH`: the encoder halves them four times and
     /// the decoder puts them back, and a size which does not divide comes
     /// back a pixel short of what the skip connection expects.
-    pub fn forward(&self, image: Tensor<B, 4>) -> Tensor<B, 4> {
+    pub fn forward(&self, image: Tensor<4>) -> Tensor<4> {
         // Down, keeping what each level saw before it was halved: that is
         // what the matching step up is missing.
         let mut skips = Vec::with_capacity(DEPTH);
@@ -209,7 +208,7 @@ impl<B: Backend> UNet<B> {
     /// emits with the frame's dropped, so they sum to one *less* whatever the
     /// network gives the frame: a pixel it is sure is frame comes out all but
     /// zero, which is what a label writes there.
-    pub fn predict(&self, image: Tensor<B, 4>) -> Tensor<B, 4> {
+    pub fn predict(&self, image: Tensor<4>) -> Tensor<4> {
         let raw = self.forward(image);
         let [batch, _, height, width] = raw.dims();
 
@@ -239,7 +238,7 @@ impl<B: Backend> UNet<B> {
 
     /// The cross-entropy the class logits are scored with, per-class weights
     /// and all.
-    pub fn class_loss(&self) -> &CrossEntropyLoss<B> {
+    pub fn class_loss(&self) -> &CrossEntropyLoss {
         &self.class_loss
     }
 
@@ -287,11 +286,11 @@ impl<B: Backend> UNet<B> {
 /// The padding keeps the picture the size it came in at, so the only thing
 /// which changes a resolution here is the pooling and the doubling.
 #[derive(Module, Debug)]
-pub struct DoubleConv<B: Backend> {
-    first: Conv2d<B>,
-    first_norm: BatchNorm<B, 2>,
-    second: Conv2d<B>,
-    second_norm: BatchNorm<B, 2>,
+pub struct DoubleConv {
+    first: Conv2d,
+    first_norm: BatchNorm,
+    second: Conv2d,
+    second_norm: BatchNorm,
     relu: Relu,
 }
 
@@ -306,10 +305,10 @@ pub struct DoubleConvConfig {
 
 impl DoubleConvConfig {
     /// Builds the block on `device`.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> DoubleConv<B> {
+    pub fn init(&self, device: &Device) -> DoubleConv {
         let conv = |from: usize, to: usize| {
             Conv2dConfig::new([from, to], [3, 3])
-                .with_padding(PaddingConfig2d::Explicit(1, 1))
+                .with_padding(PaddingConfig2d::Explicit(1, 1, 1, 1))
                 // The bias would be subtracted straight back out by the
                 // normalization which follows it.
                 .with_bias(false)
@@ -325,7 +324,7 @@ impl DoubleConvConfig {
     }
 }
 
-impl<B: Backend> DoubleConv<B> {
+impl DoubleConv {
     /// How many of this block's two normalizations' channels have no finite
     /// variance — see [`UNet::constant_channels`].
     fn constant_channels(&self) -> usize {
@@ -343,7 +342,7 @@ impl<B: Backend> DoubleConv<B> {
     }
 
     /// `[batch, in, h, w]` to `[batch, out, h, w]`.
-    pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+    pub fn forward(&self, x: Tensor<4>) -> Tensor<4> {
         let x = self
             .relu
             .forward(self.first_norm.forward(self.first.forward(x)));
@@ -355,13 +354,13 @@ impl<B: Backend> DoubleConv<B> {
 /// One step back up: double the picture, put the skip connection back beside
 /// it, and make something of the two together.
 #[derive(Module, Debug)]
-pub struct UpBlock<B: Backend> {
+pub struct UpBlock {
     /// The learned doubling. A plain interpolation would do, but a
     /// transposed convolution lets the network decide what a doubled pixel
     /// looks like, which is most of what the decoder is for.
-    upsample: ConvTranspose2d<B>,
+    upsample: ConvTranspose2d,
     /// Reads the doubled picture and the skip connection as one.
-    conv: DoubleConv<B>,
+    conv: DoubleConv,
 }
 
 /// What an [`UpBlock`] is to be built as.
@@ -375,7 +374,7 @@ pub struct UpBlockConfig {
 
 impl UpBlockConfig {
     /// Builds the block on `device`.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> UpBlock<B> {
+    pub fn init(&self, device: &Device) -> UpBlock {
         UpBlock {
             // Kernel two, stride two: every pixel becomes exactly the two by
             // two it was pooled out of, with no overlap to leave a
@@ -390,9 +389,9 @@ impl UpBlockConfig {
     }
 }
 
-impl<B: Backend> UpBlock<B> {
+impl UpBlock {
     /// Doubles `x`, concatenates `skip` onto it and convolves the two.
-    pub fn forward(&self, x: Tensor<B, 4>, skip: Tensor<B, 4>) -> Tensor<B, 4> {
+    pub fn forward(&self, x: Tensor<4>, skip: Tensor<4>) -> Tensor<4> {
         let x = self.upsample.forward(x);
         self.conv.forward(Tensor::cat(vec![x, skip], 1))
     }
@@ -401,19 +400,13 @@ impl<B: Backend> UpBlock<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::{NdArray, NdArrayDevice};
-
-    type TestBackend = NdArray<f32>;
-
     #[test]
     fn the_head_is_a_class_per_symbol_the_frame_and_the_angle() {
-        let device = NdArrayDevice::default();
-        let net = UNetConfig::new(5)
-            .with_base_channels(4)
-            .init::<TestBackend>(&device);
+        let device = Device::flex();
+        let net = UNetConfig::new(5).with_base_channels(4).init(&device);
 
         // Sixteen divides by two four times, which is what the depth asks.
-        let image = Tensor::<TestBackend, 4>::zeros([2, 3, 16, 16], &device);
+        let image = Tensor::<4>::zeros([2, 3, 16, 16], &device);
         // Five symbols, the frame, and the sine and the cosine.
         assert_eq!(net.forward(image.clone()).dims(), [2, 5 + 3, 16, 16]);
         // And the answer is the dataset's own shape: no frame channel.
@@ -427,17 +420,19 @@ mod tests {
     /// share of one rather than one.
     #[test]
     fn the_class_channels_of_an_answer_are_probabilities() {
-        let device = NdArrayDevice::default();
-        let net = UNetConfig::new(3)
-            .with_base_channels(4)
-            .init::<TestBackend>(&device);
+        let device = Device::flex();
+        let net = UNetConfig::new(3).with_base_channels(4).init(&device);
 
         let answer = net.predict(Tensor::zeros([1, 3, 16, 16], &device));
         let [_, channels, height, width] = answer.dims();
         assert_eq!(channels, 5);
 
         let classes = answer.slice([0..1, 0..3, 0..height, 0..width]);
-        assert!(classes.clone().greater_equal_elem(0.0).all().into_scalar());
+        assert!(classes
+            .clone()
+            .greater_equal_elem(0.0)
+            .all()
+            .into_scalar::<bool>());
         let total: f32 = classes.sum().into_scalar();
         // Three of the four the softmax spread itself over: under one pixel
         // for pixel, and nowhere near nothing.

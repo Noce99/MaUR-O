@@ -26,7 +26,7 @@
 //! to give.
 //!
 //! The run folder is all it is told, because a run folder holds everything:
-//! `training.json` says how big the network was, `best.mpk` is its weights,
+//! `training.json` says how big the network was, `best.bpk` is its weights,
 //! and `classes.json` and the symbol set beside them — copied out of the
 //! dataset when the run started — say which symbol a class is and how much
 //! ground a pixel covers. A run from before those were copied in is a run
@@ -91,8 +91,8 @@ pub struct Args {
     /// suffix, beside it.
     map_file: Option<PathBuf>,
 
-    /// The weights to use. Defaults to best.mpk in the run folder, which is
-    /// the epoch which validated best; a checkpoint/007/model.mpk may be
+    /// The weights to use. Defaults to best.bpk in the run folder, which is
+    /// the epoch which validated best; a checkpoint/007/model.bpk may be
     /// named instead.
     #[arg(short = 'w', long, value_name = "FILE")]
     weights: Option<PathBuf>,
@@ -237,7 +237,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         // symbol for each leaf, so there are no tiles to cut it into, and
         // the areas it makes are worked out from the curves themselves.
         let (model, _) =
-            load_tree::<Backend>(&args.run, args.weights.as_deref(), &device()).map_err(failed)?;
+            load_tree(&args.run, args.weights.as_deref(), &device()).map_err(failed)?;
         if model.classes() != notes.classes {
             return Err(failed(format!(
                 "the network tells {} symbols apart and {} was written for {}",
@@ -271,7 +271,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         .map_err(failed)?
     } else {
         let (model, config) =
-            load::<Backend>(&args.run, args.weights.as_deref(), &device()).map_err(failed)?;
+            load(&args.run, args.weights.as_deref(), &device()).map_err(failed)?;
         if model.classes() != notes.classes {
             return Err(failed(format!(
                 "the network tells {} symbols apart and {} was written for {}",
@@ -396,40 +396,37 @@ pub fn main(args: Args) -> ExitCode {
 // The backend, picked at build time as burn takes it as a type parameter.
 // The same three as `train`, without the `Autodiff` wrapper: a record is
 // tensor data and loads into either, and nothing here needs a gradient.
-use backend::{device, Backend, BACKEND};
+use backend::{device, BACKEND};
 
-#[cfg(feature = "cuda")]
 mod backend {
-    /// What to call it when the tool says which one it used.
+    use burn::tensor::Device;
+
+    /// What the tool prints for the backend it was built against.
+    #[cfg(feature = "cuda")]
     pub const BACKEND: &str = "CUDA";
-    /// NVIDIA, through CUDA.
-    pub type Backend = burn::backend::Cuda;
-    /// The one device, whichever it is.
-    pub fn device() -> burn::backend::cuda::CudaDevice {
-        Default::default()
-    }
-}
-
-#[cfg(all(feature = "wgpu", not(feature = "cuda")))]
-mod backend {
-    /// What to call it when the tool says which one it used.
+    /// What the tool prints for the backend it was built against.
+    #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
     pub const BACKEND: &str = "wgpu";
-    /// Any GPU with a Vulkan, Metal or DX12 driver.
-    pub type Backend = burn::backend::Wgpu;
-    /// The one device, whichever it is.
-    pub fn device() -> burn::backend::wgpu::WgpuDevice {
-        Default::default()
-    }
-}
+    /// What the tool prints for the backend it was built against.
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    pub const BACKEND: &str = "flex";
 
-#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
-mod backend {
-    /// What to call it when the tool says which one it used.
-    pub const BACKEND: &str = "ndarray";
-    /// The pure Rust backend, which runs anywhere the renderer does.
-    pub type Backend = burn::backend::NdArray;
+    /// The one device, whichever it is. No gradient tape over it: the
+    /// trainers ask for that themselves.
+    #[cfg(feature = "cuda")]
+    pub fn device() -> Device {
+        Device::cuda(burn::tensor::DeviceIndex::Default)
+    }
+
     /// The one device, whichever it is.
-    pub fn device() -> burn::backend::ndarray::NdArrayDevice {
-        Default::default()
+    #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
+    pub fn device() -> Device {
+        Device::wgpu(burn::tensor::DeviceKind::DefaultDevice)
+    }
+
+    /// The one device, whichever it is.
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    pub fn device() -> Device {
+        Device::flex()
     }
 }

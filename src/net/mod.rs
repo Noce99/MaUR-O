@@ -38,9 +38,9 @@
 //!
 //! # The backend
 //!
-//! Picked at build time, since burn's is a type parameter rather than a
-//! setting: `ndarray` by default, which is pure Rust and runs anywhere the
-//! renderer does and is far too slow for a real run; `--features wgpu` for
+//! Picked at build time, as the device the binaries ask burn for: `flex` by
+//! default, which is pure Rust and runs anywhere the renderer does and is
+//! far too slow for a real run; `--features wgpu` for
 //! any GPU with a Vulkan, Metal or DX12 driver; `--features cuda` for an
 //! NVIDIA one. The `train` binary is built against whichever is on.
 

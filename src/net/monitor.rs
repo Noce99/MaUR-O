@@ -34,9 +34,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use burn::data::dataset::Dataset;
-use burn::train::renderer::{MetricState, MetricsRenderer, TrainingProgress};
-use burn::train::TrainingInterrupter;
+use burn::data::dataset::{Dataset, DatasetError};
+use burn::train::logger::{EvaluationProgressLogger, TrainingProgressLogger};
+use burn::train::metric::{MetricDefinition, MetricId, NumericEntry};
+use burn::train::renderer::{
+    EvaluationName, MetricState, MetricsRenderer, MetricsRendererEvaluation,
+    MetricsRendererTraining,
+};
+use burn::train::Interrupter;
 
 /// The environment variable naming the job folder a run reports to. Without
 /// it a run reports to nobody.
@@ -375,8 +380,8 @@ impl Monitor {
     /// Starts the thread which keeps the status fresh and the control file
     /// read: asks `interrupter` to stop the run on `stop`, and closes or
     /// opens the gate on `pause`. Ends with the run, once it has ended.
-    pub fn watch(&self, interrupter: TrainingInterrupter) {
-        self.watch_with(move || interrupter.stop());
+    pub fn watch(&self, interrupter: Interrupter) {
+        self.watch_with(move || interrupter.stop(Some("asked to stop from the job folder")));
     }
 
     /// [`Monitor::watch`] for a loop which is not burn's learner: `on_stop`
@@ -489,6 +494,7 @@ impl Monitor {
                 .ok(),
             validating: false,
             steps: 0,
+            loss_id: None,
         }
     }
 
@@ -549,7 +555,7 @@ impl<I, D: Dataset<I>> Dataset<I> for Gated<D> {
         self.inner.len()
     }
 
-    fn get(&self, index: usize) -> Option<I> {
+    fn get(&self, index: usize) -> Result<I, DatasetError> {
         self.gate.wait();
         self.inner.get(index)
     }
@@ -563,14 +569,22 @@ pub struct MonitorRenderer {
     /// Training steps seen. burn's own iteration counts from one again in
     /// every epoch, which is no use on a chart of the whole run.
     steps: usize,
+    /// Which metric is the loss, learned as the learner registers them.
+    loss_id: Option<MetricId>,
 }
 
 impl MonitorRenderer {
     fn loss(&mut self, state: MetricState) {
-        let MetricState::Numeric(entry, value) = state else {
+        let MetricState::Numeric(entry, Some(value)) = state else {
             return;
         };
-        if entry.name != "Loss" || !value.is_finite() {
+        // The epoch's own mean comes through as a final entry; the chart has
+        // a point per step and that one would be a second at the same place.
+        let value = match value {
+            NumericEntry::Final(_) => return,
+            value => value.current(),
+        };
+        if self.loss_id.as_ref() != Some(&entry.metric_id) || !value.is_finite() {
             return;
         }
         let mut status = self.status.lock().unwrap();
@@ -585,26 +599,9 @@ impl MonitorRenderer {
             writeln!(file, "{kind} {} {} {value}", status.epoch, status.iteration).ok();
         }
     }
-
-    fn progress(&mut self, item: TrainingProgress, validating: bool) {
-        self.validating = validating;
-        let mut status = self.status.lock().unwrap();
-        status.epoch = item.epoch;
-        status.epochs = item.epoch_total;
-        status.done = item.progress.items_processed;
-        status.of = item.progress.items_total;
-        status.validating = validating;
-        if !validating {
-            self.steps += 1;
-            status.iteration = self.steps;
-        }
-        if status.state == State::Starting {
-            status.state = State::Running;
-        }
-    }
 }
 
-impl MetricsRenderer for MonitorRenderer {
+impl MetricsRendererTraining for MonitorRenderer {
     fn update_train(&mut self, state: MetricState) {
         self.validating = false;
         self.loss(state);
@@ -614,13 +611,74 @@ impl MetricsRenderer for MonitorRenderer {
         self.validating = true;
         self.loss(state);
     }
+}
 
-    fn render_train(&mut self, item: TrainingProgress) {
-        self.progress(item, false);
+impl MetricsRendererEvaluation for MonitorRenderer {
+    fn update_test(&mut self, _name: EvaluationName, _state: MetricState) {}
+}
+
+impl TrainingProgressLogger for MonitorRenderer {
+    fn start(
+        &mut self,
+        total_epochs: usize,
+        starting_epoch: usize,
+        _total_items: Option<usize>,
+        _label: Option<&str>,
+    ) {
+        let mut status = self.status.lock().unwrap();
+        status.epochs = total_epochs;
+        // Epochs count from one, and the first split of each bumps this.
+        status.epoch = starting_epoch.saturating_sub(1);
     }
 
-    fn render_valid(&mut self, item: TrainingProgress) {
-        self.progress(item, true);
+    fn update_epoch(&mut self, _epoch: usize) {}
+
+    fn start_split(&mut self, split: &str, total_items: usize) {
+        self.validating = split == "valid";
+        let mut status = self.status.lock().unwrap();
+        if !self.validating {
+            status.epoch += 1;
+        }
+        status.done = 0;
+        status.of = total_items;
+        status.validating = self.validating;
+        if status.state == State::Starting {
+            status.state = State::Running;
+        }
+    }
+
+    fn update_split(&mut self, items_processed: usize) {
+        let mut status = self.status.lock().unwrap();
+        status.done = items_processed;
+        if !self.validating {
+            self.steps += 1;
+            status.iteration = self.steps;
+        }
+    }
+
+    fn end_split(&mut self) {}
+
+    fn end(&mut self) {}
+
+    fn log_event_training(&mut self, _event: String) {}
+}
+
+impl EvaluationProgressLogger for MonitorRenderer {
+    fn start_global_progress(&mut self, _total_tests: usize) {}
+    fn start_test(&mut self, _name: &str, _total_items: usize) {}
+    fn update_test_progress(&mut self, _items_processed: usize) {}
+    fn end_test(&mut self) {}
+    fn end_global_progress(&mut self) {}
+    fn log_event_evaluation(&mut self, _event: String) {}
+}
+
+impl MetricsRenderer for MonitorRenderer {
+    fn manual_close(&mut self) {}
+
+    fn register_metric(&mut self, definition: MetricDefinition) {
+        if definition.name.as_str() == "Loss" {
+            self.loss_id = Some(definition.metric_id);
+        }
     }
 }
 

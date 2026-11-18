@@ -2,10 +2,9 @@
 name = "maur-o"
 version = "1.0.0"
 edition = "2021"
-# The floor set by `bytemuck`, which burn pulls in and which declares no
-# `rust-version` of its own: it uses `stdarch_x86_avx512`, stable since 1.89.
-# The renderer's own dependencies stop at 1.88, set by the `image` crate.
-rust-version = "1.89"
+# The floor set by `burn`, which declares 1.95 (0.22). The renderer's own
+# dependencies stop at 1.88, set by the `image` crate.
+rust-version = "1.95"
 description = "Renders OpenOrienteering Mapper maps to raster images"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Noce99/MaUR-O"
@@ -61,7 +60,7 @@ geo-svg = "0.8"
 # every one of them. `tui` is the ratatui dashboard `train --dashboard`
 # switches to; built in always, since which renderer runs is a runtime
 # choice, not one worth a build for.
-burn = { version = "0.18", default-features = false, features = ["std", "train", "autodiff", "tui"] }
+burn = { version = "0.22", default-features = false, features = ["std", "train", "autodiff", "tui"] }
 
 # The real fontconfig rather than `fontdb`'s bundled parser: only it resolves a
 # generic family ("Sans Serif") the way Qt and Mapper do. See `crate::text`.
@@ -94,8 +93,8 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 # anywhere the renderer does. Slow, and right for a first run and for CI.
 # Not really optional despite the name: `net::training` names it outright for
 # the backend its metrics are computed on, whatever the model is trained with.
-default = ["ndarray"]
-ndarray = ["burn/ndarray"]
+default = ["flex"]
+flex = ["burn/flex"]
 # The two below are additive on top of it rather than alternatives to it --
 # what they change is the device `train` and `image_to_map` ask for, so
 # `--features wgpu` is the whole of what a GPU run needs.

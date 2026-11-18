@@ -56,9 +56,8 @@ use burn::config::Config;
 use burn::module::{Module, Param};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
 use burn::nn::{Linear, LinearConfig, Relu};
-use burn::prelude::Backend;
 use burn::tensor::activation::{sigmoid, softmax};
-use burn::tensor::{Int, Tensor, TensorData};
+use burn::tensor::{Device, Int, Tensor, TensorData};
 
 use crate::net::unet::{DoubleConv, DoubleConvConfig};
 
@@ -102,12 +101,12 @@ pub struct TreeNetConfig {
 /// A network which answers a picture with a tree of curves and the symbol of
 /// each leaf.
 #[derive(Module, Debug)]
-pub struct TreeNet<B: Backend> {
-    down: Vec<DoubleConv<B>>,
+pub struct TreeNet {
+    down: Vec<DoubleConv>,
     pool: MaxPool2d,
-    hidden: Linear<B>,
-    curves: Linear<B>,
-    leaves: Linear<B>,
+    hidden: Linear,
+    curves: Linear,
+    leaves: Linear,
     relu: Relu,
     classes: usize,
     depth: usize,
@@ -123,7 +122,7 @@ impl TreeNetConfig {
     /// straight line through the middle at its own angle (the golden angle
     /// apart): a start where every curve is distinct, since a start where
     /// they are all the same is one the tree never breaks out of.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> TreeNet<B> {
+    pub fn init(&self, device: &Device) -> TreeNet {
         assert!(
             self.size.is_multiple_of(1 << LEVELS),
             "the side must divide by {}",
@@ -143,7 +142,11 @@ impl TreeNetConfig {
         let leaves = 1 << self.depth;
         let mut curves =
             LinearConfig::new(self.hidden, nodes * self.control_points * 2).init(device);
-        curves.weight = curves.weight.map(|w| w * 0.1);
+        // Rebuilt from its data rather than mapped: a mapped parameter is
+        // a node of the graph it was made in, which the first backward pass
+        // consumes, and the second step then cannot reach it.
+        let small = curves.weight.val().without_autodiff().mul_scalar(0.1);
+        curves.weight = Param::from_tensor(Tensor::from_data(small.into_data(), device));
         curves.bias = Some(Param::from_tensor(Tensor::from_data(
             TensorData::new(
                 straight_cuts(nodes, self.control_points),
@@ -187,23 +190,23 @@ fn straight_cuts(nodes: usize, points: usize) -> Vec<f32> {
 
 /// What a forward pass says.
 #[derive(Clone, Debug)]
-pub struct TreeAnswer<B: Backend> {
+pub struct TreeAnswer {
     /// The control points of every cut, `[batch, 2^depth - 1, points, 2]`,
     /// the root first and level by level after it.
-    pub curves: Tensor<B, 4>,
+    pub curves: Tensor<4>,
     /// The logits of every leaf, `[batch, 2^depth, classes + 1]`.
-    pub leaves: Tensor<B, 3>,
+    pub leaves: Tensor<3>,
 }
 
-impl<B: Backend> TreeNet<B> {
+impl TreeNet {
     /// Reads a picture, `[batch, 3, size, size]`.
-    pub fn forward(&self, image: Tensor<B, 4>) -> TreeAnswer<B> {
+    pub fn forward(&self, image: Tensor<4>) -> TreeAnswer {
         let [batch, ..] = image.dims();
         let mut x = image;
         for block in &self.down {
             x = self.pool.forward(block.forward(x));
         }
-        let x: Tensor<B, 2> = self.relu.forward(self.hidden.forward(x.flatten::<2>(1, 3)));
+        let x: Tensor<2> = self.relu.forward(self.hidden.forward(x.flatten::<2>(1, 3)));
 
         let nodes = (1 << self.depth) - 1;
         let raw = self.curves.forward(x.clone());
@@ -225,14 +228,14 @@ impl<B: Backend> TreeNet<B> {
     ///
     /// `temperature` is in picture widths: `0.05` blurs a cut over a twentieth
     /// of the picture.
-    pub fn partition(&self, curves: Tensor<B, 4>, temperature: f32) -> Tensor<B, 3> {
+    pub fn partition(&self, curves: Tensor<4>, temperature: f32) -> Tensor<3> {
         let device = curves.device();
         let [batch, ..] = curves.dims();
-        let pixels = pixel_centers::<B>(self.size, &device);
+        let pixels = pixel_centers(self.size, &device);
         let area = self.size * self.size;
-        let basis = bernstein::<B>(self.control_points, self.samples, &device);
+        let basis = bernstein(self.control_points, self.samples, &device);
 
-        let mut share = Tensor::<B, 3>::ones([batch, 1, area], &device);
+        let mut share = Tensor::<3>::ones([batch, 1, area], &device);
         for level in 0..self.depth {
             let first = (1 << level) - 1;
             let count = 1 << level;
@@ -254,7 +257,7 @@ impl<B: Backend> TreeNet<B> {
 
     /// The class distribution of every pixel, `[batch, classes + 1, size,
     /// size]`, out of an answer.
-    pub fn probabilities(&self, answer: &TreeAnswer<B>, temperature: f32) -> Tensor<B, 4> {
+    pub fn probabilities(&self, answer: &TreeAnswer, temperature: f32) -> Tensor<4> {
         let [batch, leaves, classes] = answer.leaves.dims();
         let share = self.partition(answer.curves.clone(), temperature);
         // [B, C, L] x [B, L, P] -> [B, C, P], the leaves' own softmax mixed
@@ -268,12 +271,7 @@ impl<B: Backend> TreeNet<B> {
 
     /// The negative log-likelihood of the label, `class` being
     /// `[batch, size, size]` with the frame as `classes`.
-    pub fn loss(
-        &self,
-        image: Tensor<B, 4>,
-        class: Tensor<B, 3, Int>,
-        temperature: f32,
-    ) -> Tensor<B, 1> {
+    pub fn loss(&self, image: Tensor<4>, class: Tensor<3, Int>, temperature: f32) -> Tensor<1> {
         let answer = self.forward(image);
         let probabilities = self.probabilities(&answer, temperature);
         let [batch, _, height, width] = probabilities.dims();
@@ -308,7 +306,7 @@ impl<B: Backend> TreeNet<B> {
 
     /// The class each leaf of `answer` says, picture 0 of the batch: the
     /// likeliest of its logits, the frame being [`TreeNet::classes`].
-    pub fn leaf_classes(&self, answer: &TreeAnswer<B>) -> Vec<usize> {
+    pub fn leaf_classes(&self, answer: &TreeAnswer) -> Vec<usize> {
         let [_, leaves, _] = answer.leaves.dims();
         answer
             .leaves
@@ -317,7 +315,7 @@ impl<B: Backend> TreeNet<B> {
             .argmax(2)
             .into_data()
             .convert::<i64>()
-            .to_vec::<i64>()
+            .try_to_vec::<i64>()
             .unwrap_or_default()
             .into_iter()
             .map(|class| class as usize)
@@ -335,20 +333,20 @@ impl<B: Backend> TreeNet<B> {
     /// at 64, which is what makes the answer a vector one. Worked in chunks
     /// of pixels, since the distance to every sample of every cut of a level
     /// is a tensor as long as the picture is large.
-    pub fn leaf_map(&self, curves: Tensor<B, 4>, width: usize, height: usize) -> Vec<u32> {
+    pub fn leaf_map(&self, curves: Tensor<4>, width: usize, height: usize) -> Vec<u32> {
         const CHUNK: usize = 16_384;
         let device = curves.device();
-        let basis = bernstein::<B>(self.control_points, self.samples, &device);
+        let basis = bernstein(self.control_points, self.samples, &device);
         let total = width * height;
         let mut leaves = Vec::with_capacity(total);
         let mut start = 0;
         while start < total {
             let end = (start + CHUNK).min(total);
-            let pixels = pixel_centers_of::<B>(width, height, start..end, &device);
+            let pixels = pixel_centers_of(width, height, start..end, &device);
             let count = end - start;
             // Where each pixel of the chunk is in the level it has come to:
             // its place among that level's nodes.
-            let mut node = Tensor::<B, 3, Int>::zeros([1, 1, count], &device);
+            let mut node = Tensor::<3, Int>::zeros([1, 1, count], &device);
             for level in 0..self.depth {
                 let first = (1 << level) - 1;
                 let nodes = 1 << level;
@@ -366,7 +364,7 @@ impl<B: Backend> TreeNet<B> {
             let chunk: Vec<i64> = node
                 .into_data()
                 .convert::<i64>()
-                .to_vec::<i64>()
+                .try_to_vec::<i64>()
                 .unwrap_or_default();
             leaves.extend(chunk.into_iter().map(|leaf| leaf as u32));
             start = end;
@@ -377,19 +375,19 @@ impl<B: Backend> TreeNet<B> {
 
 /// The centre of every pixel of a `size` square in picture coordinates,
 /// `[1, 1, size * size, 1, 2]` (x, then y), row by row.
-fn pixel_centers<B: Backend>(size: usize, device: &B::Device) -> Tensor<B, 5> {
+fn pixel_centers(size: usize, device: &Device) -> Tensor<5> {
     pixel_centers_of(size, size, 0..size * size, device)
 }
 
 /// The centres of pixels `range` (counted row by row) of a `width` by
 /// `height` picture, in picture coordinates: `[1, 1, range.len(), 1, 2]`,
 /// x then y, both across `[0, 1]` whatever the picture's shape.
-fn pixel_centers_of<B: Backend>(
+fn pixel_centers_of(
     width: usize,
     height: usize,
     range: std::ops::Range<usize>,
-    device: &B::Device,
-) -> Tensor<B, 5> {
+    device: &Device,
+) -> Tensor<5> {
     let count = range.len();
     let mut xy = Vec::with_capacity(count * 2);
     for at in range {
@@ -401,7 +399,7 @@ fn pixel_centers_of<B: Backend>(
 
 /// The Bernstein basis, `[1, 1, samples, points, 1]`: row `m` weighs each
 /// control point at the `m`-th of `samples` evenly spaced parameters.
-fn bernstein<B: Backend>(points: usize, samples: usize, device: &B::Device) -> Tensor<B, 5> {
+fn bernstein(points: usize, samples: usize, device: &Device) -> Tensor<5> {
     let degree = points - 1;
     let mut basis = Vec::with_capacity(samples * points);
     for m in 0..samples {
@@ -426,11 +424,7 @@ fn bernstein<B: Backend>(points: usize, samples: usize, device: &B::Device) -> T
 /// by a straight ray past each end, and the distance is the least to any of
 /// the resulting segments; the sign is that of the cross product with the
 /// segment it is nearest to.
-fn signed_distance<B: Backend>(
-    cuts: Tensor<B, 4>,
-    basis: Tensor<B, 5>,
-    pixels: Tensor<B, 5>,
-) -> Tensor<B, 3> {
+fn signed_distance(cuts: Tensor<4>, basis: Tensor<5>, pixels: Tensor<5>) -> Tensor<3> {
     let [batch, nodes, points, _] = cuts.dims();
     let [.., samples, _, _] = basis.dims();
     let [.., area, _, _] = pixels.dims();
@@ -513,16 +507,16 @@ fn signed_distance<B: Backend>(
 /// — positive being `(-dy, dx)` from the way the cut runs there — and back.
 /// A pixel is inside where a ray to the right of it crosses the polygon an odd
 /// number of times, which is the even-odd rule.
-fn inside_polygon<B: Backend>(
-    line: Tensor<B, 4>,
-    pixels: Tensor<B, 5>,
+fn inside_polygon(
+    line: Tensor<4>,
+    pixels: Tensor<5>,
     batch: usize,
     nodes: usize,
     area: usize,
-) -> Tensor<B, 3> {
+) -> Tensor<3> {
     let points = line.dims()[2];
     let at = |i: usize| line.clone().slice([0..batch, 0..nodes, i..i + 1, 0..2]);
-    let normal = |v: Tensor<B, 4>| {
+    let normal = |v: Tensor<4>| {
         let dx = v.clone().slice([0..batch, 0..nodes, 0..1, 0..1]);
         let dy = v.slice([0..batch, 0..nodes, 0..1, 1..2]);
         let length = (dx.clone() * dx.clone() + dy.clone() * dy.clone())
@@ -547,7 +541,7 @@ fn inside_polygon<B: Backend>(
         vec![ring.slice([0..batch, 0..nodes, 1..edges, 0..2]), first],
         2,
     );
-    let column = |t: &Tensor<B, 4>, c: usize| {
+    let column = |t: &Tensor<4>, c: usize| {
         t.clone()
             .slice([0..batch, 0..nodes, 0..edges, c..c + 1])
             .reshape([batch, nodes, 1, edges])
@@ -578,7 +572,7 @@ fn inside_polygon<B: Backend>(
 }
 
 /// A vector `[.., 2]` scaled to length one.
-fn unit<B: Backend>(v: Tensor<B, 4>) -> Tensor<B, 4> {
+fn unit(v: Tensor<4>) -> Tensor<4> {
     let length = v
         .clone()
         .powf_scalar(2.0)
@@ -591,13 +585,7 @@ fn unit<B: Backend>(v: Tensor<B, 4>) -> Tensor<B, 4> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::{NdArray, NdArrayDevice};
-    use burn::backend::Autodiff;
-    use burn::module::AutodiffModule;
-    use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-
-    type Plain = NdArray<f32>;
-    type Diff = Autodiff<Plain>;
+    use burn::optim::{AdamConfig, GradientsParams};
 
     const SIZE: usize = 32;
 
@@ -631,11 +619,11 @@ mod tests {
 
     #[test]
     fn the_leaves_tile_the_picture() {
-        let device = NdArrayDevice::default();
+        let device = Device::flex();
         let net = TreeNetConfig::new(2)
             .with_size(SIZE)
             .with_depth(3)
-            .init::<Plain>(&device);
+            .init(&device);
         let answer = net.forward(Tensor::zeros([2, 3, SIZE, SIZE], &device));
         assert_eq!(answer.curves.dims(), [2, 7, 6, 2]);
         assert_eq!(answer.leaves.dims(), [2, 8, 3]);
@@ -661,14 +649,14 @@ mod tests {
         use crate::tree_vector::CutTree;
         use geo::Contains;
 
-        let device = NdArrayDevice::default();
+        let device = Device::flex();
         let (depth, points, samples, side) = (3, 8, 24, 48);
         let net = TreeNetConfig::new(8)
             .with_size(SIZE)
             .with_depth(depth)
             .with_control_points(points)
             .with_samples(samples)
-            .init::<Plain>(&device);
+            .init(&device);
         let nodes = (1 << depth) - 1;
 
         for seed in 1..=6u64 {
@@ -684,7 +672,7 @@ mod tests {
             let values: Vec<f64> = (0..nodes * points * 2)
                 .map(|_| -0.3 + 1.6 * random())
                 .collect();
-            let curves = Tensor::<Plain, 4>::from_data(
+            let curves = Tensor::<4>::from_data(
                 TensorData::new(
                     values.iter().map(|&v| v as f32).collect::<Vec<_>>(),
                     [1, nodes, points, 2],
@@ -736,11 +724,11 @@ mod tests {
     /// away, and the hard one can be asked at any size.
     #[test]
     fn the_hard_tree_assigns_every_pixel_a_leaf_at_any_size() {
-        let device = NdArrayDevice::default();
+        let device = Device::flex();
         let net = TreeNetConfig::new(2)
             .with_size(SIZE)
             .with_depth(3)
-            .init::<Plain>(&device);
+            .init(&device);
         let answer = net.forward(Tensor::zeros([1, 3, SIZE, SIZE], &device));
         let leaves = net.leaf_map(answer.curves.clone(), SIZE, SIZE);
         assert_eq!(leaves.len(), SIZE * SIZE);
@@ -753,7 +741,7 @@ mod tests {
             .argmax(1)
             .into_data()
             .convert::<i64>()
-            .to_vec()
+            .try_to_vec::<i64>()
             .unwrap();
         let agree = leaves
             .iter()
@@ -775,18 +763,14 @@ mod tests {
     /// The distance is a distance and the sign is a side.
     #[test]
     fn a_straight_cut_is_a_signed_distance() {
-        let device = NdArrayDevice::default();
+        let device = Device::flex();
         // The horizontal line y = 0.5, run left to right.
-        let cuts = Tensor::<Plain, 4>::from_data(
+        let cuts = Tensor::<4>::from_data(
             TensorData::new(vec![0.1, 0.5, 0.9, 0.5], [1, 1, 2, 2]),
             &device,
         );
-        let s = signed_distance(
-            cuts,
-            bernstein::<Plain>(2, 8, &device),
-            pixel_centers::<Plain>(4, &device),
-        );
-        let s: Vec<f32> = s.into_data().to_vec().unwrap();
+        let s = signed_distance(cuts, bernstein(2, 8, &device), pixel_centers(4, &device));
+        let s: Vec<f32> = s.into_data().try_to_vec::<f32>().unwrap();
         // Pixel centres are 0.125, 0.375, 0.625, 0.875 down; row 0 is 0.375
         // above the line and row 3 is 0.375 below it, and they differ in sign.
         assert!((s[0].abs() - 0.375).abs() < 1e-4, "{}", s[0]);
@@ -799,11 +783,11 @@ mod tests {
     #[test]
     #[ignore = "two minutes in release and hours in debug: cargo test --release -- --ignored"]
     fn it_learns_to_cut_four_pictures() {
-        let device = NdArrayDevice::default();
+        let device = Device::flex().autodiff();
         let mut net = TreeNetConfig::new(3)
             .with_size(SIZE)
             .with_depth(3)
-            .init::<Diff>(&device);
+            .init(&device);
 
         let specs = [
             (0.0_f32, -0.15, 0.15),
@@ -818,17 +802,15 @@ mod tests {
             images.extend(image);
             classes.extend(class);
         }
-        let image =
-            Tensor::<Diff, 4>::from_data(TensorData::new(images, [4, 3, SIZE, SIZE]), &device);
-        let class =
-            Tensor::<Diff, 3, Int>::from_data(TensorData::new(classes, [4, SIZE, SIZE]), &device);
+        let image = Tensor::<4>::from_data(TensorData::new(images, [4, 3, SIZE, SIZE]), &device);
+        let class = Tensor::<3, Int>::from_data(TensorData::new(classes, [4, SIZE, SIZE]), &device);
 
-        let mut optimizer = AdamConfig::new().init::<Diff, TreeNet<Diff>>();
+        let mut optimizer = AdamConfig::new().init();
         let mut first = 0.0;
         let mut last = 0.0;
         for step in 0..400 {
             let loss = net.loss(image.clone(), class.clone(), 0.05);
-            let value: f32 = loss.clone().into_scalar();
+            let value: f32 = loss.clone().into_scalar::<f32>();
             if step == 0 {
                 first = value;
             }
@@ -839,12 +821,12 @@ mod tests {
         eprintln!("loss {first:.3} -> {last:.3}");
 
         let valid = net.valid();
-        let answer = valid.forward(image.clone().inner());
+        let answer = valid.forward(image.clone().without_autodiff());
         let probabilities = valid.probabilities(&answer, 0.05);
         let predicted = probabilities.argmax(1).reshape([4, SIZE, SIZE]);
-        let truth = class.inner();
-        let right: f32 =
-            predicted.equal(truth).int().sum().into_scalar() as f32 / (4 * SIZE * SIZE) as f32;
+        let truth = class.without_autodiff();
+        let right: f32 = predicted.equal(truth).int().sum().into_scalar::<i64>() as f32
+            / (4 * SIZE * SIZE) as f32;
         eprintln!("pixel accuracy {right:.3}");
         assert!(last < first * 0.5, "{first} -> {last}");
         assert!(right > 0.8, "accuracy {right}");

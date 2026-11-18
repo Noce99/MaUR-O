@@ -70,9 +70,9 @@ together.
 
 Dependencies:
 
-- **A working `cargo`/Rust toolchain, version 1.89 or newer** (edition 2021).
-  1.89 is the floor set by `bytemuck`, which burn pulls in; the renderer's own
-  dependencies stop at 1.88, which is what the `image` crate asks for.
+- **A working `cargo`/Rust toolchain, version 1.95 or newer** (edition 2021).
+  1.95 is the floor set by burn (0.22); the renderer's own dependencies stop
+  at 1.88, which is what the `image` crate asks for.
 
 That is all it takes to build: no C toolchain, no `pkg-config`, no `-dev`
 package. Drawing *text* correctly wants one ordinary runtime library on top —
@@ -955,8 +955,8 @@ everything else — which does mean burn's dependency tree, an order of
 magnitude larger than the renderer's, is compiled whether a map is being read
 back or only drawn.
 
-**The backend is a build-time choice**, since burn takes it as a type
-parameter: `ndarray` by default — pure Rust, runs anywhere, and far too slow
+**The backend is a build-time choice**, as the device the binaries ask
+burn for: `flex` by default — pure Rust, runs anywhere, and far too slow
 for a real run — with `--features wgpu` for any GPU with a Vulkan, Metal or
 DX12 driver and `--features cuda` for an NVIDIA one.
 
@@ -1042,7 +1042,7 @@ trainings/
     ├── train/01/…             the metrics of every epoch, per split
     ├── valid/01/…
     ├── image_valid/08/…       the pictures that epoch read back, drawn
-    └── best.mpk               the weights of the epoch which validated best
+    └── best.bpk               the weights of the epoch which validated best
 ```
 
 Epoch numbers are zero-padded to the width of the last epoch the run was set
@@ -1053,8 +1053,8 @@ A checkpoint is everything it would take to carry the run on from that epoch —
 the weights, the optimizer's state and the scheduler's — and on a full-size
 model that is not small, so **the last five epochs are checkpointed and the
 rest are not**. The epoch which validated best is kept as well, however far
-back it was, which is what lets `best.mpk` be a *copy* of that epoch's
-`model.mpk` rather than whatever `fit` handed back: the last epoch is only the
+back it was, which is what lets `best.bpk` be a *copy* of that epoch's
+`model.bpk` rather than whatever the learner handed back: the last epoch is only the
 best one when the run was still improving when it stopped. The metric logs
 under `train/` and `valid/` are untouched by any of this — every epoch keeps
 its numbers.
@@ -1080,7 +1080,7 @@ It is trained on the **whole picture**, reduced to `--size` pixels (a divisor of
 16), rather than on crops, so an epoch is short — a few dozen of them make a run.
 `--crop`, `--crops-per-map`, `--angle-weight`, `--weight-decay`, `--overhang`,
 `--workers` and `--image-valid` are the U-Net's and are ignored. A run is
-`TreeNet_<date>/` holding `tree.json`, `architecture.txt`, `best.mpk` and
+`TreeNet_<date>/` holding `tree.json`, `architecture.txt`, `best.bpk` and
 `valid.png` (*picture | label | answer*). It reports to the terminal interface
 like any other run and can be paused and stopped.
 
@@ -1285,8 +1285,8 @@ every parameter it is handed, a normalization's own `gamma` among them, and
 it should be and the run learns half as much. `--weight-decay 0` turns it off
 and makes the optimizer plain Adam.
 
-This is *not* what keeps a checkpoint readable — that is the recorder, which
-writes at full precision because a normalization's running **variance** does
+This is *not* what keeps a checkpoint readable — that is the weights file,
+which is written at full precision because a normalization's running **variance** does
 not fit in an `f16`. The two are separate.
 
 ### `mauro net show-batches`

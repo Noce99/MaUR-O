@@ -47,7 +47,6 @@ use std::process::ExitCode;
 
 use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataset::Dataset;
-use burn::prelude::Backend;
 use burn::tensor::{Int, Tensor};
 use clap::Parser;
 use image::{Rgb, RgbImage};
@@ -148,8 +147,8 @@ pub struct Args {
     #[arg(long, default_value_t = 0, value_name = "PIXELS")]
     margin: usize,
 
-    /// The weights to use with --run. Defaults to best.mpk in the run folder;
-    /// a checkpoint/007/model.mpk may be named instead.
+    /// The weights to use with --run. Defaults to best.bpk in the run folder;
+    /// a checkpoint/007/model.bpk may be named instead.
     #[arg(short = 'W', long, value_name = "FILE")]
     weights: Option<PathBuf>,
 }
@@ -280,8 +279,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
     let model = match &args.run {
         None => None,
         Some(run) => {
-            let (model, config) =
-                load::<Built>(run, args.weights.as_deref(), &device).map_err(&failed)?;
+            let (model, config) = load(run, args.weights.as_deref(), &device).map_err(&failed)?;
             if config.crop != args.crop {
                 eprintln!(
                     "Warning: {} trained at {} pixels and these crops are {}: the network is \
@@ -334,7 +332,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             .iter()
             .map(|&index| {
                 half.get(index)
-                    .unwrap_or_else(|| panic!("crop {index} is inside the dataset"))
+                    .unwrap_or_else(|_| panic!("crop {index} is inside the dataset"))
             })
             .collect();
 
@@ -423,11 +421,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
 /// The names and the corners do not survive a batch — the batcher stacks
 /// numbers — so what comes back here is the pixels alone, and the caller
 /// pairs each with the [`MapCrop`] it put in.
-fn unbatch<B: Backend>(
-    image: &Tensor<B, 4>,
-    class: &Tensor<B, 3, Int>,
-    angle: &Tensor<B, 4>,
-) -> Vec<MapCrop> {
+fn unbatch(image: &Tensor<4>, class: &Tensor<3, Int>, angle: &Tensor<4>) -> Vec<MapCrop> {
     let [batch, _, size, _] = image.dims();
     let images: Vec<f32> = image.clone().into_data().iter::<f32>().collect();
     let classed: Vec<i32> = class.clone().into_data().iter::<i32>().collect();
@@ -454,11 +448,7 @@ fn unbatch<B: Backend>(
 /// is already exactly the size the network takes, so there is nothing to
 /// tile. The argmax and the threshold are `net::predict::predict_image`'s,
 /// which is what makes this panel the same answer `image_to_map` would give.
-fn answers<B: Backend>(
-    model: &UNet<B>,
-    image: Tensor<B, 4>,
-    classes: usize,
-) -> Vec<(Vec<i32>, Vec<f32>)> {
+fn answers(model: &UNet, image: Tensor<4>, classes: usize) -> Vec<(Vec<i32>, Vec<f32>)> {
     let raw = model.forward(image);
     let [batch, channels, height, width] = raw.dims();
     let values: Vec<f32> = raw.into_data().iter::<f32>().collect();
@@ -756,42 +746,39 @@ fn print_patterns(
 
 // Which backend was built in -- see `train`, whose three these are. No
 // gradient tape over any of them: nothing here trains.
-#[cfg(feature = "cuda")]
 mod backend {
+    use burn::tensor::Device;
+
     /// What the tool prints for the backend it was built against.
+    #[cfg(feature = "cuda")]
     pub const BACKEND: &str = "CUDA";
-    /// NVIDIA, through CUDA.
-    pub type Backend = burn::backend::Cuda;
-    /// The one device, whichever it is.
-    pub fn device() -> burn::backend::cuda::CudaDevice {
-        Default::default()
-    }
-}
-
-#[cfg(all(feature = "wgpu", not(feature = "cuda")))]
-mod backend {
     /// What the tool prints for the backend it was built against.
+    #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
     pub const BACKEND: &str = "wgpu";
-    /// Any GPU with a Vulkan, Metal or DX12 driver.
-    pub type Backend = burn::backend::Wgpu;
-    /// The one device, whichever it is.
-    pub fn device() -> burn::backend::wgpu::WgpuDevice {
-        Default::default()
-    }
-}
-
-#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
-mod backend {
     /// What the tool prints for the backend it was built against.
-    pub const BACKEND: &str = "ndarray";
-    /// The pure Rust backend, which runs anywhere the renderer does.
-    pub type Backend = burn::backend::NdArray;
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    pub const BACKEND: &str = "flex";
+
+    /// The one device, whichever it is. No gradient tape over it: the
+    /// trainers ask for that themselves.
+    #[cfg(feature = "cuda")]
+    pub fn device() -> Device {
+        Device::cuda(burn::tensor::DeviceIndex::Default)
+    }
+
     /// The one device, whichever it is.
-    pub fn device() -> burn::backend::ndarray::NdArrayDevice {
-        Default::default()
+    #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
+    pub fn device() -> Device {
+        Device::wgpu(burn::tensor::DeviceKind::DefaultDevice)
+    }
+
+    /// The one device, whichever it is.
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    pub fn device() -> Device {
+        Device::flex()
     }
 }
 
 // The trait of the same name is already in scope, and generic code here is
 // written against it: the concrete one needs another name to be named by.
-use backend::{device, Backend as Built, BACKEND};
+use backend::{device, BACKEND};

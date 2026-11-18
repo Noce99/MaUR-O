@@ -12,24 +12,15 @@
 //! numbers are in the `training.json` the run wrote before it started, which
 //! is why [`load`] reads that first and the weights second.
 //!
-//! The recorder has to be the one which saved. That is `DefaultRecorder` —
-//! burn's named-messagepack file recorder at **full** precision — and it is
-//! full precision for one reason: a batch normalization's running variance
-//! does not fit in an `f16`. This network's reach 1e5 by the fourth level and
-//! `f16` tops out at 65504, so a run written by burn's `CompactRecorder`
-//! stored those channels as infinities, and a channel loaded with an infinite
-//! variance normalizes to nothing and emits its own bias everywhere. It costs
-//! a run nothing while it is going — training normalizes by the batch it is
-//! holding, and the model in memory is `f32` — and it costs every use of the
-//! file afterwards everything.
+//! The weights are a burnpack file (`.bpk`), burn's own record format, written
+//! at the precision the module holds, which is `f32`. That matters for one
+//! reason: a batch normalization's running variance does not fit in an `f16`.
+//! This network's reach 1e5 by the fourth level and `f16` tops out at 65504,
+//! so a file written at half precision stores those channels as infinities,
+//! and a channel loaded with an infinite variance normalizes to nothing and
+//! emits its own bias everywhere. [`load`] counts such channels and says so.
 //!
-//! A run written before that was so still opens — a record carries the type
-//! it was written in and burn widens it on the way back — but widening an
-//! infinity gives an infinity, so what comes back is the broken model rather
-//! than the one which trained. There is nothing to recover from such a file;
-//! the run has to be trained again.
-//!
-//! `best.mpk` is the epoch which validated best; a `checkpoint/007/model.mpk`
+//! `best.bpk` is the epoch which validated best; a `checkpoint/007/model.bpk`
 //! is the same format and loads the same way, which is what `weights` is for.
 //!
 //! # The picture
@@ -89,9 +80,8 @@ use std::path::Path;
 
 use burn::config::Config;
 use burn::module::Module;
-use burn::prelude::Backend;
-use burn::record::DefaultRecorder;
-use burn::tensor::{Tensor, TensorData};
+use burn::store::ModuleRecord;
+use burn::tensor::{Device, Tensor, TensorData};
 use image::RgbImage;
 
 use crate::differences::{difference_mask, Comparison, DEFAULT_TOLERANCE};
@@ -129,15 +119,15 @@ pub const ANGLE_LENGTH: f32 = 0.5;
 
 /// The model a run folder holds, and the configuration it was built to.
 ///
-/// `weights` names the record to load, and is `<run>/best.mpk` where it is
-/// `None`. A checkpoint — `<run>/checkpoint/007/model.mpk` — is the same
+/// `weights` names the record to load, and is `<run>/best.bpk` where it is
+/// `None`. A checkpoint — `<run>/checkpoint/007/model.bpk` — is the same
 /// format and may be named instead, which is how a run is looked at as it was
 /// part way through.
-pub fn load<B: Backend>(
+pub fn load(
     run: &Path,
     weights: Option<&Path>,
-    device: &B::Device,
-) -> Result<(UNet<B>, TrainingConfig), String> {
+    device: &Device,
+) -> Result<(UNet, TrainingConfig), String> {
     let configuration = run.join("training.json");
     if !configuration.exists() && run.join("tree.json").exists() {
         return Err(format!(
@@ -160,33 +150,66 @@ pub fn load<B: Backend>(
     let weights = weights.unwrap_or(&default);
     let model = UNetConfig::new(config.classes)
         .with_base_channels(config.base_channels)
-        .init::<B>(device)
-        .load_file(weights, &DefaultRecorder::new(), device)
-        .map_err(|e| {
-            format!(
-                "cannot read the weights from {}: {e}\nA run which was stopped before it \
-                 finished an epoch has none: there is no best.mpk and checkpoint/ is empty.",
-                weights.display(),
-            )
-        })?;
+        .init(device);
+    let model = load_weights(model, weights)?;
 
-    // A run from before the recorder was full precision. The file opens --
-    // burn widens what it was written in -- but widening an infinity gives
-    // an infinity, and a batch normalization channel loaded with one emits
-    // its own bias and nothing else. Said out loud, because the answer looks
-    // like a network which learned the wrong thing rather than like a file
-    // which lost what it learned.
+    // A file written at half precision. It opens, but a variance past 65504
+    // was stored as an infinity, and a batch normalization channel loaded
+    // with one emits its own bias and nothing else. Said out loud, because
+    // the answer looks like a network which learned the wrong thing rather
+    // than like a file which lost what it learned.
     let dead = model.constant_channels();
     if dead > 0 {
         eprintln!(
             "Warning: {} holds {dead} batch normalization channels whose variance is not finite. \
-             It was written at half precision, by a run from before that was fixed: every \
-             variance over 65504 was stored as an infinity, and a channel loaded with one is a \
-             constant. What this model says is worth no more than the file. Train again.",
+             It was written at half precision: every variance over 65504 was stored as an \
+             infinity, and a channel loaded with one is a constant. What this model says is worth no more than the file. Train again.",
             weights.display(),
         );
     }
     Ok((model, config))
+}
+
+/// Loads the weights in `weights` into `module`, which has to be built to the
+/// shape they were written in.
+///
+/// `weights` is the file as it was written: the `.bpk` of a [`ModuleRecord`],
+/// burn's burnpack format. A name without an extension is given one, which is
+/// how [`BEST_WEIGHTS`] is passed.
+pub fn load_weights<M: Module>(module: M, weights: &Path) -> Result<M, String> {
+    let weights = weights_file(weights);
+    let record = ModuleRecord::load(&weights).map_err(|e| {
+        format!(
+            "cannot read the weights from {}: {e}\nA run which was stopped before it \
+             finished an epoch has none: there is no best.bpk and checkpoint/ is empty.",
+            weights.display(),
+        )
+    })?;
+    module.try_load_record(record).map_err(|e| {
+        format!(
+            "the weights in {} do not fit the network: {e}",
+            weights.display(),
+        )
+    })
+}
+
+/// Saves `module`'s weights to `weights`, giving it the `.bpk` extension
+/// where it has none.
+pub fn save_weights<M: Module>(module: M, weights: &Path) -> Result<(), String> {
+    let weights = weights_file(weights);
+    module
+        .into_record()
+        .save(&weights)
+        .map_err(|e| format!("cannot write the weights to {}: {e}", weights.display()))
+}
+
+/// `path`, with the extension of a burnpack file where it has none.
+fn weights_file(path: &Path) -> std::path::PathBuf {
+    if path.extension().is_some() {
+        path.to_path_buf()
+    } else {
+        path.with_extension("bpk")
+    }
 }
 
 /// What the network says about a whole picture, tile by tile.
@@ -198,12 +221,12 @@ pub fn load<B: Backend>(
 /// Both are clamped rather than refused: a tile larger than the picture
 /// becomes the picture, and an overlap which would leave the tiles standing
 /// still becomes one that does not.
-pub fn predict_image<B: Backend>(
-    model: &UNet<B>,
+pub fn predict_image(
+    model: &UNet,
     image: &RgbImage,
     tile: usize,
     overlap: usize,
-    device: &B::Device,
+    device: &Device,
 ) -> SymbolGrid {
     let step = 1 << DEPTH;
     let (width, height) = (image.width() as usize, image.height() as usize);
@@ -236,7 +259,7 @@ pub fn predict_image<B: Backend>(
             let [_, channels, _, _] = raw.dims();
             let values = raw
                 .into_data()
-                .into_vec::<f32>()
+                .try_into_vec::<f32>()
                 .expect("the head is a tensor of floats");
             let classes = model.classes();
             let pixels = tile * tile;
@@ -362,14 +385,14 @@ impl ReadBack {
 /// `symbols` its opaque areas, which is [`Catalogue::opaque_areas`] of the
 /// same file.
 #[allow(clippy::too_many_arguments)]
-pub fn read_back<B: Backend>(
-    model: &UNet<B>,
+pub fn read_back(
+    model: &UNet,
     picture: &RgbImage,
     symbol_set: &Path,
     symbols: &[Entry],
     into: &Path,
     settings: &ReadBackSettings,
-    device: &B::Device,
+    device: &Device,
 ) -> Result<ReadBack, String> {
     let mut grid = predict_image(model, picture, settings.tile, settings.overlap, device);
     // A symbol with no pattern to turn gets no angle, whatever the two
@@ -385,11 +408,7 @@ pub fn read_back<B: Backend>(
 /// The picture is reduced to the size the network was trained on, the way the
 /// training reduced its pictures; the curves it answers with are in picture
 /// coordinates, so they say where to cut a picture of any size.
-pub fn tree_answer<B: Backend>(
-    model: &TreeNet<B>,
-    picture: &RgbImage,
-    device: &B::Device,
-) -> (CutTree, TreeAnswer<B>) {
+pub fn tree_answer(model: &TreeNet, picture: &RgbImage, device: &Device) -> (CutTree, TreeAnswer) {
     let size = model.size();
     let small = image::imageops::resize(
         picture,
@@ -404,7 +423,7 @@ pub fn tree_answer<B: Backend>(
                 pixel[channel] as f32 / 255.0;
         }
     }
-    let input = Tensor::<B, 4>::from_data(TensorData::new(pixels, [1, 3, size, size]), device);
+    let input = Tensor::<4>::from_data(TensorData::new(pixels, [1, 3, size, size]), device);
     let answer = model.forward(input);
 
     let [_, nodes, points, _] = answer.curves.dims();
@@ -413,7 +432,7 @@ pub fn tree_answer<B: Backend>(
         .clone()
         .into_data()
         .convert::<f32>()
-        .to_vec()
+        .try_to_vec::<f32>()
         .unwrap_or_default();
     let cuts = (0..nodes)
         .map(|node| {
@@ -441,11 +460,7 @@ pub fn tree_answer<B: Backend>(
 /// how many symbols it used — and for a picture to look at. The map a tree
 /// is read into does not go through it: see [`read_back_tree`]. A tree has no
 /// angle to give, so every cell has none.
-pub fn predict_tree_image<B: Backend>(
-    model: &TreeNet<B>,
-    picture: &RgbImage,
-    device: &B::Device,
-) -> SymbolGrid {
+pub fn predict_tree_image(model: &TreeNet, picture: &RgbImage, device: &Device) -> SymbolGrid {
     let (tree, answer) = tree_answer(model, picture, device);
     tree_grid(
         model,
@@ -457,10 +472,10 @@ pub fn predict_tree_image<B: Backend>(
 }
 
 /// [`predict_tree_image`] from an answer already in hand.
-fn tree_grid<B: Backend>(
-    model: &TreeNet<B>,
+fn tree_grid(
+    model: &TreeNet,
     tree: &CutTree,
-    answer: TreeAnswer<B>,
+    answer: TreeAnswer,
     width: usize,
     height: usize,
 ) -> SymbolGrid {
@@ -503,14 +518,14 @@ pub const TREE_TOLERANCE: f64 = 0.05;
 /// `symbols` is `Catalogue::opaque_areas` of `symbol_set`. The grid in the
 /// answer is made for the numbers a grid is good for, and is not what the map
 /// was written from.
-pub fn read_back_tree<B: Backend>(
-    model: &TreeNet<B>,
+pub fn read_back_tree(
+    model: &TreeNet,
     picture: &RgbImage,
     symbol_set: &Path,
     symbols: &[Entry],
     into: &Path,
     settings: &ReadBackSettings,
-    device: &B::Device,
+    device: &Device,
 ) -> Result<ReadBack, String> {
     let (tree, answer) = tree_answer(model, picture, device);
     let grid = tree_grid(
@@ -733,13 +748,13 @@ fn round_up(value: usize, step: usize) -> usize {
 /// and has to stay the one it uses: a network shown its input on another
 /// scale is being shown another picture. Past the edge of the image the tile
 /// is white, which is the frame a map is drawn inside.
-fn tile_tensor<B: Backend>(
+fn tile_tensor(
     image: &RgbImage,
     left: usize,
     top: usize,
     tile: usize,
-    device: &B::Device,
-) -> Tensor<B, 4> {
+    device: &Device,
+) -> Tensor<4> {
     let (width, height) = (image.width() as usize, image.height() as usize);
     let pixels = tile * tile;
     // White, which is 255 and so 1.0 on the scale below: a picture smaller
@@ -769,11 +784,7 @@ fn tile_tensor<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::{NdArray, NdArrayDevice};
     use image::Rgb;
-
-    type TestBackend = NdArray<f32>;
-
     /// A tree nobody trained, asked about a picture of a shape it was not
     /// built for: the grid is the picture's own size, every cell is a symbol
     /// of the set or the frame, and there is no angle anywhere.
@@ -781,11 +792,11 @@ mod tests {
     fn a_tree_reads_a_picture_of_any_size_into_a_grid_of_that_size() {
         use crate::net::tree::TreeNetConfig;
 
-        let device = NdArrayDevice::default();
+        let device = Device::flex();
         let model = TreeNetConfig::new(3)
             .with_size(32)
             .with_depth(2)
-            .init::<TestBackend>(&device);
+            .init(&device);
         let picture = RgbImage::from_pixel(50, 70, Rgb([200, 30, 30]));
         let grid = predict_tree_image(&model, &picture, &device);
         assert_eq!((grid.width, grid.height), (50, 70));
@@ -796,11 +807,9 @@ mod tests {
 
     /// A network nobody trained, which is enough to ask about shapes: what
     /// comes out of it is arbitrary, and it comes out of it for every pixel.
-    fn untrained(classes: usize) -> (UNet<TestBackend>, NdArrayDevice) {
-        let device = NdArrayDevice::default();
-        let model = UNetConfig::new(classes)
-            .with_base_channels(2)
-            .init::<TestBackend>(&device);
+    fn untrained(classes: usize) -> (UNet, Device) {
+        let device = Device::flex();
+        let model = UNetConfig::new(classes).with_base_channels(2).init(&device);
         (model, device)
     }
 
@@ -848,7 +857,7 @@ mod tests {
         let image = picture(16, 16);
         let grid = predict_image(&model, &image, 16, 0, &device);
 
-        let raw = model.forward(tile_tensor::<TestBackend>(&image, 0, 0, 16, &device));
+        let raw = model.forward(tile_tensor(&image, 0, 0, 16, &device));
         // The class logits are the first `classes + 1` channels: one per
         // symbol, and the frame after them.
         let winners = raw
@@ -856,7 +865,7 @@ mod tests {
             .argmax(1)
             .into_data()
             .convert::<i64>()
-            .into_vec::<i64>()
+            .try_into_vec::<i64>()
             .expect("an index per pixel");
         assert_eq!(winners.len(), grid.class.len());
         for (at, &winner) in winners.iter().enumerate() {
@@ -1060,7 +1069,7 @@ mod tests {
 
     /// A model saved and loaded back says the same thing about a picture.
     ///
-    /// The recorder keeps weights at half precision, which is lossy, and the
+    /// A file which kept weights at half precision would be lossy, and the
     /// running statistics of a batch norm are the numbers that loses most —
     /// so this is the check that what a run folder holds is still the network
     /// which trained.
@@ -1075,12 +1084,10 @@ mod tests {
             .with_base_channels(2)
             .save(dir.path().join("training.json"))
             .expect("cannot write the configuration");
-        model
-            .save_file(dir.path().join(BEST_WEIGHTS), &DefaultRecorder::new())
+        save_weights(model.clone(), &dir.path().join(BEST_WEIGHTS))
             .expect("cannot write the weights");
 
-        let (read, _) =
-            load::<TestBackend>(dir.path(), None, &device).expect("cannot read them back");
+        let (read, _) = load(dir.path(), None, &device).expect("cannot read them back");
         let after = predict_image(&read, &image, 16, 4, &device);
         assert_eq!(before.class, after.class);
     }
@@ -1119,19 +1126,15 @@ mod tests {
     #[test]
     fn a_run_without_weights_is_refused() {
         let dir = tempfile::tempdir().expect("a temporary folder");
-        let device = NdArrayDevice::default();
+        let device = Device::flex();
 
-        let error = load::<TestBackend>(dir.path(), None, &device)
-            .err()
-            .expect("no configuration to read");
+        let error = load(dir.path(), None, &device).expect_err("no configuration to read");
         assert!(error.contains("training.json"), "{error}");
 
         TrainingConfig::new(3)
             .save(dir.path().join("training.json"))
             .expect("cannot write the configuration");
-        let error = load::<TestBackend>(dir.path(), None, &device)
-            .err()
-            .expect("no weights to read");
+        let error = load(dir.path(), None, &device).expect_err("no weights to read");
         assert!(error.contains("weights"), "{error}");
     }
 }

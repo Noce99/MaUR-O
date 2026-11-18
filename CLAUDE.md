@@ -18,7 +18,7 @@ and adds it to the map as a template. `mauro net` is the machine-learning side:
 it generates a dataset of random maps with pixel labels, trains a U-Net (`burn`)
 to read a rendered map back into its opaque area symbols, and turns what it
 reads into a map again (`src/net/`, `vectorize.rs`; the backend is a Cargo
-feature, `ndarray` by default, `wgpu` or `cuda` for a GPU). All of these are
+feature, `flex` by default, `wgpu` or `cuda` for a GPU). All of these are
 subcommands of the one binary, `mauro`.
 
 This crate is consumed by the o-mnia web app from a vendored copy (via
@@ -46,7 +46,7 @@ cargo doc --no-deps --locked                   # doc build; every public item mu
 ```
 
 CI (`.github/workflows/ci.yml`) runs the above across Linux/macOS/Windows plus an
-MSRV check pinned to Rust 1.89 (the floor set by `bytemuck`, which `burn` pulls in). There is no
+MSRV check pinned to Rust 1.95 (the floor set by `burn`). There is no
 Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 
 ### The `mauro` subcommands

@@ -5,7 +5,7 @@
 //! else: the **whole picture**, small, because what it answers is where the
 //! cuts run across it, and a crop of a map has cuts running off its edges. So
 //! this is its own loop, with the same run folder, the same job folder
-//! ([`Monitor`]) and the same `best.mpk`, and nothing else shared.
+//! ([`Monitor`]) and the same `best.bpk`, and nothing else shared.
 //!
 //! What a run does:
 //!
@@ -22,7 +22,7 @@
 //! * validates after every epoch, keeping the weights which validated best.
 //!
 //! The run folder holds `tree.json` (this configuration), `architecture.txt`,
-//! the dataset's `classes.json` and symbol set, `best.mpk`, and `valid.png`:
+//! the dataset's `classes.json` and symbol set, `best.bpk`, and `valid.png`:
 //! the first validation pictures as *picture | label | answer*, which is the
 //! quickest way to see what the net reads.
 //!
@@ -35,16 +35,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use burn::config::Config;
-use burn::module::{AutodiffModule, Module};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::prelude::Backend;
-use burn::record::DefaultRecorder;
-use burn::tensor::backend::AutodiffBackend;
-use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
+use burn::module::Module;
+use burn::optim::{AdamConfig, GradientsParams};
+use burn::tensor::{Device, Int, Tensor, TensorData};
 use image::imageops::FilterType;
 
 use crate::ground_truth::{GroundTruth, BACKGROUND};
 use crate::net::monitor::Monitor;
+use crate::net::predict::{load_weights, save_weights};
 use crate::net::training::{copy_dataset_notes, run_directory};
 use crate::net::tree::{TreeNet, TreeNetConfig};
 
@@ -166,11 +164,7 @@ pub fn load_samples(dataset: &Path, size: usize, classes: usize) -> Result<Vec<S
         .collect()
 }
 
-fn batch<B: Backend>(
-    samples: &[&Sample],
-    size: usize,
-    device: &B::Device,
-) -> (Tensor<B, 4>, Tensor<B, 3, Int>) {
+fn batch(samples: &[&Sample], size: usize, device: &Device) -> (Tensor<4>, Tensor<3, Int>) {
     let n = samples.len();
     let image: Vec<f32> = samples
         .iter()
@@ -187,17 +181,17 @@ fn batch<B: Backend>(
 }
 
 /// The mean loss and the share of pixels right over `samples`.
-fn evaluate<B: Backend>(
-    net: &TreeNet<B>,
+fn evaluate(
+    net: &TreeNet,
     samples: &[Sample],
     size: usize,
     temperature: f32,
-    device: &B::Device,
+    device: &Device,
 ) -> (f64, f64) {
     let (mut loss, mut right) = (0.0, 0usize);
     for chunk in samples.chunks(16) {
         let refs: Vec<&Sample> = chunk.iter().collect();
-        let (image, class) = batch::<B>(&refs, size, device);
+        let (image, class) = batch(&refs, size, device);
         let answer = net.forward(image.clone());
         let probabilities = net.probabilities(&answer, temperature);
         let predicted = probabilities.argmax(1).reshape([chunk.len(), size, size]);
@@ -205,9 +199,8 @@ fn evaluate<B: Backend>(
             .equal(class.clone())
             .int()
             .sum()
-            .into_scalar()
-            .elem::<i64>() as usize;
-        let value: f64 = net.loss(image, class, temperature).into_scalar().elem();
+            .into_scalar::<i64>() as usize;
+        let value: f64 = net.loss(image, class, temperature).into_scalar::<f64>();
         loss += value * chunk.len() as f64;
     }
     let n = samples.len().max(1);
@@ -215,12 +208,12 @@ fn evaluate<B: Backend>(
 }
 
 /// A picture of *picture | label | answer* for the first few of `samples`.
-fn write_panel<B: Backend>(
-    net: &TreeNet<B>,
+fn write_panel(
+    net: &TreeNet,
     samples: &[Sample],
     size: usize,
     temperature: f32,
-    device: &B::Device,
+    device: &Device,
     path: &Path,
 ) -> Result<(), String> {
     let rows = samples.len().min(PANEL_ROWS);
@@ -235,14 +228,14 @@ fn write_panel<B: Backend>(
     };
     let mut panel = image::RgbImage::new((3 * size) as u32, (rows * size) as u32);
     for (row, sample) in samples.iter().take(rows).enumerate() {
-        let (image, _) = batch::<B>(&[sample], size, device);
+        let (image, _) = batch(&[sample], size, device);
         let answer = net.forward(image);
         let predicted: Vec<i64> = net
             .probabilities(&answer, temperature)
             .argmax(1)
             .into_data()
             .convert::<i64>()
-            .to_vec()
+            .try_to_vec::<i64>()
             .map_err(|e| format!("cannot read the answer back: {e:?}"))?;
         for y in 0..size {
             for x in 0..size {
@@ -265,12 +258,12 @@ fn write_panel<B: Backend>(
 }
 
 /// The tree network a run folder holds, and the configuration it was
-/// trained with. `weights` is `<run>/best.mpk` where it is `None`.
-pub fn load_tree<B: Backend>(
+/// trained with. `weights` is `<run>/best.bpk` where it is `None`.
+pub fn load_tree(
     run: &Path,
     weights: Option<&Path>,
-    device: &B::Device,
-) -> Result<(TreeNet<B>, TreeTrainingConfig), String> {
+    device: &Device,
+) -> Result<(TreeNet, TreeTrainingConfig), String> {
     let file = run.join("tree.json");
     let config = TreeTrainingConfig::load(&file).map_err(|e| {
         format!(
@@ -279,7 +272,7 @@ pub fn load_tree<B: Backend>(
             file.display(),
         )
     })?;
-    let default = run.join(BEST_WEIGHTS).with_extension("mpk");
+    let default = run.join(BEST_WEIGHTS).with_extension("bpk");
     let weights = weights.unwrap_or(&default);
     let model = TreeNetConfig::new(config.classes)
         .with_size(config.size)
@@ -287,25 +280,18 @@ pub fn load_tree<B: Backend>(
         .with_control_points(config.control_points)
         .with_samples(config.samples)
         .with_base_channels(config.base_channels)
-        .init::<B>(device)
-        .load_file(weights, &DefaultRecorder::new(), device)
-        .map_err(|e| {
-            format!(
-                "cannot read the weights from {}: {e}\nA run which was stopped before it \
-                 finished an epoch has none.",
-                weights.display(),
-            )
-        })?;
+        .init(device);
+    let model = load_weights(model, weights)?;
     Ok((model, config))
 }
 
 /// Trains a tree network on `dataset`, writing the run under `into`.
 /// Returns the run's folder.
-pub fn train_tree<B: AutodiffBackend>(
+pub fn train_tree(
     dataset: &Path,
     into: &Path,
     config: TreeTrainingConfig,
-    device: B::Device,
+    device: Device,
     monitor: Option<Monitor>,
 ) -> Result<PathBuf, String> {
     if !config.size.is_multiple_of(16) || config.size == 0 {
@@ -320,6 +306,9 @@ pub fn train_tree<B: AutodiffBackend>(
     if config.control_points < 2 || config.samples < 3 {
         return Err("a cut needs at least 2 control points and 3 samples".to_string());
     }
+
+    // Gradients are asked for on the device, and not by a backend type.
+    let device = device.autodiff();
 
     let run = run_directory(into, "TreeNet")?;
     config
@@ -373,10 +362,10 @@ pub fn train_tree<B: AutodiffBackend>(
         .with_control_points(config.control_points)
         .with_samples(config.samples)
         .with_base_channels(config.base_channels)
-        .init::<B>(&device);
+        .init(&device);
     std::fs::write(run.join("architecture.txt"), format!("{net}\n"))
         .map_err(|e| format!("cannot write architecture.txt: {e}"))?;
-    let mut optimizer = AdamConfig::new().init::<B, TreeNet<B>>();
+    let mut optimizer = AdamConfig::new().init();
 
     let steps_per_epoch = train.len().div_ceil(config.batch_size).max(1);
     let total = (config.epochs * steps_per_epoch).max(1);
@@ -397,9 +386,9 @@ pub fn train_tree<B: AutodiffBackend>(
                 + (config.temperature_end - config.temperature_start) * iteration as f32
                     / total as f32;
             let picked: Vec<&Sample> = chunk.iter().map(|&i| &train[i]).collect();
-            let (image, class) = batch::<B>(&picked, config.size, &device);
+            let (image, class) = batch(&picked, config.size, &device);
             let loss = net.loss(image, class, temperature);
-            let value: f64 = loss.clone().into_scalar().elem();
+            let value: f64 = loss.clone().detach().into_scalar::<f64>();
             let grads = GradientsParams::from_grads(loss.backward(), &net);
             net = optimizer.step(config.learning_rate, net, grads);
             iteration += 1;
@@ -440,19 +429,15 @@ pub fn train_tree<B: AutodiffBackend>(
         }
         if loss.is_nan() || loss < best {
             best = if loss.is_nan() { best } else { loss };
-            net.clone()
-                .save_file(run.join(BEST_WEIGHTS), &DefaultRecorder::new())
-                .map_err(|e| format!("cannot write the weights: {e}"))?;
+            save_weights(net.clone(), &run.join(BEST_WEIGHTS))?;
         }
     }
 
     // The last word: the weights as they are when the run had nothing better
     // to keep, and a picture of what they read.
-    let weights = run.join(BEST_WEIGHTS).with_extension("mpk");
+    let weights = run.join(BEST_WEIGHTS).with_extension("bpk");
     if !weights.is_file() {
-        net.clone()
-            .save_file(run.join(BEST_WEIGHTS), &DefaultRecorder::new())
-            .map_err(|e| format!("cannot write the weights: {e}"))?;
+        save_weights(net.clone(), &run.join(BEST_WEIGHTS))?;
     }
     let checked = net.valid();
     let inner = checked.devices().first().cloned().unwrap_or_default();

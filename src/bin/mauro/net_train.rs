@@ -33,10 +33,10 @@
 //! `checkpoint/001/`, `002/`, … for what a checkpointed epoch left behind —
 //! the last five and the best one, rather than all of them — `train/001/` and
 //! `valid/001/` for the metrics of every epoch, `experiment.log` for what the
-//! run logged, and `best.mpk` — the weights of the epoch which validated best
+//! run logged, and `best.bpk` — the weights of the epoch which validated best
 //! — at the end of it.
 //!
-//! The backend is chosen when this is built, not when it is run: `ndarray` by
+//! The backend is chosen when this is built, not when it is run: `flex` by
 //! default, which is pure Rust and slow; `--features wgpu` for any GPU with a
 //! Vulkan, Metal or DX12 driver; `--features cuda` for an NVIDIA one.
 //!
@@ -380,7 +380,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             args.size,
         );
         let monitor = Monitor::from_env();
-        let result = train_tree::<Backend>(
+        let result = train_tree(
             &args.dataset,
             &args.trainings,
             config,
@@ -423,7 +423,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
     // Told where to report by whoever started this detached — the terminal
     // interface does — and by nobody else.
     let monitor = Monitor::from_env();
-    let result = train::<Backend>(
+    let result = train(
         &args.dataset,
         &args.trainings,
         config,
@@ -466,41 +466,38 @@ pub fn main(args: Args) -> ExitCode {
 // as a setting, so it is a compile time choice, and these are the three the
 // crate's features offer. CUDA first and the pure Rust one last: where more
 // than one is on, the fastest is what was meant.
-#[cfg(feature = "cuda")]
 mod backend {
+    use burn::tensor::Device;
+
     /// What the tool prints for the backend it was built against.
+    #[cfg(feature = "cuda")]
     pub const BACKEND: &str = "CUDA";
-    /// The backend, with a gradient tape over it.
-    pub type Backend = burn::backend::Autodiff<burn::backend::Cuda>;
-    /// The device it runs on.
-    pub fn device() -> burn::backend::cuda::CudaDevice {
-        Default::default()
-    }
-}
-
-#[cfg(all(feature = "wgpu", not(feature = "cuda")))]
-mod backend {
     /// What the tool prints for the backend it was built against.
+    #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
     pub const BACKEND: &str = "wgpu";
-    /// The backend, with a gradient tape over it.
-    pub type Backend = burn::backend::Autodiff<burn::backend::Wgpu>;
-    /// The device it runs on.
-    pub fn device() -> burn::backend::wgpu::WgpuDevice {
-        Default::default()
-    }
-}
-
-#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
-mod backend {
     /// What the tool prints for the backend it was built against.
-    pub const BACKEND: &str = "ndarray (pure Rust, and slow: build with --features wgpu or \
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    pub const BACKEND: &str = "flex (pure Rust, and slow: build with --features wgpu or \
                                --features cuda for a real run)";
-    /// The backend, with a gradient tape over it.
-    pub type Backend = burn::backend::Autodiff<burn::backend::NdArray>;
-    /// The device it runs on.
-    pub fn device() -> burn::backend::ndarray::NdArrayDevice {
-        Default::default()
+
+    /// The one device, whichever it is. No gradient tape over it: the
+    /// trainers ask for that themselves.
+    #[cfg(feature = "cuda")]
+    pub fn device() -> Device {
+        Device::cuda(burn::tensor::DeviceIndex::Default)
+    }
+
+    /// The one device, whichever it is.
+    #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
+    pub fn device() -> Device {
+        Device::wgpu(burn::tensor::DeviceKind::DefaultDevice)
+    }
+
+    /// The one device, whichever it is.
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    pub fn device() -> Device {
+        Device::flex()
     }
 }
 
-use backend::{device, Backend, BACKEND};
+use backend::{device, BACKEND};

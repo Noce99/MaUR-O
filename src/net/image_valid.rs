@@ -50,7 +50,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use burn::prelude::Backend;
+use burn::tensor::Device;
 use burn::train::metric::store::EventStoreClient;
 use burn::train::EarlyStoppingStrategy;
 use image::RgbImage;
@@ -88,7 +88,8 @@ pub const DEFAULT_IMAGE_VALID: usize = 3;
 /// Built once, before training starts, and handed to the learner as its
 /// early stopping strategy — see the module documentation for why that is
 /// the hook.
-pub struct ImageValidation<B: Backend> {
+#[derive(Clone)]
+pub struct ImageValidation {
     /// The run folder: where the checkpoints are read from and the sheets
     /// written to.
     run: PathBuf,
@@ -101,10 +102,10 @@ pub struct ImageValidation<B: Backend> {
     /// How to read a picture back, which is what `mauro net image-to-map` would do.
     settings: ReadBackSettings,
     /// Where the network is run.
-    device: B::Device,
+    device: Device,
 }
 
-impl<B: Backend> ImageValidation<B> {
+impl ImageValidation {
     /// The phase for a run, over `pictures`.
     ///
     /// `pictures` is already cut to the number asked for; an empty list is a
@@ -116,8 +117,8 @@ impl<B: Backend> ImageValidation<B> {
         symbol_set: &Path,
         symbols: Vec<Entry>,
         settings: ReadBackSettings,
-        device: B::Device,
-    ) -> ImageValidation<B> {
+        device: Device,
+    ) -> ImageValidation {
         ImageValidation {
             run: run.to_path_buf(),
             pictures,
@@ -144,7 +145,7 @@ impl<B: Backend> ImageValidation<B> {
             return Ok(());
         }
         let weights = self.run.join("checkpoint").join(format!("model-{epoch}"));
-        let file = weights.with_extension("mpk");
+        let file = weights.with_extension("bpk");
         if !file.is_file() {
             return Ok(());
         }
@@ -152,7 +153,7 @@ impl<B: Backend> ImageValidation<B> {
         let folder = self.run.join(IMAGE_VALID).join(epoch_name(epoch));
         std::fs::create_dir_all(&folder)
             .map_err(|e| format!("cannot make {}: {e}", folder.display()))?;
-        let (model, _) = load::<B>(&self.run, Some(&file), &self.device)?;
+        let (model, _) = load(&self.run, Some(&file), &self.device)?;
 
         // Where the maps go while they are being drawn from, and no further:
         // what is kept of an epoch is its sheets. Dropped at the end of the
@@ -242,7 +243,7 @@ impl<B: Backend> ImageValidation<B> {
 /// Not a stopping strategy at all: the one place burn will call user code
 /// once an epoch, with the epoch's number and after its checkpoint has been
 /// handed over. It always answers that the run should carry on.
-impl<B: Backend> EarlyStoppingStrategy for ImageValidation<B> {
+impl EarlyStoppingStrategy for ImageValidation {
     fn should_stop(&mut self, epoch: usize, _store: &EventStoreClient) -> bool {
         // The epoch before this one, whose checkpoint is certainly written —
         // see the module documentation. A failure here is a picture nobody
@@ -264,8 +265,8 @@ fn epoch_name(epoch: usize) -> String {
 
 /// Which epochs the checkpoint folder still holds.
 ///
-/// Both the shapes it takes: `model-7.mpk` while the run is going, and
-/// `007/model.mpk` once the run has tidied itself up.
+/// Both the shapes it takes: `model-7.bpk` while the run is going, and
+/// `007/model.bpk` once the run has tidied itself up.
 fn kept_epochs(checkpoint: &Path) -> BTreeSet<usize> {
     let mut epochs = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(checkpoint) else {
@@ -315,10 +316,10 @@ mod tests {
             if grouped {
                 let folder = at.join(format!("{epoch:03}"));
                 std::fs::create_dir_all(&folder).expect("an epoch's folder");
-                std::fs::write(folder.join("model.mpk"), []).expect("the weights");
+                std::fs::write(folder.join("model.bpk"), []).expect("the weights");
             } else {
-                std::fs::write(at.join(format!("model-{epoch}.mpk")), []).expect("the weights");
-                std::fs::write(at.join(format!("optim-{epoch}.mpk")), []).expect("the optimizer");
+                std::fs::write(at.join(format!("model-{epoch}.bpk")), []).expect("the weights");
+                std::fs::write(at.join(format!("optim-{epoch}.bpk")), []).expect("the optimizer");
             }
         }
     }
@@ -353,7 +354,7 @@ mod tests {
             std::fs::write(folder.join("map_001.png"), []).expect("a sheet");
         }
 
-        let phase: ImageValidation<burn::backend::NdArray> = ImageValidation::new(
+        let phase: ImageValidation = ImageValidation::new(
             run,
             vec![PathBuf::from("map_001.png")],
             Path::new("symbols.omap"),
@@ -377,7 +378,7 @@ mod tests {
     #[test]
     fn a_phase_over_no_pictures_does_nothing() {
         let dir = tempfile::tempdir().expect("a temporary folder");
-        let phase: ImageValidation<burn::backend::NdArray> = ImageValidation::new(
+        let phase: ImageValidation = ImageValidation::new(
             dir.path(),
             Vec::new(),
             Path::new("symbols.omap"),
