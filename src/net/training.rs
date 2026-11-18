@@ -61,6 +61,20 @@
 //!   than as the error of any particular pixel. Zero is perfect, ninety is a
 //!   network pointing anywhere, and a batch with no rotatable pattern in it
 //!   counts as one pixel of ninety rather than as a division by nothing.
+//! * **Scale error** — for a network with a scale head (see
+//!   [`crate::net::unet::UNetConfig::scale_head`]), how far out it was
+//!   about how dense its crops were, in per cent: `e^m - 1` of the mean `m`
+//!   of how far its logarithm was from the label's. Ten per cent is a map
+//!   read back a tenth too big or too small.
+//!
+//! # How dense the picture is
+//!
+//! A scale head answers one number per crop, `ln(density / normal)`, and is
+//! scored with a Huber loss on it: a squared error near the answer, which is
+//! smooth where the network is nearly right, and a straight one beyond
+//! [`SCALE_HUBER`], so that a crop of white paper — which shows nothing of
+//! how dense the map is and is labelled with its map's density all the same
+//! — pulls no harder than any other wrong answer.
 
 use std::path::{Path, PathBuf};
 
@@ -95,7 +109,12 @@ use crate::net::data::{MapBatch, MapBatcher, MapDataset, CROP, DEFAULT_CROPS_PER
 use crate::net::image_valid::{ImageValidation, DEFAULT_IMAGE_VALID, IMAGE_VALID};
 use crate::net::monitor::{Gated, Monitor};
 use crate::net::predict::{save_weights, ReadBackSettings};
-use crate::net::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEPTH};
+use crate::net::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEFAULT_SCALE_WEIGHT, DEPTH};
+
+/// Where the scale loss turns from a squared error into a straight one, as a
+/// natural logarithm: a tenth, which is a picture about a tenth denser or
+/// sparser than the network says. See the module documentation.
+pub const SCALE_HUBER: f64 = 0.1;
 
 /// How much the angle term counts for beside the classes. See
 /// [`TrainingConfig::angle_weight`].
@@ -372,6 +391,13 @@ pub struct MapOutput {
     /// through: their union, which is what the intersection is divided by to
     /// give the IoU.
     pub line_union: Tensor<1>,
+    /// How far out the scale head was, summed over the crops: the absolute
+    /// difference between its logarithm and the label's. Nought where the
+    /// network has no scale head.
+    pub scale_error: Tensor<1>,
+    /// How many crops that was summed over: the batch, or nought where the
+    /// network has no scale head.
+    pub scaled: Tensor<1>,
 }
 
 impl ItemLazy for MapOutput {
@@ -389,6 +415,8 @@ impl ItemLazy for MapOutput {
             angled: self.angled.without_autodiff(),
             line_intersection: self.line_intersection.without_autodiff(),
             line_union: self.line_union.without_autodiff(),
+            scale_error: self.scale_error.without_autodiff(),
+            scaled: self.scaled.without_autodiff(),
         })
     }
 }
@@ -413,6 +441,15 @@ impl Adaptor<LineInput> for MapOutput {
         LineInput {
             intersection: self.line_intersection.clone(),
             union: self.line_union.clone(),
+        }
+    }
+}
+
+impl Adaptor<ScaleInput> for MapOutput {
+    fn adapt(&self) -> ScaleInput {
+        ScaleInput {
+            error: self.scale_error.clone(),
+            crops: self.scaled.clone(),
         }
     }
 }
@@ -620,6 +657,114 @@ impl Numeric for LineIouMetric {
     fn final_value(&self) -> NumericEntry {
         self.state.final_value()
     }
+}
+
+/// What [`ScaleErrorMetric`] is fed.
+pub struct ScaleInput {
+    error: Tensor<1>,
+    crops: Tensor<1>,
+}
+
+/// How far out the scale head was about how dense its crops were, in per
+/// cent: `e^m - 1` of the mean `m` of `|ln(said) - ln(was)|` over the crops.
+///
+/// In per cent rather than as a logarithm because that is what it costs a map
+/// read back with it: a scale error of ten per cent is a map a tenth too big
+/// or too small.
+#[derive(Clone)]
+pub struct ScaleErrorMetric {
+    name: MetricName,
+    state: NumericMetricState,
+}
+
+impl Default for ScaleErrorMetric {
+    fn default() -> Self {
+        ScaleErrorMetric {
+            name: std::sync::Arc::new("Scale error".to_string()),
+            state: NumericMetricState::default(),
+        }
+    }
+}
+
+impl ScaleErrorMetric {
+    /// Creates the metric.
+    pub fn new() -> ScaleErrorMetric {
+        ScaleErrorMetric::default()
+    }
+
+    fn format(&self) -> FormatOptions {
+        FormatOptions::new(self.name.clone()).unit("%").precision(2)
+    }
+}
+
+impl Metric for ScaleErrorMetric {
+    type Input = ScaleInput;
+
+    fn name(&self) -> MetricName {
+        self.name.clone()
+    }
+
+    fn attributes(&self) -> MetricAttributes {
+        NumericAttributes {
+            unit: Some("%".to_string()),
+            higher_is_better: false,
+        }
+        .into()
+    }
+
+    fn update(
+        &mut self,
+        input: &ScaleInput,
+        _metadata: &MetricMetadata,
+    ) -> Result<SerializedEntry, TensorReadError> {
+        let crops = scalar(&input.crops)?;
+        let mean = scalar(&input.error)? / crops.max(1.0);
+        self.state
+            .update(100.0 * mean.exp_m1(), crops.max(1.0) as usize);
+        Ok(self.state.compute_update(self.format()))
+    }
+
+    fn compute(&mut self) -> Result<SerializedEntry, TensorReadError> {
+        Ok(self.state.compute_final(self.format()))
+    }
+
+    fn clear(&mut self) {
+        self.state.reset()
+    }
+}
+
+impl Numeric for ScaleErrorMetric {
+    fn value(&self) -> Option<NumericEntry> {
+        Some(self.state.current_value())
+    }
+
+    fn running_value(&self) -> Option<NumericEntry> {
+        Some(self.state.running_value())
+    }
+
+    fn final_value(&self) -> NumericEntry {
+        self.state.final_value()
+    }
+}
+
+/// The scale head's loss, and how far out it was.
+///
+/// `said` and `wanted` are `[batch, 1]` natural logarithms of how much denser
+/// than the normal a crop is. The loss is a Huber loss with its knee at
+/// [`SCALE_HUBER`], scaled to have the slope of an absolute error past it, so
+/// that the weight of the term means the same thing near the answer as far
+/// from it; the second number is the sum of the absolute errors, which is
+/// what the metric reads.
+fn scale_loss(said: Tensor<2>, wanted: Tensor<2>) -> (Tensor<1>, Tensor<1>) {
+    let delta = SCALE_HUBER as f32;
+    let error = (said - wanted).abs();
+    // Squared within the knee, straight beyond it, meeting with the same
+    // value and slope at it.
+    let near = error.clone().lower_elem(delta).float();
+    let squared = error.clone().powi_scalar(2).div_scalar(2.0 * delta);
+    let straight = error.clone().sub_scalar(delta / 2.0);
+    let loss = (squared * near.clone() + straight * near.neg().add_scalar(1.0)).mean();
+    (loss, error.sum())
 }
 
 /// What [`AngleMetric`] is fed.
@@ -849,7 +994,7 @@ impl UNet {
     /// the counts the metrics divide.
     pub fn forward_step(&self, batch: MapBatch) -> MapOutput {
         let device = batch.image.device();
-        let raw = self.forward(batch.image);
+        let (raw, said_scale) = self.forward_all(batch.image);
         let [size, channels, height, width] = raw.dims();
         let classes = self.classes();
         let pixels = size * height * width;
@@ -922,16 +1067,32 @@ impl UNet {
 
         let agreement = agreement(predicted, wanted, has_angle);
 
+        // How dense each crop is, where the network says so.
+        let (scale_loss, scale_error, scaled) = match said_scale {
+            Some(said) => {
+                let (loss, error) = scale_loss(said, batch.scale);
+                (loss, error, Tensor::from_data([size as f32], &device))
+            }
+            None => (
+                Tensor::from_data([0.0f32], &device),
+                Tensor::from_data([0.0f32], &device),
+                Tensor::from_data([0.0f32], &device),
+            ),
+        };
+
         MapOutput {
             loss: class_loss
                 + angle_loss.mul_scalar(self.angle_weight())
-                + lines_loss.mul_scalar(self.line_weight()),
+                + lines_loss.mul_scalar(self.line_weight())
+                + scale_loss.mul_scalar(self.scale_weight()),
             correct,
             pixels: Tensor::from_data([pixels as f32], &device),
             agreement,
             angled,
             line_intersection,
             line_union,
+            scale_error,
+            scaled,
         }
     }
 }
@@ -1042,6 +1203,16 @@ pub struct TrainingConfig {
     /// What the lines term counts for beside the ground's.
     #[config(default = 1.0)]
     pub line_weight: f64,
+    /// Whether the network has a scale head, which the run takes from the
+    /// dataset rather than being told: one drawn over a range of densities
+    /// has something for it to learn, and [`train`] fills this in before it
+    /// writes the configuration out. See
+    /// [`crate::net::unet::UNetConfig::scale_head`].
+    #[config(default = false)]
+    pub scale_head: bool,
+    /// What the scale term counts for beside the ground's.
+    #[config(default = "DEFAULT_SCALE_WEIGHT")]
+    pub scale_weight: f64,
     /// How many of the validation split's pictures to read back into maps
     /// each epoch, for the sheets under `image_valid/`. Nought draws none.
     #[config(default = "DEFAULT_IMAGE_VALID")]
@@ -1056,6 +1227,36 @@ pub struct TrainingConfig {
     /// gives the same run.
     #[config(default = 0)]
     pub seed: u64,
+}
+
+impl TrainingConfig {
+    /// Reads a run's `training.json`, giving any field the file does not have
+    /// its default.
+    ///
+    /// burn's own [`Config::load`] wants every field in the file, defaulted
+    /// or not, so a run written before a field existed — before the lines
+    /// layer, before the scale head — would not load at all, when what it
+    /// means is plain: the network it trained had no such thing, which is
+    /// what the default says.
+    pub fn read(path: &Path) -> Result<TrainingConfig, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let mut value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let classes = value
+            .get("classes")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| format!("{} says nothing of the classes", path.display()))?;
+        let defaults = serde_json::to_value(TrainingConfig::new(classes as usize))
+            .map_err(|e| format!("cannot write the defaults out: {e}"))?;
+        if let (Some(read), serde_json::Value::Object(defaults)) = (value.as_object_mut(), defaults)
+        {
+            for (key, default) in defaults {
+                read.entry(key).or_insert(default);
+            }
+        }
+        serde_json::from_value(value).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    }
 }
 
 /// How the moment a run was started is written into its folder's name. Fixed
@@ -1112,7 +1313,7 @@ const BEST_WEIGHTS: &str = "best";
 /// of that tool rather than a second opinion.
 fn image_validation(
     run: &Path,
-    pictures: Vec<PathBuf>,
+    pictures: Vec<(PathBuf, f64)>,
     config: &TrainingConfig,
     device: &Device,
 ) -> Result<ImageValidation, String> {
@@ -1142,12 +1343,18 @@ fn image_validation(
     map.resolve_references();
     let catalogue = Catalogue::of(&map);
 
+    // Over the range the dataset was drawn at, where it was drawn over one:
+    // a validation picture is read at its own density, as the tool reads one.
+    let (low, high) = notes
+        .resolution_range
+        .unwrap_or((notes.resolution, notes.resolution));
     Ok(ImageValidation::new(
         run,
         pictures,
         &symbol_set,
         catalogue.opaque_areas,
-        ReadBackSettings::of(config.crop, notes.resolution, map.scale_denominator),
+        ReadBackSettings::of(config.crop, notes.resolution, map.scale_denominator)
+            .trained_over(low, high),
         device.clone(),
     ))
 }
@@ -1367,6 +1574,7 @@ pub fn train(
         .with_crops_per_map(config.crops_per_map)
         .with_overhang(config.overhang.unwrap_or(config.crop / 2));
     config.lines = all.lines();
+    config.scale_head = all.varies();
 
     let run = run_directory(into, extract_type_name::<UNet>())?;
     config
@@ -1395,10 +1603,10 @@ pub fn train(
     // Taken before the split is handed to a loader, which consumes it. The
     // validation half, because a sheet of a map the network trained on shows
     // how well it remembers rather than how well it reads.
-    let pictures: Vec<PathBuf> = valid
-        .pictures()
+    let pictures: Vec<(PathBuf, f64)> = valid
+        .pictures_with_resolutions()
         .take(config.image_valid)
-        .map(Path::to_path_buf)
+        .map(|(picture, resolution)| (picture.to_path_buf(), resolution))
         .collect();
     println!(
         "{}: {maps} maps, {} to train on and {} to validate against, {} crops of {} pixels from \
@@ -1410,6 +1618,13 @@ pub fn train(
         config.crop,
     );
     println!("{}: the run", run.display());
+    if config.scale_head {
+        println!(
+            "the maps were drawn at densities of their own, so the network also learns to say \
+             how dense a picture is (a scale head, weighted {})",
+            config.scale_weight,
+        );
+    }
 
     // Counted before the model is built, since the loss inside it carries
     // the weights. A sample of the training half only: the validation half is
@@ -1432,6 +1647,8 @@ pub fn train(
         .with_angle_weight(config.angle_weight)
         .with_lines(config.lines)
         .with_line_weight(config.line_weight)
+        .with_scale_head(config.scale_head)
+        .with_scale_weight(config.scale_weight)
         .with_class_weights(Some(weights))
         // On a device with a gradient tape: it is where a parameter is made
         // that decides whether it is tracked, and the learner forks the
@@ -1510,6 +1727,11 @@ pub fn train(
         training = training
             .metric_train_numeric(LineIouMetric::new())
             .metric_valid_numeric(LineIouMetric::new());
+    }
+    if config.scale_head {
+        training = training
+            .metric_train_numeric(ScaleErrorMetric::new())
+            .metric_valid_numeric(ScaleErrorMetric::new());
     }
     let training = training
         .with_default_checkpointers()
@@ -1928,6 +2150,7 @@ mod tests {
             class: class.clone(),
             angle: Tensor::zeros([1, 2, 16, 16], &device),
             lines: None,
+            scale: Tensor::zeros([1, 1], &device),
         };
         let without = net.forward_step(none);
         let angled: f32 = without.angled.clone().into_scalar();
@@ -1953,6 +2176,7 @@ mod tests {
             class,
             angle: Tensor::ones([1, 2, 16, 16], &device),
             lines: None,
+            scale: Tensor::zeros([1, 1], &device),
         };
         let with = net.forward_step(some);
         let angled: f32 = with.angled.into_scalar();
@@ -1982,6 +2206,94 @@ mod tests {
             "{inverted:?}"
         );
         assert_eq!(inverted[2], 1.0 / RAREST_SHARE);
+    }
+
+    /// A run's configuration from before a field existed reads back with
+    /// that field at its default, rather than not at all.
+    #[test]
+    fn an_older_configuration_reads_with_the_fields_it_lacks_at_their_defaults() {
+        let file = tempfile::NamedTempFile::new().expect("a temporary file");
+        std::fs::write(
+            file.path(),
+            r#"{"classes": 4, "epochs": 3, "crop": 64, "angle_weight": 0.5}"#,
+        )
+        .expect("a configuration");
+        let read = TrainingConfig::read(file.path()).expect("it reads");
+        assert_eq!(read.classes, 4);
+        assert_eq!(read.epochs, 3);
+        assert_eq!(read.crop, 64);
+        assert_eq!(read.angle_weight, 0.5);
+        assert_eq!(read.lines, 0);
+        assert!(!read.scale_head);
+        assert_eq!(read.scale_weight, DEFAULT_SCALE_WEIGHT);
+
+        // And what a run writes reads back as it was.
+        let written = TrainingConfig::new(7).with_scale_head(true).with_lines(2);
+        written.save(file.path()).expect("written");
+        let read = TrainingConfig::read(file.path()).expect("it reads");
+        assert!(read.scale_head);
+        assert_eq!((read.classes, read.lines), (7, 2));
+    }
+
+    /// The scale loss is a squared error near the answer and a straight one
+    /// beyond the knee, meeting there; the error it reports is the plain sum.
+    #[test]
+    fn the_scale_loss_is_squared_near_the_answer_and_straight_beyond() {
+        let device = Device::flex();
+        let value = |t: Tensor<1>| t.into_data().try_to_vec::<f32>().expect("floats")[0];
+        let at = |said: f32, wanted: f32| {
+            let (loss, error) = scale_loss(
+                Tensor::<2>::from_data([[said]], &device),
+                Tensor::<2>::from_data([[wanted]], &device),
+            );
+            (value(loss), value(error))
+        };
+        let delta = SCALE_HUBER as f32;
+
+        assert_eq!(at(0.3, 0.3), (0.0, 0.0));
+        // Within the knee: e^2 / (2 delta).
+        let (loss, error) = at(0.05, 0.0);
+        assert!((loss - 0.05 * 0.05 / (2.0 * delta)).abs() < 1e-6, "{loss}");
+        assert!((error - 0.05).abs() < 1e-6);
+        // Beyond it: e - delta / 2, and either way round.
+        let (loss, _) = at(-1.0, 0.0);
+        assert!((loss - (1.0 - delta / 2.0)).abs() < 1e-6, "{loss}");
+        // Continuous at the knee.
+        let (below, _) = at(delta - 1e-4, 0.0);
+        let (above, _) = at(delta + 1e-4, 0.0);
+        assert!((below - above).abs() < 1e-3, "{below} and {above}");
+    }
+
+    /// A network with a scale head is scored on how dense it said the crops
+    /// were, and one without it is not: the same batch with a wrong label
+    /// costs the first more and the second nothing.
+    #[test]
+    fn the_scale_term_counts_only_where_there_is_a_scale_head() {
+        let device = Device::flex();
+        let batch = |scale: f32| MapBatch {
+            image: Tensor::zeros([2, 3, 16, 16], &device),
+            class: Tensor::zeros([2, 16, 16], &device),
+            angle: Tensor::zeros([2, 2, 16, 16], &device),
+            lines: None,
+            scale: Tensor::full([2, 1], scale, &device),
+        };
+        let loss =
+            |net: &UNet, scale: f32| -> f32 { net.forward_step(batch(scale)).loss.into_scalar() };
+
+        let with = UNetConfig::new(3)
+            .with_base_channels(4)
+            .with_scale_head(true)
+            .init(&device);
+        assert!(loss(&with, 2.0) > loss(&with, 0.0) + 0.5);
+        let output = with.forward_step(batch(0.0));
+        let scaled: f32 = output.scaled.into_scalar();
+        assert_eq!(scaled, 2.0);
+
+        let without = UNetConfig::new(3).with_base_channels(4).init(&device);
+        assert!((loss(&without, 2.0) - loss(&without, 0.0)).abs() < 1e-6);
+        let output = without.forward_step(batch(2.0));
+        let scaled: f32 = output.scaled.into_scalar();
+        assert_eq!(scaled, 0.0);
     }
 
     /// A network which says "no line" everywhere is right about nearly every

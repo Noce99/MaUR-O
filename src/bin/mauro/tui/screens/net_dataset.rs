@@ -15,11 +15,13 @@ const TRANSPARENT: usize = 6;
 const POINTS: usize = 7;
 const CONTENT: usize = 8;
 const RESOLUTION: usize = 9;
-const FRAME: usize = 10;
-const NO_IMAGES: usize = 11;
-const NO_GT: usize = 12;
-const IOF_RULES: usize = 13;
-const SEED: usize = 14;
+const MIN_RESOLUTION: usize = 10;
+const MAX_RESOLUTION: usize = 11;
+const FRAME: usize = 12;
+const NO_IMAGES: usize = 13;
+const NO_GT: usize = 14;
+const IOF_RULES: usize = 15;
+const SEED: usize = 16;
 
 /// What the maps are drawn with, and so what their labels say. A step up is
 /// the one before it and more: the labels of the areas are always there.
@@ -53,6 +55,12 @@ impl NetDataset {
                      ground under the line as it was.",
                 ),
                 Field::text("Resolution").arg("resolution").unit("px/m"),
+                Field::text("Min resolution")
+                    .arg("min_resolution")
+                    .unit("px/m"),
+                Field::text("Max resolution")
+                    .arg("max_resolution")
+                    .unit("px/m"),
                 Field::text("Frame").arg("frame").unit("m"),
                 Field::toggle("No images").arg("no_images"),
                 Field::toggle("No labels").arg("no_gt"),
@@ -132,6 +140,8 @@ impl Tool for NetDataset {
             args.push("--just-opaque-areas".to_string());
         }
         form.push_option(&mut args, RESOLUTION, "--resolution");
+        form.push_option(&mut args, MIN_RESOLUTION, "--min-resolution");
+        form.push_option(&mut args, MAX_RESOLUTION, "--max-resolution");
         form.push_option(&mut args, FRAME, "--frame");
         form.push_flag(&mut args, NO_IMAGES, "--no-images");
         form.push_flag(&mut args, NO_GT, "--no-gt");
@@ -215,5 +225,21 @@ mod tests {
         let after = |flag: &str| args.iter().position(|a| a == flag).map(|at| &args[at + 1]);
         assert_eq!(after("--resolution").map(String::as_str), Some("2"));
         assert_eq!(after("--seed").map(String::as_str), Some("7"));
+    }
+
+    /// A range of densities is two options, and is left out until asked for.
+    #[test]
+    fn a_range_of_resolutions_is_passed_on_when_given() {
+        let mut screen = NetDataset::new();
+        type_into(&mut screen.form, SYMBOL_SET, "a.omap");
+        let args = command(&screen).unwrap();
+        assert!(!args.iter().any(|a| a.contains("-resolution")), "{args:?}");
+
+        type_into(&mut screen.form, MIN_RESOLUTION, "1");
+        type_into(&mut screen.form, MAX_RESOLUTION, "6");
+        let args = command(&screen).unwrap();
+        let after = |flag: &str| args.iter().position(|a| a == flag).map(|at| &args[at + 1]);
+        assert_eq!(after("--min-resolution").map(String::as_str), Some("1"));
+        assert_eq!(after("--max-resolution").map(String::as_str), Some("6"));
     }
 }

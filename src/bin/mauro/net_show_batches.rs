@@ -350,8 +350,24 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         let mut rows = Vec::with_capacity(read.len());
         for (index, crop) in read.iter().enumerate() {
             let from = &crops[index];
-            let ground = ground_of(from, notes.image_size as usize, notes.resolution);
-            let drawn = |grid| draw(grid, &ground, &symbol_set, &scratch_map, &settings);
+            // The density the crop's own map was drawn at: one per dataset,
+            // or one per map where the dataset was drawn over a range.
+            let resolution = if from.resolution > 0.0 {
+                from.resolution
+            } else {
+                notes.resolution
+            };
+            let ground = ground_of(from, notes.image_size as usize, resolution);
+            let drawn = |grid| {
+                draw(
+                    grid,
+                    &ground,
+                    resolution,
+                    &symbol_set,
+                    &scratch_map,
+                    &settings,
+                )
+            };
 
             // The labels carry the folded angle the network is asked for, so
             // they need the same unfolding a prediction does before anything
@@ -360,7 +376,14 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             resolve_angles(&mut label_grid, &symbols);
             let mut panels = vec![picture_of(crop), drawn(label_grid)?];
             let mut labels = vec![
-                format!("{} at {},{}", from.map, from.left, from.top),
+                if notes.resolution_range.is_some() {
+                    format!(
+                        "{} at {},{}, {:.2} px/m",
+                        from.map, from.left, from.top, resolution
+                    )
+                } else {
+                    format!("{} at {},{}", from.map, from.left, from.top)
+                },
                 format!("labels: {}", tally(&crop.class, classes, &symbols)),
             ];
 
@@ -438,6 +461,8 @@ fn unbatch(image: &Tensor<4>, class: &Tensor<3, Int>, angle: &Tensor<4>) -> Vec<
             map: String::new(),
             left: 0,
             top: 0,
+            resolution: 0.0,
+            scale: 0.0,
         })
         .collect()
 }
@@ -567,6 +592,7 @@ fn ground_of(crop: &MapCrop, image_size: usize, resolution: f64) -> Rect {
 fn draw(
     grid: SymbolGrid,
     ground: &Rect,
+    resolution: f64,
     symbol_set: &Path,
     into: &Path,
     settings: &ReadBackSettings,
@@ -583,7 +609,7 @@ fn draw(
         &settings.simplify,
     )
     .map_err(failed)?;
-    let drawing = render_map_over(into, settings.resolution, Extent::Ground(*ground))
+    let drawing = render_map_over(into, resolution, Extent::Ground(*ground))
         .map_err(|e| failed(format!("cannot draw {}: {e}", into.display())))?;
     Ok(to_rgb_image(&drawing.pixmap))
 }

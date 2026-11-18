@@ -775,3 +775,100 @@ fn a_share_outside_zero_to_one_is_a_usage_error() {
             .stderr(predicates::str::contains("between zero and one"));
     }
 }
+
+/// A dataset drawn over a range of densities keeps every image the same size
+/// and says what each map was drawn at, in the range and spread over it; the
+/// range goes into classes.json beside the normal density.
+#[test]
+fn a_range_of_resolutions_draws_each_map_at_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("dataset");
+    generate()
+        .arg(SYMBOL_SET)
+        .arg(&folder)
+        .args(["--maps=6", "--layout-size=2", "--background-cell-size=20"])
+        .args(["--resolution=2", "--frame=5", "--just-opaque-areas"])
+        .args(["--min-resolution=1", "--max-resolution=4"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("resolutions.csv"));
+
+    let read = maur_o::dataset::resolutions_of(&folder)
+        .expect("the file reads")
+        .expect("the file is there");
+    assert_eq!(read.len(), 6);
+    for (name, &resolution) in &read {
+        assert!((1.0..=4.0).contains(&resolution), "{name} at {resolution}");
+        let png = std::fs::read(folder.join(IMAGES_FOLDER).join(format!("{name}.png")))
+            .expect("an image");
+        let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+        // The size the normal density makes it, whatever this map's was.
+        assert_eq!((size(16), size(20)), (100, 100), "{name}.png");
+    }
+    // Spread out, not the one density six times over.
+    let (low, high) = read.values().fold((f64::MAX, f64::MIN), |(low, high), &r| {
+        (low.min(r), high.max(r))
+    });
+    assert!(high / low > 1.3, "{low} to {high}");
+
+    let notes = maur_o::dataset::Classes::read(&folder.join("classes.json")).expect("notes");
+    assert_eq!(notes.resolution, 2.0);
+    assert_eq!(notes.resolution_range, Some((1.0, 4.0)));
+}
+
+/// A map drawn at another density covers another amount of ground with the
+/// same pixels, and its label, rasterized straight from its map file at that
+/// density, is the label written beside its image.
+#[test]
+fn a_label_rebuilt_at_a_maps_own_density_is_the_label_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("dataset");
+    generate()
+        .arg(TURNING_PATTERNS)
+        .arg(&folder)
+        .args(["--maps=3", "--layout-size=2", "--background-cell-size=20"])
+        .args(["--resolution=2", "--frame=5", "--just-opaque-areas"])
+        .args(["--min-resolution=1", "--max-resolution=4"])
+        .assert()
+        .success();
+
+    let read = maur_o::dataset::resolutions_of(&folder)
+        .unwrap()
+        .expect("the file is there");
+    for n in 1..=3 {
+        let name = format!("map_{n:03}");
+        let written =
+            GroundTruth::read(&folder.join(GROUND_TRUTH_FOLDER).join(format!("{name}.bin")))
+                .expect("the label");
+        let rebuilt = GroundTruth::from_map(
+            &map_at(&folder, n),
+            written.width,
+            written.height,
+            read[&name],
+        )
+        .expect("the label from the map");
+        assert_eq!(rebuilt.class_of, written.class_of, "{name}");
+    }
+}
+
+/// A range which does not hold the density the images are sized at, or which
+/// runs backwards, is a usage error.
+#[test]
+fn a_range_of_resolutions_has_to_hold_the_resolution() {
+    let dir = tempfile::tempdir().unwrap();
+    for range in [
+        ["--min-resolution=4", "--max-resolution=6"],
+        ["--min-resolution=1", "--max-resolution=2"],
+        ["--min-resolution=0", "--max-resolution=6"],
+    ] {
+        generate()
+            .arg(NO_IMAGES)
+            .arg(SYMBOL_SET)
+            .arg(dir.path().join("dataset"))
+            .args(["--resolution=3"])
+            .args(range)
+            .assert()
+            .code(1)
+            .stderr(predicates::str::contains("resolution"));
+    }
+}

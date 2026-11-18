@@ -91,6 +91,27 @@
 //! objects came to, so a folder of them stacks into a batch without being
 //! cropped first. See [`crate::ground_truth`] for what a label holds.
 //!
+//! # Maps at more than one density
+//!
+//! A picture of a map says nothing about how many pixels a meter of it is,
+//! and a network trained on maps all drawn at one density learns that
+//! density and nothing else. [`Settings::resolution_range`] draws each map
+//! at a density of its own instead — still the same number of pixels, so a
+//! map at half the density shows twice the ground — and writes what each
+//! was drawn at to `resolutions.csv` beside `classes.json`:
+//!
+//! ```text
+//! map,resolution
+//! map_001,2.374
+//! map_002,4.81
+//! ```
+//!
+//! That is what a network learns the density of a picture from, and what a
+//! label rebuilt from `maps/` is rasterized at. The layout is stretched with
+//! the ground, so a cell is the same size in pixels at every density: the
+//! symbols, whose sizes the symbol set fixes on the paper, are the only thing
+//! in a picture which shows how dense it is.
+//!
 //! The answers only exist where [`Settings::just_opaque_areas`] is on, which
 //! is the one map a label can describe so far: every pixel is one piece of
 //! ground cover and nothing is drawn over it. [`Settings::ground_truth`] can
@@ -99,6 +120,7 @@
 //! goes out, since a label can be computed from a map in `maps/` instead of
 //! read from `gt/`.
 
+use std::collections::HashMap;
 use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
 
@@ -124,6 +146,11 @@ pub const GROUND_TRUTH_FOLDER: &str = "gt";
 /// The file naming what a label's channels are, written in the dataset's own
 /// folder.
 pub const CLASSES_FILE: &str = "classes.json";
+
+/// The file saying what density each map was drawn at, written in the
+/// dataset's own folder where [`Settings::resolution_range`] makes them
+/// differ: a header, then `<name>,<pixels per meter>` for each map.
+pub const RESOLUTIONS_FILE: &str = "resolutions.csv";
 
 /// The default number of cells a generated map is across.
 pub const DEFAULT_LAYOUT_SIZE: usize = 3;
@@ -214,7 +241,27 @@ pub struct Settings {
     pub ground_truth: bool,
     /// How many pixels of image one meter of ground comes to, which is what
     /// decides how big the images and their labels are.
+    ///
+    /// Where [`Settings::resolution_range`] is set, this is the dataset's
+    /// *normal* density rather than every map's: the images are still the
+    /// size the layout and the frame come to at this resolution, and each map
+    /// is drawn at a density of its own — see [`Settings::sheet`].
     pub resolution: f64,
+    /// The densities the maps are drawn at, lowest and highest, in pixels per
+    /// meter of ground; `None` draws every map at [`Settings::resolution`].
+    ///
+    /// Each map's is drawn log-uniformly from the range (so a map at half the
+    /// normal density is as likely as one at twice it), and the image stays
+    /// the same number of pixels: what changes is how much ground it shows.
+    /// The layout and the frame are scaled with the ground, so a cell is as
+    /// many pixels across at every density, and the only thing in a picture
+    /// which says how dense it is, is the symbols — the widths of the lines,
+    /// the sizes of the dots and of the patterns, which a symbol set fixes on
+    /// the paper. That is what a network is to learn the density from, and
+    /// nothing in the layout is left for it to cheat with.
+    ///
+    /// Each map's density is written to [`RESOLUTIONS_FILE`].
+    pub resolution_range: Option<(f64, f64)>,
     /// How much white ground to leave around the square a map covers, in
     /// meters. Part of the image and part of the labels, where it is the
     /// background class.
@@ -237,9 +284,23 @@ impl Default for Settings {
             images: true,
             ground_truth: true,
             resolution: DEFAULT_RESOLUTION,
+            resolution_range: None,
             frame: DEFAULT_FRAME,
         }
     }
+}
+
+/// How one map of a dataset is laid out and drawn: the density it is drawn
+/// at, and the ground its picture covers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sheet {
+    /// How many pixels of image one meter of ground comes to.
+    pub resolution: f64,
+    /// How much bigger, on the ground, this map's layout and frame are than
+    /// the [`Settings`] say: one at the normal density, two at half of it.
+    pub stretch: f64,
+    /// The square of ground the image covers, centred on the origin.
+    pub ground: Rect,
 }
 
 impl Settings {
@@ -258,7 +319,54 @@ impl Settings {
     pub fn image_size(&self) -> u32 {
         (self.ground().width() * self.resolution).round().max(0.0) as u32
     }
+
+    /// Whether the maps are drawn at densities of their own rather than all
+    /// at [`Settings::resolution`].
+    pub fn varies(&self) -> bool {
+        self.resolution_range.is_some_and(|(low, high)| low < high)
+    }
+
+    /// How the `index`-th map is drawn: at [`Settings::resolution`] over
+    /// [`Settings::ground`], or — where the density varies — at one drawn
+    /// out of the range, over as much ground as the same number of pixels
+    /// covers at it.
+    ///
+    /// The density comes out of a generator of its own, seeded by the map's
+    /// index, so a map's density does not move the dice its shapes are drawn
+    /// with, and the n-th map has the same density however many are asked
+    /// for.
+    pub fn sheet(&self, index: usize) -> Sheet {
+        let normal = Sheet {
+            resolution: self.resolution,
+            stretch: 1.0,
+            ground: self.ground(),
+        };
+        let Some((low, high)) = self.resolution_range.filter(|_| self.varies()) else {
+            return normal;
+        };
+
+        // Log-uniform: as likely to halve the density as to double it.
+        let mut random = Random::from_seed(self.seed.wrapping_add(index as u64) ^ RESOLUTION_SEED);
+        let resolution = random.between(low.ln(), high.ln()).exp();
+
+        // The image is the size it is at the normal density, and covers that
+        // many pixels' worth of ground at this one: worked out from the
+        // pixels rather than by scaling the ground, so that rounding never
+        // makes one map of a dataset a pixel bigger than the rest.
+        let pixels = self.image_size() as f64;
+        let side = pixels / resolution;
+        Sheet {
+            resolution,
+            stretch: side / self.ground().width(),
+            ground: Rect::from_ltrb(-side / 2.0, -side / 2.0, side / 2.0, side / 2.0),
+        }
+    }
 }
+
+/// What the generator a map's density is drawn out of is seeded with, beside
+/// the map's own seed: anything, as long as it is not what the map's shapes
+/// come out of.
+const RESOLUTION_SEED: u64 = 0x5ca1_ab1e_d0e5_1717;
 
 /// How many objects of each sort a whole dataset came to.
 #[derive(Debug, Default)]
@@ -337,6 +445,21 @@ pub fn create_dataset(
             "the resolution must be more than zero pixels per meter, not {}",
             settings.resolution
         ));
+    }
+    if let Some((low, high)) = settings.resolution_range {
+        if !(low.is_finite() && high.is_finite() && 0.0 < low && low <= high) {
+            return Err(format!(
+                "the resolutions run from more than nothing to no less than that, not from {low} \
+                 to {high} pixels per meter"
+            ));
+        }
+        if !(low..=high).contains(&settings.resolution) {
+            return Err(format!(
+                "the resolution, {} pixels per meter, is the density the images are sized at and \
+                 has to lie in the range the maps are drawn at, {low} to {high}",
+                settings.resolution
+            ));
+        }
     }
     if settings.frame.is_nan() || settings.frame < 0.0 {
         return Err(format!(
@@ -435,14 +558,27 @@ pub fn create_dataset(
     let mut written = Vec::with_capacity(settings.maps);
     let mut drawn = Drawn::default();
     let mut warnings = warnings;
+    // Each map's density, where they differ, as the file says it.
+    let mut resolutions = String::from("map,resolution\n");
     for index in 0..settings.maps {
         // A seed of its own per map, so that the third map of a dataset is
         // the same map whether ten or a thousand were asked for.
         let mut random = Random::from_seed(settings.seed.wrapping_add(index as u64));
-        let layout = Layout::random(settings.layout_size, settings.cell_size as f64, &mut random);
+        let sheet = settings.sheet(index);
+        // The cells stretched with the ground, so that they are as many
+        // pixels across at every density: see `Settings::resolution_range`.
+        let layout = Layout::random(
+            settings.layout_size,
+            settings.cell_size as f64 * sheet.stretch,
+            &mut random,
+        );
         let (objects, ground) = generator.draw(&layout, &mut random, &mut drawn);
 
         let stem = map_stem(index, settings.maps);
+        // `{}` of an f64 is the shortest text which reads back as the same
+        // number, which is what a label rebuilt from the map has to land on
+        // the image's own pixel grid with.
+        resolutions.push_str(&format!("{stem},{}\n", sheet.resolution));
         let map_path = maps_folder.join(format!("{stem}.omap"));
         MapFile {
             scale_denominator: map.scale_denominator,
@@ -463,12 +599,9 @@ pub fn create_dataset(
             // in hand: the image belongs to the map somebody else can open,
             // and any disagreement between the two is a bug worth tripping
             // over here.
-            let drawing = render_map_over(
-                &map_path,
-                settings.resolution,
-                Extent::Ground(settings.ground()),
-            )
-            .map_err(|e| format!("cannot draw {}: {e}", map_path.display()))?;
+            let drawing =
+                render_map_over(&map_path, sheet.resolution, Extent::Ground(sheet.ground))
+                    .map_err(|e| format!("cannot draw {}: {e}", map_path.display()))?;
             for warning in drawing.warnings {
                 if !warnings.contains(&warning) {
                     warnings.push(warning);
@@ -502,6 +635,19 @@ pub fn create_dataset(
             ground_truth,
         });
         progress(index + 1, settings.maps);
+    }
+
+    // Only where the densities differ: a dataset at one density says so in
+    // classes.json, and a file of one number repeated would be a second
+    // place for it to be wrong. A stale one from an earlier run into the
+    // same folder would be read as this run's, so it goes.
+    let resolutions_file = into.join(RESOLUTIONS_FILE);
+    if settings.varies() {
+        std::fs::write(&resolutions_file, resolutions)
+            .map_err(|e| format!("cannot write {}: {e}", resolutions_file.display()))?;
+    } else if resolutions_file.is_file() {
+        std::fs::remove_file(&resolutions_file)
+            .map_err(|e| format!("cannot remove {}: {e}", resolutions_file.display()))?;
     }
 
     Ok(Summary {
@@ -748,6 +894,12 @@ fn write_classes(
     json.push_str(&format!("  \"lines\": {lines},\n"));
     json.push_str(&format!("  \"image_size\": {},\n", settings.image_size()));
     json.push_str(&format!("  \"resolution\": {},\n", settings.resolution));
+    // The range the maps' own densities were drawn from, only where they
+    // differ; each map's is in RESOLUTIONS_FILE.
+    if let Some((low, high)) = settings.resolution_range.filter(|_| settings.varies()) {
+        json.push_str(&format!("  \"resolution_min\": {low},\n"));
+        json.push_str(&format!("  \"resolution_max\": {high},\n"));
+    }
     json.push_str(&format!("  \"frame\": {},\n", settings.frame));
     json.push_str(&format!("  \"cell_size\": {},\n", settings.cell_size));
     json.push_str(&format!("  \"layout_size\": {},\n", settings.layout_size));
@@ -801,11 +953,19 @@ pub struct Classes {
     pub lines: usize,
     /// How many pixels across the images of the dataset were drawn.
     pub image_size: u32,
-    /// How many pixels of image one meter of ground came to.
+    /// How many pixels of image one meter of ground came to: every map's, or
+    /// — where [`Classes::resolution_range`] is set — the normal density the
+    /// images were sized at, which is what a network trained on them reads
+    /// best and what a picture is resampled to before it is read.
     pub resolution: f64,
-    /// How much white ground was left around each map, in meters.
+    /// The range each map's own density was drawn from, lowest first, where
+    /// they differ — see [`Settings::resolution_range`] — and `None` where
+    /// every map was drawn at [`Classes::resolution`].
+    pub resolution_range: Option<(f64, f64)>,
+    /// How much white ground was left around each map, in meters, at the
+    /// normal density.
     pub frame: f64,
-    /// How wide one cell of the layout was, in meters.
+    /// How wide one cell of the layout was, in meters, at the normal density.
     pub cell_size: u32,
     /// How many cells across the layout was.
     pub layout_size: usize,
@@ -843,6 +1003,11 @@ impl Classes {
             lines: number("lines").unwrap_or(0.0) as usize,
             image_size: number("image_size")? as u32,
             resolution: number("resolution")?,
+            // A dataset at one density, or written before they could differ.
+            resolution_range: number("resolution_min")
+                .ok()
+                .zip(number("resolution_max").ok())
+                .filter(|(low, high)| low < high),
             frame: number("frame")?,
             cell_size: number("cell_size")? as u32,
             layout_size: number("layout_size")? as usize,
@@ -890,6 +1055,39 @@ pub fn resolution_of(dataset: &Path) -> Result<f64, String> {
                 .and_then(|digits| digits.parse().ok())
         })
         .ok_or_else(|| format!("{} names no resolution", path.display()))
+}
+
+/// The density each map of a dataset was drawn at, by the name its map, image
+/// and labels share, out of the [`RESOLUTIONS_FILE`] written beside them —
+/// or `None` where there is no such file, which is a dataset whose maps were
+/// all drawn at the one resolution `classes.json` gives.
+pub fn resolutions_of(dataset: &Path) -> Result<Option<HashMap<String, f64>>, String> {
+    let path = dataset.join(RESOLUTIONS_FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut read = HashMap::new();
+    // The header first, then a map to a line.
+    for (number, line) in text.lines().enumerate().skip(1) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed = line.split_once(',').and_then(|(name, value)| {
+            let value: f64 = value.trim().parse().ok()?;
+            (value.is_finite() && value > 0.0).then(|| (name.trim().to_string(), value))
+        });
+        let Some((name, value)) = parsed else {
+            return Err(format!(
+                "{} line {}: {line:?} is not a map's name and its pixels per meter",
+                path.display(),
+                number + 1,
+            ));
+        };
+        read.insert(name, value);
+    }
+    Ok(Some(read))
 }
 
 /// A string as a JSON one. A symbol name is whatever the symbol set called

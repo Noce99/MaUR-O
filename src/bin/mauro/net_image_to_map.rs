@@ -33,6 +33,33 @@
 //! has to be of a pixel, and `--min-line` how long a path has to be; the
 //! lines are simplified by `--tolerance`, like the areas' boundaries.
 //!
+//! # How dense the picture is
+//!
+//! The map is only the right size if it is known how many pixels of the
+//! picture a meter of ground is, and a picture does not say. It is taken,
+//! first to last, from:
+//!
+//! 1. `--resolution`, in pixels per meter of ground at the scale the map is
+//!    written at;
+//! 2. `--dpi`, for a scan or an export: so many pixels to an inch of paper,
+//!    which `--scale` turns into meters of ground;
+//! 3. the network itself, where it has a scale head (a run trained on a
+//!    dataset made with `mauro net dataset --min-resolution/--max-resolution`):
+//!    it is asked about the tiles of the picture which have anything on them,
+//!    and the median of what they say is taken. It is held to the range the
+//!    dataset was drawn over, and says so where that clips it;
+//! 4. the density the run's dataset was drawn at, from its `classes.json`.
+//!
+//! Whichever it is, a picture at a density the network was trained over is
+//! read as it is, every pixel of it; one outside is resampled to the nearer
+//! end of that range before the network reads it (to the one density, for a
+//! run trained at one), and the map drawn back at the picture's own density
+//! to score it. A density is a
+//! number of pixels to a millimeter of paper, which is what a symbol set fixes
+//! its symbols' sizes in: a map written at another `--scale` than the symbol
+//! set's covers another amount of ground with the same paper, and its
+//! `--resolution` is in meters of that ground.
+//!
 //! The run folder is all it is told, because a run folder holds everything:
 //! `training.json` says how big the network was, `best.bpk` is its weights,
 //! and `classes.json` and the symbol set beside them — copied out of the
@@ -70,8 +97,9 @@ use maur_o::line_vector::LineSettings;
 use maur_o::vectorize::Simplify;
 
 use maur_o::net::predict::{
-    load, read_back, read_back_tree, ReadBackSettings, DEFAULT_LINE_THRESHOLD, OVERLAP,
-    PREDICTED_SAME_ANGLE, PREDICTED_TOLERANCE, TREE_TOLERANCE,
+    at_scale, estimate_scale, load, read_back, read_back_tree, ReadBackSettings,
+    DEFAULT_LINE_THRESHOLD, OVERLAP, PREDICTED_SAME_ANGLE, PREDICTED_TOLERANCE, RESAMPLE_TOLERANCE,
+    TREE_TOLERANCE,
 };
 use maur_o::net::tree_training::load_tree;
 
@@ -148,10 +176,20 @@ pub struct Args {
     #[arg(long, value_name = "IMAGE")]
     rendered: Option<PathBuf>,
 
-    /// How many pixels of picture one meter of ground is. Defaults to what
-    /// the run's classes.json records for the dataset it trained on.
-    #[arg(short = 'r', long, value_name = "PX_PER_M")]
+    /// How many pixels of picture one meter of ground is, at the scale the
+    /// map is written at. Defaults to --dpi where that is given; else to what
+    /// the network says, where it has a scale head (a run trained on maps
+    /// drawn over a range of densities); else to what the run's classes.json
+    /// records for the dataset it trained on. The picture is resampled to the
+    /// density the network trained at before it is read.
+    #[arg(short = 'r', long, value_name = "PX_PER_M", conflicts_with = "dpi")]
     resolution: Option<f64>,
+
+    /// How many pixels of picture an inch of the paper map is: the
+    /// resolution a scan or an export was made at. Turned into pixels per
+    /// meter of ground by the scale.
+    #[arg(long, value_name = "DPI")]
+    dpi: Option<f64>,
 
     /// The scale to write the map at. Defaults to the symbol set's own.
     #[arg(short = 's', long, value_name = "DENOMINATOR")]
@@ -229,13 +267,25 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         }
         None => map.scale_denominator,
     };
-    let resolution = match args.resolution.unwrap_or(notes.resolution) {
-        resolution if resolution.is_finite() && resolution > 0.0 => resolution,
-        resolution => {
+    // The density the network reads best, at the scale the map is written
+    // at: the same pixels to a millimeter of paper as its dataset had.
+    let normal = at_scale(notes.resolution, map.scale_denominator, scale);
+    // What the picture was said to be, where it was.
+    let given = match (args.resolution, args.dpi) {
+        (Some(resolution), _) if !(resolution.is_finite() && resolution > 0.0) => {
             return Err(usage(format!(
                 "Invalid value for --resolution: {resolution} is not pixels per meter."
             )))
         }
+        (_, Some(dpi)) if !(dpi.is_finite() && dpi > 0.0) => {
+            return Err(usage(format!(
+                "Invalid value for --dpi: {dpi} is not pixels per inch."
+            )))
+        }
+        (Some(resolution), _) => Some((resolution, "--resolution".to_string())),
+        // Pixels to the mm of paper, then the paper of a meter of ground.
+        (None, Some(dpi)) => Some((dpi / 25.4 * 1000.0 / scale as f64, format!("--dpi {dpi}"))),
+        (None, None) => None,
     };
 
     // `open_image` rather than `image::open`: it lifts the decoder's default
@@ -252,7 +302,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         same_angle: args.same_angle,
     };
 
-    let done = if tree {
+    let (done, resolution) = if tree {
         // A tree of curves: its answer is a cut of the whole picture and a
         // symbol for each leaf, so there are no tiles to cut it into, and
         // the areas it makes are worked out from the curves themselves.
@@ -272,16 +322,21 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             model.leaves(),
             model.classes(),
         );
+        let (resolution, from) = given.unwrap_or((normal, CLASSES_FILE.to_string()));
+        println!("  the picture is {resolution:.3} px/m, from {from}");
         let settings = ReadBackSettings {
             tile: 0,
             overlap: 0,
             resolution,
+            // The tree reduces the whole picture to the size it trained at,
+            // whatever its density, so nothing is resampled for it.
+            network_resolutions: (resolution, resolution),
             scale_denominator: scale,
             simplify,
             line_threshold: DEFAULT_LINE_THRESHOLD,
             lines: LineSettings::default(),
         };
-        read_back_tree(
+        let done = read_back_tree(
             &model,
             &picture,
             &symbol_set,
@@ -290,7 +345,8 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             &settings,
             &device(),
         )
-        .map_err(failed)?
+        .map_err(failed)?;
+        (done, resolution)
     } else {
         let (model, config) =
             load(&args.run, args.weights.as_deref(), &device()).map_err(failed)?;
@@ -323,10 +379,54 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             model.classes(),
         );
 
+        // The densities the network was trained over, at this scale: the
+        // one, for a run trained at one.
+        let (low, high) = notes
+            .resolution_range
+            .map(|(low, high)| {
+                (
+                    at_scale(low, map.scale_denominator, scale),
+                    at_scale(high, map.scale_denominator, scale),
+                )
+            })
+            .unwrap_or((normal, normal));
+        let (resolution, from) = match given {
+            Some(given) => given,
+            None => match estimate_scale(&model, &picture, tile, &device()) {
+                Some(estimate) => {
+                    let said = normal * estimate.log_scale.exp();
+                    // Held to what the network was trained on: past it, the
+                    // head is guessing.
+                    let held = said.clamp(low, high);
+                    if held != said {
+                        eprintln!(
+                            "Warning: the network says {said:.3} px/m, outside the {low:.3} to \
+                             {high:.3} it was trained on; taking {held:.3}. Give --resolution or \
+                             --dpi if that is wrong."
+                        );
+                    }
+                    let spread = 100.0 * estimate.spread.exp_m1();
+                    (
+                        held,
+                        format!(
+                            "the network's scale head, the median of {} tiles, give or take \
+                             {spread:.1}%",
+                            estimate.tiles
+                        ),
+                    )
+                }
+                None => (normal, CLASSES_FILE.to_string()),
+            },
+        };
+        println!(
+            "  the picture is {resolution:.3} px/m ({:.2} px to a mm of paper), from {from}",
+            resolution * scale as f64 / 1000.0,
+        );
         let settings = ReadBackSettings {
             tile,
             overlap,
             resolution,
+            network_resolutions: (low, high),
             scale_denominator: scale,
             simplify,
             line_threshold: args.line_threshold,
@@ -337,7 +437,24 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
                 min_length: args.min_line,
             },
         };
-        read_back(
+        let reading = settings.reading_resolution();
+        let factor = reading / resolution;
+        if (factor - 1.0).abs() > RESAMPLE_TOLERANCE {
+            let trained = if low < high {
+                format!("{low:.3} to {high:.3} px/m")
+            } else {
+                format!("{low:.3} px/m")
+            };
+            println!(
+                "  resampled to {}x{} pixels, {reading:.3} px/m, before it is read: the network \
+                 was trained at {trained}",
+                (width as f64 * factor).round(),
+                (height as f64 * factor).round(),
+            );
+        } else if low < high {
+            println!("  read as it is: the network was trained at {low:.3} to {high:.3} px/m",);
+        }
+        let done = read_back(
             &model,
             &picture,
             &symbol_set,
@@ -346,7 +463,8 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             &settings,
             &device(),
         )
-        .map_err(failed)?
+        .map_err(failed)?;
+        (done, resolution)
     };
     for warning in &done.warnings {
         eprintln!("Warning: {warning}");

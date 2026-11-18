@@ -93,3 +93,31 @@ fn a_negative_tolerance_is_a_usage_error() {
         .code(1)
         .stderr(predicates::str::contains("--tolerance"));
 }
+
+/// A density given two ways is one too many, and a density of nothing is no
+/// density: both are usage errors.
+#[test]
+fn the_density_is_given_once_and_given_as_something() {
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let image = picture(dir.path());
+
+    image_to_map()
+        .args([dir.path(), image.as_path()])
+        .args(["--resolution", "3", "--dpi", "300"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("--dpi"));
+
+    notes(dir.path(), Some("set.omap"));
+    std::fs::copy(
+        "tests/data/turning_patterns.xmap",
+        dir.path().join("set.omap"),
+    )
+    .expect("a symbol set");
+    image_to_map()
+        .args([dir.path(), image.as_path()])
+        .arg("--dpi=-300")
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("--dpi"));
+}

@@ -36,6 +36,14 @@
 //! dataset/gt/map_001.bin     what it is, pixel by pixel: the answer
 //! ```
 //!
+//! `--min-resolution` and `--max-resolution` draw each map at a density of
+//! its own, log-uniform between the two, so that a network trained on them
+//! learns to tell how dense a picture is. The images stay the size
+//! `--resolution` makes them, and cover as much ground as that many pixels
+//! do at the map's density; the cells and the frame stretch with it, so the
+//! symbols are the only thing which shows the density. Each map's is written
+//! to `dataset/resolutions.csv`, and the range to `classes.json`.
+//!
 //! The whole dataset follows from the seed: the same options give the same
 //! maps, down to the coordinate, and the n-th map is the same map whatever
 //! number of maps was asked for.
@@ -51,7 +59,7 @@ use clap::Parser;
 use maur_o::dataset::{
     create_dataset, Generated, Settings, CLASSES_FILE, DEFAULT_CELL_SIZE, DEFAULT_EMPTY_SIDES,
     DEFAULT_LAYOUT_SIZE, DEFAULT_MAPS, DEFAULT_POINT_SYMBOLS, DEFAULT_TRANSPARENT_AREAS,
-    GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER,
+    GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER, RESOLUTIONS_FILE,
 };
 use maur_o::progress::Progress;
 use maur_o::render::{DEFAULT_FRAME, DEFAULT_RESOLUTION};
@@ -130,6 +138,20 @@ pub struct Args {
     #[arg(short = 'r', long, default_value_t = DEFAULT_RESOLUTION, value_name = "PX_PER_M")]
     resolution: f64,
 
+    /// The lowest density a map is drawn at. With --max-resolution, each map
+    /// is drawn at a density of its own, log-uniform between the two, over
+    /// as much ground as the image's pixels cover at it: the images stay the
+    /// size --resolution makes them and the layout stretches with the
+    /// ground, so only the symbols show how dense a picture is. Each map's
+    /// is written to resolutions.csv. Defaults to --resolution.
+    #[arg(long, value_name = "PX_PER_M")]
+    min_resolution: Option<f64>,
+
+    /// The highest density a map is drawn at: see --min-resolution. Defaults
+    /// to --resolution.
+    #[arg(long, value_name = "PX_PER_M")]
+    max_resolution: Option<f64>,
+
     /// How much white ground to leave around each map, in meters. It is part
     /// of the image, and the background class of the labels.
     #[arg(short = 'f', long, default_value_t = DEFAULT_FRAME, value_name = "METERS")]
@@ -199,6 +221,28 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             "Error: Invalid value for --frame: it cannot be negative.".to_string(),
         ));
     }
+    let (low, high) = (
+        args.min_resolution.unwrap_or(args.resolution),
+        args.max_resolution.unwrap_or(args.resolution),
+    );
+    for (value, name) in [(low, "--min-resolution"), (high, "--max-resolution")] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err((
+                ExitCode::from(1),
+                format!("Error: Invalid value for {name}: it must be greater than zero."),
+            ));
+        }
+    }
+    if !(low <= args.resolution && args.resolution <= high) {
+        return Err((
+            ExitCode::from(1),
+            format!(
+                "Error: Invalid resolutions: {} px/m is what the images are sized at, and has to \
+                 lie between --min-resolution ({low}) and --max-resolution ({high}).",
+                args.resolution
+            ),
+        ));
+    }
 
     let settings = Settings {
         layout_size: args.layout_size,
@@ -214,6 +258,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         images: !args.no_images,
         ground_truth: !args.no_gt,
         resolution: args.resolution,
+        resolution_range: (low < high).then_some((low, high)),
         frame: args.frame,
     };
 
@@ -303,6 +348,12 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             "  {IMAGES_FOLDER}/ {images} images of {} by {} pixels, at {} px/m with a {} m frame",
             summary.image_size, summary.image_size, settings.resolution, settings.frame,
         );
+        if settings.varies() {
+            println!(
+                "  each map drawn at its own density, {low} to {high} px/m (the ground, the cells \
+                 and the frame stretched to match); {RESOLUTIONS_FILE} says which",
+            );
+        }
     }
     let labelled = count(|g| g.ground_truth.is_some());
     if labelled == 0 {

@@ -5,8 +5,14 @@
 //! on whole pictures reduced to `--size`, and reads with `--depth`,
 //! `--control-points`, `--samples`, `--temperature-start` and
 //! `--temperature-end`; the U-Net's `--crop`, `--crops-per-map`,
-//! `--angle-weight`, `--line-weight`, `--weight-decay`, `--overhang`, `--workers` and
-//! `--image-valid` do not apply to it.
+//! `--angle-weight`, `--line-weight`, `--scale-weight`, `--weight-decay`,
+//! `--overhang`, `--workers` and `--image-valid` do not apply to it.
+//!
+//! A dataset drawn over a range of densities (`mauro net dataset
+//! --min-resolution/--max-resolution`) gives the U-Net a scale head as well:
+//! it learns to say how dense a picture is, which `mauro net image-to-map`
+//! asks it when it is not told, and reports how far out it was as the Scale
+//! error. `--scale-weight` is what that term counts for.
 //!
 //! ```text
 //! mauro net train [OPTIONS] <dataset> [trainings]
@@ -63,7 +69,7 @@ use maur_o::net::training::{
     train, TrainingConfig, DEFAULT_ANGLE_WEIGHT, DEFAULT_LEARNING_RATE, DEFAULT_WEIGHT_DECAY,
 };
 use maur_o::net::tree_training::{train_tree, TreeTrainingConfig};
-use maur_o::net::unet::{DEFAULT_BASE_CHANNELS, DEPTH};
+use maur_o::net::unet::{DEFAULT_BASE_CHANNELS, DEFAULT_SCALE_WEIGHT, DEPTH};
 
 /// Where the runs are written when no folder is named.
 const DEFAULT_TRAININGS: &str = "trainings";
@@ -106,7 +112,8 @@ pub struct Args {
     /// trained on crops of the maps; the tree answers with the curves which
     /// cut the picture into its areas and a symbol for each, and is trained on
     /// the whole pictures reduced to --size. The options of the other model
-    /// are ignored: --crop, --crops-per-map, --angle-weight, --line-weight, --weight-decay,
+    /// are ignored: --crop, --crops-per-map, --angle-weight, --line-weight,
+    /// --scale-weight, --weight-decay,
     /// --overhang, --workers and --image-valid are the U-Net's; --size,
     /// --depth, --control-points, --samples and the two temperatures the
     /// tree's.
@@ -155,6 +162,13 @@ pub struct Args {
     /// reports how much of them it found as the Line IoU.
     #[arg(long, default_value_t = 1.0, value_name = "WEIGHT")]
     line_weight: f64,
+
+    /// What the scale term counts for beside the ground's. Only a dataset
+    /// drawn over a range of densities (--min-resolution/--max-resolution)
+    /// has one: the network then also says how dense a picture is, and
+    /// reports how far out it was as the Scale error.
+    #[arg(long, default_value_t = DEFAULT_SCALE_WEIGHT, value_name = "WEIGHT")]
+    scale_weight: f64,
 
     /// How hard the weights are pulled back towards nothing at every step, as
     /// a share of that step's own rate. A batch normalization leaves the loss
@@ -413,6 +427,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         .with_train_share(args.train_share)
         .with_angle_weight(args.angle_weight)
         .with_line_weight(args.line_weight)
+        .with_scale_weight(args.scale_weight)
         .with_weight_decay(args.weight_decay)
         .with_image_valid(args.image_valid)
         .with_seed(args.seed);

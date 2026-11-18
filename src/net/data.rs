@@ -89,7 +89,8 @@ use burn::data::dataset::{Dataset, DatasetError};
 use burn::tensor::{Device, Int, Tensor, TensorData};
 
 use crate::dataset::{
-    resolution_of, Classes, CLASSES_FILE, GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER,
+    resolution_of, resolutions_of, Classes, CLASSES_FILE, GROUND_TRUTH_FOLDER, IMAGES_FOLDER,
+    MAPS_FOLDER, RESOLUTIONS_FILE,
 };
 use crate::ground_truth::{GroundTruth, BACKGROUND};
 use crate::line_truth::LineTruth;
@@ -147,6 +148,16 @@ pub struct MapCrop {
     pub left: isize,
     /// Which pixel of that map the crop's top edge is at.
     pub top: isize,
+    /// How many pixels of the map one meter of ground is: the density it was
+    /// drawn at, which differs from map to map in a dataset drawn over a
+    /// range of them, and nought where nothing says what it was.
+    pub resolution: f64,
+    /// What the scale head is to answer: the natural logarithm of how much
+    /// denser than the dataset's normal density this map was drawn,
+    /// `ln(resolution / normal)` — nought for a map at the normal density,
+    /// and for every map of a dataset drawn at one. See
+    /// [`crate::net::unet::UNetConfig::scale_head`].
+    pub scale: f32,
 }
 
 /// Where one map's labels come from.
@@ -161,11 +172,26 @@ enum Labels {
     FromMap(PathBuf),
 }
 
+/// One map of a dataset: its picture, its labels, and the density it was
+/// drawn at.
+#[derive(Clone, Debug)]
+struct Entry {
+    image: PathBuf,
+    labels: Labels,
+    /// How many pixels of the picture one meter of ground is — the map's own
+    /// line of `resolutions.csv`, or the dataset's one resolution — and
+    /// `None` where neither is there to say. What rasterizing a
+    /// [`Labels::FromMap`] or the lines needs to land on the picture's own
+    /// pixel grid.
+    resolution: Option<f64>,
+}
+
 /// The maps of a dataset folder, cropped.
 #[derive(Debug)]
 pub struct MapDataset {
-    /// The image and the labels of each map, in the order the folder sorts.
-    maps: Vec<(PathBuf, Labels)>,
+    /// The image, the labels and the density of each map, in the order the
+    /// folder sorts.
+    maps: Vec<Entry>,
     /// How many pixels the maps are across and down — the same for all of
     /// them, which [`MapDataset::load`] is where it is checked.
     size: (usize, usize),
@@ -176,12 +202,15 @@ pub struct MapDataset {
     lines: usize,
     /// The folder of map files, which the lines layer is rebuilt from.
     maps_folder: PathBuf,
-    /// The resolution the images were drawn at, in pixels per meter of
-    /// ground — what rasterizing a [`Labels::FromMap`] needs to land on the
-    /// same pixel grid as the image beside it, and read once for the whole
-    /// dataset since a map file says nothing about it. `None` where every
-    /// map's labels are already on disk and nothing ever asks.
-    resolution: Option<f64>,
+    /// The dataset's normal density, in pixels per meter of ground: the one
+    /// every map was drawn at, or — where they differ — the one the images
+    /// were sized at, which a map's [`MapCrop::scale`] is measured against.
+    /// `None` where there is no `classes.json` to say.
+    normal: Option<f64>,
+    /// Whether the maps were drawn at densities of their own, which is what
+    /// gives a scale head something to learn — see
+    /// [`crate::dataset::Settings::resolution_range`].
+    varies: bool,
     /// How many crops one pass takes from each map.
     crops_per_map: usize,
     /// How many pixels square a crop is.
@@ -267,29 +296,69 @@ impl MapDataset {
             ));
         }
 
-        // The resolution a `Labels::FromMap` is rasterized at, read once
-        // rather than per map: it is one dataset-wide setting, and reading it
-        // before there is a map which needs it means a folder missing
-        // `classes.json` is refused here rather than eight minutes into an
-        // epoch, from inside a loader thread.
-        let mut resolution = None;
+        // The resolution a `Labels::FromMap` is rasterized at, read here
+        // rather than when a map needs it: a folder missing `classes.json` is
+        // refused now rather than eight minutes into an epoch, from inside a
+        // loader thread.
+        let notes = Classes::read(&folder.join(CLASSES_FILE)).ok();
         // The lines are not on disk at all: they are rebuilt from the map
-        // file, at this resolution, whatever the ground's labels are.
-        let lines = Classes::read(&folder.join(CLASSES_FILE))
-            .map(|read| read.lines)
-            .unwrap_or(0);
-        if lines > 0 || maps.iter().any(|(_, l)| matches!(l, Labels::FromMap(_))) {
-            resolution = Some(resolution_of(folder)?);
+        // file, at its resolution, whatever the ground's labels are.
+        let lines = notes.as_ref().map(|read| read.lines).unwrap_or(0);
+        let needed = lines > 0 || maps.iter().any(|(_, l)| matches!(l, Labels::FromMap(_)));
+        let normal = match &notes {
+            Some(notes) => Some(notes.resolution),
+            None if needed => Some(resolution_of(folder)?),
+            None => None,
+        };
+        // Each map's own density, where they differ. A dataset which says it
+        // was drawn over a range and has lost the file saying which map is
+        // which has labels nobody can line up with its pictures, nor a scale
+        // to teach.
+        let varies = notes.as_ref().is_some_and(|n| n.resolution_range.is_some());
+        let own = resolutions_of(folder)?;
+        if varies && own.is_none() {
+            return Err(format!(
+                "{} says its maps were drawn at densities of their own, and there is no {} \
+                 beside it to say which map was drawn at which",
+                folder.join(CLASSES_FILE).display(),
+                RESOLUTIONS_FILE,
+            ));
         }
+        let mut entries = Vec::with_capacity(maps.len());
+        for (image, labels) in maps {
+            let resolution = match &own {
+                Some(own) => {
+                    let stem = image
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    Some(*own.get(&stem).ok_or_else(|| {
+                        format!(
+                            "{} names no resolution for {stem}, so its labels cannot be lined \
+                             up with its picture",
+                            folder.join(RESOLUTIONS_FILE).display(),
+                        )
+                    })?)
+                }
+                None => normal,
+            };
+            entries.push(Entry {
+                image,
+                labels,
+                resolution,
+            });
+        }
+        let maps = entries;
         if lines > 0 {
-            if let Some((image, _)) = maps.iter().find(|(image, _)| {
-                !image
+            if let Some(entry) = maps.iter().find(|entry| {
+                !entry
+                    .image
                     .file_stem()
                     .is_some_and(|stem| maps_folder.join(stem).with_extension("omap").is_file())
             }) {
                 return Err(format!(
                     "{} has no map file in {}, which the labels of its lines are made from",
-                    image.display(),
+                    entry.image.display(),
                     maps_folder.display(),
                 ));
             }
@@ -301,7 +370,12 @@ impl MapDataset {
         // about how many symbols there are is a folder two runs of the
         // generator were emptied into, and the time to say so is now.
         let (mut size, mut classes) = (None, None);
-        for (image, label) in &maps {
+        for Entry {
+            image,
+            labels: label,
+            ..
+        } in &maps
+        {
             let (width, height, holds) = match label {
                 Labels::File(label) => {
                     let (height, width, holds) = GroundTruth::size(label)?;
@@ -356,7 +430,8 @@ impl MapDataset {
             classes,
             lines,
             maps_folder,
-            resolution,
+            normal,
+            varies,
             crops_per_map: DEFAULT_CROPS_PER_MAP,
             crop: CROP,
             overhang: 0,
@@ -413,7 +488,28 @@ impl MapDataset {
     /// through the network as it stands. `crate::net::image_valid` reads
     /// the first few of a validation split back into maps, epoch by epoch.
     pub fn pictures(&self) -> impl Iterator<Item = &Path> {
-        self.maps.iter().map(|(image, _)| image.as_path())
+        self.maps.iter().map(|entry| entry.image.as_path())
+    }
+
+    /// [`MapDataset::pictures`], each with the density it was drawn at —
+    /// the normal one where nothing says otherwise, and nought where there is
+    /// not even that.
+    pub fn pictures_with_resolutions(&self) -> impl Iterator<Item = (&Path, f64)> {
+        self.maps
+            .iter()
+            .map(|entry| (entry.image.as_path(), entry.resolution.unwrap_or(0.0)))
+    }
+
+    /// Whether the maps were drawn at densities of their own: what a scale
+    /// head needs to have anything to learn.
+    pub fn varies(&self) -> bool {
+        self.varies
+    }
+
+    /// The dataset's normal density, in pixels per meter: the one its maps
+    /// were drawn at, or the one the images were sized at where they differ.
+    pub fn normal_resolution(&self) -> Option<f64> {
+        self.normal
     }
 
     /// How many line symbols the lines layer has a channel for, nought where
@@ -472,8 +568,7 @@ impl MapDataset {
         let size = self.crop.min(width).min(height);
 
         for map in (0..self.maps.len()).step_by(stride.max(1)).take(wanted) {
-            let (_, labels) = &self.maps[map];
-            let truth = self.labels(labels)?;
+            let truth = self.labels(&self.maps[map])?;
 
             // The crops this map would be asked for, at the corners `get`
             // works out for those same item indices.
@@ -529,13 +624,13 @@ impl MapDataset {
     }
 
     /// One map's labels, however they are kept — read from `gt/`, or
-    /// rasterized from the map itself.
-    fn labels(&self, labels: &Labels) -> Result<GroundTruth, String> {
-        match labels {
+    /// rasterized from the map itself, at the density it was drawn at.
+    fn labels(&self, entry: &Entry) -> Result<GroundTruth, String> {
+        match &entry.labels {
             Labels::File(path) => GroundTruth::read(path),
             Labels::FromMap(path) => {
                 let (width, height) = self.size;
-                let resolution = self
+                let resolution = entry
                     .resolution
                     .expect("set in load whenever a map's labels are computed from it");
                 GroundTruth::from_map(path, width as u32, height as u32, resolution)
@@ -555,13 +650,14 @@ impl MapDataset {
         let at = ((self.maps.len() as f64 * share).round() as usize)
             .clamp(1, self.maps.len().saturating_sub(1).max(1));
         let (train, valid) = self.maps.split_at(at);
-        let part = |maps: &[(PathBuf, Labels)], seed: u64| MapDataset {
+        let part = |maps: &[Entry], seed: u64| MapDataset {
             maps: maps.to_vec(),
             size: self.size,
             classes: self.classes,
             lines: self.lines,
             maps_folder: self.maps_folder.clone(),
-            resolution: self.resolution,
+            normal: self.normal,
+            varies: self.varies,
             crops_per_map: self.crops_per_map,
             crop: self.crop,
             overhang: self.overhang,
@@ -661,13 +757,14 @@ impl Dataset<MapCrop> for MapDataset {
     /// running loader — and that panics, because the alternative burn offers
     /// is an epoch which stops early and says nothing.
     fn get(&self, index: usize) -> Result<MapCrop, DatasetError> {
-        let (image_path, labels) = self
+        let entry = self
             .maps
             .get(index / self.crops_per_map)
             .ok_or_else(|| DatasetError::new(std::io::Error::other("past the end")))?;
+        let image_path = &entry.image;
 
         let truth = self
-            .labels(labels)
+            .labels(entry)
             .unwrap_or_else(|e| panic!("cannot read the labels mid-run: {e}"));
         let image = image::open(image_path)
             .unwrap_or_else(|e| panic!("cannot read {} mid-run: {e}", image_path.display()))
@@ -744,7 +841,7 @@ impl Dataset<MapCrop> for MapDataset {
         if self.lines > 0 {
             let stem = image_path.file_stem().expect("an image has a name");
             let map = self.maps_folder.join(stem).with_extension("omap");
-            let resolution = self.resolution.expect("read where there are lines");
+            let resolution = entry.resolution.expect("read where there are lines");
             let truth = LineTruth::from_map(&map, width as u32, height as u32, resolution)
                 .unwrap_or_else(|e| panic!("cannot read the lines mid-run: {e}"));
             for (class, mask) in &truth.layers {
@@ -772,7 +869,21 @@ impl Dataset<MapCrop> for MapDataset {
                 .unwrap_or_default(),
             left,
             top,
+            resolution: entry.resolution.unwrap_or(0.0),
+            scale: scale_label(entry.resolution, self.normal),
         })
+    }
+}
+
+/// What the scale head is to answer for a map drawn at `resolution` in a
+/// dataset whose normal density is `normal`: `ln(resolution / normal)`, and
+/// nought wherever either is not known.
+fn scale_label(resolution: Option<f64>, normal: Option<f64>) -> f32 {
+    match (resolution, normal) {
+        (Some(resolution), Some(normal)) if resolution > 0.0 && normal > 0.0 => {
+            (resolution / normal).ln() as f32
+        }
+        _ => 0.0,
     }
 }
 
@@ -789,6 +900,9 @@ pub struct MapBatch {
     /// Which lines run through every pixel, `[batch, lines, crop, crop]` of
     /// zeros and ones, and `None` for a dataset whose lines are not labelled.
     pub lines: Option<Tensor<4>>,
+    /// How much denser than the dataset's normal density each crop's map was
+    /// drawn, as a natural logarithm, `[batch, 1]` — see [`MapCrop::scale`].
+    pub scale: Tensor<2>,
 }
 
 /// Stacks [`MapCrop`]s into a [`MapBatch`].
@@ -811,7 +925,9 @@ impl Batcher<MapCrop, MapBatch> for MapBatcher {
             .map(|item| item.lines.len() / (size * size))
             .unwrap_or(0);
         let mut lines = Vec::with_capacity(batch * line_channels * size * size);
+        let mut scale = Vec::with_capacity(batch);
         for item in items {
+            scale.push(item.scale);
             lines.extend(item.lines.iter().map(|&on| on as f32));
             image.extend_from_slice(&item.image);
             class.extend_from_slice(&item.class);
@@ -828,6 +944,7 @@ impl Batcher<MapCrop, MapBatch> for MapBatcher {
                     device,
                 )
             }),
+            scale: Tensor::from_data(TensorData::new(scale, [batch, 1]), device),
         }
     }
 }
@@ -846,6 +963,8 @@ mod tests {
             map: "map".to_string(),
             left: 0,
             top: 0,
+            resolution: 3.0,
+            scale: value,
         }
     }
 

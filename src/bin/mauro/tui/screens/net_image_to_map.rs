@@ -13,9 +13,10 @@ const CROP: usize = 6;
 const OVERLAP: usize = 7;
 const RENDERED: usize = 8;
 const RESOLUTION: usize = 9;
-const SCALE: usize = 10;
-const LINE_THRESHOLD: usize = 11;
-const MIN_LINE: usize = 12;
+const DPI: usize = 10;
+const SCALE: usize = 11;
+const LINE_THRESHOLD: usize = 12;
+const MIN_LINE: usize = 13;
 
 pub struct NetImageToMap {
     form: Form,
@@ -41,6 +42,7 @@ impl NetImageToMap {
                 Field::text("Overlap").arg("overlap").unit("px"),
                 Field::text("Rendered").arg("rendered"),
                 Field::text("Resolution").arg("resolution").unit("px/m"),
+                Field::text("DPI").arg("dpi").unit("px/in"),
                 Field::text("Scale").arg("scale").unit("1:"),
                 Field::text("Line threshold").arg("line_threshold"),
                 Field::text("Min line").arg("min_line").unit("px"),
@@ -87,6 +89,7 @@ impl Tool for NetImageToMap {
         form.push_option(&mut args, OVERLAP, "--overlap");
         form.push_option(&mut args, RENDERED, "--rendered");
         form.push_option(&mut args, RESOLUTION, "--resolution");
+        form.push_option(&mut args, DPI, "--dpi");
         form.push_option(&mut args, SCALE, "--scale");
         form.push_option(&mut args, LINE_THRESHOLD, "--line-threshold");
         form.push_option(&mut args, MIN_LINE, "--min-line");
@@ -112,5 +115,15 @@ mod tests {
         );
         type_into(&mut screen.form, TOLERANCE, "2");
         assert_eq!(command(&screen).unwrap()[4..], ["--tolerance", "2"]);
+    }
+
+    /// The density of a scan is given as the scanner gives it.
+    #[test]
+    fn the_dpi_is_passed_on_when_given() {
+        let mut screen = NetImageToMap::new();
+        type_into(&mut screen.form, RUN, "trainings/run");
+        type_into(&mut screen.form, IMAGE, "p.png");
+        type_into(&mut screen.form, DPI, "300");
+        assert_eq!(command(&screen).unwrap()[4..], ["--dpi", "300"]);
     }
 }

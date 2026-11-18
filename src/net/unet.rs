@@ -36,6 +36,20 @@
 //! angle channels after it — `on + 2`, matching a `gt/*.bin` expanded by
 //! [`crate::ground_truth::GroundTruth::one_hot`] channel for channel.
 //!
+//! # How dense the picture is
+//!
+//! A picture says nothing about how many pixels a meter of ground is, and the
+//! map read out of it is only the right size if that is known. A network
+//! built with [`UNetConfig::scale_head`] answers it as well: a small head on
+//! the bottom of the encoder — a global average over the picture, then two
+//! dense layers — which says how much denser than the density its dataset
+//! was normally drawn at the picture is, as a natural logarithm. It is
+//! trained on a dataset drawn over a range of densities (see
+//! [`crate::dataset::Settings::resolution_range`]), where the symbols, whose
+//! sizes are fixed on the paper, are the only thing which shows it.
+//! [`UNet::forward`] leaves it out; [`UNet::forward_all`] and
+//! [`UNet::scale`] are where it is.
+//!
 //! Everything here is `NCHW`, which is the layout burn's convolutions work
 //! in: `[batch, channel, row, column]`. The label on disk is `H, W, C`, the
 //! same numbers read in a different order, and [`crate::net::data`] is where
@@ -49,7 +63,7 @@ use burn::module::Module;
 use burn::nn::conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig};
 use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
-use burn::nn::{BatchNorm, BatchNormConfig, PaddingConfig2d, Relu};
+use burn::nn::{BatchNorm, BatchNormConfig, Linear, LinearConfig, PaddingConfig2d, Relu};
 use burn::tensor::activation::{sigmoid, softmax};
 use burn::tensor::{Device, Tensor};
 
@@ -74,6 +88,15 @@ pub const DEPTH: usize = 4;
 /// a first model on a dataset of a few hundred maps, so it starts a quarter
 /// of the way there and can be turned up.
 pub const DEFAULT_BASE_CHANNELS: usize = 16;
+
+/// How wide the scale head's hidden layer is. One number is all it answers,
+/// out of an average of the bottom's features, so it needs little.
+pub const SCALE_HIDDEN: usize = 64;
+
+/// What the scale term counts for beside the class term, by default. The
+/// scale is a natural logarithm, so an answer a tenth out costs a tenth: of
+/// the order a class loss is by the time the network reads the ground well.
+pub const DEFAULT_SCALE_WEIGHT: f64 = 1.0;
 
 /// What a [`UNet`] is to be built as.
 #[derive(Config, Debug)]
@@ -112,6 +135,15 @@ pub struct UNetConfig {
     /// What the lines term counts for beside the ground's.
     #[config(default = 1.0)]
     pub line_weight: f64,
+    /// Whether the network also says how dense the picture is: a head on
+    /// the bottom of the encoder answering `ln(density / normal)` for the
+    /// whole picture — see the module documentation. Off is the network it
+    /// was before there was such a head, weight for weight.
+    #[config(default = false)]
+    pub scale_head: bool,
+    /// What the scale term counts for beside the ground's.
+    #[config(default = "DEFAULT_SCALE_WEIGHT")]
+    pub scale_weight: f64,
 }
 
 impl UNetConfig {
@@ -152,6 +184,12 @@ impl UNetConfig {
             // the rest of the network was for.
             head: Conv2dConfig::new([self.base_channels, self.head_channels()], [1, 1])
                 .init(device),
+            scale: self.scale_head.then(|| ScaleHead {
+                hidden: LinearConfig::new(width(DEPTH), SCALE_HIDDEN).init(device),
+                relu: Relu::new(),
+                out: LinearConfig::new(SCALE_HIDDEN, 1).init(device),
+            }),
+            scale_weight: self.scale_weight,
             classes: self.classes,
             lines: self.lines,
             line_weight: self.line_weight,
@@ -181,6 +219,11 @@ pub struct UNet {
     up: Vec<UpBlock>,
     /// The 1x1 convolution which turns features into an answer.
     head: Conv2d,
+    /// What says how dense the picture is, where the network was built to —
+    /// see [`UNetConfig::scale_head`].
+    scale: Option<ScaleHead>,
+    /// What the scale term counts for — see [`UNetConfig::scale_weight`].
+    scale_weight: f64,
     /// How many opaque areas the symbol set holds — see [`UNetConfig`].
     classes: usize,
     /// How many line symbols the head has a channel for — see
@@ -209,17 +252,88 @@ impl UNet {
     /// the decoder puts them back, and a size which does not divide comes
     /// back a pixel short of what the skip connection expects.
     pub fn forward(&self, image: Tensor<4>) -> Tensor<4> {
-        self.forward_tapped(image, &mut |_, _| {})
+        self.forward_all(image).0
+    }
+
+    /// [`UNet::forward`], and how dense the network says each picture is:
+    /// `[batch, 1]` of `ln(density / normal)`, where it has a scale head.
+    pub fn forward_all(&self, image: Tensor<4>) -> (Tensor<4>, Option<Tensor<2>>) {
+        self.forward_all_tapped(image, &mut |_, _| {})
+    }
+
+    /// How dense the network says each picture is, `[batch, 1]` of
+    /// `ln(density / normal)`, or `None` for a network with no scale head.
+    ///
+    /// The encoder alone: the decoder says where things are, and nothing of
+    /// that goes into the scale.
+    pub fn scale(&self, image: Tensor<4>) -> Option<Tensor<2>> {
+        let head = self.scale.as_ref()?;
+        let tap = &mut |_: &str, _: &[usize]| {};
+        let (bottom, _) = self.encode_tapped(image, tap);
+        Some(head.forward_tapped(bottom, tap))
+    }
+
+    /// Whether the network says how dense a picture is.
+    pub fn has_scale_head(&self) -> bool {
+        self.scale.is_some()
+    }
+
+    /// What the scale term counts for beside the class term.
+    pub fn scale_weight(&self) -> f64 {
+        self.scale_weight
     }
 
     /// [`UNet::forward`], reporting the shape of every tensor it makes to
     /// `tap` under the name [`UNetConfig::describe`] gives it: what holds the
     /// descriptor to the code.
+    #[cfg(test)]
     pub(crate) fn forward_tapped(
         &self,
         image: Tensor<4>,
         tap: &mut dyn FnMut(&str, &[usize]),
     ) -> Tensor<4> {
+        self.forward_all_tapped(image, tap).0
+    }
+
+    /// [`UNet::forward_all`], reporting every tensor's shape to `tap`.
+    pub(crate) fn forward_all_tapped(
+        &self,
+        image: Tensor<4>,
+        tap: &mut dyn FnMut(&str, &[usize]),
+    ) -> (Tensor<4>, Option<Tensor<2>>) {
+        let (x, skips) = self.encode_tapped(image, tap);
+
+        // How dense the picture is, out of what the encoder made of all of
+        // it.
+        let scale = self
+            .scale
+            .as_ref()
+            .map(|head| head.forward_tapped(x.clone(), tap));
+
+        // And up, deepest first, each step handed back the level it lost.
+        tap("unet/decoder@in:x", &x.dims());
+        let mut x = x;
+        for (step, (block, skip)) in self.up.iter().zip(skips.into_iter().rev()).enumerate() {
+            tap(
+                &format!("unet/decoder@in:skip{}", DEPTH - 1 - step),
+                &skip.dims(),
+            );
+            x = block.forward_tapped(x, skip, &format!("unet/decoder/up{step}"), tap);
+        }
+        tap("unet/decoder", &x.dims());
+
+        let x = self.head.forward(x);
+        tap("unet/head", &x.dims());
+        (x, scale)
+    }
+
+    /// The encoder: what the bottom made of the picture, and what each level
+    /// saw before it was halved, full resolution first.
+    fn encode_tapped(
+        &self,
+        image: Tensor<4>,
+        tap: &mut dyn FnMut(&str, &[usize]),
+    ) -> (Tensor<4>, Vec<Tensor<4>>) {
         tap("unet@in", &image.dims());
         tap("unet/encoder@in", &image.dims());
         // Down, keeping what each level saw before it was halved: that is
@@ -236,21 +350,7 @@ impl UNet {
 
         x = self.bottom.forward_tapped(x, "unet/encoder/bottom", tap);
         tap("unet/encoder", &x.dims());
-
-        // And up, deepest first, each step handed back the level it lost.
-        tap("unet/decoder@in:x", &x.dims());
-        for (step, (block, skip)) in self.up.iter().zip(skips.into_iter().rev()).enumerate() {
-            tap(
-                &format!("unet/decoder@in:skip{}", DEPTH - 1 - step),
-                &skip.dims(),
-            );
-            x = block.forward_tapped(x, skip, &format!("unet/decoder/up{step}"), tap);
-        }
-        tap("unet/decoder", &x.dims());
-
-        let x = self.head.forward(x);
-        tap("unet/head", &x.dims());
-        x
+        (x, skips)
     }
 
     /// The answer in the shape the dataset's labels are in:
@@ -352,6 +452,39 @@ impl UNet {
             .chain(self.up.iter().map(|block| &block.conv))
             .map(DoubleConv::constant_channels)
             .sum()
+    }
+}
+
+/// The head which says how dense a picture is: the bottom's features averaged
+/// over the whole picture, then a dense layer, a rectifier and one number.
+///
+/// An average rather than anything which looks at where: the density of a
+/// picture is the same all over it, and an average over however much picture
+/// there is makes the head answer a tile of any size.
+#[derive(Module, Debug)]
+pub struct ScaleHead {
+    hidden: Linear,
+    relu: Relu,
+    out: Linear,
+}
+
+impl ScaleHead {
+    /// `[batch, channels, h, w]` of the bottom to `[batch, 1]`.
+    fn forward_tapped(&self, x: Tensor<4>, tap: &mut dyn FnMut(&str, &[usize])) -> Tensor<2> {
+        let [batch, channels, ..] = x.dims();
+        tap("unet/scale_head@in", &x.dims());
+        let pooled = x.mean_dim(3).mean_dim(2);
+        tap("unet/scale_head/pool", &pooled.dims());
+        let flat: Tensor<2> = pooled.reshape([batch, channels]);
+        tap("unet/scale_head/flatten", &flat.dims());
+        let hidden = self.hidden.forward(flat);
+        tap("unet/scale_head/hidden", &hidden.dims());
+        let hidden = self.relu.forward(hidden);
+        tap("unet/scale_head/relu", &hidden.dims());
+        let out = self.out.forward(hidden);
+        tap("unet/scale_head/out", &out.dims());
+        tap("unet/scale_head", &out.dims());
+        out
     }
 }
 
@@ -718,10 +851,41 @@ impl UNetConfig {
             .edge("decoder", "head", &refs(&shape(width(0), 0)))
             .edge("head", "@out", &refs(&shape(self.head_channels(), 0)));
 
+        // Only where there is one, so that a network without it describes
+        // exactly as it did before there was such a thing.
+        if self.scale_head {
+            let bottom = width(DEPTH);
+            let b = bottom.to_string();
+            let hidden = SCALE_HIDDEN.to_string();
+            let scale_head = Node::new("scale_head", "group", "Scale head")
+                .summary("how much denser than the normal the picture is, as a natural logarithm")
+                .child(
+                    Node::new("pool", "global_avg_pool", "Global average pool")
+                        .summary("the bottom's features averaged over the whole picture"),
+                )
+                .child(Node::new("flatten", "flatten", "Flatten"))
+                .child(layer::linear("hidden", bottom, SCALE_HIDDEN))
+                .child(layer::relu("relu"))
+                .child(layer::linear("out", SCALE_HIDDEN, 1))
+                .edge("@in", "pool", &refs(&shape(bottom, DEPTH)))
+                .edge("pool", "flatten", &["B", &b, "1", "1"])
+                .edge("flatten", "hidden", &["B", &b])
+                .edge("hidden", "relu", &["B", &hidden])
+                .edge("relu", "out", &["B", &hidden])
+                .edge("out", "@out", &["B", "1"]);
+            root = root
+                .child(scale_head)
+                .edge("encoder", "scale_head", &refs(&shape(bottom, DEPTH)))
+                .edge("scale_head", "@out:scale", &["B", "1"]);
+        }
+
         let mut config = BTreeMap::new();
         config.insert("classes".to_string(), Value::from(self.classes));
         config.insert("in_channels".to_string(), Value::from(self.in_channels));
         config.insert("base_channels".to_string(), Value::from(self.base_channels));
+        if self.scale_head {
+            config.insert("scale_head".to_string(), Value::from(true));
+        }
         NetDescriptor::new("image_to_omap", "unet", config, root)
     }
 }
@@ -835,5 +999,83 @@ mod tests {
             &[("B", 2), ("H", 32), ("W", 48)],
         );
         assert_eq!(descriptor.total_params(), net.num_params() as u64);
+    }
+
+    /// The scale head answers one number per picture, whatever size the
+    /// picture is, and the same one out of `scale` as out of `forward_all`;
+    /// a network without one has nothing to say.
+    #[test]
+    fn the_scale_head_answers_one_number_per_picture() {
+        let device = Device::flex();
+        let net = UNetConfig::new(5)
+            .with_base_channels(4)
+            .with_scale_head(true)
+            .init(&device);
+        assert!(net.has_scale_head());
+        for (height, width) in [(16, 16), (32, 48)] {
+            let image = Tensor::<4>::ones([3, 3, height, width], &device);
+            let (raw, scale) = net.forward_all(image.clone());
+            assert_eq!(raw.dims(), [3, 5 + 3, height, width]);
+            let scale = scale.expect("a network with a scale head");
+            assert_eq!(scale.dims(), [3, 1]);
+            let alone = net.scale(image).expect("the same head");
+            let (a, b): (Vec<f32>, Vec<f32>) = (
+                scale.into_data().try_to_vec().expect("floats"),
+                alone.into_data().try_to_vec().expect("floats"),
+            );
+            for (a, b) in a.iter().zip(&b) {
+                assert!((a - b).abs() < 1e-5, "{a} and {b}");
+            }
+        }
+
+        let without = UNetConfig::new(5).with_base_channels(4).init(&device);
+        assert!(!without.has_scale_head());
+        assert!(without
+            .scale(Tensor::zeros([1, 3, 16, 16], &device))
+            .is_none());
+    }
+
+    /// The descriptor of a network with a scale head holds to its forward
+    /// pass too, and one without describes exactly as it did before there
+    /// was such a head.
+    #[test]
+    fn the_descriptor_matches_the_forward_pass_with_a_scale_head() {
+        let device = Device::flex();
+        let config = UNetConfig::new(5)
+            .with_base_channels(4)
+            .with_lines(3)
+            .with_scale_head(true);
+        let net = config.init(&device);
+        let descriptor = config.describe();
+
+        let mut reported = Vec::new();
+        net.forward_tapped(
+            Tensor::<4>::zeros([2, 3, 32, 48], &device),
+            &mut |key, dims| {
+                reported.push((key.to_string(), dims.to_vec()));
+            },
+        );
+        crate::net::describe::assert_matches_forward(
+            &descriptor,
+            &reported,
+            &[("B", 2), ("H", 32), ("W", 48)],
+        );
+        assert_eq!(descriptor.total_params(), net.num_params() as u64);
+        assert_eq!(descriptor.problems(), Vec::<String>::new());
+
+        let plain = UNetConfig::new(5).with_base_channels(4).with_lines(3);
+        assert_ne!(
+            plain.describe().canonical_hash(),
+            descriptor.canonical_hash()
+        );
+        assert_eq!(
+            plain.describe().canonical_hash(),
+            plain
+                .clone()
+                .with_scale_weight(3.0)
+                .describe()
+                .canonical_hash(),
+            "the weight of a term is training, not architecture"
+        );
     }
 }

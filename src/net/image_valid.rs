@@ -93,13 +93,18 @@ pub struct ImageValidation {
     /// The run folder: where the checkpoints are read from and the sheets
     /// written to.
     run: PathBuf,
-    /// The pictures to read back, in the order they are drawn.
-    pictures: Vec<PathBuf>,
+    /// The pictures to read back, in the order they are drawn, each with the
+    /// density it was drawn at (nought where nothing says).
+    pictures: Vec<(PathBuf, f64)>,
     /// The symbol set the network's classes are places in.
     symbol_set: PathBuf,
     /// Its opaque areas, which is that list.
     symbols: Vec<Entry>,
     /// How to read a picture back, which is what `mauro net image-to-map` would do.
+    /// Its resolution is the dataset's normal one; a picture drawn at another
+    /// is read at its own, and resampled into the range the network was
+    /// trained over on the way in where it is outside it, as the tool does
+    /// with a picture whose density it was given.
     settings: ReadBackSettings,
     /// Where the network is run.
     device: Device,
@@ -113,7 +118,7 @@ impl ImageValidation {
     /// means.
     pub fn new(
         run: &Path,
-        pictures: Vec<PathBuf>,
+        pictures: Vec<(PathBuf, f64)>,
         symbol_set: &Path,
         symbols: Vec<Entry>,
         settings: ReadBackSettings,
@@ -161,7 +166,12 @@ impl ImageValidation {
         let scratch = tempfile::tempdir()
             .map_err(|e| format!("cannot make a folder for the read-back maps: {e}"))?;
 
-        for picture in &self.pictures {
+        for (picture, resolution) in &self.pictures {
+            let settings = if *resolution > 0.0 {
+                self.settings.clone().read_at(*resolution)
+            } else {
+                self.settings.clone()
+            };
             let stem = picture
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
@@ -173,7 +183,7 @@ impl ImageValidation {
                 &self.symbol_set,
                 &self.symbols,
                 &scratch.path().join(format!("{stem}.omap")),
-                &self.settings,
+                &settings,
                 &self.device,
             )?;
 
@@ -356,7 +366,7 @@ mod tests {
 
         let phase: ImageValidation = ImageValidation::new(
             run,
-            vec![PathBuf::from("map_001.png")],
+            vec![(PathBuf::from("map_001.png"), 3.0)],
             Path::new("symbols.omap"),
             Vec::new(),
             ReadBackSettings::of(64, 3.0, 10000),

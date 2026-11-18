@@ -125,3 +125,75 @@ fn a_tree_trains_and_reads_a_picture_back() {
         .success();
     assert!(map.is_file());
 }
+
+/// A dataset drawn over a range of densities gives the U-Net a scale head:
+/// the run says so in its configuration, reports the Scale error, and
+/// `image-to-map` asks it how dense a picture is when it is not told — and
+/// does not when it is.
+#[test]
+fn a_unet_on_a_range_of_densities_learns_to_say_how_dense_a_picture_is() {
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let folder = dir.path().join("dataset");
+    mauro()
+        .args(["net", "dataset", SYMBOL_SET])
+        .arg(&folder)
+        .args(["-n", "4", "-l", "2", "-c", "20", "-j", "-r", "2", "-f", "5"])
+        .args(["--min-resolution", "1", "--max-resolution", "4"])
+        .assert()
+        .success();
+    let trainings = dir.path().join("trainings");
+
+    mauro()
+        .args(["net", "train"])
+        .arg(&folder)
+        .arg(&trainings)
+        .args(["-e", "1", "-b", "2", "-c", "16", "--crops-per-map", "2"])
+        .args(["--base-channels", "2", "-w", "1", "--image-valid", "1"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("scale head"));
+
+    let run = run_of(&trainings, "UNet_");
+    let config = std::fs::read_to_string(run.join("training.json")).expect("the configuration");
+    assert!(config.contains("\"scale_head\": true"), "{config}");
+    for split in ["train", "valid"] {
+        let log = run.join(split).join("1").join("Scale_error.log");
+        assert!(log.is_file(), "no scale error in {log:?}");
+    }
+
+    let picture = folder.join("images").join("map_001.png");
+    let map = dir.path().join("read.omap");
+    mauro()
+        .args(["net", "image-to-map"])
+        .arg(&run)
+        .arg(&picture)
+        .arg(&map)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("scale head"));
+    assert!(map.is_file());
+
+    // Told a density it was trained over, it reads the picture as it is.
+    mauro()
+        .args(["net", "image-to-map"])
+        .arg(&run)
+        .arg(&picture)
+        .arg(&map)
+        .args(["--resolution", "4"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("from --resolution"))
+        .stdout(predicates::str::contains("read as it is"));
+
+    // Told one past it, it resamples to the nearer end and no further: the
+    // 100 pixels at 8 px/m are 50 at the 4 it was trained up to.
+    mauro()
+        .args(["net", "image-to-map"])
+        .arg(&run)
+        .arg(&picture)
+        .arg(&map)
+        .args(["--resolution", "8"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("resampled to 50x50"));
+}

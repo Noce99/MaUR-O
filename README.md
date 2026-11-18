@@ -712,7 +712,8 @@ mauro net dataset [OPTIONS] <symbol-set> [folder]
 | `-t, --transparent-areas <CHANCE>` | The chance of a cell being covered by a see-through area (default `0.1`). |
 | `-p, --point-symbols <CHANCE>` | The chance of a cell holding a point symbol; two are half as likely as one, three half as likely again (default `0.5`). |
 | `-j, --just-opaque-areas` | Draw nothing but the ground: the cells are filled with opaque areas and the lines, see-through areas and point symbols are all skipped, whatever the three options above say. Also what makes a dataset labelled — see [below](#a-training-set). |
-| `-r, --resolution <PX_PER_M>` | How many pixels of image one meter of ground comes to (default `3`). |
+| `-r, --resolution <PX_PER_M>` | How many pixels of image one meter of ground comes to (default `3`). With a range below, the density the images are sized at. |
+| `--min-resolution <PX_PER_M>` / `--max-resolution <PX_PER_M>` | Draw each map at a density of its own, log-uniform between the two (each defaults to `--resolution`, which has to lie between them) — see [Maps at more than one density](#a-training-set). |
 | `-f, --frame <METERS>` | How much white ground to leave around each map (default `50`). |
 | `--no-images` | Write the maps and nothing else. Drawing them is most of the work; the labels go with the images, having nothing left to be labels of. |
 | `--iof-rules` | Keep to the IOF rules for what may be drawn where — **not read yet**: an overlay is picked for showing up on its ground, not for being allowed there. |
@@ -854,6 +855,31 @@ It needs `--transparent-areas 0 --point-symbols 0`, since anything else would
 be drawn and left unlabelled. A network trained on such a dataset answers for
 the lines too, and `mauro net train` reports how much of them it found as the
 *Line IoU*.
+
+**Maps at more than one density.** A picture of a map says nothing about how many pixels a meter of ground is,
+and a network trained on maps all drawn at one density learns that density
+and nothing else: shown a 600 dpi scan, it writes a map four times the size.
+`--min-resolution` and `--max-resolution` draw each map at a density of its
+own instead, log-uniform between the two. **The images stay the same number
+of pixels** — the size `--resolution` makes them — so a map at half the
+density shows twice the ground, and the cells and the frame stretch with it:
+a cell is as many pixels across at every density, and the only thing in a
+picture which says how dense it is, is the symbols, whose sizes the symbol
+set fixes on the paper. Each map's density is written to
+`resolutions.csv`, and the range to `classes.json`:
+
+```bash
+./target/release/mauro net dataset --just-opaque-areas -n 300 \
+    --resolution 3 --min-resolution 1 --max-resolution 6 maps/ISOM_10k.omap dataset
+```
+
+A U-Net trained on such a dataset grows a **scale head** — the bottom of
+the encoder averaged over the picture, then two dense layers — which says how
+much denser than the normal density a picture is (as a natural logarithm,
+scored with a Huber loss; `--scale-weight` on `mauro net train` is what the
+term counts for), and `mauro net train` reports how far out it was as the
+*Scale error*, in per cent. [`mauro net image-to-map`](#mauro-net-image-to-map)
+asks it when it is not told the density.
 
 **On disk it is not that tensor.** A 1650 × 1650 image of a set with thirty
 opaque areas would be 345 MB of mostly zeros; a `gt/*.bin` holds the same
@@ -1093,7 +1119,7 @@ cargo run --release --features cuda -- net train --model tree \
 
 It is trained on the **whole picture**, reduced to `--size` pixels (a divisor of
 16), rather than on crops, so an epoch is short — a few dozen of them make a run.
-`--crop`, `--crops-per-map`, `--angle-weight`, `--line-weight`, `--weight-decay`, `--overhang`,
+`--crop`, `--crops-per-map`, `--angle-weight`, `--line-weight`, `--scale-weight`, `--weight-decay`, `--overhang`,
 `--workers` and `--image-valid` are the U-Net's and are ignored. A run is
 `TreeNet_<date>/` holding `tree.json`, `architecture.txt`, `best.bpk` and
 `valid.png` (*picture | label | answer*). It reports to the terminal interface
@@ -1171,6 +1197,24 @@ The whole chain in one call, and the other end of
 ```bash
 cargo run --release -- net image-to-map \
     trainings/UNet_2026_08_18__09_13_39 dataset/images/map_001.png back.omap
+```
+
+**How dense the picture is** decides how big the map comes out, and a
+picture does not say. It is taken from `--resolution` (pixels per meter of
+ground, at the scale the map is written at), else from `--dpi` (a scan or an
+export: so many pixels to an inch of paper, which the scale turns into
+meters), else from the network's own scale head where it has one (trained on
+[maps at more than one density](#a-training-set); the median
+of what the tiles with anything on them say, held to the range it was trained
+on), else from the run's `classes.json`. Whichever it is, a picture at a density
+the network was trained over is **read as it is, every pixel of it**; one
+outside that range is resampled to the nearer end of it (to the one density,
+for a run trained at one) before it is read, and the map is drawn back at the
+picture's own density to score it:
+
+```text
+  the picture is 5.906 px/m (23.62 px to a mm of paper), from --dpi 600
+  resampled to 103x98 pixels, 1.500 px/m, before it is read: the network was trained at 1.500 px/m
 ```
 
 The network says which of the symbol set's opaque areas each pixel is; the

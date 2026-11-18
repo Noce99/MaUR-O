@@ -60,10 +60,10 @@ Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 | `mauro dem-eval` | Score a predicted DEM GeoTIFF against a ground-truth one (MSE/RMSE/MAE + error maps). |
 | `mauro osm` | Convert OpenStreetMap XML (a file, or downloaded for an area from the Overpass API with `--download`) into an `.omap` drawn to ISSprOM 2019 (default) or ISOM 2017-2, or (`--standard osm`, optionally with GTFS feeds) styled like openstreetmap-carto. |
 | `mauro ortho` | Download a map's aerial orthophoto from the best open WMS for its place (European national/regional agencies) and add it to the map as a georeferenced template. |
-| `mauro net dataset` | Generate a dataset of random maps out of one map's symbol set: maps, images and per-pixel labels (`images/`, `gt/`, `classes.json`). |
+| `mauro net dataset` | Generate a dataset of random maps out of one map's symbol set: maps, images and per-pixel labels (`images/`, `gt/`, `classes.json`). `--min-resolution/--max-resolution` draws each map at its own density (same pixels, more or less ground; `resolutions.csv`), which gives the U-Net a scale head. |
 | `mauro net grid-to-map` | Turn a label grid back into a map (the way back from `gt/`). |
 | `mauro net train` | Train a network on such a dataset: a U-Net (`--model unet`, the default) or a tree of curves (`--model tree`, `src/net/tree.rs`, `tree_training.rs`). `--dashboard` for burn's live terminal dashboard (U-Net only); the TUI's job screen replaces it. |
-| `mauro net image-to-map` | Read a picture of a map back into a map with a trained run, and score it by drawing it again. |
+| `mauro net image-to-map` | Read a picture of a map back into a map with a trained run, and score it by drawing it again. The picture's density comes from `--resolution`, `--dpi`, the scale head or `classes.json`, and a picture outside the densities the run was trained over is resampled to the nearer end of them before it is read. |
 | `mauro net show-batches` | Draw the batches a run would be trained on, from the tensors, to check the labels. |
 | `mauro net describe` | Write each network's architecture (`net/describe.rs`) into the versioned `networks/` folder; `--check` is the CI/hook gate. |
 

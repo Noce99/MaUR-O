@@ -66,6 +66,26 @@
 //! rather than about the network — see [`resolve_angles`], which is also
 //! where the angle is unfolded by the symbol's own symmetry.
 //!
+//! # How dense the picture is
+//!
+//! A network reads best at the densities its dataset was drawn at, and the
+//! map it writes is only the right size if the density of the picture is
+//! known. [`ReadBackSettings::resolution`] is the picture's density and
+//! [`ReadBackSettings::network_resolutions`] the range the network was
+//! trained over — one density, for a dataset drawn at one. A picture inside
+//! the range is read as it is, every pixel of it; one outside is resampled to
+//! the nearer end of it ([`ReadBackSettings::reading_resolution`]) and no
+//! further, so a 600 dpi scan read by a network trained up to 400 dpi loses
+//! a third of its pixels rather than all but a quarter. [`read_back`] then
+//! places what the network said over the ground
+//! the *original* picture covers, and draws the map back at the original
+//! density to score it — so the drawing is the picture's own size whatever
+//! was resampled on the way.
+//!
+//! Where the picture's density is not known, a network with a scale head can
+//! say it: [`estimate_resolution`] asks it about tiles of the picture and
+//! takes the median.
+//!
 //! # The whole way round
 //!
 //! [`read_back`] is all of it in one call: a picture in, the map the network
@@ -78,7 +98,6 @@
 
 use std::path::Path;
 
-use burn::config::Config;
 use burn::module::Module;
 use burn::store::ModuleRecord;
 use burn::tensor::{Device, Tensor, TensorData};
@@ -140,7 +159,7 @@ pub fn load(
     }
     // The shape of the module has to be known before a record can be loaded
     // into it, and a record does not carry it.
-    let config = TrainingConfig::load(&configuration).map_err(|e| {
+    let config = TrainingConfig::read(&configuration).map_err(|e| {
         format!(
             "cannot read {}: {e}\nA run folder is what `train` wrote: its training.json is what \
              says how big the network it trained was.",
@@ -153,6 +172,7 @@ pub fn load(
     let model = UNetConfig::new(config.classes)
         .with_base_channels(config.base_channels)
         .with_lines(config.lines)
+        .with_scale_head(config.scale_head)
         .init(device);
     let model = load_weights(model, weights)?;
 
@@ -442,9 +462,13 @@ pub fn read_back(
     settings: &ReadBackSettings,
     device: &Device,
 ) -> Result<ReadBack, String> {
+    // The ground the picture covers, at its own density, whatever the
+    // network is shown of it.
+    let ground = ground_of(picture, settings);
+    let resampled = resample(picture, settings.resolution, settings.reading_resolution());
     let (mut grid, lines) = predict_image_with_lines(
         model,
-        picture,
+        resampled.as_ref().unwrap_or(picture),
         settings.tile,
         settings.overlap,
         settings.line_threshold,
@@ -454,7 +478,155 @@ pub fn read_back(
     // channels said: left in, that noise is read as a difference of angle and
     // splits the region into fragments.
     resolve_angles(&mut grid, symbols);
-    read_back_grid_with_lines(grid, lines, picture, symbol_set, into, settings)
+    read_back_grid_over(grid, lines, picture, ground, symbol_set, into, settings)
+}
+
+/// How far apart two densities may be before a picture is resampled from
+/// one to the other: a hundredth, which is a pixel in a hundred and less
+/// than anything resampling would gain.
+pub const RESAMPLE_TOLERANCE: f64 = 0.01;
+
+/// `picture`, drawn at `from` pixels per meter, resampled to `to` — or
+/// `None` where the two are close enough that it would change nothing.
+///
+/// Lanczos either way: a map is thin lines and fine patterns, and a filter
+/// which blurs them away going down, or steps them going up, gives the
+/// network something it was never shown.
+pub fn resample(picture: &RgbImage, from: f64, to: f64) -> Option<RgbImage> {
+    if !(from > 0.0 && to > 0.0) || (to / from - 1.0).abs() <= RESAMPLE_TOLERANCE {
+        return None;
+    }
+    let factor = to / from;
+    let size = |pixels: u32| ((pixels as f64 * factor).round() as u32).max(1);
+    Some(image::imageops::resize(
+        picture,
+        size(picture.width()),
+        size(picture.height()),
+        image::imageops::FilterType::Lanczos3,
+    ))
+}
+
+/// The share of a tile which has to be ink rather than paper for the scale
+/// head to be asked about it. A tile of white paper shows nothing of how
+/// dense the map is, and the head's answer to it is whatever the training
+/// set's average was.
+const SCALE_TILE_INK: f64 = 0.05;
+
+/// How bright a pixel has to be, in every channel, to count as paper.
+const PAPER: u8 = 240;
+
+/// What a network with a scale head says about how dense a picture is.
+pub struct ScaleEstimate {
+    /// The median of what the tiles said, as the logarithm of how much denser
+    /// than the network's normal density the picture is.
+    pub log_scale: f64,
+    /// How far the tiles' answers spread: half the distance between the
+    /// first and the third quartile of their logarithms. Small where the
+    /// picture showed its density plainly, and large where the tiles
+    /// disagreed — which is a picture with little to go on.
+    pub spread: f64,
+    /// How many tiles were asked.
+    pub tiles: usize,
+}
+
+impl ScaleEstimate {
+    /// The density the picture is, in pixels per meter, for a network whose
+    /// normal density is `normal`.
+    pub fn resolution(&self, normal: f64) -> f64 {
+        normal * self.log_scale.exp()
+    }
+}
+
+/// How dense a network with a scale head says `picture` is, or `None` for a
+/// network without one.
+///
+/// The picture is cut into tiles of `tile` pixels as [`predict_image`] cuts
+/// it, at its own density — the head was trained on crops of maps at
+/// densities of their own, and is asked the question it was trained on — and
+/// every tile with any ink on it is asked. What comes back is the median of
+/// the answers, which a few tiles of not much more than paper do not move.
+pub fn estimate_scale(
+    model: &UNet,
+    picture: &RgbImage,
+    tile: usize,
+    device: &Device,
+) -> Option<ScaleEstimate> {
+    if !model.has_scale_head() {
+        return None;
+    }
+    let step = 1 << DEPTH;
+    let (width, height) = (picture.width() as usize, picture.height() as usize);
+    let tile = round_up(tile.max(step).min(round_up(width.max(height), step)), step);
+    let (padded_width, padded_height) = (width.max(tile), height.max(tile));
+    // Side by side rather than overlapping: every tile is asked the same
+    // question, and the median wants answers which are not about the same
+    // pixels twice.
+    let mut inked = Vec::new();
+    let mut all = Vec::new();
+    for top in starts(padded_height, tile, tile) {
+        for left in starts(padded_width, tile, tile) {
+            let ink = ink_share(picture, left, top, tile);
+            all.push((left, top));
+            if ink >= SCALE_TILE_INK {
+                inked.push((left, top));
+            }
+        }
+    }
+    // A picture which is paper all over still gets an answer, out of all of
+    // it, rather than none.
+    let asked = if inked.is_empty() { all } else { inked };
+
+    let mut said: Vec<f64> = asked
+        .iter()
+        .filter_map(|&(left, top)| {
+            let input = tile_tensor(picture, left, top, tile, device);
+            let scale = model.scale(input)?;
+            let values = scale.into_data().try_into_vec::<f32>().ok()?;
+            values.first().map(|&value| value as f64)
+        })
+        .collect();
+    if said.is_empty() {
+        return None;
+    }
+    said.sort_by(f64::total_cmp);
+    let quantile = |q: f64| {
+        let at = q * (said.len() - 1) as f64;
+        let (low, high) = (at.floor() as usize, at.ceil() as usize);
+        said[low] + (said[high] - said[low]) * (at - low as f64)
+    };
+    Some(ScaleEstimate {
+        log_scale: quantile(0.5),
+        spread: (quantile(0.75) - quantile(0.25)) / 2.0,
+        tiles: said.len(),
+    })
+}
+
+/// [`estimate_scale`], as the density the picture is drawn at for a network
+/// whose normal density is `normal` pixels per meter.
+pub fn estimate_resolution(
+    model: &UNet,
+    picture: &RgbImage,
+    tile: usize,
+    normal: f64,
+    device: &Device,
+) -> Option<f64> {
+    estimate_scale(model, picture, tile, device).map(|estimate| estimate.resolution(normal))
+}
+
+/// The share of the tile at `(left, top)` which is ink rather than paper,
+/// counting what is past the edge of the picture as paper.
+fn ink_share(picture: &RgbImage, left: usize, top: usize, tile: usize) -> f64 {
+    let (width, height) = (picture.width() as usize, picture.height() as usize);
+    let mut ink = 0usize;
+    for y in top..(top + tile).min(height) {
+        for x in left..(left + tile).min(width) {
+            let pixel = picture.get_pixel(x as u32, y as u32);
+            if pixel.0.iter().any(|&channel| channel < PAPER) {
+                ink += 1;
+            }
+        }
+    }
+    ink as f64 / (tile * tile) as f64
 }
 
 /// What the tree network says about a picture: its cuts and the symbol of
@@ -631,6 +803,21 @@ pub fn read_back_grid_with_lines(
     settings: &ReadBackSettings,
 ) -> Result<ReadBack, String> {
     let ground = ground_of(picture, settings);
+    read_back_grid_over(grid, lines, picture, ground, symbol_set, into, settings)
+}
+
+/// [`read_back_grid_with_lines`] with the ground the grid covers given
+/// rather than worked out from the picture: the grid may be of a resampled
+/// copy of it, and the ground is the original's either way.
+fn read_back_grid_over(
+    grid: SymbolGrid,
+    lines: Option<LineGrid>,
+    picture: &RgbImage,
+    ground: Rect,
+    symbol_set: &Path,
+    into: &Path,
+    settings: &ReadBackSettings,
+) -> Result<ReadBack, String> {
     let written = write_map_with_lines(
         &grid,
         lines.as_ref().map(|found| (found, &settings.lines)),
@@ -701,6 +888,13 @@ pub struct ReadBackSettings {
     pub overlap: usize,
     /// How many pixels of picture one meter of ground is.
     pub resolution: f64,
+    /// The densities the network was trained over, lowest first, in pixels
+    /// per meter at `scale_denominator`: a picture outside them is resampled
+    /// to the nearer end before it is read, and one inside is read as it is
+    /// — see the module documentation. One density twice for a network
+    /// trained at one. At another scale than its symbol set's, as many pixels
+    /// per meter as make the same number of pixels to a millimeter of paper.
+    pub network_resolutions: (f64, f64),
     /// The scale to write the map at.
     pub scale_denominator: i32,
     /// How much of the boundary to keep, and what counts as one object's
@@ -721,11 +915,16 @@ impl ReadBackSettings {
     /// numbers a grid off a network wants of the vectorizer —
     /// [`PREDICTED_TOLERANCE`] of boundary and [`PREDICTED_SAME_ANGLE`]
     /// between two cells of one object.
+    ///
+    /// The network is taken to have been trained at `resolution` itself, so
+    /// nothing is resampled; [`ReadBackSettings::read_at`] and
+    /// [`ReadBackSettings::trained_over`] say otherwise.
     pub fn of(crop: usize, resolution: f64, scale_denominator: i32) -> ReadBackSettings {
         ReadBackSettings {
             tile: crop,
             overlap: (crop as f64 * OVERLAP) as usize,
             resolution,
+            network_resolutions: (resolution, resolution),
             scale_denominator,
             simplify: Simplify {
                 tolerance: PREDICTED_TOLERANCE,
@@ -735,6 +934,39 @@ impl ReadBackSettings {
             lines: LineSettings::default(),
         }
     }
+
+    /// These settings, for a picture drawn at `resolution` pixels per meter
+    /// rather than at whatever they said.
+    pub fn read_at(mut self, resolution: f64) -> ReadBackSettings {
+        self.resolution = resolution;
+        self
+    }
+
+    /// These settings, for a network trained over densities from `low` to
+    /// `high` pixels per meter.
+    pub fn trained_over(mut self, low: f64, high: f64) -> ReadBackSettings {
+        self.network_resolutions = (low.min(high), low.max(high));
+        self
+    }
+
+    /// The density the network is shown the picture at: its own, where that
+    /// is one the network was trained over, and the nearer end of what it
+    /// was trained over where it is not.
+    pub fn reading_resolution(&self) -> f64 {
+        let (low, high) = self.network_resolutions;
+        self.resolution.clamp(low, high)
+    }
+}
+
+/// The density, in pixels per meter at `scale_denominator`, which puts as
+/// many pixels to a millimeter of paper as `resolution` does at
+/// `normal_scale`.
+///
+/// What the network was trained on is pixels to the millimeter of paper —
+/// a symbol set fixes its symbols' sizes there — and a map written at
+/// another scale covers another amount of ground with the same paper.
+pub fn at_scale(resolution: f64, normal_scale: i32, scale_denominator: i32) -> f64 {
+    resolution * normal_scale as f64 / scale_denominator as f64
 }
 
 /// How far a boundary may be moved to be rid of a node, in cells, when the
@@ -865,6 +1097,29 @@ fn tile_tensor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use burn::config::Config;
+
+    /// A picture at a density the network was trained over is read at its
+    /// own; one outside, at the nearer end of the range; and a network
+    /// trained at one density reads everything at that one.
+    #[test]
+    fn a_picture_is_read_at_its_own_density_where_the_network_knows_it() {
+        let over = |resolution: f64| {
+            ReadBackSettings::of(64, resolution, 4000)
+                .trained_over(1.0, 4.0)
+                .reading_resolution()
+        };
+        assert_eq!(over(2.5), 2.5);
+        assert_eq!(over(1.0), 1.0);
+        assert_eq!(over(8.0), 4.0);
+        assert_eq!(over(0.5), 1.0);
+
+        let one = ReadBackSettings::of(64, 1.5, 4000).read_at(5.9);
+        assert_eq!(one.reading_resolution(), 1.5);
+        assert!(resample(&RgbImage::new(10, 10), 2.5, 2.5).is_none());
+        let resampled = resample(&RgbImage::new(100, 60), 8.0, 4.0).expect("halved");
+        assert_eq!((resampled.width(), resampled.height()), (50, 30));
+    }
     use image::Rgb;
     /// A tree nobody trained, asked about a picture of a shape it was not
     /// built for: the grid is the picture's own size, every cell is a symbol
