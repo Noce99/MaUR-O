@@ -33,11 +33,41 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Axis, Block, Chart, Dataset, Gauge, GraphType, Paragraph, Wrap};
 use ratatui::Frame;
 
-use maur_o::net::monitor::{Control, LossPoint, State, Status, ACCURACY_FILE, LOSSES_FILE};
+use maur_o::net::monitor::{
+    Control, LossPoint, State, Status, ACCURACY_FILE, LINE_IOU_FILE, LOSSES_FILE,
+};
 
 use super::gpu::{Gpu, Probe};
 use super::jobs::{Health, Job};
 use super::Action;
+
+/// What the chart shows. Tab goes through the ones the run has numbers for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum View {
+    Loss,
+    Accuracy,
+    /// How much of the lines the network found: only a run with a lines layer.
+    LineIou,
+}
+
+impl View {
+    /// What the chart is titled, and what it says there is none of yet.
+    fn name(self) -> &'static str {
+        match self {
+            View::Loss => "Loss",
+            View::Accuracy => "Accuracy (% of pixels right)",
+            View::LineIou => "Line IoU (% of the lines found)",
+        }
+    }
+
+    fn short(self) -> &'static str {
+        match self {
+            View::Loss => "loss",
+            View::Accuracy => "accuracy",
+            View::LineIou => "line IoU",
+        }
+    }
+}
 
 /// The screen of one job.
 pub struct Watch {
@@ -54,8 +84,12 @@ pub struct Watch {
     /// The same for the accuracy file.
     accuracy_offset: u64,
     accuracy_partial: String,
-    /// Whether the chart shows the accuracy rather than the loss (Tab).
-    show_accuracy: bool,
+    /// The line IoU file's points, where the run has a lines layer.
+    line_points: Vec<LossPoint>,
+    line_offset: u64,
+    line_partial: String,
+    /// What the chart shows (Tab).
+    view: View,
     /// `s` pressed once, and waiting to be pressed again.
     confirming: bool,
     /// What the last command did, if it went wrong.
@@ -77,7 +111,10 @@ impl Watch {
             partial: String::new(),
             accuracy_offset: 0,
             accuracy_partial: String::new(),
-            show_accuracy: false,
+            line_points: Vec::new(),
+            line_offset: 0,
+            line_partial: String::new(),
+            view: View::Loss,
             confirming: false,
             message: None,
             gpu: Probe::start(),
@@ -106,6 +143,37 @@ impl Watch {
             &mut self.accuracy_partial,
             &mut self.accuracy_points,
         );
+        read_points(
+            &self.job.dir.join(LINE_IOU_FILE),
+            &mut self.line_offset,
+            &mut self.line_partial,
+            &mut self.line_points,
+        );
+    }
+
+    /// The numbers behind a view.
+    fn points_of(&self, view: View) -> &[LossPoint] {
+        match view {
+            View::Loss => &self.points,
+            View::Accuracy => &self.accuracy_points,
+            View::LineIou => &self.line_points,
+        }
+    }
+
+    /// The views the run has anything for, in the order Tab goes through
+    /// them: the loss always, the others once their first number is in.
+    fn views(&self) -> Vec<View> {
+        [View::Loss, View::Accuracy, View::LineIou]
+            .into_iter()
+            .filter(|&v| v == View::Loss || !self.points_of(v).is_empty())
+            .collect()
+    }
+
+    /// The view after the current one.
+    fn next_view(&self) -> View {
+        let views = self.views();
+        let at = views.iter().position(|&v| v == self.view).unwrap_or(0);
+        views[(at + 1) % views.len()]
     }
 
     fn running(&self) -> bool {
@@ -117,7 +185,7 @@ impl Watch {
         self.message = None;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left => return Action::Back,
-            KeyCode::Tab | KeyCode::BackTab => self.show_accuracy = !self.show_accuracy,
+            KeyCode::Tab | KeyCode::BackTab => self.view = self.next_view(),
             KeyCode::Char('p') | KeyCode::Char(' ') if self.running() => {
                 let paused = matches!(self.health, Health::Alive(State::Paused));
                 let control = if paused { Control::Run } else { Control::Pause };
@@ -228,19 +296,23 @@ impl Watch {
                 loss(status.train_loss),
                 loss(status.valid_loss)
             )));
-            let last = |validation: bool| {
-                self.accuracy_points
+            let last = |points: &[LossPoint], validation: bool| {
+                points
                     .iter()
                     .rev()
                     .find(|p| p.validation == validation)
                     .map_or("—".to_string(), |p| format!("{:.2}%", p.loss))
             };
-            if !self.accuracy_points.is_empty() {
-                lines.push(Line::from(format!(
-                    "accuracy: train {} · valid {}",
-                    last(false),
-                    last(true)
-                )));
+            for view in [View::Accuracy, View::LineIou] {
+                let points = self.points_of(view);
+                if !points.is_empty() {
+                    lines.push(Line::from(format!(
+                        "{}: train {} · valid {}",
+                        view.short(),
+                        last(points, false),
+                        last(points, true)
+                    )));
+                }
             }
             if let Some(message) = &status.message {
                 lines.push(Line::styled(message.clone(), Style::new().fg(Color::Red)));
@@ -269,15 +341,7 @@ impl Watch {
         } else {
             lines.push(key("x", "forget this job (the run's files stay)".into()));
         }
-        lines.push(key(
-            "Tab",
-            if self.show_accuracy {
-                "show the loss"
-            } else {
-                "show the accuracy"
-            }
-            .into(),
-        ));
+        lines.push(key("Tab", format!("show the {}", self.next_view().short())));
         lines.push(key(
             "Esc",
             "back — the job goes on without this screen".into(),
@@ -340,11 +404,7 @@ impl Watch {
     }
 
     fn draw_loss(&self, frame: &mut Frame, area: Rect) {
-        let (name, points) = if self.show_accuracy {
-            ("Accuracy (% of pixels right)", &self.accuracy_points)
-        } else {
-            ("Loss", &self.points)
-        };
+        let (name, points) = (self.view.name(), self.points_of(self.view));
         let block = Block::bordered().title(format!(" {name} · Tab switches "));
         let inner = block.inner(area);
         let series = self.series(points, inner.width.saturating_sub(8) as usize * 2);
@@ -352,11 +412,7 @@ impl Watch {
             frame.render_widget(
                 Paragraph::new(format!(
                     "No {} yet: the first steps are still being taken.",
-                    if self.show_accuracy {
-                        "accuracy"
-                    } else {
-                        "loss"
-                    }
+                    self.view.short()
                 ))
                 .dim()
                 .block(block),
@@ -763,5 +819,61 @@ mod tests {
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         let watch = watch_with(&refs);
         assert!(watch.series(&watch.points, 100).train.len() <= 100);
+    }
+
+    /// Tab goes through the charts the run has numbers for and no others: a
+    /// run without a lines layer never offers the line IoU.
+    #[test]
+    fn tab_goes_through_what_the_run_has_numbers_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut watch = Watch::new(job_in(dir.path()));
+        watch.gpu = Probe::fixed(Default::default());
+        assert_eq!(watch.views(), [View::Loss]);
+        watch.handle(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(watch.view, View::Loss, "nothing else to show");
+
+        std::fs::write(dir.path().join(ACCURACY_FILE), "t 1 1 50.0\n").unwrap();
+        std::fs::write(dir.path().join(LINE_IOU_FILE), "t 1 1 2.5\nv 1 1 3.5\n").unwrap();
+        watch.tick();
+        assert_eq!(watch.views(), [View::Loss, View::Accuracy, View::LineIou]);
+
+        for expected in [View::Accuracy, View::LineIou, View::Loss] {
+            watch.handle(KeyEvent::from(KeyCode::Tab));
+            assert_eq!(watch.view, expected);
+        }
+    }
+
+    /// The latest line IoU of the run is written in the panel beside the loss.
+    #[test]
+    fn the_panel_says_how_much_of_the_lines_the_run_has_found() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(LINE_IOU_FILE), "t 1 1 2.5\nv 1 1 3.5\n").unwrap();
+        let status = Status {
+            state: State::Running,
+            epoch: 1,
+            epochs: 4,
+            ..Status::default()
+        };
+        std::fs::write(dir.path().join("status"), status.to_text()).unwrap();
+        let mut watch = Watch::new(job_in(dir.path()));
+        watch.gpu = Probe::fixed(Default::default());
+        watch.tick();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| watch.draw(frame)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            text.contains("line IoU: train 2.50% · valid 3.50%"),
+            "{text}"
+        );
     }
 }

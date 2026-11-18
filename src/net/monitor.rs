@@ -12,6 +12,8 @@
 //! losses      one line per step: `t|v <epoch> <iteration> <loss>`,
 //!             `t` for a training step and `v` for a validation one
 //! accuracy    the same, one line per step, for the share of pixels right (in %)
+//! line_iou    the same, for how much of the lines the run found (in %); only
+//!             a run with a lines layer writes it
 //! control     what the watcher asks for: `run`, `pause` or `stop`
 //! ```
 //!
@@ -55,6 +57,9 @@ pub const LOSSES_FILE: &str = "losses";
 /// The file the run's pixel accuracies (in %) are appended to, in the
 /// losses file's own line format.
 pub const ACCURACY_FILE: &str = "accuracy";
+/// The file the run's line IoUs (in %) are appended to, in the losses file's
+/// own line format. Only a run whose network has a lines layer makes it.
+pub const LINE_IOU_FILE: &str = "line_iou";
 /// The file the watcher asks things of the run in.
 pub const CONTROL_FILE: &str = "control";
 
@@ -517,10 +522,13 @@ impl Monitor {
                 .append(true)
                 .open(self.dir.join(ACCURACY_FILE))
                 .ok(),
+            line_ious: None,
+            dir: self.dir.clone(),
             validating: false,
             steps: 0,
             loss_id: None,
             accuracy_id: None,
+            line_iou_id: None,
         }
     }
 
@@ -592,6 +600,11 @@ pub struct MonitorRenderer {
     status: Arc<Mutex<Status>>,
     losses: Option<fs::File>,
     accuracies: Option<fs::File>,
+    /// Opened when the metric is registered, which a run without a lines
+    /// layer never does.
+    line_ious: Option<fs::File>,
+    /// Where the job folder is, for opening that file.
+    dir: PathBuf,
     validating: bool,
     /// Training steps seen. burn's own iteration counts from one again in
     /// every epoch, which is no use on a chart of the whole run.
@@ -600,6 +613,8 @@ pub struct MonitorRenderer {
     loss_id: Option<MetricId>,
     /// Which metric is the pixel accuracy.
     accuracy_id: Option<MetricId>,
+    /// Which metric is the line IoU, where there is one.
+    line_iou_id: Option<MetricId>,
 }
 
 impl MonitorRenderer {
@@ -620,6 +635,14 @@ impl MonitorRenderer {
             let kind = if self.validating { 'v' } else { 't' };
             let status = self.status.lock().unwrap();
             if let Some(file) = &mut self.accuracies {
+                writeln!(file, "{kind} {} {} {value}", status.epoch, status.iteration).ok();
+            }
+            return;
+        }
+        if self.line_iou_id.as_ref() == Some(&entry.metric_id) {
+            let kind = if self.validating { 'v' } else { 't' };
+            let status = self.status.lock().unwrap();
+            if let Some(file) = &mut self.line_ious {
                 writeln!(file, "{kind} {} {} {value}", status.epoch, status.iteration).ok();
             }
             return;
@@ -720,6 +743,13 @@ impl MetricsRenderer for MonitorRenderer {
             self.loss_id = Some(definition.metric_id);
         } else if definition.name.as_str() == "Pixel accuracy" {
             self.accuracy_id = Some(definition.metric_id);
+        } else if definition.name.as_str() == "Line IoU" {
+            self.line_iou_id = Some(definition.metric_id);
+            self.line_ious = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.dir.join(LINE_IOU_FILE))
+                .ok();
         }
     }
 }
