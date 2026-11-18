@@ -50,7 +50,7 @@ use burn::nn::conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfi
 use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
 use burn::nn::{BatchNorm, BatchNormConfig, PaddingConfig2d, Relu};
-use burn::tensor::activation::softmax;
+use burn::tensor::activation::{sigmoid, softmax};
 use burn::tensor::{Device, Tensor};
 
 use serde_json::Value;
@@ -101,9 +101,25 @@ pub struct UNetConfig {
     /// run's come from and why it wants them.
     #[config(default = "None")]
     pub class_weights: Option<Vec<f32>>,
+    /// How many line symbols the lines layer has: nought for a network which
+    /// reads the ground alone, which is then exactly the network it was before
+    /// there was such a layer. Each is one more channel of the head, a logit
+    /// for *a line of this symbol runs through this pixel*, scored
+    /// independently of the others — two lines may cross — see
+    /// [`crate::net::training::lines_loss`].
+    #[config(default = 0)]
+    pub lines: usize,
+    /// What the lines term counts for beside the ground's.
+    #[config(default = 1.0)]
+    pub line_weight: f64,
 }
 
 impl UNetConfig {
+    /// How many channels the head emits: the ground's, then the lines'.
+    pub fn head_channels(&self) -> usize {
+        self.classes + 3 + self.lines
+    }
+
     /// Builds the network on `device`, with its weights initialized.
     pub fn init(&self, device: &Device) -> UNet {
         let width = |level: usize| self.base_channels << level;
@@ -134,8 +150,11 @@ impl UNetConfig {
             // what a pixel is out of what the last block made of it, and
             // looks at nothing around it, since the looking around is what
             // the rest of the network was for.
-            head: Conv2dConfig::new([self.base_channels, self.classes + 3], [1, 1]).init(device),
+            head: Conv2dConfig::new([self.base_channels, self.head_channels()], [1, 1])
+                .init(device),
             classes: self.classes,
+            lines: self.lines,
+            line_weight: self.line_weight,
             // Built once here rather than per step: the weights are a tensor,
             // and a tensor built inside a training step is a tensor built
             // tens of thousands of times an epoch.
@@ -164,6 +183,11 @@ pub struct UNet {
     head: Conv2d,
     /// How many opaque areas the symbol set holds — see [`UNetConfig`].
     classes: usize,
+    /// How many line symbols the head has a channel for — see
+    /// [`UNetConfig::lines`].
+    lines: usize,
+    /// What the lines term counts for — see [`UNetConfig::line_weight`].
+    line_weight: f64,
     /// The cross-entropy the class logits are scored with, its per-class
     /// weights already in it — see [`UNetConfig::class_weights`].
     class_loss: CrossEntropyLoss,
@@ -247,7 +271,7 @@ impl UNet {
         let logits = raw
             .clone()
             .slice([0..batch, 0..self.classes + 1, 0..height, 0..width]);
-        let angle = raw.slice([
+        let angle = raw.clone().slice([
             0..batch,
             self.classes + 1..self.classes + 3,
             0..height,
@@ -256,7 +280,18 @@ impl UNet {
 
         let probabilities =
             softmax(logits, 1).slice([0..batch, 0..self.classes, 0..height, 0..width]);
-        Tensor::cat(vec![probabilities, angle], 1)
+        let mut answer = vec![probabilities, angle];
+        if self.lines > 0 {
+            // Each line symbol on its own: a sigmoid, not a share of one.
+            let lines = raw.slice([
+                0..batch,
+                self.classes + 3..self.classes + 3 + self.lines,
+                0..height,
+                0..width,
+            ]);
+            answer.push(sigmoid(lines));
+        }
+        Tensor::cat(answer, 1)
     }
 
     /// How many opaque areas this network was built for, which is how many
@@ -277,9 +312,20 @@ impl UNet {
     }
 
     /// How many channels its answer has in the dataset's shape: one per
-    /// opaque area, and two for the angle.
+    /// opaque area, two for the angle, and one per line symbol.
     pub fn channels(&self) -> usize {
-        self.classes + 2
+        self.classes + 2 + self.lines
+    }
+
+    /// How many line symbols it answers for, nought for a network which reads
+    /// the ground alone.
+    pub fn lines(&self) -> usize {
+        self.lines
+    }
+
+    /// What the lines term counts for beside the ground's.
+    pub fn line_weight(&self) -> f64 {
+        self.line_weight
     }
 
     /// The class the frame is, in the head's own numbering: the one logit
@@ -642,10 +688,15 @@ impl UNetConfig {
             &refs(&shape(width(0), 0)),
         );
 
-        let head =
-            layer::conv2d("head", self.base_channels, self.classes + 3, 1, true).summary(&format!(
-                "{} class logits (the frame included), sine and cosine of the angle",
-                self.classes + 1
+        let head = layer::conv2d("head", self.base_channels, self.head_channels(), 1, true)
+            .summary(&format!(
+                "{} class logits (the frame included), sine and cosine of the angle{}",
+                self.classes + 1,
+                if self.lines > 0 {
+                    format!(", then {} line logits", self.lines)
+                } else {
+                    String::new()
+                }
             ));
 
         let mut root = Node::new("unet", "model", "U-Net")
@@ -665,7 +716,7 @@ impl UNetConfig {
         }
         root = root
             .edge("decoder", "head", &refs(&shape(width(0), 0)))
-            .edge("head", "@out", &refs(&shape(self.classes + 3, 0)));
+            .edge("head", "@out", &refs(&shape(self.head_channels(), 0)));
 
         let mut config = BTreeMap::new();
         config.insert("classes".to_string(), Value::from(self.classes));
@@ -743,5 +794,46 @@ mod tests {
         );
         assert_eq!(descriptor.total_params(), net.num_params() as u64);
         assert_eq!(descriptor.problems(), Vec::<String>::new());
+    }
+
+    /// A network with a lines layer has a channel per line symbol after the
+    /// ground's, as a probability, and one without is what it always was.
+    #[test]
+    fn the_lines_layer_is_a_sigmoid_channel_per_line_symbol() {
+        let device = Device::flex();
+        let net = UNetConfig::new(5)
+            .with_base_channels(4)
+            .with_lines(3)
+            .init(&device);
+        let answer = net.predict(Tensor::zeros([1, 3, 16, 16], &device));
+        assert_eq!(answer.dims(), [1, 5 + 2 + 3, 16, 16]);
+        assert_eq!(net.channels(), 10);
+
+        let lines = answer.slice([0..1, 7..10, 0..16, 0..16]);
+        let values = lines.into_data().try_to_vec::<f32>().expect("floats");
+        assert!(values.iter().all(|v| (0.0..=1.0).contains(v)));
+    }
+
+    /// The descriptor of a network with lines holds to its forward pass too.
+    #[test]
+    fn the_descriptor_matches_the_forward_pass_with_lines() {
+        let device = Device::flex();
+        let config = UNetConfig::new(5).with_base_channels(4).with_lines(3);
+        let net = config.init(&device);
+        let descriptor = config.describe();
+
+        let mut reported = Vec::new();
+        net.forward_tapped(
+            Tensor::<4>::zeros([2, 3, 32, 48], &device),
+            &mut |key, dims| {
+                reported.push((key.to_string(), dims.to_vec()));
+            },
+        );
+        crate::net::describe::assert_matches_forward(
+            &descriptor,
+            &reported,
+            &[("B", 2), ("H", 32), ("W", 48)],
+        );
+        assert_eq!(descriptor.total_params(), net.num_params() as u64);
     }
 }

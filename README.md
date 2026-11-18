@@ -1080,7 +1080,7 @@ cargo run --release --features cuda -- net train --model tree \
 
 It is trained on the **whole picture**, reduced to `--size` pixels (a divisor of
 16), rather than on crops, so an epoch is short — a few dozen of them make a run.
-`--crop`, `--crops-per-map`, `--angle-weight`, `--weight-decay`, `--overhang`,
+`--crop`, `--crops-per-map`, `--angle-weight`, `--line-weight`, `--weight-decay`, `--overhang`,
 `--workers` and `--image-valid` are the U-Net's and are ignored. A run is
 `TreeNet_<date>/` holding `tree.json`, `architecture.txt`, `best.bpk` and
 `valid.png` (*picture | label | answer*). It reports to the terminal interface

@@ -70,6 +70,7 @@ use burn::grad_clipping::GradientClippingConfig;
 use burn::lr_scheduler::{LrScheduler, LrSchedulerRecord};
 use burn::module::extract_type_name;
 use burn::optim::{AdamWConfig, LearningRate};
+use burn::tensor::activation::{relu, sigmoid};
 use burn::tensor::{Device, ExecutionError, Tensor, TensorReadError};
 use burn::train::checkpoint::{
     ComposedCheckpointingStrategy, KeepLastNCheckpoints, MetricCheckpointingStrategy,
@@ -363,6 +364,14 @@ pub struct MapOutput {
     pub agreement: Tensor<1>,
     /// How many pixels had an angle at all.
     pub angled: Tensor<1>,
+    /// How many (pixel, line symbol) pairs the network said a line runs
+    /// through and one really does: the intersection of the answer and the
+    /// label. Nought where the network has no lines layer.
+    pub line_intersection: Tensor<1>,
+    /// How many pairs either the network or the label said a line runs
+    /// through: their union, which is what the intersection is divided by to
+    /// give the IoU.
+    pub line_union: Tensor<1>,
 }
 
 impl ItemLazy for MapOutput {
@@ -378,6 +387,8 @@ impl ItemLazy for MapOutput {
             pixels: self.pixels.without_autodiff(),
             agreement: self.agreement.without_autodiff(),
             angled: self.angled.without_autodiff(),
+            line_intersection: self.line_intersection.without_autodiff(),
+            line_union: self.line_union.without_autodiff(),
         })
     }
 }
@@ -393,6 +404,15 @@ impl Adaptor<PixelInput> for MapOutput {
         PixelInput {
             correct: self.correct.clone(),
             pixels: self.pixels.clone(),
+        }
+    }
+}
+
+impl Adaptor<LineInput> for MapOutput {
+    fn adapt(&self) -> LineInput {
+        LineInput {
+            intersection: self.line_intersection.clone(),
+            union: self.line_union.clone(),
         }
     }
 }
@@ -493,6 +513,102 @@ impl PixelAccuracyMetric {
 }
 
 impl Numeric for PixelAccuracyMetric {
+    fn value(&self) -> Option<NumericEntry> {
+        Some(self.state.current_value())
+    }
+
+    fn running_value(&self) -> Option<NumericEntry> {
+        Some(self.state.running_value())
+    }
+
+    fn final_value(&self) -> NumericEntry {
+        self.state.final_value()
+    }
+}
+
+/// What [`LineIouMetric`] is fed.
+pub struct LineInput {
+    intersection: Tensor<1>,
+    union: Tensor<1>,
+}
+
+/// How much of the lines the network found, as an intersection over union:
+/// the pairs of a pixel and a line symbol it was right about, over the pairs
+/// either it or the label put a line on.
+///
+/// Not an accuracy: a line is a few percent of a picture, so a network which
+/// answers "no line anywhere" is right about nearly every pixel and has found
+/// nothing, which this scores as nought.
+#[derive(Clone)]
+pub struct LineIouMetric {
+    name: MetricName,
+    state: NumericMetricState,
+}
+
+impl Default for LineIouMetric {
+    fn default() -> Self {
+        LineIouMetric {
+            name: std::sync::Arc::new("Line IoU".to_string()),
+            state: NumericMetricState::default(),
+        }
+    }
+}
+
+impl LineIouMetric {
+    /// Creates the metric.
+    pub fn new() -> LineIouMetric {
+        LineIouMetric::default()
+    }
+
+    fn format(&self) -> FormatOptions {
+        FormatOptions::new(self.name.clone()).unit("%").precision(2)
+    }
+}
+
+impl Metric for LineIouMetric {
+    type Input = LineInput;
+
+    fn name(&self) -> MetricName {
+        self.name.clone()
+    }
+
+    fn attributes(&self) -> MetricAttributes {
+        NumericAttributes {
+            unit: Some("%".to_string()),
+            higher_is_better: true,
+        }
+        .into()
+    }
+
+    fn update(
+        &mut self,
+        input: &LineInput,
+        _metadata: &MetricMetadata,
+    ) -> Result<SerializedEntry, TensorReadError> {
+        let union = scalar(&input.union)?;
+        // A batch with no line in the answer or the label is one the network
+        // got right, and is worth nothing to the figure: there was nothing
+        // to find. Weighted by the union, so an epoch's figure is the IoU
+        // over all of its pairs rather than the mean of its batches'.
+        let share = if union > 0.0 {
+            100.0 * scalar(&input.intersection)? / union
+        } else {
+            100.0
+        };
+        self.state.update(share, union.max(1.0) as usize);
+        Ok(self.state.compute_update(self.format()))
+    }
+
+    fn compute(&mut self) -> Result<SerializedEntry, TensorReadError> {
+        Ok(self.state.compute_final(self.format()))
+    }
+
+    fn clear(&mut self) {
+        self.state.reset()
+    }
+}
+
+impl Numeric for LineIouMetric {
     fn value(&self) -> Option<NumericEntry> {
         Some(self.state.current_value())
     }
@@ -680,6 +796,54 @@ impl Numeric for AngleMetric {
     }
 }
 
+/// The loss of the lines layer, and what the IoU is made of.
+///
+/// `logits` and `wanted` are `[batch, lines, height, width]`, the second of
+/// zeros and ones. Every channel is its own yes-or-no question — two lines
+/// may cross, so a pixel can be a yes to several — which is a sigmoid per
+/// channel and not a softmax across them.
+///
+/// Two terms, because each covers what the other cannot:
+///
+/// * a binary cross-entropy on every pixel, which is what keeps the channels
+///   of symbols that are nowhere in the batch at nought;
+/// * a Dice loss per symbol, over the symbols which are in the batch. A line
+///   is a few percent of a picture, and a cross-entropy alone is lowest for
+///   a network which says "no line" everywhere; Dice is a ratio of the
+///   overlap to the sizes, so a missed line costs it as much as it is long
+///   however little of the picture it is.
+///
+/// Returns the loss, then the intersection and the union of the answer (a
+/// logit above nought) with the label, counted in pairs of a pixel and a
+/// symbol.
+fn lines_loss(logits: Tensor<4>, wanted: Tensor<4>) -> (Tensor<1>, Tensor<1>, Tensor<1>) {
+    let [batch, lines, height, width] = logits.dims();
+
+    // The numerically stable form of -(y ln p + (1 - y) ln (1 - p)), which
+    // does not go through a probability of exactly nought or one.
+    let bce = relu(logits.clone()) - logits.clone() * wanted.clone()
+        + (logits.clone().abs().neg().exp() + 1.0).log();
+    let bce = bce.mean();
+
+    let probability = sigmoid(logits.clone());
+    let flat = |t: Tensor<4>| t.reshape([batch, lines, height * width]);
+    // One figure per symbol, over the whole batch: [1, lines, 1].
+    let per_symbol = |t: Tensor<3>| t.sum_dim(2).sum_dim(0);
+    let overlap = per_symbol(flat(probability.clone() * wanted.clone()));
+    let predicted = per_symbol(flat(probability));
+    let labelled = per_symbol(flat(wanted.clone()));
+
+    let dice = (overlap.mul_scalar(2.0) + 1.0).div(predicted + labelled.clone() + 1.0);
+    let present = labelled.greater_elem(0.0).float();
+    let dice_loss = (present.clone() - present.clone() * dice).sum() / present.sum().clamp_min(1.0);
+
+    let chosen = logits.greater_elem(0.0).float();
+    let intersection = (chosen.clone() * wanted.clone()).sum();
+    let union = (chosen.clone() + wanted.clone() - chosen * wanted).sum();
+
+    (bce + dice_loss, intersection, union)
+}
+
 impl UNet {
     /// One forward pass scored against the labels: the loss to descend, and
     /// the counts the metrics divide.
@@ -689,6 +853,29 @@ impl UNet {
         let [size, channels, height, width] = raw.dims();
         let classes = self.classes();
         let pixels = size * height * width;
+
+        // The lines layer: its own channels of the head, which the ground's
+        // loss does not look at, scored against the labels of the lines.
+        let (lines_loss, line_intersection, line_union) = match (self.lines(), batch.lines) {
+            (0, _) => (
+                Tensor::from_data([0.0f32], &device),
+                Tensor::from_data([0.0f32], &device),
+                Tensor::from_data([0.0f32], &device),
+            ),
+            (lines, Some(wanted)) => {
+                let logits = raw.clone().slice([
+                    0..size,
+                    classes + 3..classes + 3 + lines,
+                    0..height,
+                    0..width,
+                ]);
+                lines_loss(logits, wanted)
+            }
+            (lines, None) => panic!(
+                "the network answers for {lines} line symbols and the batch labels none: it was \
+                 trained on a dataset made without --line-labels"
+            ),
+        };
 
         // The channel axis last, then one row per pixel: a segmentation is a
         // classification repeated over the picture, and this is where it is
@@ -736,11 +923,15 @@ impl UNet {
         let agreement = agreement(predicted, wanted, has_angle);
 
         MapOutput {
-            loss: class_loss + angle_loss.mul_scalar(self.angle_weight()),
+            loss: class_loss
+                + angle_loss.mul_scalar(self.angle_weight())
+                + lines_loss.mul_scalar(self.line_weight()),
             correct,
             pixels: Tensor::from_data([pixels as f32], &device),
             agreement,
             angled,
+            line_intersection,
+            line_union,
         }
     }
 }
@@ -842,6 +1033,15 @@ pub struct TrainingConfig {
     /// built rather than about the data.
     #[config(default = "DEFAULT_ANGLE_WEIGHT")]
     pub angle_weight: f64,
+    /// How many line symbols the dataset's lines layer has, which the run
+    /// takes from the dataset's `classes.json` rather than being told:
+    /// [`train`] fills it in before it writes the configuration out. Nought
+    /// is a network which reads the ground alone.
+    #[config(default = 0)]
+    pub lines: usize,
+    /// What the lines term counts for beside the ground's.
+    #[config(default = 1.0)]
+    pub line_weight: f64,
     /// How many of the validation split's pictures to read back into maps
     /// each epoch, for the sheets under `image_valid/`. Nought draws none.
     #[config(default = "DEFAULT_IMAGE_VALID")]
@@ -1158,6 +1358,16 @@ pub fn train(
     let mut config = config;
     config.overhang = Some(config.overhang.unwrap_or(config.crop / 2));
 
+    // Before the run's folder is made, so that a dataset which cannot be read
+    // leaves no empty folder behind; and before the configuration is written,
+    // since how many line symbols the network answers for is the dataset's to
+    // say.
+    let all = MapDataset::load(dataset, config.seed)?
+        .with_crop(config.crop)?
+        .with_crops_per_map(config.crops_per_map)
+        .with_overhang(config.overhang.unwrap_or(config.crop / 2));
+    config.lines = all.lines();
+
     let run = run_directory(into, extract_type_name::<UNet>())?;
     config
         .save(run.join("training.json"))
@@ -1166,11 +1376,6 @@ pub fn train(
     if let Some(monitor) = &monitor {
         monitor.set_run(&run);
     }
-
-    let all = MapDataset::load(dataset, config.seed)?
-        .with_crop(config.crop)?
-        .with_crops_per_map(config.crops_per_map)
-        .with_overhang(config.overhang.unwrap_or(config.crop / 2));
 
     // The labels say how many symbols there are and so does `classes.json`;
     // a network built for the wrong number would train against targets it has
@@ -1225,6 +1430,8 @@ pub fn train(
     let model = UNetConfig::new(config.classes)
         .with_base_channels(config.base_channels)
         .with_angle_weight(config.angle_weight)
+        .with_lines(config.lines)
+        .with_line_weight(config.line_weight)
         .with_class_weights(Some(weights))
         // On a device with a gradient tape: it is where a parameter is made
         // that decides whether it is tracked, and the learner forks the
@@ -1292,13 +1499,19 @@ pub fn train(
         WarmupCosine::new(config.learning_rate, steps),
     );
 
-    let training = SupervisedTraining::new(&run, train_loader, valid_loader)
+    let mut training = SupervisedTraining::new(&run, train_loader, valid_loader)
         .metric_train_numeric(LossMetric::new())
         .metric_valid_numeric(LossMetric::new())
         .metric_train_numeric(PixelAccuracyMetric::new())
         .metric_valid_numeric(PixelAccuracyMetric::new())
         .metric_train_numeric(AngleMetric::new())
-        .metric_valid_numeric(AngleMetric::new())
+        .metric_valid_numeric(AngleMetric::new());
+    if config.lines > 0 {
+        training = training
+            .metric_train_numeric(LineIouMetric::new())
+            .metric_valid_numeric(LineIouMetric::new());
+    }
+    let training = training
         .with_default_checkpointers()
         // burn's own default, with a longer tail: the last few epochs, so
         // that a run can be carried on from where it stopped, and the epoch
@@ -1714,6 +1927,7 @@ mod tests {
             image: image.clone(),
             class: class.clone(),
             angle: Tensor::zeros([1, 2, 16, 16], &device),
+            lines: None,
         };
         let without = net.forward_step(none);
         let angled: f32 = without.angled.clone().into_scalar();
@@ -1738,6 +1952,7 @@ mod tests {
             image,
             class,
             angle: Tensor::ones([1, 2, 16, 16], &device),
+            lines: None,
         };
         let with = net.forward_step(some);
         let angled: f32 = with.angled.into_scalar();
@@ -1767,5 +1982,44 @@ mod tests {
             "{inverted:?}"
         );
         assert_eq!(inverted[2], 1.0 / RAREST_SHARE);
+    }
+
+    /// A network which says "no line" everywhere is right about nearly every
+    /// pixel and has found nothing: its loss is higher than one which found
+    /// the line, and its IoU is nought.
+    #[test]
+    fn saying_no_line_anywhere_is_not_a_good_answer() {
+        let device = Device::flex();
+        // One line symbol, a line along the middle row of an 8 by 8 picture.
+        let mut wanted = vec![0.0f32; 64];
+        for column in 0..8 {
+            wanted[4 * 8 + column] = 1.0;
+        }
+        let target = Tensor::<4>::from_data(
+            burn::tensor::TensorData::new(wanted.clone(), [1, 1, 8, 8]),
+            &device,
+        );
+
+        let nothing = Tensor::<4>::full([1, 1, 8, 8], -6.0, &device);
+        let found = Tensor::<4>::from_data(
+            burn::tensor::TensorData::new(
+                wanted
+                    .iter()
+                    .map(|&w| if w > 0.5 { 6.0 } else { -6.0 })
+                    .collect::<Vec<f32>>(),
+                [1, 1, 8, 8],
+            ),
+            &device,
+        );
+
+        let value = |t: Tensor<1>| t.into_data().try_to_vec::<f32>().expect("floats")[0];
+        let (none_loss, none_inter, none_union) = lines_loss(nothing, target.clone());
+        let (found_loss, found_inter, found_union) = lines_loss(found, target);
+
+        assert!(value(none_loss) > value(found_loss) + 0.5);
+        assert_eq!(value(none_inter), 0.0);
+        assert_eq!(value(none_union), 8.0);
+        assert_eq!(value(found_inter), 8.0);
+        assert_eq!(value(found_union), 8.0);
     }
 }

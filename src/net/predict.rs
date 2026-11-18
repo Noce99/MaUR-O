@@ -150,6 +150,7 @@ pub fn load(
     let weights = weights.unwrap_or(&default);
     let model = UNetConfig::new(config.classes)
         .with_base_channels(config.base_channels)
+        .with_lines(config.lines)
         .init(device);
     let model = load_weights(model, weights)?;
 

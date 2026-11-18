@@ -5,7 +5,7 @@
 //! on whole pictures reduced to `--size`, and reads with `--depth`,
 //! `--control-points`, `--samples`, `--temperature-start` and
 //! `--temperature-end`; the U-Net's `--crop`, `--crops-per-map`,
-//! `--angle-weight`, `--weight-decay`, `--overhang`, `--workers` and
+//! `--angle-weight`, `--line-weight`, `--weight-decay`, `--overhang`, `--workers` and
 //! `--image-valid` do not apply to it.
 //!
 //! ```text
@@ -106,7 +106,7 @@ pub struct Args {
     /// trained on crops of the maps; the tree answers with the curves which
     /// cut the picture into its areas and a symbol for each, and is trained on
     /// the whole pictures reduced to --size. The options of the other model
-    /// are ignored: --crop, --crops-per-map, --angle-weight, --weight-decay,
+    /// are ignored: --crop, --crops-per-map, --angle-weight, --line-weight, --weight-decay,
     /// --overhang, --workers and --image-valid are the U-Net's; --size,
     /// --depth, --control-points, --samples and the two temperatures the
     /// tree's.
@@ -148,6 +148,13 @@ pub struct Args {
     /// what an angled pixel's direction is worth beside its symbol.
     #[arg(long, default_value_t = DEFAULT_ANGLE_WEIGHT, value_name = "WEIGHT")]
     angle_weight: f64,
+
+    /// What the lines term counts for beside the ground's. Only a dataset
+    /// made with --line-labels has one: the network then also answers, for
+    /// every line symbol, whether a line of it runs through each pixel, and
+    /// reports how much of them it found as the Line IoU.
+    #[arg(long, default_value_t = 1.0, value_name = "WEIGHT")]
+    line_weight: f64,
 
     /// How hard the weights are pulled back towards nothing at every step, as
     /// a share of that step's own rate. A batch normalization leaves the loss
@@ -405,6 +412,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         .with_overhang(args.overhang)
         .with_train_share(args.train_share)
         .with_angle_weight(args.angle_weight)
+        .with_line_weight(args.line_weight)
         .with_weight_decay(args.weight_decay)
         .with_image_valid(args.image_valid)
         .with_seed(args.seed);

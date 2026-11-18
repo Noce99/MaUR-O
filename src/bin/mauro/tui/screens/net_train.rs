@@ -13,24 +13,26 @@ const CROPS_PER_MAP: usize = 6;
 const BASE_CHANNELS: usize = 7;
 const LEARNING_RATE: usize = 8;
 const ANGLE_WEIGHT: usize = 9;
-const WEIGHT_DECAY: usize = 10;
-const OVERHANG: usize = 11;
-const TRAIN_SHARE: usize = 12;
-const WORKERS: usize = 13;
-const IMAGE_VALID: usize = 14;
-const SEED: usize = 15;
-const SIZE: usize = 16;
-const DEPTH: usize = 17;
-const CONTROL_POINTS: usize = 18;
-const SAMPLES: usize = 19;
-const TEMPERATURE_START: usize = 20;
-const TEMPERATURE_END: usize = 21;
+const LINE_WEIGHT: usize = 10;
+const WEIGHT_DECAY: usize = 11;
+const OVERHANG: usize = 12;
+const TRAIN_SHARE: usize = 13;
+const WORKERS: usize = 14;
+const IMAGE_VALID: usize = 15;
+const SEED: usize = 16;
+const SIZE: usize = 17;
+const DEPTH: usize = 18;
+const CONTROL_POINTS: usize = 19;
+const SAMPLES: usize = 20;
+const TEMPERATURE_START: usize = 21;
+const TEMPERATURE_END: usize = 22;
 
 /// The fields only the U-Net has, and the ones only the tree has.
-const UNET_ONLY: [usize; 7] = [
+const UNET_ONLY: [usize; 8] = [
     CROP,
     CROPS_PER_MAP,
     ANGLE_WEIGHT,
+    LINE_WEIGHT,
     WEIGHT_DECAY,
     OVERHANG,
     WORKERS,
@@ -69,6 +71,7 @@ impl NetTrain {
                 Field::text("Base channels").arg("base_channels"),
                 Field::text("Learning rate").arg("learning_rate"),
                 Field::text("Angle weight").arg("angle_weight"),
+                Field::text("Line weight").arg("line_weight"),
                 Field::text("Weight decay").arg("weight_decay"),
                 Field::text("Overhang").arg("overhang").unit("px"),
                 Field::text("Train share").arg("train_share"),
@@ -152,6 +155,7 @@ impl Tool for NetTrain {
         form.push_option(&mut args, BASE_CHANNELS, "--base-channels");
         form.push_option(&mut args, LEARNING_RATE, "--learning-rate");
         form.push_option(&mut args, ANGLE_WEIGHT, "--angle-weight");
+        form.push_option(&mut args, LINE_WEIGHT, "--line-weight");
         form.push_option(&mut args, WEIGHT_DECAY, "--weight-decay");
         form.push_option(&mut args, OVERHANG, "--overhang");
         form.push_option(&mut args, TRAIN_SHARE, "--train-share");

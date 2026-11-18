@@ -92,6 +92,7 @@ use crate::dataset::{
     resolution_of, Classes, CLASSES_FILE, GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER,
 };
 use crate::ground_truth::{GroundTruth, BACKGROUND};
+use crate::line_truth::LineTruth;
 use crate::random::Random;
 use crate::symbol_kinds::Catalogue;
 use crate::xml_reader::read_xml_map;
@@ -122,6 +123,11 @@ pub struct MapCrop {
     /// The sine and the cosine of each pixel's angle, `[2, CROP, CROP]`, and
     /// `(0, 0)` where there is no angle to give.
     pub angle: Vec<f32>,
+    /// Which lines run through each pixel, `[lines, CROP, CROP]`: one where a
+    /// line of that symbol does and zero where it does not, a channel per
+    /// line symbol — see [`crate::line_truth`]. Empty for a dataset whose
+    /// lines are not labelled.
+    pub lines: Vec<u8>,
     /// How many pixels square this crop is.
     pub size: usize,
     /// The name of the map it was cut out of, without its suffix.
@@ -165,6 +171,11 @@ pub struct MapDataset {
     size: (usize, usize),
     /// How many opaque areas the labels were written for.
     classes: usize,
+    /// How many line symbols the lines layer has a channel for: nought for a
+    /// dataset whose lines are not labelled.
+    lines: usize,
+    /// The folder of map files, which the lines layer is rebuilt from.
+    maps_folder: PathBuf,
     /// The resolution the images were drawn at, in pixels per meter of
     /// ground — what rasterizing a [`Labels::FromMap`] needs to land on the
     /// same pixel grid as the image beside it, and read once for the whole
@@ -262,8 +273,26 @@ impl MapDataset {
         // `classes.json` is refused here rather than eight minutes into an
         // epoch, from inside a loader thread.
         let mut resolution = None;
-        if maps.iter().any(|(_, l)| matches!(l, Labels::FromMap(_))) {
+        // The lines are not on disk at all: they are rebuilt from the map
+        // file, at this resolution, whatever the ground's labels are.
+        let lines = Classes::read(&folder.join(CLASSES_FILE))
+            .map(|read| read.lines)
+            .unwrap_or(0);
+        if lines > 0 || maps.iter().any(|(_, l)| matches!(l, Labels::FromMap(_))) {
             resolution = Some(resolution_of(folder)?);
+        }
+        if lines > 0 {
+            if let Some((image, _)) = maps.iter().find(|(image, _)| {
+                !image
+                    .file_stem()
+                    .is_some_and(|stem| maps_folder.join(stem).with_extension("omap").is_file())
+            }) {
+                return Err(format!(
+                    "{} has no map file in {}, which the labels of its lines are made from",
+                    image.display(),
+                    maps_folder.display(),
+                ));
+            }
         }
 
         // Every labels file's header, which is thirty-two bytes of a sixteen
@@ -325,6 +354,8 @@ impl MapDataset {
             maps,
             size: size.expect("there is at least one map"),
             classes,
+            lines,
+            maps_folder,
             resolution,
             crops_per_map: DEFAULT_CROPS_PER_MAP,
             crop: CROP,
@@ -383,6 +414,12 @@ impl MapDataset {
     /// the first few of a validation split back into maps, epoch by epoch.
     pub fn pictures(&self) -> impl Iterator<Item = &Path> {
         self.maps.iter().map(|(image, _)| image.as_path())
+    }
+
+    /// How many line symbols the lines layer has a channel for, nought where
+    /// the dataset's lines are not labelled.
+    pub fn lines(&self) -> usize {
+        self.lines
     }
 
     /// How many pixels square this dataset's crops are.
@@ -522,6 +559,8 @@ impl MapDataset {
             maps: maps.to_vec(),
             size: self.size,
             classes: self.classes,
+            lines: self.lines,
+            maps_folder: self.maps_folder.clone(),
             resolution: self.resolution,
             crops_per_map: self.crops_per_map,
             crop: self.crop,
@@ -649,6 +688,7 @@ impl Dataset<MapCrop> for MapDataset {
         let mut rgb = vec![0.0; 3 * pixels];
         let mut class = vec![0; pixels];
         let mut angle = vec![0.0; 2 * pixels];
+        let mut lines = vec![0u8; self.lines * pixels];
         // The frame is the last class rather than the file's 0xFFFF: a
         // cross-entropy counts classes from nothing upwards and has no room
         // for a sentinel.
@@ -701,10 +741,30 @@ impl Dataset<MapCrop> for MapDataset {
             }
         }
 
+        if self.lines > 0 {
+            let stem = image_path.file_stem().expect("an image has a name");
+            let map = self.maps_folder.join(stem).with_extension("omap");
+            let resolution = self.resolution.expect("read where there are lines");
+            let truth = LineTruth::from_map(&map, width as u32, height as u32, resolution)
+                .unwrap_or_else(|e| panic!("cannot read the lines mid-run: {e}"));
+            for (class, mask) in &truth.layers {
+                let channel = &mut lines[class * pixels..(class + 1) * pixels];
+                for row in 0..self.crop {
+                    for column in 0..self.crop {
+                        let (x, y) = (left + column as isize, top + row as isize);
+                        if let Some(from) = inside(x, y, width, height) {
+                            channel[row * self.crop + column] = mask[from];
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(MapCrop {
             image: rgb,
             class,
             angle,
+            lines,
             size: self.crop,
             map: image_path
                 .file_stem()
@@ -726,6 +786,9 @@ pub struct MapBatch {
     /// The sine and the cosine of every pixel's angle,
     /// `[batch, 2, crop, crop]`.
     pub angle: Tensor<4>,
+    /// Which lines run through every pixel, `[batch, lines, crop, crop]` of
+    /// zeros and ones, and `None` for a dataset whose lines are not labelled.
+    pub lines: Option<Tensor<4>>,
 }
 
 /// Stacks [`MapCrop`]s into a [`MapBatch`].
@@ -743,7 +806,13 @@ impl Batcher<MapCrop, MapBatch> for MapBatcher {
         let mut image = Vec::with_capacity(batch * 3 * size * size);
         let mut class = Vec::with_capacity(batch * size * size);
         let mut angle = Vec::with_capacity(batch * 2 * size * size);
+        let line_channels = items
+            .first()
+            .map(|item| item.lines.len() / (size * size))
+            .unwrap_or(0);
+        let mut lines = Vec::with_capacity(batch * line_channels * size * size);
         for item in items {
+            lines.extend(item.lines.iter().map(|&on| on as f32));
             image.extend_from_slice(&item.image);
             class.extend_from_slice(&item.class);
             angle.extend_from_slice(&item.angle);
@@ -753,6 +822,12 @@ impl Batcher<MapCrop, MapBatch> for MapBatcher {
             image: Tensor::from_data(TensorData::new(image, [batch, 3, size, size]), device),
             class: Tensor::from_data(TensorData::new(class, [batch, size, size]), device),
             angle: Tensor::from_data(TensorData::new(angle, [batch, 2, size, size]), device),
+            lines: (line_channels > 0).then(|| {
+                Tensor::from_data(
+                    TensorData::new(lines, [batch, line_channels, size, size]),
+                    device,
+                )
+            }),
         }
     }
 }
@@ -766,6 +841,7 @@ mod tests {
             image: vec![value; 3 * size * size],
             class: vec![class; size * size],
             angle: vec![value; 2 * size * size],
+            lines: Vec::new(),
             size,
             map: "map".to_string(),
             left: 0,

@@ -433,6 +433,7 @@ fn unbatch(image: &Tensor<4>, class: &Tensor<3, Int>, angle: &Tensor<4>) -> Vec<
             image: images[item * 3 * pixels..(item + 1) * 3 * pixels].to_vec(),
             class: classed[item * pixels..(item + 1) * pixels].to_vec(),
             angle: angles[item * 2 * pixels..(item + 1) * 2 * pixels].to_vec(),
+            lines: Vec::new(),
             size,
             map: String::new(),
             left: 0,
