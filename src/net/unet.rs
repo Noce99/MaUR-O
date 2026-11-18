@@ -197,23 +197,32 @@ impl UNet {
         tap: &mut dyn FnMut(&str, &[usize]),
     ) -> Tensor<4> {
         tap("unet@in", &image.dims());
+        tap("unet/encoder@in", &image.dims());
         // Down, keeping what each level saw before it was halved: that is
         // what the matching step up is missing.
         let mut skips = Vec::with_capacity(DEPTH);
         let mut x = image;
         for (level, block) in self.down.iter().enumerate() {
-            x = block.forward_tapped(x, &format!("unet/down{level}"), tap);
+            x = block.forward_tapped(x, &format!("unet/encoder/down{level}"), tap);
+            tap(&format!("unet/encoder:skip{level}"), &x.dims());
             skips.push(x.clone());
             x = self.pool.forward(x);
-            tap(&format!("unet/pool{level}"), &x.dims());
+            tap(&format!("unet/encoder/pool{level}"), &x.dims());
         }
 
-        x = self.bottom.forward_tapped(x, "unet/bottom", tap);
+        x = self.bottom.forward_tapped(x, "unet/encoder/bottom", tap);
+        tap("unet/encoder", &x.dims());
 
         // And up, deepest first, each step handed back the level it lost.
+        tap("unet/decoder@in:x", &x.dims());
         for (step, (block, skip)) in self.up.iter().zip(skips.into_iter().rev()).enumerate() {
-            x = block.forward_tapped(x, skip, &format!("unet/up{step}"), tap);
+            tap(
+                &format!("unet/decoder@in:skip{}", DEPTH - 1 - step),
+                &skip.dims(),
+            );
+            x = block.forward_tapped(x, skip, &format!("unet/decoder/up{step}"), tap);
         }
+        tap("unet/decoder", &x.dims());
 
         let x = self.head.forward(x);
         tap("unet/head", &x.dims());
@@ -519,6 +528,11 @@ fn describe_up_block(id: &str, from: usize, to: usize, level: usize) -> Node {
 impl UNetConfig {
     /// What this network is, as [`crate::net::describe`] writes it down. Keep
     /// it beside `UNet::forward_tapped`: a test runs one against the other.
+    ///
+    /// Three blocks, the encoder, the decoder and the head, so that the whole
+    /// reads at a glance; the skip connections between the first two are the
+    /// encoder's `@out:skip<level>` ports and the decoder's `@in:skip<level>`
+    /// ones, one for each level.
     pub fn describe(&self) -> NetDescriptor {
         let width = |level: usize| self.base_channels << level;
         let shape = |channels: usize, level: usize| -> [String; 4] {
@@ -529,86 +543,129 @@ impl UNetConfig {
                 halved("W", level),
             ]
         };
+        fn refs(dims: &[String; 4]) -> [&str; 4] {
+            [
+                dims[0].as_str(),
+                dims[1].as_str(),
+                dims[2].as_str(),
+                dims[3].as_str(),
+            ]
+        }
 
-        let mut root = Node::new("unet", "model", "U-Net")
-            .summary("reads a rendered map, pixel by pixel, into symbols and angles")
-            .param("depth", DEPTH);
-        let mut edges: Vec<(String, String, [String; 4])> = Vec::new();
-
+        // The way down: a double convolution and a halving at each level, and
+        // a double convolution at the bottom. What each level made is also
+        // what the matching level of the decoder is handed.
+        let mut encoder = Node::new("encoder", "group", "Encoder")
+            .summary(&format!(
+                "{DEPTH} × (double conv, max pool), then the bottom: what is in the picture"
+            ))
+            .param("levels", DEPTH);
         let mut from = self.in_channels;
-        edges.push(("@in".into(), "down0".into(), shape(from, 0)));
         for level in 0..DEPTH {
             let to = width(level);
             let (h, w) = (halved("H", level), halved("W", level));
-            root = root.child(describe_double_conv(
-                &format!("down{level}"),
-                from,
-                to,
-                &h,
-                &w,
-            ));
-            root = root.child(layer::max_pool(&format!("pool{level}")));
-            // Out of the block: along to the pool, and across to the matching
-            // step up, which is what the skip connection is.
-            edges.push((
-                format!("down{level}"),
-                format!("pool{level}"),
-                shape(to, level),
-            ));
-            edges.push((
-                format!("down{level}"),
-                format!("up{}:skip", DEPTH - 1 - level),
-                shape(to, level),
-            ));
-            let next = if level + 1 < DEPTH {
-                format!("down{}", level + 1)
+            let before = if level == 0 {
+                "@in".to_string()
             } else {
-                "bottom".to_string()
+                format!("pool{}", level - 1)
             };
-            edges.push((format!("pool{level}"), next, shape(to, level + 1)));
+            encoder = encoder
+                .child(describe_double_conv(
+                    &format!("down{level}"),
+                    from,
+                    to,
+                    &h,
+                    &w,
+                ))
+                .child(layer::max_pool(&format!("pool{level}")))
+                .edge(&before, &format!("down{level}"), &refs(&shape(from, level)))
+                .edge(
+                    &format!("down{level}"),
+                    &format!("pool{level}"),
+                    &refs(&shape(to, level)),
+                )
+                .edge(
+                    &format!("down{level}"),
+                    &format!("@out:skip{level}"),
+                    &refs(&shape(to, level)),
+                );
             from = to;
         }
-        root = root.child(describe_double_conv(
-            "bottom",
-            from,
-            width(DEPTH),
-            &halved("H", DEPTH),
-            &halved("W", DEPTH),
-        ));
-        edges.push(("bottom".into(), "up0:x".into(), shape(width(DEPTH), DEPTH)));
+        encoder = encoder
+            .child(describe_double_conv(
+                "bottom",
+                from,
+                width(DEPTH),
+                &halved("H", DEPTH),
+                &halved("W", DEPTH),
+            ))
+            .edge(
+                &format!("pool{}", DEPTH - 1),
+                "bottom",
+                &refs(&shape(from, DEPTH)),
+            )
+            .edge("bottom", "@out", &refs(&shape(width(DEPTH), DEPTH)));
+
+        // The way back up, deepest first, each step handed the level it lost.
+        let mut decoder = Node::new("decoder", "group", "Decoder")
+            .summary(&format!(
+                "{DEPTH} × (double the picture, join a skip connection, convolve): where it is"
+            ))
+            .param("levels", DEPTH);
         for step in 0..DEPTH {
             let level = DEPTH - 1 - step;
-            root = root.child(describe_up_block(
-                &format!("up{step}"),
-                width(level + 1),
-                width(level),
-                level,
-            ));
-            let next = if step + 1 < DEPTH {
-                format!("up{}:x", step + 1)
-            } else {
-                "head".to_string()
-            };
-            edges.push((format!("up{step}"), next, shape(width(level), level)));
+            decoder = decoder
+                .child(describe_up_block(
+                    &format!("up{step}"),
+                    width(level + 1),
+                    width(level),
+                    level,
+                ))
+                .edge(
+                    &format!("@in:skip{level}"),
+                    &format!("up{step}:skip"),
+                    &refs(&shape(width(level), level)),
+                );
         }
-        root = root.child(
+        decoder = decoder.edge("@in:x", "up0:x", &refs(&shape(width(DEPTH), DEPTH)));
+        for step in 0..DEPTH - 1 {
+            let level = DEPTH - 1 - step;
+            decoder = decoder.edge(
+                &format!("up{step}"),
+                &format!("up{}:x", step + 1),
+                &refs(&shape(width(level), level)),
+            );
+        }
+        decoder = decoder.edge(
+            &format!("up{}", DEPTH - 1),
+            "@out",
+            &refs(&shape(width(0), 0)),
+        );
+
+        let head =
             layer::conv2d("head", self.base_channels, self.classes + 3, 1, true).summary(&format!(
                 "{} class logits (the frame included), sine and cosine of the angle",
                 self.classes + 1
-            )),
-        );
-        edges.push(("head".into(), "@out".into(), shape(self.classes + 3, 0)));
+            ));
 
-        // Edges are listed in the order a reader meets them, not the order
-        // the loops produced them: by the block they leave.
-        let order: Vec<String> = std::iter::once("@in".to_string())
-            .chain(root.children.iter().map(|c| c.id.clone()))
-            .collect();
-        edges.sort_by_key(|(from, ..)| order.iter().position(|id| id == from));
-        for (from, to, dims) in edges {
-            let dims: Vec<&str> = dims.iter().map(String::as_str).collect();
-            root = root.edge(&from, &to, &dims);
+        let mut root = Node::new("unet", "model", "U-Net")
+            .summary("reads a rendered map, pixel by pixel, into symbols and angles")
+            .param("depth", DEPTH)
+            .child(encoder)
+            .child(decoder)
+            .child(head)
+            .edge("@in", "encoder", &refs(&shape(self.in_channels, 0)))
+            .edge("encoder", "decoder:x", &refs(&shape(width(DEPTH), DEPTH)));
+        for level in 0..DEPTH {
+            root = root.edge(
+                &format!("encoder:skip{level}"),
+                &format!("decoder:skip{level}"),
+                &refs(&shape(width(level), level)),
+            );
         }
+        root = root
+            .edge("decoder", "head", &refs(&shape(width(0), 0)))
+            .edge("head", "@out", &refs(&shape(self.classes + 3, 0)));
 
         let mut config = BTreeMap::new();
         config.insert("classes".to_string(), Value::from(self.classes));

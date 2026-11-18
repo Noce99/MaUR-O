@@ -1,0 +1,2197 @@
+{
+  "schema_version": 1,
+  "scope": "image_to_omap",
+  "name": "unet",
+  "version": "0.2",
+  "config": {
+    "base_channels": 16,
+    "classes": 11,
+    "in_channels": 3
+  },
+  "root": {
+    "id": "unet",
+    "kind": "model",
+    "label": "U-Net",
+    "summary": "reads a rendered map, pixel by pixel, into symbols and angles",
+    "params": {
+      "depth": 4
+    },
+    "param_count": 1945742,
+    "children": [
+      {
+        "id": "encoder",
+        "kind": "group",
+        "label": "Encoder",
+        "summary": "4 × (double conv, max pool), then the bottom: what is in the picture",
+        "params": {
+          "levels": 4
+        },
+        "param_count": 1181744,
+        "children": [
+          {
+            "id": "down0",
+            "kind": "double_conv",
+            "label": "Double conv",
+            "summary": "2 × (conv 3×3, batch norm, ReLU), 3→16",
+            "params": {
+              "in_channels": 3,
+              "out_channels": 16
+            },
+            "param_count": 2864,
+            "children": [
+              {
+                "id": "conv1",
+                "kind": "conv2d",
+                "label": "Conv 3×3",
+                "summary": "3→16 channels",
+                "params": {
+                  "bias": false,
+                  "in_channels": 3,
+                  "kernel": 3,
+                  "out_channels": 16,
+                  "padding": 1,
+                  "stride": 1
+                },
+                "param_count": 432
+              },
+              {
+                "id": "norm1",
+                "kind": "batch_norm",
+                "label": "BatchNorm",
+                "params": {
+                  "channels": 16
+                },
+                "param_count": 64
+              },
+              {
+                "id": "relu1",
+                "kind": "relu",
+                "label": "ReLU",
+                "param_count": 0
+              },
+              {
+                "id": "conv2",
+                "kind": "conv2d",
+                "label": "Conv 3×3",
+                "summary": "16→16 channels",
+                "params": {
+                  "bias": false,
+                  "in_channels": 16,
+                  "kernel": 3,
+                  "out_channels": 16,
+                  "padding": 1,
+                  "stride": 1
+                },
+                "param_count": 2304
+              },
+              {
+                "id": "norm2",
+                "kind": "batch_norm",
+                "label": "BatchNorm",
+                "params": {
+                  "channels": 16
+                },
+                "param_count": 64
+              },
+              {
+                "id": "relu2",
+                "kind": "relu",
+                "label": "ReLU",
+                "param_count": 0
+              }
+            ],
+            "edges": [
+              {
+                "from": "@in",
+                "to": "conv1",
+                "shape": [
+                  "B",
+                  3,
+                  "H",
+                  "W"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv1",
+                "to": "norm1",
+                "shape": [
+                  "B",
+                  16,
+                  "H",
+                  "W"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "norm1",
+                "to": "relu1",
+                "shape": [
+                  "B",
+                  16,
+                  "H",
+                  "W"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "relu1",
+                "to": "conv2",
+                "shape": [
+                  "B",
+                  16,
+                  "H",
+                  "W"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv2",
+                "to": "norm2",
+                "shape": [
+                  "B",
+                  16,
+                  "H",
+                  "W"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "norm2",
+                "to": "relu2",
+                "shape": [
+                  "B",
+                  16,
+                  "H",
+                  "W"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "relu2",
+                "to": "@out",
+                "shape": [
+                  "B",
+                  16,
+                  "H",
+                  "W"
+                ],
+                "dtype": "f32"
+              }
+            ]
+          },
+          {
+            "id": "pool0",
+            "kind": "max_pool2d",
+            "label": "MaxPool 2×2",
+            "summary": "halves height and width",
+            "params": {
+              "kernel": 2,
+              "stride": 2
+            },
+            "param_count": 0
+          },
+          {
+            "id": "down1",
+            "kind": "double_conv",
+            "label": "Double conv",
+            "summary": "2 × (conv 3×3, batch norm, ReLU), 16→32",
+            "params": {
+              "in_channels": 16,
+              "out_channels": 32
+            },
+            "param_count": 14080,
+            "children": [
+              {
+                "id": "conv1",
+                "kind": "conv2d",
+                "label": "Conv 3×3",
+                "summary": "16→32 channels",
+                "params": {
+                  "bias": false,
+                  "in_channels": 16,
+                  "kernel": 3,
+                  "out_channels": 32,
+                  "padding": 1,
+                  "stride": 1
+                },
+                "param_count": 4608
+              },
+              {
+                "id": "norm1",
+                "kind": "batch_norm",
+                "label": "BatchNorm",
+                "params": {
+                  "channels": 32
+                },
+                "param_count": 128
+              },
+              {
+                "id": "relu1",
+                "kind": "relu",
+                "label": "ReLU",
+                "param_count": 0
+              },
+              {
+                "id": "conv2",
+                "kind": "conv2d",
+                "label": "Conv 3×3",
+                "summary": "32→32 channels",
+                "params": {
+                  "bias": false,
+                  "in_channels": 32,
+                  "kernel": 3,
+                  "out_channels": 32,
+                  "padding": 1,
+                  "stride": 1
+                },
+                "param_count": 9216
+              },
+              {
+                "id": "norm2",
+                "kind": "batch_norm",
+                "label": "BatchNorm",
+                "params": {
+                  "channels": 32
+                },
+                "param_count": 128
+              },
+              {
+                "id": "relu2",
+                "kind": "relu",
+                "label": "ReLU",
+                "param_count": 0
+              }
+            ],
+            "edges": [
+              {
+                "from": "@in",
+                "to": "conv1",
+                "shape": [
+                  "B",
+                  16,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv1",
+                "to": "norm1",
+                "shape": [
+                  "B",
+                  32,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "norm1",
+                "to": "relu1",
+                "shape": [
+                  "B",
+                  32,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "relu1",
+                "to": "conv2",
+                "shape": [
+                  "B",
+                  32,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv2",
+                "to": "norm2",
+                "shape": [
+                  "B",
+                  32,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "norm2",
+                "to": "relu2",
+                "shape": [
+                  "B",
+                  32,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "relu2",
+                "to": "@out",
+                "shape": [
+                  "B",
+                  32,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              }
+            ]
+          },
+          {
+            "id": "pool1",
+            "kind": "max_pool2d",
+            "label": "MaxPool 2×2",
+            "summary": "halves height and width",
+            "params": {
+              "kernel": 2,
+              "stride": 2
+            },
+            "param_count": 0
+          },
+          {
+            "id": "down2",
+            "kind": "double_conv",
+            "label": "Double conv",
+            "summary": "2 × (conv 3×3, batch norm, ReLU), 32→64",
+            "params": {
+              "in_channels": 32,
+              "out_channels": 64
+            },
+            "param_count": 55808,
+            "children": [
+              {
+                "id": "conv1",
+                "kind": "conv2d",
+                "label": "Conv 3×3",
+                "summary": "32→64 channels",
+                "params": {
+                  "bias": false,
+                  "in_channels": 32,
+                  "kernel": 3,
+                  "out_channels": 64,
+                  "padding": 1,
+                  "stride": 1
+                },
+                "param_count": 18432
+              },
+              {
+                "id": "norm1",
+                "kind": "batch_norm",
+                "label": "BatchNorm",
+                "params": {
+                  "channels": 64
+                },
+                "param_count": 256
+              },
+              {
+                "id": "relu1",
+                "kind": "relu",
+                "label": "ReLU",
+                "param_count": 0
+              },
+              {
+                "id": "conv2",
+                "kind": "conv2d",
+                "label": "Conv 3×3",
+                "summary": "64→64 channels",
+                "params": {
+                  "bias": false,
+                  "in_channels": 64,
+                  "kernel": 3,
+                  "out_channels": 64,
+                  "padding": 1,
+                  "stride": 1
+                },
+                "param_count": 36864
+              },
+              {
+                "id": "norm2",
+                "kind": "batch_norm",
+                "label": "BatchNorm",
+                "params": {
+                  "channels": 64
+                },
+                "param_count": 256
+              },
+              {
+                "id": "relu2",
+                "kind": "relu",
+                "label": "ReLU",
+                "param_count": 0
+              }
+            ],
+            "edges": [
+              {
+                "from": "@in",
+                "to": "conv1",
+                "shape": [
+                  "B",
+                  32,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv1",
+                "to": "norm1",
+                "shape": [
+                  "B",
+                  64,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "norm1",
+                "to": "relu1",
+                "shape": [
+                  "B",
+                  64,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "relu1",
+                "to": "conv2",
+                "shape": [
+                  "B",
+                  64,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv2",
+                "to": "norm2",
+                "shape": [
+                  "B",
+                  64,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "norm2",
+                "to": "relu2",
+                "shape": [
+                  "B",
+                  64,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "relu2",
+                "to": "@out",
+                "shape": [
+                  "B",
+                  64,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              }
+            ]
+          },
+          {
+            "id": "pool2",
+            "kind": "max_pool2d",
+            "label": "MaxPool 2×2",
+            "summary": "halves height and width",
+            "params": {
+              "kernel": 2,
+              "stride": 2
+            },
+            "param_count": 0
+          },
+          {
+            "id": "down3",
+            "kind": "double_conv",
+            "label": "Double conv",
+            "summary": "2 × (conv 3×3, batch norm, ReLU), 64→128",
+            "params": {
+              "in_channels": 64,
+              "out_channels": 128
+            },
+            "param_count": 222208,
+            "children": [
+              {
+                "id": "conv1",
+                "kind": "conv2d",
+                "label": "Conv 3×3",
+                "summary": "64→128 channels",
+                "params": {
+                  "bias": false,
+                  "in_channels": 64,
+                  "kernel": 3,
+                  "out_channels": 128,
+                  "padding": 1,
+                  "stride": 1
+                },
+                "param_count": 73728
+              },
+              {
+                "id": "norm1",
+                "kind": "batch_norm",
+                "label": "BatchNorm",
+                "params": {
+                  "channels": 128
+                },
+                "param_count": 512
+              },
+              {
+                "id": "relu1",
+                "kind": "relu",
+                "label": "ReLU",
+                "param_count": 0
+              },
+              {
+                "id": "conv2",
+                "kind": "conv2d",
+                "label": "Conv 3×3",
+                "summary": "128→128 channels",
+                "params": {
+                  "bias": false,
+                  "in_channels": 128,
+                  "kernel": 3,
+                  "out_channels": 128,
+                  "padding": 1,
+                  "stride": 1
+                },
+                "param_count": 147456
+              },
+              {
+                "id": "norm2",
+                "kind": "batch_norm",
+                "label": "BatchNorm",
+                "params": {
+                  "channels": 128
+                },
+                "param_count": 512
+              },
+              {
+                "id": "relu2",
+                "kind": "relu",
+                "label": "ReLU",
+                "param_count": 0
+              }
+            ],
+            "edges": [
+              {
+                "from": "@in",
+                "to": "conv1",
+                "shape": [
+                  "B",
+                  64,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv1",
+                "to": "norm1",
+                "shape": [
+                  "B",
+                  128,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "norm1",
+                "to": "relu1",
+                "shape": [
+                  "B",
+                  128,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "relu1",
+                "to": "conv2",
+                "shape": [
+                  "B",
+                  128,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv2",
+                "to": "norm2",
+                "shape": [
+                  "B",
+                  128,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "norm2",
+                "to": "relu2",
+                "shape": [
+                  "B",
+                  128,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "relu2",
+                "to": "@out",
+                "shape": [
+                  "B",
+                  128,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              }
+            ]
+          },
+          {
+            "id": "pool3",
+            "kind": "max_pool2d",
+            "label": "MaxPool 2×2",
+            "summary": "halves height and width",
+            "params": {
+              "kernel": 2,
+              "stride": 2
+            },
+            "param_count": 0
+          },
+          {
+            "id": "bottom",
+            "kind": "double_conv",
+            "label": "Double conv",
+            "summary": "2 × (conv 3×3, batch norm, ReLU), 128→256",
+            "params": {
+              "in_channels": 128,
+              "out_channels": 256
+            },
+            "param_count": 886784,
+            "children": [
+              {
+                "id": "conv1",
+                "kind": "conv2d",
+                "label": "Conv 3×3",
+                "summary": "128→256 channels",
+                "params": {
+                  "bias": false,
+                  "in_channels": 128,
+                  "kernel": 3,
+                  "out_channels": 256,
+                  "padding": 1,
+                  "stride": 1
+                },
+                "param_count": 294912
+              },
+              {
+                "id": "norm1",
+                "kind": "batch_norm",
+                "label": "BatchNorm",
+                "params": {
+                  "channels": 256
+                },
+                "param_count": 1024
+              },
+              {
+                "id": "relu1",
+                "kind": "relu",
+                "label": "ReLU",
+                "param_count": 0
+              },
+              {
+                "id": "conv2",
+                "kind": "conv2d",
+                "label": "Conv 3×3",
+                "summary": "256→256 channels",
+                "params": {
+                  "bias": false,
+                  "in_channels": 256,
+                  "kernel": 3,
+                  "out_channels": 256,
+                  "padding": 1,
+                  "stride": 1
+                },
+                "param_count": 589824
+              },
+              {
+                "id": "norm2",
+                "kind": "batch_norm",
+                "label": "BatchNorm",
+                "params": {
+                  "channels": 256
+                },
+                "param_count": 1024
+              },
+              {
+                "id": "relu2",
+                "kind": "relu",
+                "label": "ReLU",
+                "param_count": 0
+              }
+            ],
+            "edges": [
+              {
+                "from": "@in",
+                "to": "conv1",
+                "shape": [
+                  "B",
+                  128,
+                  "H/16",
+                  "W/16"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv1",
+                "to": "norm1",
+                "shape": [
+                  "B",
+                  256,
+                  "H/16",
+                  "W/16"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "norm1",
+                "to": "relu1",
+                "shape": [
+                  "B",
+                  256,
+                  "H/16",
+                  "W/16"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "relu1",
+                "to": "conv2",
+                "shape": [
+                  "B",
+                  256,
+                  "H/16",
+                  "W/16"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv2",
+                "to": "norm2",
+                "shape": [
+                  "B",
+                  256,
+                  "H/16",
+                  "W/16"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "norm2",
+                "to": "relu2",
+                "shape": [
+                  "B",
+                  256,
+                  "H/16",
+                  "W/16"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "relu2",
+                "to": "@out",
+                "shape": [
+                  "B",
+                  256,
+                  "H/16",
+                  "W/16"
+                ],
+                "dtype": "f32"
+              }
+            ]
+          }
+        ],
+        "edges": [
+          {
+            "from": "@in",
+            "to": "down0",
+            "shape": [
+              "B",
+              3,
+              "H",
+              "W"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "down0",
+            "to": "pool0",
+            "shape": [
+              "B",
+              16,
+              "H",
+              "W"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "down0",
+            "to": "@out:skip0",
+            "shape": [
+              "B",
+              16,
+              "H",
+              "W"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "pool0",
+            "to": "down1",
+            "shape": [
+              "B",
+              16,
+              "H/2",
+              "W/2"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "down1",
+            "to": "pool1",
+            "shape": [
+              "B",
+              32,
+              "H/2",
+              "W/2"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "down1",
+            "to": "@out:skip1",
+            "shape": [
+              "B",
+              32,
+              "H/2",
+              "W/2"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "pool1",
+            "to": "down2",
+            "shape": [
+              "B",
+              32,
+              "H/4",
+              "W/4"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "down2",
+            "to": "pool2",
+            "shape": [
+              "B",
+              64,
+              "H/4",
+              "W/4"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "down2",
+            "to": "@out:skip2",
+            "shape": [
+              "B",
+              64,
+              "H/4",
+              "W/4"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "pool2",
+            "to": "down3",
+            "shape": [
+              "B",
+              64,
+              "H/8",
+              "W/8"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "down3",
+            "to": "pool3",
+            "shape": [
+              "B",
+              128,
+              "H/8",
+              "W/8"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "down3",
+            "to": "@out:skip3",
+            "shape": [
+              "B",
+              128,
+              "H/8",
+              "W/8"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "pool3",
+            "to": "bottom",
+            "shape": [
+              "B",
+              128,
+              "H/16",
+              "W/16"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "bottom",
+            "to": "@out",
+            "shape": [
+              "B",
+              256,
+              "H/16",
+              "W/16"
+            ],
+            "dtype": "f32"
+          }
+        ]
+      },
+      {
+        "id": "decoder",
+        "kind": "group",
+        "label": "Decoder",
+        "summary": "4 × (double the picture, join a skip connection, convolve): where it is",
+        "params": {
+          "levels": 4
+        },
+        "param_count": 763760,
+        "children": [
+          {
+            "id": "up0",
+            "kind": "up_block",
+            "label": "Up block",
+            "summary": "double the picture, join the skip connection, convolve",
+            "params": {
+              "in_channels": 256,
+              "out_channels": 128
+            },
+            "param_count": 574592,
+            "children": [
+              {
+                "id": "upsample",
+                "kind": "conv_transpose2d",
+                "label": "ConvTranspose 2×2",
+                "summary": "doubles height and width, 256→128",
+                "params": {
+                  "in_channels": 256,
+                  "kernel": 2,
+                  "out_channels": 128,
+                  "stride": 2
+                },
+                "param_count": 131200
+              },
+              {
+                "id": "concat",
+                "kind": "concat",
+                "label": "Concat",
+                "summary": "skip connection beside the doubled picture",
+                "params": {
+                  "axis": 1
+                },
+                "param_count": 0
+              },
+              {
+                "id": "conv",
+                "kind": "double_conv",
+                "label": "Double conv",
+                "summary": "2 × (conv 3×3, batch norm, ReLU), 256→128",
+                "params": {
+                  "in_channels": 256,
+                  "out_channels": 128
+                },
+                "param_count": 443392,
+                "children": [
+                  {
+                    "id": "conv1",
+                    "kind": "conv2d",
+                    "label": "Conv 3×3",
+                    "summary": "256→128 channels",
+                    "params": {
+                      "bias": false,
+                      "in_channels": 256,
+                      "kernel": 3,
+                      "out_channels": 128,
+                      "padding": 1,
+                      "stride": 1
+                    },
+                    "param_count": 294912
+                  },
+                  {
+                    "id": "norm1",
+                    "kind": "batch_norm",
+                    "label": "BatchNorm",
+                    "params": {
+                      "channels": 128
+                    },
+                    "param_count": 512
+                  },
+                  {
+                    "id": "relu1",
+                    "kind": "relu",
+                    "label": "ReLU",
+                    "param_count": 0
+                  },
+                  {
+                    "id": "conv2",
+                    "kind": "conv2d",
+                    "label": "Conv 3×3",
+                    "summary": "128→128 channels",
+                    "params": {
+                      "bias": false,
+                      "in_channels": 128,
+                      "kernel": 3,
+                      "out_channels": 128,
+                      "padding": 1,
+                      "stride": 1
+                    },
+                    "param_count": 147456
+                  },
+                  {
+                    "id": "norm2",
+                    "kind": "batch_norm",
+                    "label": "BatchNorm",
+                    "params": {
+                      "channels": 128
+                    },
+                    "param_count": 512
+                  },
+                  {
+                    "id": "relu2",
+                    "kind": "relu",
+                    "label": "ReLU",
+                    "param_count": 0
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "@in",
+                    "to": "conv1",
+                    "shape": [
+                      "B",
+                      256,
+                      "H/8",
+                      "W/8"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "conv1",
+                    "to": "norm1",
+                    "shape": [
+                      "B",
+                      128,
+                      "H/8",
+                      "W/8"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "norm1",
+                    "to": "relu1",
+                    "shape": [
+                      "B",
+                      128,
+                      "H/8",
+                      "W/8"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "relu1",
+                    "to": "conv2",
+                    "shape": [
+                      "B",
+                      128,
+                      "H/8",
+                      "W/8"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "conv2",
+                    "to": "norm2",
+                    "shape": [
+                      "B",
+                      128,
+                      "H/8",
+                      "W/8"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "norm2",
+                    "to": "relu2",
+                    "shape": [
+                      "B",
+                      128,
+                      "H/8",
+                      "W/8"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "relu2",
+                    "to": "@out",
+                    "shape": [
+                      "B",
+                      128,
+                      "H/8",
+                      "W/8"
+                    ],
+                    "dtype": "f32"
+                  }
+                ]
+              }
+            ],
+            "edges": [
+              {
+                "from": "@in:x",
+                "to": "upsample",
+                "shape": [
+                  "B",
+                  256,
+                  "H/16",
+                  "W/16"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "upsample",
+                "to": "concat:x",
+                "shape": [
+                  "B",
+                  128,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "@in:skip",
+                "to": "concat:skip",
+                "shape": [
+                  "B",
+                  128,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "concat",
+                "to": "conv",
+                "shape": [
+                  "B",
+                  256,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv",
+                "to": "@out",
+                "shape": [
+                  "B",
+                  128,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              }
+            ]
+          },
+          {
+            "id": "up1",
+            "kind": "up_block",
+            "label": "Up block",
+            "summary": "double the picture, join the skip connection, convolve",
+            "params": {
+              "in_channels": 128,
+              "out_channels": 64
+            },
+            "param_count": 143936,
+            "children": [
+              {
+                "id": "upsample",
+                "kind": "conv_transpose2d",
+                "label": "ConvTranspose 2×2",
+                "summary": "doubles height and width, 128→64",
+                "params": {
+                  "in_channels": 128,
+                  "kernel": 2,
+                  "out_channels": 64,
+                  "stride": 2
+                },
+                "param_count": 32832
+              },
+              {
+                "id": "concat",
+                "kind": "concat",
+                "label": "Concat",
+                "summary": "skip connection beside the doubled picture",
+                "params": {
+                  "axis": 1
+                },
+                "param_count": 0
+              },
+              {
+                "id": "conv",
+                "kind": "double_conv",
+                "label": "Double conv",
+                "summary": "2 × (conv 3×3, batch norm, ReLU), 128→64",
+                "params": {
+                  "in_channels": 128,
+                  "out_channels": 64
+                },
+                "param_count": 111104,
+                "children": [
+                  {
+                    "id": "conv1",
+                    "kind": "conv2d",
+                    "label": "Conv 3×3",
+                    "summary": "128→64 channels",
+                    "params": {
+                      "bias": false,
+                      "in_channels": 128,
+                      "kernel": 3,
+                      "out_channels": 64,
+                      "padding": 1,
+                      "stride": 1
+                    },
+                    "param_count": 73728
+                  },
+                  {
+                    "id": "norm1",
+                    "kind": "batch_norm",
+                    "label": "BatchNorm",
+                    "params": {
+                      "channels": 64
+                    },
+                    "param_count": 256
+                  },
+                  {
+                    "id": "relu1",
+                    "kind": "relu",
+                    "label": "ReLU",
+                    "param_count": 0
+                  },
+                  {
+                    "id": "conv2",
+                    "kind": "conv2d",
+                    "label": "Conv 3×3",
+                    "summary": "64→64 channels",
+                    "params": {
+                      "bias": false,
+                      "in_channels": 64,
+                      "kernel": 3,
+                      "out_channels": 64,
+                      "padding": 1,
+                      "stride": 1
+                    },
+                    "param_count": 36864
+                  },
+                  {
+                    "id": "norm2",
+                    "kind": "batch_norm",
+                    "label": "BatchNorm",
+                    "params": {
+                      "channels": 64
+                    },
+                    "param_count": 256
+                  },
+                  {
+                    "id": "relu2",
+                    "kind": "relu",
+                    "label": "ReLU",
+                    "param_count": 0
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "@in",
+                    "to": "conv1",
+                    "shape": [
+                      "B",
+                      128,
+                      "H/4",
+                      "W/4"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "conv1",
+                    "to": "norm1",
+                    "shape": [
+                      "B",
+                      64,
+                      "H/4",
+                      "W/4"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "norm1",
+                    "to": "relu1",
+                    "shape": [
+                      "B",
+                      64,
+                      "H/4",
+                      "W/4"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "relu1",
+                    "to": "conv2",
+                    "shape": [
+                      "B",
+                      64,
+                      "H/4",
+                      "W/4"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "conv2",
+                    "to": "norm2",
+                    "shape": [
+                      "B",
+                      64,
+                      "H/4",
+                      "W/4"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "norm2",
+                    "to": "relu2",
+                    "shape": [
+                      "B",
+                      64,
+                      "H/4",
+                      "W/4"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "relu2",
+                    "to": "@out",
+                    "shape": [
+                      "B",
+                      64,
+                      "H/4",
+                      "W/4"
+                    ],
+                    "dtype": "f32"
+                  }
+                ]
+              }
+            ],
+            "edges": [
+              {
+                "from": "@in:x",
+                "to": "upsample",
+                "shape": [
+                  "B",
+                  128,
+                  "H/8",
+                  "W/8"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "upsample",
+                "to": "concat:x",
+                "shape": [
+                  "B",
+                  64,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "@in:skip",
+                "to": "concat:skip",
+                "shape": [
+                  "B",
+                  64,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "concat",
+                "to": "conv",
+                "shape": [
+                  "B",
+                  128,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv",
+                "to": "@out",
+                "shape": [
+                  "B",
+                  64,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              }
+            ]
+          },
+          {
+            "id": "up2",
+            "kind": "up_block",
+            "label": "Up block",
+            "summary": "double the picture, join the skip connection, convolve",
+            "params": {
+              "in_channels": 64,
+              "out_channels": 32
+            },
+            "param_count": 36128,
+            "children": [
+              {
+                "id": "upsample",
+                "kind": "conv_transpose2d",
+                "label": "ConvTranspose 2×2",
+                "summary": "doubles height and width, 64→32",
+                "params": {
+                  "in_channels": 64,
+                  "kernel": 2,
+                  "out_channels": 32,
+                  "stride": 2
+                },
+                "param_count": 8224
+              },
+              {
+                "id": "concat",
+                "kind": "concat",
+                "label": "Concat",
+                "summary": "skip connection beside the doubled picture",
+                "params": {
+                  "axis": 1
+                },
+                "param_count": 0
+              },
+              {
+                "id": "conv",
+                "kind": "double_conv",
+                "label": "Double conv",
+                "summary": "2 × (conv 3×3, batch norm, ReLU), 64→32",
+                "params": {
+                  "in_channels": 64,
+                  "out_channels": 32
+                },
+                "param_count": 27904,
+                "children": [
+                  {
+                    "id": "conv1",
+                    "kind": "conv2d",
+                    "label": "Conv 3×3",
+                    "summary": "64→32 channels",
+                    "params": {
+                      "bias": false,
+                      "in_channels": 64,
+                      "kernel": 3,
+                      "out_channels": 32,
+                      "padding": 1,
+                      "stride": 1
+                    },
+                    "param_count": 18432
+                  },
+                  {
+                    "id": "norm1",
+                    "kind": "batch_norm",
+                    "label": "BatchNorm",
+                    "params": {
+                      "channels": 32
+                    },
+                    "param_count": 128
+                  },
+                  {
+                    "id": "relu1",
+                    "kind": "relu",
+                    "label": "ReLU",
+                    "param_count": 0
+                  },
+                  {
+                    "id": "conv2",
+                    "kind": "conv2d",
+                    "label": "Conv 3×3",
+                    "summary": "32→32 channels",
+                    "params": {
+                      "bias": false,
+                      "in_channels": 32,
+                      "kernel": 3,
+                      "out_channels": 32,
+                      "padding": 1,
+                      "stride": 1
+                    },
+                    "param_count": 9216
+                  },
+                  {
+                    "id": "norm2",
+                    "kind": "batch_norm",
+                    "label": "BatchNorm",
+                    "params": {
+                      "channels": 32
+                    },
+                    "param_count": 128
+                  },
+                  {
+                    "id": "relu2",
+                    "kind": "relu",
+                    "label": "ReLU",
+                    "param_count": 0
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "@in",
+                    "to": "conv1",
+                    "shape": [
+                      "B",
+                      64,
+                      "H/2",
+                      "W/2"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "conv1",
+                    "to": "norm1",
+                    "shape": [
+                      "B",
+                      32,
+                      "H/2",
+                      "W/2"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "norm1",
+                    "to": "relu1",
+                    "shape": [
+                      "B",
+                      32,
+                      "H/2",
+                      "W/2"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "relu1",
+                    "to": "conv2",
+                    "shape": [
+                      "B",
+                      32,
+                      "H/2",
+                      "W/2"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "conv2",
+                    "to": "norm2",
+                    "shape": [
+                      "B",
+                      32,
+                      "H/2",
+                      "W/2"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "norm2",
+                    "to": "relu2",
+                    "shape": [
+                      "B",
+                      32,
+                      "H/2",
+                      "W/2"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "relu2",
+                    "to": "@out",
+                    "shape": [
+                      "B",
+                      32,
+                      "H/2",
+                      "W/2"
+                    ],
+                    "dtype": "f32"
+                  }
+                ]
+              }
+            ],
+            "edges": [
+              {
+                "from": "@in:x",
+                "to": "upsample",
+                "shape": [
+                  "B",
+                  64,
+                  "H/4",
+                  "W/4"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "upsample",
+                "to": "concat:x",
+                "shape": [
+                  "B",
+                  32,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "@in:skip",
+                "to": "concat:skip",
+                "shape": [
+                  "B",
+                  32,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "concat",
+                "to": "conv",
+                "shape": [
+                  "B",
+                  64,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv",
+                "to": "@out",
+                "shape": [
+                  "B",
+                  32,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              }
+            ]
+          },
+          {
+            "id": "up3",
+            "kind": "up_block",
+            "label": "Up block",
+            "summary": "double the picture, join the skip connection, convolve",
+            "params": {
+              "in_channels": 32,
+              "out_channels": 16
+            },
+            "param_count": 9104,
+            "children": [
+              {
+                "id": "upsample",
+                "kind": "conv_transpose2d",
+                "label": "ConvTranspose 2×2",
+                "summary": "doubles height and width, 32→16",
+                "params": {
+                  "in_channels": 32,
+                  "kernel": 2,
+                  "out_channels": 16,
+                  "stride": 2
+                },
+                "param_count": 2064
+              },
+              {
+                "id": "concat",
+                "kind": "concat",
+                "label": "Concat",
+                "summary": "skip connection beside the doubled picture",
+                "params": {
+                  "axis": 1
+                },
+                "param_count": 0
+              },
+              {
+                "id": "conv",
+                "kind": "double_conv",
+                "label": "Double conv",
+                "summary": "2 × (conv 3×3, batch norm, ReLU), 32→16",
+                "params": {
+                  "in_channels": 32,
+                  "out_channels": 16
+                },
+                "param_count": 7040,
+                "children": [
+                  {
+                    "id": "conv1",
+                    "kind": "conv2d",
+                    "label": "Conv 3×3",
+                    "summary": "32→16 channels",
+                    "params": {
+                      "bias": false,
+                      "in_channels": 32,
+                      "kernel": 3,
+                      "out_channels": 16,
+                      "padding": 1,
+                      "stride": 1
+                    },
+                    "param_count": 4608
+                  },
+                  {
+                    "id": "norm1",
+                    "kind": "batch_norm",
+                    "label": "BatchNorm",
+                    "params": {
+                      "channels": 16
+                    },
+                    "param_count": 64
+                  },
+                  {
+                    "id": "relu1",
+                    "kind": "relu",
+                    "label": "ReLU",
+                    "param_count": 0
+                  },
+                  {
+                    "id": "conv2",
+                    "kind": "conv2d",
+                    "label": "Conv 3×3",
+                    "summary": "16→16 channels",
+                    "params": {
+                      "bias": false,
+                      "in_channels": 16,
+                      "kernel": 3,
+                      "out_channels": 16,
+                      "padding": 1,
+                      "stride": 1
+                    },
+                    "param_count": 2304
+                  },
+                  {
+                    "id": "norm2",
+                    "kind": "batch_norm",
+                    "label": "BatchNorm",
+                    "params": {
+                      "channels": 16
+                    },
+                    "param_count": 64
+                  },
+                  {
+                    "id": "relu2",
+                    "kind": "relu",
+                    "label": "ReLU",
+                    "param_count": 0
+                  }
+                ],
+                "edges": [
+                  {
+                    "from": "@in",
+                    "to": "conv1",
+                    "shape": [
+                      "B",
+                      32,
+                      "H",
+                      "W"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "conv1",
+                    "to": "norm1",
+                    "shape": [
+                      "B",
+                      16,
+                      "H",
+                      "W"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "norm1",
+                    "to": "relu1",
+                    "shape": [
+                      "B",
+                      16,
+                      "H",
+                      "W"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "relu1",
+                    "to": "conv2",
+                    "shape": [
+                      "B",
+                      16,
+                      "H",
+                      "W"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "conv2",
+                    "to": "norm2",
+                    "shape": [
+                      "B",
+                      16,
+                      "H",
+                      "W"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "norm2",
+                    "to": "relu2",
+                    "shape": [
+                      "B",
+                      16,
+                      "H",
+                      "W"
+                    ],
+                    "dtype": "f32"
+                  },
+                  {
+                    "from": "relu2",
+                    "to": "@out",
+                    "shape": [
+                      "B",
+                      16,
+                      "H",
+                      "W"
+                    ],
+                    "dtype": "f32"
+                  }
+                ]
+              }
+            ],
+            "edges": [
+              {
+                "from": "@in:x",
+                "to": "upsample",
+                "shape": [
+                  "B",
+                  32,
+                  "H/2",
+                  "W/2"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "upsample",
+                "to": "concat:x",
+                "shape": [
+                  "B",
+                  16,
+                  "H",
+                  "W"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "@in:skip",
+                "to": "concat:skip",
+                "shape": [
+                  "B",
+                  16,
+                  "H",
+                  "W"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "concat",
+                "to": "conv",
+                "shape": [
+                  "B",
+                  32,
+                  "H",
+                  "W"
+                ],
+                "dtype": "f32"
+              },
+              {
+                "from": "conv",
+                "to": "@out",
+                "shape": [
+                  "B",
+                  16,
+                  "H",
+                  "W"
+                ],
+                "dtype": "f32"
+              }
+            ]
+          }
+        ],
+        "edges": [
+          {
+            "from": "@in:skip3",
+            "to": "up0:skip",
+            "shape": [
+              "B",
+              128,
+              "H/8",
+              "W/8"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "@in:skip2",
+            "to": "up1:skip",
+            "shape": [
+              "B",
+              64,
+              "H/4",
+              "W/4"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "@in:skip1",
+            "to": "up2:skip",
+            "shape": [
+              "B",
+              32,
+              "H/2",
+              "W/2"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "@in:skip0",
+            "to": "up3:skip",
+            "shape": [
+              "B",
+              16,
+              "H",
+              "W"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "@in:x",
+            "to": "up0:x",
+            "shape": [
+              "B",
+              256,
+              "H/16",
+              "W/16"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "up0",
+            "to": "up1:x",
+            "shape": [
+              "B",
+              128,
+              "H/8",
+              "W/8"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "up1",
+            "to": "up2:x",
+            "shape": [
+              "B",
+              64,
+              "H/4",
+              "W/4"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "up2",
+            "to": "up3:x",
+            "shape": [
+              "B",
+              32,
+              "H/2",
+              "W/2"
+            ],
+            "dtype": "f32"
+          },
+          {
+            "from": "up3",
+            "to": "@out",
+            "shape": [
+              "B",
+              16,
+              "H",
+              "W"
+            ],
+            "dtype": "f32"
+          }
+        ]
+      },
+      {
+        "id": "head",
+        "kind": "conv2d",
+        "label": "Conv 1×1",
+        "summary": "12 class logits (the frame included), sine and cosine of the angle",
+        "params": {
+          "bias": true,
+          "in_channels": 16,
+          "kernel": 1,
+          "out_channels": 14,
+          "padding": 0,
+          "stride": 1
+        },
+        "param_count": 238
+      }
+    ],
+    "edges": [
+      {
+        "from": "@in",
+        "to": "encoder",
+        "shape": [
+          "B",
+          3,
+          "H",
+          "W"
+        ],
+        "dtype": "f32"
+      },
+      {
+        "from": "encoder",
+        "to": "decoder:x",
+        "shape": [
+          "B",
+          256,
+          "H/16",
+          "W/16"
+        ],
+        "dtype": "f32"
+      },
+      {
+        "from": "encoder:skip0",
+        "to": "decoder:skip0",
+        "shape": [
+          "B",
+          16,
+          "H",
+          "W"
+        ],
+        "dtype": "f32"
+      },
+      {
+        "from": "encoder:skip1",
+        "to": "decoder:skip1",
+        "shape": [
+          "B",
+          32,
+          "H/2",
+          "W/2"
+        ],
+        "dtype": "f32"
+      },
+      {
+        "from": "encoder:skip2",
+        "to": "decoder:skip2",
+        "shape": [
+          "B",
+          64,
+          "H/4",
+          "W/4"
+        ],
+        "dtype": "f32"
+      },
+      {
+        "from": "encoder:skip3",
+        "to": "decoder:skip3",
+        "shape": [
+          "B",
+          128,
+          "H/8",
+          "W/8"
+        ],
+        "dtype": "f32"
+      },
+      {
+        "from": "decoder",
+        "to": "head",
+        "shape": [
+          "B",
+          16,
+          "H",
+          "W"
+        ],
+        "dtype": "f32"
+      },
+      {
+        "from": "head",
+        "to": "@out",
+        "shape": [
+          "B",
+          14,
+          "H",
+          "W"
+        ],
+        "dtype": "f32"
+      }
+    ]
+  },
+  "meta": {
+    "generated_at": "2026-11-18T12:04:35Z",
+    "git_commit": "164b67c-dirty"
+  }
+}

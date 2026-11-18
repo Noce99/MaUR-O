@@ -176,8 +176,8 @@ impl Expr<'_> {
 /// The tensor which travels from one place in a node to another.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
-    /// Where it leaves: a child's id, or `@in` / `@in:port` for the node's
-    /// own input.
+    /// Where it leaves: a child's id (`child:port` for one of several outputs),
+    /// or `@in` / `@in:port` for the node's own input.
     pub from: String,
     /// Where it goes: a child's id (`child:port` when it has several inputs),
     /// or `@out` / `@out:port` for the node's own output.
