@@ -33,7 +33,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Axis, Block, Chart, Dataset, Gauge, GraphType, Paragraph, Wrap};
 use ratatui::Frame;
 
-use maur_o::net::monitor::{Control, LossPoint, State, Status, LOSSES_FILE};
+use maur_o::net::monitor::{Control, LossPoint, State, Status, ACCURACY_FILE, LOSSES_FILE};
 
 use super::gpu::{Gpu, Probe};
 use super::jobs::{Health, Job};
@@ -45,10 +45,17 @@ pub struct Watch {
     status: Option<Status>,
     health: Health,
     points: Vec<LossPoint>,
+    /// The accuracy file's points (in %; the `loss` field holds the value).
+    accuracy_points: Vec<LossPoint>,
     /// How much of the losses file has been read, and the unfinished line
     /// at the end of it.
     offset: u64,
     partial: String,
+    /// The same for the accuracy file.
+    accuracy_offset: u64,
+    accuracy_partial: String,
+    /// Whether the chart shows the accuracy rather than the loss (Tab).
+    show_accuracy: bool,
     /// `s` pressed once, and waiting to be pressed again.
     confirming: bool,
     /// What the last command did, if it went wrong.
@@ -65,8 +72,12 @@ impl Watch {
             status: job.status(),
             job,
             points: Vec::new(),
+            accuracy_points: Vec::new(),
             offset: 0,
             partial: String::new(),
+            accuracy_offset: 0,
+            accuracy_partial: String::new(),
+            show_accuracy: false,
             confirming: false,
             message: None,
             gpu: Probe::start(),
@@ -83,24 +94,18 @@ impl Watch {
     }
 
     fn read_losses(&mut self) {
-        let Ok(mut file) = File::open(self.job.dir.join(LOSSES_FILE)) else {
-            return;
-        };
-        if file.seek(SeekFrom::Start(self.offset)).is_err() {
-            return;
-        }
-        let mut text = String::new();
-        if file.read_to_string(&mut text).is_err() {
-            return;
-        }
-        self.offset += text.len() as u64;
-        self.partial.push_str(&text);
-        // Only whole lines: the job may be midway through writing one.
-        if let Some(end) = self.partial.rfind('\n') {
-            let whole: String = self.partial.drain(..=end).collect();
-            self.points
-                .extend(whole.lines().filter_map(LossPoint::parse));
-        }
+        read_points(
+            &self.job.dir.join(LOSSES_FILE),
+            &mut self.offset,
+            &mut self.partial,
+            &mut self.points,
+        );
+        read_points(
+            &self.job.dir.join(ACCURACY_FILE),
+            &mut self.accuracy_offset,
+            &mut self.accuracy_partial,
+            &mut self.accuracy_points,
+        );
     }
 
     fn running(&self) -> bool {
@@ -112,6 +117,7 @@ impl Watch {
         self.message = None;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left => return Action::Back,
+            KeyCode::Tab | KeyCode::BackTab => self.show_accuracy = !self.show_accuracy,
             KeyCode::Char('p') | KeyCode::Char(' ') if self.running() => {
                 let paused = matches!(self.health, Health::Alive(State::Paused));
                 let control = if paused { Control::Run } else { Control::Pause };
@@ -222,6 +228,20 @@ impl Watch {
                 loss(status.train_loss),
                 loss(status.valid_loss)
             )));
+            let last = |validation: bool| {
+                self.accuracy_points
+                    .iter()
+                    .rev()
+                    .find(|p| p.validation == validation)
+                    .map_or("—".to_string(), |p| format!("{:.2}%", p.loss))
+            };
+            if !self.accuracy_points.is_empty() {
+                lines.push(Line::from(format!(
+                    "accuracy: train {} · valid {}",
+                    last(false),
+                    last(true)
+                )));
+            }
             if let Some(message) = &status.message {
                 lines.push(Line::styled(message.clone(), Style::new().fg(Color::Red)));
             }
@@ -250,6 +270,15 @@ impl Watch {
             lines.push(key("x", "forget this job (the run's files stay)".into()));
         }
         lines.push(key(
+            "Tab",
+            if self.show_accuracy {
+                "show the loss"
+            } else {
+                "show the accuracy"
+            }
+            .into(),
+        ));
+        lines.push(key(
             "Esc",
             "back — the job goes on without this screen".into(),
         ));
@@ -266,8 +295,8 @@ impl Watch {
 
     /// The training loss as at most `buckets` averaged points, the
     /// validation loss as a point per epoch, and where the epochs end.
-    fn series(&self, buckets: usize) -> Series {
-        let train: Vec<&LossPoint> = self.points.iter().filter(|p| !p.validation).collect();
+    fn series(&self, points: &[LossPoint], buckets: usize) -> Series {
+        let train: Vec<&LossPoint> = points.iter().filter(|p| !p.validation).collect();
         let per = train.len().div_ceil(buckets.max(1)).max(1);
         let train_line = train
             .chunks(per)
@@ -282,10 +311,9 @@ impl Watch {
 
         // One point per epoch, at the step the epoch ended on.
         let mut valid_points: Vec<(f64, f64)> = Vec::new();
-        let epochs = self.points.iter().map(|p| p.epoch).max().unwrap_or(0);
+        let epochs = points.iter().map(|p| p.epoch).max().unwrap_or(0);
         for epoch in 1..=epochs {
-            let of_epoch: Vec<&LossPoint> = self
-                .points
+            let of_epoch: Vec<&LossPoint> = points
                 .iter()
                 .filter(|p| p.validation && p.epoch == epoch)
                 .collect();
@@ -312,14 +340,26 @@ impl Watch {
     }
 
     fn draw_loss(&self, frame: &mut Frame, area: Rect) {
-        let block = Block::bordered().title(" Loss ");
+        let (name, points) = if self.show_accuracy {
+            ("Accuracy (% of pixels right)", &self.accuracy_points)
+        } else {
+            ("Loss", &self.points)
+        };
+        let block = Block::bordered().title(format!(" {name} · Tab switches "));
         let inner = block.inner(area);
-        let series = self.series(inner.width.saturating_sub(8) as usize * 2);
+        let series = self.series(points, inner.width.saturating_sub(8) as usize * 2);
         if series.train.is_empty() {
             frame.render_widget(
-                Paragraph::new("No loss yet: the first steps are still being taken.")
-                    .dim()
-                    .block(block),
+                Paragraph::new(format!(
+                    "No {} yet: the first steps are still being taken.",
+                    if self.show_accuracy {
+                        "accuracy"
+                    } else {
+                        "loss"
+                    }
+                ))
+                .dim()
+                .block(block),
                 area,
             );
             return;
@@ -517,6 +557,32 @@ struct Series {
 }
 
 /// A bar `fraction` full, with the percentage written in the middle.
+/// Reads what `path` gained since `offset` into `points`, whole lines only
+/// (the job may be midway through writing one).
+fn read_points(
+    path: &std::path::Path,
+    offset: &mut u64,
+    partial: &mut String,
+    points: &mut Vec<LossPoint>,
+) {
+    let Ok(mut file) = File::open(path) else {
+        return;
+    };
+    if file.seek(SeekFrom::Start(*offset)).is_err() {
+        return;
+    }
+    let mut text = String::new();
+    if file.read_to_string(&mut text).is_err() {
+        return;
+    }
+    *offset += text.len() as u64;
+    partial.push_str(&text);
+    if let Some(end) = partial.rfind('\n') {
+        let whole: String = partial.drain(..=end).collect();
+        points.extend(whole.lines().filter_map(LossPoint::parse));
+    }
+}
+
 fn bar(fraction: f64, block: Block<'_>, color: Color) -> Gauge<'_> {
     Gauge::default()
         .block(block)
@@ -685,7 +751,7 @@ mod tests {
             "v 2 4 0.75",
             "t 3 5 0.6",
         ]);
-        let series = watch.series(100);
+        let series = watch.series(&watch.points, 100);
         assert_eq!(series.train.len(), 5);
         assert_eq!(series.valid, [(2.0, 0.95), (4.0, 0.75)]);
         assert_eq!(series.epoch_ends, [3.0, 5.0]);
@@ -696,6 +762,6 @@ mod tests {
         let lines: Vec<String> = (1..=1000).map(|i| format!("t 1 {i} 1.0")).collect();
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         let watch = watch_with(&refs);
-        assert!(watch.series(100).train.len() <= 100);
+        assert!(watch.series(&watch.points, 100).train.len() <= 100);
     }
 }

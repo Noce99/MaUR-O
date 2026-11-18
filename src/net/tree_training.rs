@@ -426,6 +426,8 @@ pub fn train_tree(
         );
         if let Some(monitor) = &monitor {
             monitor.record_loss(true, epoch, iteration, loss);
+            monitor.record_accuracy(true, epoch, iteration, accuracy * 100.0);
+            monitor.record_accuracy(false, epoch, iteration, train_accuracy * 100.0);
         }
         if loss.is_nan() || loss < best {
             best = if loss.is_nan() { best } else { loss };

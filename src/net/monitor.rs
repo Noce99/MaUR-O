@@ -11,6 +11,7 @@
 //!             whole (written to a sibling and renamed) twice a second
 //! losses      one line per step: `t|v <epoch> <iteration> <loss>`,
 //!             `t` for a training step and `v` for a validation one
+//! accuracy    the same, one line per step, for the share of pixels right (in %)
 //! control     what the watcher asks for: `run`, `pause` or `stop`
 //! ```
 //!
@@ -51,6 +52,9 @@ pub const JOB_DIR_ENV: &str = "MAURO_JOB_DIR";
 pub const STATUS_FILE: &str = "status";
 /// The file the run's losses are appended to.
 pub const LOSSES_FILE: &str = "losses";
+/// The file the run's pixel accuracies (in %) are appended to, in the
+/// losses file's own line format.
+pub const ACCURACY_FILE: &str = "accuracy";
 /// The file the watcher asks things of the run in.
 pub const CONTROL_FILE: &str = "control";
 
@@ -463,6 +467,22 @@ impl Monitor {
         }
     }
 
+    /// Writes down an accuracy in %, a training step's or a validation
+    /// pass's, for the watcher's chart (the line format of the losses).
+    pub fn record_accuracy(&self, validation: bool, epoch: usize, iteration: usize, percent: f64) {
+        if !percent.is_finite() {
+            return;
+        }
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join(ACCURACY_FILE))
+        {
+            let kind = if validation { 'v' } else { 't' };
+            writeln!(file, "{kind} {epoch} {iteration} {percent}").ok();
+        }
+    }
+
     /// Writes the status as it stands, stamped with the time.
     fn write(&self) {
         // Written under the lock, so that a stale copy cannot land after a
@@ -492,9 +512,15 @@ impl Monitor {
                 .append(true)
                 .open(self.dir.join(LOSSES_FILE))
                 .ok(),
+            accuracies: fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.dir.join(ACCURACY_FILE))
+                .ok(),
             validating: false,
             steps: 0,
             loss_id: None,
+            accuracy_id: None,
         }
     }
 
@@ -565,12 +591,15 @@ impl<I, D: Dataset<I>> Dataset<I> for Gated<D> {
 pub struct MonitorRenderer {
     status: Arc<Mutex<Status>>,
     losses: Option<fs::File>,
+    accuracies: Option<fs::File>,
     validating: bool,
     /// Training steps seen. burn's own iteration counts from one again in
     /// every epoch, which is no use on a chart of the whole run.
     steps: usize,
     /// Which metric is the loss, learned as the learner registers them.
     loss_id: Option<MetricId>,
+    /// Which metric is the pixel accuracy.
+    accuracy_id: Option<MetricId>,
 }
 
 impl MonitorRenderer {
@@ -584,7 +613,18 @@ impl MonitorRenderer {
             NumericEntry::Final(_) => return,
             value => value.current(),
         };
-        if self.loss_id.as_ref() != Some(&entry.metric_id) || !value.is_finite() {
+        if !value.is_finite() {
+            return;
+        }
+        if self.accuracy_id.as_ref() == Some(&entry.metric_id) {
+            let kind = if self.validating { 'v' } else { 't' };
+            let status = self.status.lock().unwrap();
+            if let Some(file) = &mut self.accuracies {
+                writeln!(file, "{kind} {} {} {value}", status.epoch, status.iteration).ok();
+            }
+            return;
+        }
+        if self.loss_id.as_ref() != Some(&entry.metric_id) {
             return;
         }
         let mut status = self.status.lock().unwrap();
@@ -678,6 +718,8 @@ impl MetricsRenderer for MonitorRenderer {
     fn register_metric(&mut self, definition: MetricDefinition) {
         if definition.name.as_str() == "Loss" {
             self.loss_id = Some(definition.metric_id);
+        } else if definition.name.as_str() == "Pixel accuracy" {
+            self.accuracy_id = Some(definition.metric_id);
         }
     }
 }
