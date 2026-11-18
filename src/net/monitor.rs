@@ -14,6 +14,8 @@
 //! accuracy    the same, one line per step, for the share of pixels right (in %)
 //! line_iou    the same, for how much of the lines the run found (in %); only
 //!             a run with a lines layer writes it
+//! scale_error the same, for how far out the network was about how dense its
+//!             crops were (in %); only a run with a scale head writes it
 //! control     what the watcher asks for: `run`, `pause` or `stop`
 //! ```
 //!
@@ -60,6 +62,10 @@ pub const ACCURACY_FILE: &str = "accuracy";
 /// The file the run's line IoUs (in %) are appended to, in the losses file's
 /// own line format. Only a run whose network has a lines layer makes it.
 pub const LINE_IOU_FILE: &str = "line_iou";
+/// The file the run's scale errors (in %) are appended to, in the losses
+/// file's own line format. Only a run whose network has a scale head makes
+/// it.
+pub const SCALE_ERROR_FILE: &str = "scale_error";
 /// The file the watcher asks things of the run in.
 pub const CONTROL_FILE: &str = "control";
 
@@ -523,12 +529,14 @@ impl Monitor {
                 .open(self.dir.join(ACCURACY_FILE))
                 .ok(),
             line_ious: None,
+            scale_errors: None,
             dir: self.dir.clone(),
             validating: false,
             steps: 0,
             loss_id: None,
             accuracy_id: None,
             line_iou_id: None,
+            scale_error_id: None,
         }
     }
 
@@ -603,7 +611,9 @@ pub struct MonitorRenderer {
     /// Opened when the metric is registered, which a run without a lines
     /// layer never does.
     line_ious: Option<fs::File>,
-    /// Where the job folder is, for opening that file.
+    /// The same, for a run with a scale head.
+    scale_errors: Option<fs::File>,
+    /// Where the job folder is, for opening those files.
     dir: PathBuf,
     validating: bool,
     /// Training steps seen. burn's own iteration counts from one again in
@@ -615,6 +625,8 @@ pub struct MonitorRenderer {
     accuracy_id: Option<MetricId>,
     /// Which metric is the line IoU, where there is one.
     line_iou_id: Option<MetricId>,
+    /// Which metric is the scale error, where there is one.
+    scale_error_id: Option<MetricId>,
 }
 
 impl MonitorRenderer {
@@ -643,6 +655,14 @@ impl MonitorRenderer {
             let kind = if self.validating { 'v' } else { 't' };
             let status = self.status.lock().unwrap();
             if let Some(file) = &mut self.line_ious {
+                writeln!(file, "{kind} {} {} {value}", status.epoch, status.iteration).ok();
+            }
+            return;
+        }
+        if self.scale_error_id.as_ref() == Some(&entry.metric_id) {
+            let kind = if self.validating { 'v' } else { 't' };
+            let status = self.status.lock().unwrap();
+            if let Some(file) = &mut self.scale_errors {
                 writeln!(file, "{kind} {} {} {value}", status.epoch, status.iteration).ok();
             }
             return;
@@ -749,6 +769,13 @@ impl MetricsRenderer for MonitorRenderer {
                 .create(true)
                 .append(true)
                 .open(self.dir.join(LINE_IOU_FILE))
+                .ok();
+        } else if definition.name.as_str() == "Scale error" {
+            self.scale_error_id = Some(definition.metric_id);
+            self.scale_errors = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.dir.join(SCALE_ERROR_FILE))
                 .ok();
         }
     }

@@ -34,7 +34,7 @@ use ratatui::widgets::{Axis, Block, Chart, Dataset, Gauge, GraphType, Paragraph,
 use ratatui::Frame;
 
 use maur_o::net::monitor::{
-    Control, LossPoint, State, Status, ACCURACY_FILE, LINE_IOU_FILE, LOSSES_FILE,
+    Control, LossPoint, State, Status, ACCURACY_FILE, LINE_IOU_FILE, LOSSES_FILE, SCALE_ERROR_FILE,
 };
 
 use super::gpu::{Gpu, Probe};
@@ -48,6 +48,9 @@ enum View {
     Accuracy,
     /// How much of the lines the network found: only a run with a lines layer.
     LineIou,
+    /// How far out the network was about the density: only a run with a
+    /// scale head.
+    ScaleError,
 }
 
 impl View {
@@ -57,6 +60,7 @@ impl View {
             View::Loss => "Loss",
             View::Accuracy => "Accuracy (% of pixels right)",
             View::LineIou => "Line IoU (% of the lines found)",
+            View::ScaleError => "Scale error (% out about how dense the picture is)",
         }
     }
 
@@ -65,6 +69,7 @@ impl View {
             View::Loss => "loss",
             View::Accuracy => "accuracy",
             View::LineIou => "line IoU",
+            View::ScaleError => "scale error",
         }
     }
 }
@@ -88,6 +93,10 @@ pub struct Watch {
     line_points: Vec<LossPoint>,
     line_offset: u64,
     line_partial: String,
+    /// The scale error file's points, where the run has a scale head.
+    scale_points: Vec<LossPoint>,
+    scale_offset: u64,
+    scale_partial: String,
     /// What the chart shows (Tab).
     view: View,
     /// `s` pressed once, and waiting to be pressed again.
@@ -114,6 +123,9 @@ impl Watch {
             line_points: Vec::new(),
             line_offset: 0,
             line_partial: String::new(),
+            scale_points: Vec::new(),
+            scale_offset: 0,
+            scale_partial: String::new(),
             view: View::Loss,
             confirming: false,
             message: None,
@@ -149,6 +161,12 @@ impl Watch {
             &mut self.line_partial,
             &mut self.line_points,
         );
+        read_points(
+            &self.job.dir.join(SCALE_ERROR_FILE),
+            &mut self.scale_offset,
+            &mut self.scale_partial,
+            &mut self.scale_points,
+        );
     }
 
     /// The numbers behind a view.
@@ -157,13 +175,14 @@ impl Watch {
             View::Loss => &self.points,
             View::Accuracy => &self.accuracy_points,
             View::LineIou => &self.line_points,
+            View::ScaleError => &self.scale_points,
         }
     }
 
     /// The views the run has anything for, in the order Tab goes through
     /// them: the loss always, the others once their first number is in.
     fn views(&self) -> Vec<View> {
-        [View::Loss, View::Accuracy, View::LineIou]
+        [View::Loss, View::Accuracy, View::LineIou, View::ScaleError]
             .into_iter()
             .filter(|&v| v == View::Loss || !self.points_of(v).is_empty())
             .collect()
@@ -303,7 +322,7 @@ impl Watch {
                     .find(|p| p.validation == validation)
                     .map_or("—".to_string(), |p| format!("{:.2}%", p.loss))
             };
-            for view in [View::Accuracy, View::LineIou] {
+            for view in [View::Accuracy, View::LineIou, View::ScaleError] {
                 let points = self.points_of(view);
                 if !points.is_empty() {
                     lines.push(Line::from(format!(
@@ -841,6 +860,19 @@ mod tests {
             watch.handle(KeyEvent::from(KeyCode::Tab));
             assert_eq!(watch.view, expected);
         }
+
+        // A run with a scale head has its error to chart as well.
+        std::fs::write(
+            dir.path().join(SCALE_ERROR_FILE),
+            "t 1 1 12.0
+",
+        )
+        .unwrap();
+        watch.tick();
+        assert_eq!(
+            watch.views(),
+            [View::Loss, View::Accuracy, View::LineIou, View::ScaleError]
+        );
     }
 
     /// The latest line IoU of the run is written in the panel beside the loss.
