@@ -30,3 +30,6 @@ BOO26.sh
 trainings
 *.csv
 .cargo
+graphify-out/
+.claude/settings.local.json
+CLAUDE.local.md
