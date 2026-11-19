@@ -8,6 +8,8 @@
 //! and what the tool prints about a symbol set is how a person finds out
 //! which symbols they have to work with.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
@@ -47,7 +49,7 @@ const NO_IMAGES: &str = "--no-images";
 const NO_GT: &str = "--no-gt";
 
 fn generate() -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["net", "dataset"]);
     command
 }
@@ -405,7 +407,7 @@ fn a_generated_map_renders() {
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join("dataset");
     let render = |name: &str| {
-        Command::cargo_bin("mauro")
+        common::mauro()
             .unwrap()
             .args(["render"])
             .arg(folder.join(MAPS_FOLDER).join(name))

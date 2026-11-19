@@ -2,6 +2,8 @@
 //! against a ground truth into its own timestamped `Results` folder, and the
 //! documented exit codes fire on a missing file or an uncomparable pair.
 
+mod common;
+
 use std::path::Path;
 
 use assert_cmd::Command;
@@ -14,7 +16,7 @@ const MODEL_TIEPOINT_TAG: u16 = 33922;
 const GEO_KEY_DIRECTORY_TAG: u16 = 34735;
 
 fn dem_eval() -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["dem-eval"]);
     command
 }

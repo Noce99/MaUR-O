@@ -8,6 +8,8 @@
 //! checkpoint is written and read back are properties of that whole, and each
 //! of them has broken a run which every unit test passed.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
@@ -16,7 +18,7 @@ use assert_cmd::Command;
 const SYMBOL_SET: &str = "tests/data/turning_patterns.xmap";
 
 fn mauro() -> Command {
-    Command::cargo_bin("mauro").unwrap()
+    common::mauro().unwrap()
 }
 
 /// A dataset of four small maps, with their labels.

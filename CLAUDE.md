@@ -88,8 +88,10 @@ into the TUI. Defaults are not in the clap definitions: every option's default i
 the parser at run time by `src/bin/mauro/defaults.rs` — always build the
 parser with `crate::defaults::command()`, never `Cli::command()`/`Cli::parse`,
 or the defaults are missing and the args they make optional are required.
-A new option with a default gets a key there (`every_default_is_an_argument_and_parses`
-checks the keys), and the TUI's Ctrl+D writes that file. Adding or renaming a flag: update that subcommand's screen too —
+A new option with a default gets a key there and in `tests/data/defaults.toml`,
+the fixed copy the binary's unit tests run on so that a default changed with
+the TUI's Ctrl+D cannot break them (`every_default_is_an_argument_and_parses`
+checks both files' keys). Adding or renaming a flag: update that subcommand's screen too —
 a stale arg id panics `Form::new`, caught by `every_tool_opens_and_draws_its_screen`,
 and a flag a screen still emits fails that screen's unit tests. Each
 subcommand module also has `exit_meaning(code)`, mirroring its doc comment's

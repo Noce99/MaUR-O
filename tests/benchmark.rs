@@ -2,13 +2,15 @@
 //! folder comes out. The archives are built here rather than checked in, so
 //! that a test says in one place what it puts in and what it expects back.
 
+mod common;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 
 fn benchmark_run() -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["benchmark", "run"]);
     command
 }
@@ -64,7 +66,7 @@ fn run_folder(results: &Path) -> PathBuf {
 fn render(map: &str) -> Vec<u8> {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("reference.png");
-    Command::cargo_bin("mauro")
+    common::mauro()
         .unwrap()
         .args(["render"])
         .arg(map)
@@ -174,7 +176,7 @@ fn resolution_and_frame_are_read_from_the_archives_own_info_txt() {
 
     let reference = {
         let out = dir.path().join("reference.png");
-        Command::cargo_bin("mauro")
+        common::mauro()
             .unwrap()
             .args(["render"])
             .arg("tests/data/empty.xmap")

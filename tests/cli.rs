@@ -7,10 +7,12 @@
 //! documented and scripted against, and a change to one of them is a breaking
 //! change no library-level test would notice.
 
+mod common;
+
 use assert_cmd::Command;
 
 fn render() -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["render"]);
     command
 }
@@ -148,7 +150,7 @@ fn huge_window() {
 /// is a usage error.
 #[test]
 fn no_subcommand() {
-    Command::cargo_bin("mauro")
+    common::mauro()
         .unwrap()
         .assert()
         .code(1)
@@ -160,7 +162,7 @@ fn no_subcommand() {
 /// An unknown subcommand is a usage error, as an unknown option is.
 #[test]
 fn unknown_subcommand() {
-    Command::cargo_bin("mauro")
+    common::mauro()
         .unwrap()
         .arg("map_to_image")
         .assert()
@@ -176,10 +178,6 @@ fn help_and_version() {
         &["render", "--help"],
         &["benchmark", "run", "--version"],
     ] {
-        Command::cargo_bin("mauro")
-            .unwrap()
-            .args(args)
-            .assert()
-            .success();
+        common::mauro().unwrap().args(args).assert().success();
     }
 }

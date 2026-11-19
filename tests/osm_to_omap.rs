@@ -5,6 +5,8 @@
 //! Driven through the built binary, like `cli.rs`, because the interface —
 //! the exit codes and the resolution hint it prints — is the contract.
 
+mod common;
+
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
 
@@ -26,7 +28,7 @@ fn carto() -> Command {
 
 /// The command as it is, which draws to ISSprOM.
 fn orienteering() -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["osm"]);
     command
 }
@@ -308,7 +310,7 @@ fn the_written_map_renders() {
     let omap = dir.path().join("sample.omap");
     let png = dir.path().join("sample.png");
     carto().arg(BBOX).arg(SAMPLE).arg(&omap).assert().success();
-    Command::cargo_bin("mauro")
+    common::mauro()
         .unwrap()
         .args(["render"])
         .args(["-r", "0.7143", "-f", "0"])

@@ -2,11 +2,13 @@
 //! nothing, and the exit codes `--check` gives (which CI and the git hook
 //! rely on).
 
+mod common;
+
 use assert_cmd::Command;
 use predicates::str::contains;
 
 fn describe(folder: &std::path::Path) -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["net", "describe", "--networks-dir"]);
     command.arg(folder);
     command
@@ -113,7 +115,7 @@ fn check_and_stdout_exclude_each_other() {
 /// `mauro net describe` before a push does.
 #[test]
 fn the_repositorys_own_networks_folder_is_up_to_date() {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command
         .args(["net", "describe", "--check", "--networks-dir"])
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("networks"))

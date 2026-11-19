@@ -8,6 +8,8 @@
 //! The geometry the tool is built on is tested where it lives, in
 //! `maur_o::vectorize`.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
@@ -28,13 +30,13 @@ const SMALL: [&str; 4] = [
 ];
 
 fn generate() -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["net", "dataset"]);
     command
 }
 
 fn grid_to_map() -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["net", "grid-to-map"]);
     command
 }

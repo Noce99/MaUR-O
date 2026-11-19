@@ -11,12 +11,14 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 
 fn benchmark_create() -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["benchmark", "create"]);
     command
 }
@@ -162,7 +164,7 @@ fn the_archive_it_writes_needs_no_correcting() {
         .assert()
         .success();
 
-    Command::cargo_bin("mauro")
+    common::mauro()
         .unwrap()
         .args(["benchmark", "run"])
         .arg("--names-only")
@@ -409,7 +411,7 @@ fn the_command_it_suggests_for_the_archive_runs() {
 
     // The stub's images are not PNGs, so only the names are checked; what
     // matters is that the command line is accepted.
-    Command::cargo_bin("mauro")
+    common::mauro()
         .unwrap()
         .args(["benchmark", "run"])
         .arg("--results")
@@ -445,7 +447,7 @@ fn mauro_render_is_a_renderer_with_renderer_arg() {
     let info = contents(&archive, "suite/info.txt");
     assert!(info.contains("mauro render ("), "{info}");
 
-    Command::cargo_bin("mauro")
+    common::mauro()
         .unwrap()
         .args(["benchmark", "run"])
         .arg("--results")

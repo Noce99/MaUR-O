@@ -3,11 +3,13 @@
 //! numbered, plus the unnumbered "final" and "contours_function" ones), and
 //! the documented exit codes fire on a missing map or config file.
 
+mod common;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn dem() -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["dem"]);
     command
 }

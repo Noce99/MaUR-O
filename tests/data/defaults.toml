@@ -1,0 +1,110 @@
+# The defaults the unit tests of `mauro` run with: config/defaults.toml as it
+# was first written, so that a default changed there (by hand, or with the
+# terminal interface's Ctrl+D) changes what `mauro` does without breaking the
+# tests of what its screens and parser do with a default. A new option with a
+# default wants its key here too.
+
+[render]
+resolution = 3
+frame = 50
+
+[benchmark.create]
+resolution = 3
+frame = 50
+filter = ""
+
+[benchmark.run]
+results = "Results"
+tolerance = 3
+crops = 0
+crop_size = 128
+zoom = 512
+overview = 2000
+filter = ""
+
+[dem]
+results = "Results"
+config = "config/contours_to_raster.conf"
+equidistance = 5
+
+[dem-eval]
+results = "Results"
+
+[osm]
+size = "1km"
+overpass_url = "https://overpass-api.de/api/interpreter"
+max_area = 25
+standard = "issprom"
+details = 3
+bundle_width = 12
+stop_merge = 3
+
+[ortho]
+margin = 50
+
+[net.dataset]
+folder = "dataset"
+layout_size = 3
+background_cell_size = 150
+maps = 10
+empty_sides = 0.5
+transparent_areas = 0.1
+point_symbols = 0.5
+content = "all"
+resolution = 3
+frame = 50
+seed = 0
+
+[net.describe]
+model = "all"
+networks_dir = "networks"
+
+[net.grid-to-map]
+tolerance = 0
+same_angle = 0.01
+layout_size = 3
+background_cell_size = 150
+frame = 50
+resolution = 3
+
+[net.train]
+trainings = "trainings"
+gpu = 0
+model = "unet"
+epochs = 10
+batch_size = 8
+crop = 256
+crops_per_map = 8
+base_channels = 16
+learning_rate = 0.0003
+angle_weight = 0.2
+line_weight = 1
+scale_weight = 1
+weight_decay = 0.1
+patience = 10
+train_share = 0.8
+workers = 4
+image_valid = 3
+seed = 0
+size = 64
+depth = 4
+control_points = 8
+samples = 24
+temperature_start = 0.08
+temperature_end = 0.012
+
+[net.image-to-map]
+same_angle = 0.05
+line_threshold = 0.5
+min_line = 6
+
+[net.show-batches]
+into = "batches"
+batches = 2
+batch_size = 4
+crop = 256
+crops_per_map = 8
+train_share = 0.8
+split = "valid"
+seed = 0
+margin = 0

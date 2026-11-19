@@ -59,8 +59,11 @@ transparent_areas = 0.1
 point_symbols = 0.5
 content = "all"
 resolution = 3
-frame = 50
+frame = 5
 seed = 0
+min_resolution = 1
+max_resolution = 4
+symbol_set = "symbols_sets/simple_line_and_colors.omap"
 
 [net.describe]
 model = "all"

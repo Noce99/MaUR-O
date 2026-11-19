@@ -6,10 +6,12 @@
 //! map the tool cannot place, or that no service covers, is turned away with
 //! the documented code and that the map is never touched when it is.
 
+mod common;
+
 use assert_cmd::Command;
 
 fn ortho() -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["ortho"]);
     command
 }

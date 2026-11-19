@@ -8,13 +8,15 @@
 //! behind the tool is tested in `maur_o::vectorize`, and the tiling and the
 //! reloading in `maur_o::net::predict`, both without a trained network.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use maur_o::dataset::CLASSES_FILE;
 
 fn image_to_map() -> Command {
-    let mut command = Command::cargo_bin("mauro").unwrap();
+    let mut command = common::mauro().unwrap();
     command.args(["net", "image-to-map"]);
     command
 }

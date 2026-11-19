@@ -5,7 +5,8 @@
 //! matters is the one thing about it which went wrong, and a fixture with
 //! nothing else in it says so.
 
-use assert_cmd::Command;
+mod common;
+
 use maur_o::map::{symbol_leaves, Symbol};
 use maur_o::runnability::{build, Options};
 use maur_o::xml_reader::read_xml_map_str;
@@ -33,7 +34,7 @@ fn renders(xml: &str) {
     let dir = tempfile::tempdir().unwrap();
     let map = dir.path().join("map.xmap");
     std::fs::write(&map, xml).unwrap();
-    Command::cargo_bin("mauro")
+    common::mauro()
         .unwrap()
         .args(["render"])
         .arg(&map)
@@ -183,7 +184,7 @@ fn a_map_renders_to_jpeg() {
     let dir = tempfile::tempdir().unwrap();
     for name in ["map.jpg", "map.JPEG"] {
         let out = dir.path().join(name);
-        Command::cargo_bin("mauro")
+        common::mauro()
             .unwrap()
             .args(["render"])
             .arg("tests/data/shapes.xmap")

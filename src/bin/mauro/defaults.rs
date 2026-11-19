@@ -21,7 +21,17 @@ use clap::{Command, CommandFactory};
 use toml_edit::{DocumentMut, Item, Table, Value};
 
 /// The file as it was when the binary was built.
+#[cfg(not(test))]
 const EMBEDDED: &str = include_str!("../../../config/defaults.toml");
+
+/// The unit tests' own defaults, which a default changed in the real file
+/// cannot change: see `tests/data/defaults.toml`.
+#[cfg(test)]
+const EMBEDDED: &str = include_str!("../../../tests/data/defaults.toml");
+
+/// The real file, for the tests which check it against the parser.
+#[cfg(test)]
+const REAL: &str = include_str!("../../../config/defaults.toml");
 
 /// The environment variable naming a defaults file to use instead.
 pub const ENV: &str = "MAURO_DEFAULTS";
@@ -30,7 +40,15 @@ pub const ENV: &str = "MAURO_DEFAULTS";
 /// compiled-in copy). Read once, at the first question.
 static LOADED: Mutex<Option<(DocumentMut, Option<PathBuf>)>> = Mutex::new(None);
 
+/// The file to read and write, where there is one. None for the unit tests,
+/// which run on their own copy and write nowhere.
+#[cfg(test)]
+fn file() -> Option<PathBuf> {
+    None
+}
+
 /// The file to read and write, where there is one.
+#[cfg(not(test))]
 fn file() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(ENV) {
         return Some(PathBuf::from(path));
@@ -93,6 +111,16 @@ fn value_of(text: &str) -> Value {
 /// Puts the defaults in `table` into `command`, and into its subcommands
 /// those of the tables under it. `path` is where it is, for the warnings.
 fn apply(mut command: Command, table: &Table, path: &str) -> Command {
+    // clap numbers the positional arguments in the order they were added,
+    // and `mut_arg` takes one out and adds it back last: pinned first, or a
+    // default given to an earlier one would put it after the later ones.
+    let positionals: Vec<String> = command
+        .get_positionals()
+        .map(|a| a.get_id().to_string())
+        .collect();
+    for (at, id) in positionals.iter().enumerate() {
+        command = command.mut_arg(id, |a| a.index(at + 1));
+    }
     for (key, item) in table.iter() {
         let here = if path.is_empty() {
             key.to_string()
@@ -220,7 +248,13 @@ mod tests {
     /// somebody's first run.
     #[test]
     fn every_default_is_an_argument_and_parses() {
-        let doc: DocumentMut = EMBEDDED.parse().unwrap();
+        for text in [REAL, EMBEDDED] {
+            check_file(text);
+        }
+    }
+
+    fn check_file(text: &str) {
+        let doc: DocumentMut = text.parse().unwrap();
         fn walk(command: &Command, table: &Table, path: &str) {
             for (key, item) in table.iter() {
                 if let Some(sub) = item.as_table() {
@@ -275,6 +309,45 @@ mod tests {
         let complaint = accepts(arg("model"), "transformer").unwrap_err();
         assert!(complaint.contains("transformer"), "{complaint}");
         assert!(!complaint.contains('\n'));
+    }
+
+    /// However many of a subcommand's positional arguments the defaults
+    /// give a value, they are taken in the order the code declares them.
+    #[test]
+    fn defaults_keep_the_positional_arguments_in_their_order() {
+        fn order(command: &Command) -> Vec<String> {
+            let mut c = command.clone();
+            c.build();
+            let mut all: Vec<_> = c
+                .get_positionals()
+                .map(|a| (a.get_index().unwrap(), a.get_id().to_string()))
+                .collect();
+            all.sort();
+            all.into_iter().map(|(_, id)| id).collect()
+        }
+        fn walk(plain: &Command, table: &Table) {
+            let mut with = apply(plain.clone(), table, "");
+            with.build();
+            assert_eq!(order(plain), order(&with), "mauro {}", plain.get_name());
+            for sub in plain.get_subcommands() {
+                if let Some(t) = table.get(sub.get_name()).and_then(Item::as_table) {
+                    walk(sub, t);
+                }
+            }
+        }
+        // Every positional with a default, the later ones first in the file:
+        // the order which once swapped `net dataset`'s two.
+        let doc: DocumentMut = "[net.dataset]\nfolder = \"out\"\nsymbol_set = \"a.omap\"\n\
+                                [net.train]\ntrainings = \"t\"\ndataset = \"d\"\n"
+            .parse()
+            .unwrap();
+        let mut plain = crate::Cli::command();
+        plain.build();
+        walk(&plain, doc.as_table());
+        for text in [REAL, EMBEDDED] {
+            let file: DocumentMut = text.parse().unwrap();
+            walk(&plain, file.as_table());
+        }
     }
 
     #[test]
