@@ -146,7 +146,37 @@ pub struct UNetConfig {
     pub scale_weight: f64,
 }
 
+/// How many times what a forward pass keeps a training step holds at its
+/// peak: the activations kept for the backward pass, and their gradients as
+/// it makes them. A round figure, not a measurement: the allocator's slack
+/// and the layers' own scratch space are in it too.
+pub const ACTIVATION_FACTOR: u64 = 2;
+
+/// How many copies of the weights a training step holds: the weights, their
+/// gradients, and the optimizer's two moments.
+pub const WEIGHT_COPIES: u64 = 4;
+
 impl UNetConfig {
+    /// Roughly how many bytes of device memory a training step on `batch`
+    /// crops `crop` pixels square holds: the activations of the forward pass
+    /// (out of [`UNetConfig::describe`], so it follows the architecture)
+    /// times [`ACTIVATION_FACTOR`], the labels, and the weights times
+    /// [`WEIGHT_COPIES`], all as 32-bit floats. Not the backend's own
+    /// overhead, which is a fixed amount per process. `None` for a crop the
+    /// network cannot take (one not divisible by `2^DEPTH`).
+    pub fn training_bytes(&self, batch: usize, crop: usize) -> Option<u64> {
+        if crop == 0 || !crop.is_multiple_of(1 << DEPTH) {
+            return None;
+        }
+        let (b, c) = (i64::try_from(batch).ok()?, i64::try_from(crop).ok()?);
+        let descriptor = self.describe();
+        let activations = descriptor.activation_count(&[("B", b), ("H", c), ("W", c)])?;
+        let labels = (batch * (self.classes + 2 + self.lines) * crop * crop) as u64;
+        let floats =
+            activations * ACTIVATION_FACTOR + labels + descriptor.total_params() * WEIGHT_COPIES;
+        floats.checked_mul(4)
+    }
+
     /// How many channels the head emits: the ground's, then the lines'.
     pub fn head_channels(&self) -> usize {
         self.classes + 3 + self.lines
@@ -1077,5 +1107,25 @@ mod tests {
                 .canonical_hash(),
             "the weight of a term is training, not architecture"
         );
+    }
+
+    #[test]
+    fn the_training_memory_grows_with_the_batch_and_the_crop() {
+        let config = UNetConfig::new(10);
+        let one = config.training_bytes(1, 256).unwrap();
+        let eight = config.training_bytes(8, 256).unwrap();
+        // The weights are paid once, the activations per crop.
+        assert!(eight > 7 * one && eight < 8 * one, "{one} {eight}");
+        assert!(config.training_bytes(1, 512).unwrap() > 3 * one);
+        assert!(
+            config
+                .with_base_channels(32)
+                .training_bytes(1, 256)
+                .unwrap()
+                > one
+        );
+        assert_eq!(UNetConfig::new(10).training_bytes(1, 250), None);
+        // Base 16, crops of 256: between a hundred megabytes and a gigabyte a crop.
+        assert!((100 << 20..1 << 30).contains(&one), "{one}");
     }
 }

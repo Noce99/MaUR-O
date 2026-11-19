@@ -8,7 +8,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 /// A one-line text field: its text, and where the cursor is in it.
@@ -90,10 +90,10 @@ struct Entry {
 pub enum Picked {
     /// Still picking.
     Not,
-    /// This file was picked.
+    /// This file (or folder, with Space) was picked.
     File(PathBuf),
-    /// Given up on.
-    Cancelled,
+    /// The picker walked into this folder, or up to it.
+    Entered(PathBuf),
 }
 
 /// What a [`FilePicker`] picks.
@@ -110,15 +110,18 @@ pub enum Pick {
 }
 
 impl Pick {
-    fn folders(self) -> bool {
+    /// Whether a folder can be what is picked.
+    pub fn folders(self) -> bool {
         matches!(self, Pick::Folder | Pick::FileOrFolder(_))
     }
 }
 
 /// Picks a file (or a folder) by walking the folders, showing only the
-/// files it can pick, and every folder to walk into. A folder is picked by
-/// the `./` row at the top of its own listing. Hidden files and folders are
-/// left out.
+/// files it can pick, and every folder to walk into. Enter picks a file and
+/// walks into a folder; Space picks whichever is selected, a folder too where
+/// folders can be picked; Backspace walks up. Walking says where it went
+/// ([`Picked::Entered`]), which is how a folder field follows the folder
+/// being looked at. Hidden files and folders are left out.
 pub struct FilePicker {
     dir: PathBuf,
     entries: Vec<Entry>,
@@ -175,13 +178,6 @@ impl FilePicker {
                 label: "../".to_string(),
                 path: parent.to_path_buf(),
                 is_dir: true,
-            });
-        }
-        if self.kind.folders() {
-            self.entries.push(Entry {
-                label: "./  (pick this folder)".to_string(),
-                path: self.dir.clone(),
-                is_dir: false,
             });
         }
         match std::fs::read_dir(&self.dir) {
@@ -258,21 +254,32 @@ impl FilePicker {
         let last = self.entries.len().saturating_sub(1);
         let at = self.state.selected().unwrap_or(0);
         match key.code {
-            KeyCode::Esc => return Picked::Cancelled,
             KeyCode::Up => self.state.select(Some(at.saturating_sub(1))),
             KeyCode::Down => self.state.select(Some((at + 1).min(last))),
             KeyCode::PageUp => self.state.select(Some(at.saturating_sub(10))),
             KeyCode::PageDown => self.state.select(Some((at + 10).min(last))),
             KeyCode::Home => self.state.select(Some(0)),
             KeyCode::End => self.state.select(Some(last)),
-            KeyCode::Backspace | KeyCode::Left => self.up(),
+            KeyCode::Backspace => {
+                self.up();
+                return Picked::Entered(self.dir.clone());
+            }
+            KeyCode::Char(' ') => {
+                if let Some(entry) = self.entries.get(at) {
+                    if entry.label != "../" && (!entry.is_dir || self.kind.folders()) {
+                        return Picked::File(entry.path.clone());
+                    }
+                }
+            }
             KeyCode::Char(c) => self.jump(c, Instant::now()),
             KeyCode::Enter | KeyCode::Right => {
                 if let Some(entry) = self.entries.get(at).cloned() {
                     if entry.label == "../" {
                         self.up();
+                        return Picked::Entered(self.dir.clone());
                     } else if entry.is_dir {
                         self.enter(entry.path, None);
+                        return Picked::Entered(self.dir.clone());
                     } else if key.code == KeyCode::Enter {
                         return Picked::File(entry.path);
                     }
@@ -310,15 +317,19 @@ impl FilePicker {
         }
     }
 
-    /// Draws the picker as a box over the middle of `area`.
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect, title: &str) {
-        let area = centered(area, 80, 80);
-        frame.render_widget(Clear, area);
-        let block = Block::bordered()
-            .title(Line::from(format!(" {title} ")).bold())
-            .title_bottom(Line::from(
-                " ↑↓ move · a-z jump · Enter open/pick · ← up · Esc cancel ",
-            ));
+    /// Draws the picker in `area`; `focused` where the keys are coming to
+    /// it, which is when it says which they are.
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
+        let mut block = Block::bordered().title(Line::from(format!(" {title} ")).bold());
+        block = if focused {
+            block
+                .border_style(Style::new().bold())
+                .title_bottom(Line::from(
+                    " ↑↓ a-z · Enter open/pick · Space pick · ⌫ up · ← back ",
+                ))
+        } else {
+            block.title_bottom(Line::from(" Enter or → to browse ").dim())
+        };
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let [head, body] =
@@ -343,7 +354,12 @@ impl FilePicker {
                 }
             })
             .collect();
-        let list = List::new(items).highlight_style(Style::new().reversed());
+        let highlight = if focused {
+            Style::new().reversed()
+        } else {
+            Style::new().underlined()
+        };
+        let list = List::new(items).highlight_style(highlight);
         frame.render_stateful_widget(list, body, &mut self.state);
     }
 }
@@ -376,23 +392,6 @@ pub fn visible(text: &str, cursor: Option<usize>, width: usize) -> (String, usiz
             (format!("…{tail}"), 0)
         }
     }
-}
-
-/// A rectangle `percent_x` by `percent_y` of `area`, in its middle.
-pub fn centered(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
-    let [_, middle, _] = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Min(0),
-    ])
-    .areas(area);
-    let [_, center, _] = Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Min(0),
-    ])
-    .areas(middle);
-    center
 }
 
 #[cfg(test)]
@@ -437,7 +436,10 @@ mod tests {
 
         // Into sub/, pick its map.
         picker.handle(key(KeyCode::Down));
-        assert_eq!(picker.handle(key(KeyCode::Enter)), Picked::Not);
+        assert!(matches!(
+            picker.handle(key(KeyCode::Enter)),
+            Picked::Entered(_)
+        ));
         assert!(picker.dir().ends_with("sub"));
         picker.handle(key(KeyCode::Down));
         assert_eq!(
@@ -446,10 +448,14 @@ mod tests {
         );
 
         // Back up: the folder just left is the one selected.
-        picker.handle(key(KeyCode::Backspace));
+        assert_eq!(
+            picker.handle(key(KeyCode::Backspace)),
+            Picked::Entered(std::path::absolute(dir.path()).unwrap())
+        );
         let at = picker.state.selected().unwrap();
         assert_eq!(picker.entries[at].label, "sub/");
-        assert_eq!(picker.handle(key(KeyCode::Esc)), Picked::Cancelled);
+        // A folder is not a file to pick with Space here.
+        assert_eq!(picker.handle(key(KeyCode::Char(' '))), Picked::Not);
     }
 
     #[test]
@@ -486,24 +492,23 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_is_picked_by_its_own_row() {
+    fn a_folder_is_walked_into_and_picked_with_space() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("out")).unwrap();
         std::fs::write(dir.path().join("a.omap"), "").unwrap();
         let mut picker = FilePicker::new(dir.path(), Pick::Folder);
         let labels: Vec<&str> = picker.entries.iter().map(|e| e.label.as_str()).collect();
-        assert_eq!(labels, ["../", "./  (pick this folder)", "out/"]);
+        assert_eq!(labels, ["../", "out/"]);
         picker.handle(key(KeyCode::Down));
-        picker.handle(key(KeyCode::Down));
-        picker.handle(key(KeyCode::Enter)); // into out/
-        picker.handle(key(KeyCode::Down)); // its ./ row
+        let out = std::path::absolute(dir.path().join("out")).unwrap();
         assert_eq!(
-            picker.handle(key(KeyCode::Enter)),
-            Picked::File(std::path::absolute(dir.path().join("out")).unwrap())
+            picker.handle(key(KeyCode::Char(' '))),
+            Picked::File(out.clone())
         );
+        assert_eq!(picker.handle(key(KeyCode::Right)), Picked::Entered(out));
 
         let picker = FilePicker::new(dir.path(), Pick::FileOrFolder(&["omap"]));
-        assert_eq!(picker.entries.len(), 4);
+        assert_eq!(picker.entries.len(), 3);
         let picker = FilePicker::new(dir.path(), Pick::AnyFile);
         assert_eq!(picker.entries.last().unwrap().label, "a.omap");
     }

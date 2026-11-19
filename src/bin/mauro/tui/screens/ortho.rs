@@ -68,7 +68,9 @@ impl Ortho {
             &["ortho"],
             "Add the photo",
             vec![
-                Field::path("Map", Pick::Files(&["omap", "xmap"])).arg("map_file"),
+                Field::path("Map", Pick::Files(&["omap", "xmap"]))
+                    .arg("map_file")
+                    .required(),
                 Field::text("Output map")
                     .arg("output_map_file")
                     .hint("the map itself, changed in place"),

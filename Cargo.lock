@@ -4390,6 +4390,7 @@ dependencies = [
  "tempfile",
  "tiff",
  "tiny-skia",
+ "toml_edit",
  "ureq 3.5.1",
  "zip 2.4.2",
 ]
@@ -7118,6 +7119,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

@@ -34,9 +34,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use maur_o::geometry::Rect;
-use maur_o::render::{
-    render_map_svg, render_map_window, save_pixmap, DEFAULT_FRAME, DEFAULT_RESOLUTION,
-};
+use maur_o::render::{render_map_svg, render_map_window, save_pixmap};
 
 #[derive(Parser)]
 #[command(
@@ -56,12 +54,12 @@ pub struct Args {
     image_file: Option<PathBuf>,
 
     /// Resolution of the image, in pixels per meter on the ground.
-    #[arg(short = 'r', long, default_value_t = DEFAULT_RESOLUTION)]
+    #[arg(short = 'r', long)]
     resolution: f64,
 
     /// Width of the white frame which is added on each side of the map, in
     /// meters on the ground.
-    #[arg(short = 'f', long, default_value_t = DEFAULT_FRAME)]
+    #[arg(short = 'f', long)]
     frame: f64,
 
     /// Draw only this rectangle of the map instead of all of it, given as

@@ -65,7 +65,7 @@ pub struct Args {
     archive: PathBuf,
 
     /// Where the run folder is created.
-    #[arg(long, default_value = "Results")]
+    #[arg(long)]
     results: PathBuf,
 
     /// Check and correct the names only; do not render anything.
@@ -74,7 +74,7 @@ pub struct Args {
 
     /// Per pixel difference, summed over red, green and blue, which does not
     /// count as a difference.
-    #[arg(long, default_value_t = differences::DEFAULT_TOLERANCE, value_name = "N")]
+    #[arg(long, value_name = "N")]
     tolerance: i32,
 
     /// Count differences antialiasing explains as real ones, i.e. report
@@ -84,24 +84,24 @@ pub struct Args {
 
     /// How many regions to crop out, 0 for as many as it takes to cover
     /// every difference.
-    #[arg(long, default_value_t = 0, value_name = "N")]
+    #[arg(long, value_name = "N")]
     crops: usize,
 
     /// The side of a cropped region, in pixels.
-    #[arg(long, default_value_t = 128, value_name = "N")]
+    #[arg(long, value_name = "N")]
     crop_size: u32,
 
     /// The width a cropped region is enlarged to.
-    #[arg(long, default_value_t = 512, value_name = "N")]
+    #[arg(long, value_name = "N")]
     zoom: u32,
 
     /// The width the whole images are scaled down to in side_by_side.png, 0
     /// for their full size.
-    #[arg(long, default_value_t = 2000, value_name = "N")]
+    #[arg(long, value_name = "N")]
     overview: u32,
 
     /// Only use maps whose name contains this.
-    #[arg(long, default_value = "", value_name = "TEXT")]
+    #[arg(long, value_name = "TEXT")]
     filter: String,
 }
 

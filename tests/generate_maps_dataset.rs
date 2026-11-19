@@ -105,7 +105,9 @@ fn a_dataset_is_one_map_per_ask_and_one_fill_per_cell() {
         .arg(NO_IMAGES)
         .arg(SYMBOL_SET)
         .arg(&folder)
-        .args(["--maps=3", "--layout-size=4"])
+        // The cell size spelled out: the sizes below are the test's, whatever
+        // config/defaults.toml has been set to.
+        .args(["--maps=3", "--layout-size=4", "--background-cell-size=150"])
         .args(ONLY_THE_GROUND)
         .assert()
         .success()
@@ -243,6 +245,66 @@ fn just_the_opaque_areas_skips_everything_drawn_over_them() {
         .all(|object| attribute(object, "symbol") == "0"));
 }
 
+/// `--content areas` is what `--just-opaque-areas` always was, and the two
+/// names cannot both be given.
+#[test]
+fn the_content_option_names_the_ground_alone_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("dataset");
+    generate()
+        .arg(NO_IMAGES)
+        .arg(SYMBOL_SET)
+        .arg(&folder)
+        .args(["--maps=1", "--layout-size=3", "--content", "areas"])
+        .args([
+            "--empty-sides=0",
+            "--transparent-areas=1",
+            "--point-symbols=1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "9 fills, 0 lines, 0 transparent areas, 0 point symbols drawn",
+        ));
+
+    generate()
+        .arg(NO_IMAGES)
+        .arg(SYMBOL_SET)
+        .arg(dir.path().join("other"))
+        .args(["--content", "areas", "--just-opaque-areas"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("cannot be used with"));
+}
+
+/// `--content areas-and-lines` draws the lines and nothing else over the
+/// ground, whatever the overlays' own options ask for: those would go
+/// unlabelled.
+#[test]
+fn areas_and_lines_leave_out_the_overlays_nothing_would_label() {
+    let dir = tempfile::tempdir().unwrap();
+    generate()
+        .arg(NO_IMAGES)
+        .arg(SYMBOL_SET)
+        .arg(dir.path().join("dataset"))
+        .args([
+            "--maps=1",
+            "--layout-size=3",
+            "--content",
+            "areas-and-lines",
+        ])
+        .args([
+            "--empty-sides=0",
+            "--transparent-areas=1",
+            "--point-symbols=1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "0 transparent areas, 0 point symbols drawn",
+        ));
+}
+
 /// Nothing is drawn where it would not be seen. The overlays of this set
 /// draw in a colour above one ground and below the other, so a cell filled
 /// with the second is left bare however much is asked for.
@@ -357,7 +419,7 @@ fn a_generated_map_renders() {
         .arg(NO_IMAGES)
         .arg(SYMBOL_SET)
         .arg(&folder)
-        .args(["--maps=2"])
+        .args(["--maps=2", "--layout-size=3", "--background-cell-size=150"])
         .args(ONLY_THE_GROUND)
         .assert()
         .success();

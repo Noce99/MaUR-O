@@ -45,10 +45,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use maur_o::dataset::{Settings, DEFAULT_CELL_SIZE, DEFAULT_LAYOUT_SIZE};
+use maur_o::dataset::Settings;
 use maur_o::ground_truth::GroundTruth;
-use maur_o::render::{render_map_over, save_pixmap, Extent, DEFAULT_FRAME, DEFAULT_RESOLUTION};
-use maur_o::vectorize::{write_map, Placement, Simplify, SymbolGrid, SAME_ANGLE};
+use maur_o::render::{render_map_over, save_pixmap, Extent};
+use maur_o::vectorize::{write_map, Placement, Simplify, SymbolGrid};
 use maur_o::xml_reader::read_xml_map;
 
 #[derive(Parser)]
@@ -80,13 +80,13 @@ pub struct Args {
 
     /// How far the boundary may be moved to be rid of a node, in cells.
     /// Nought keeps every node the staircase asks for.
-    #[arg(short = 't', long, default_value_t = 0.0, value_name = "CELLS")]
+    #[arg(short = 't', long, value_name = "CELLS")]
     tolerance: f64,
 
     /// How far apart two neighbouring cells' angles may be and still be one
     /// object's, as a share of a whole turn. A symbol turned two ways is two
     /// objects; `inf` never splits a region on its angle.
-    #[arg(short = 'a', long, default_value_t = SAME_ANGLE, value_name = "TURNS")]
+    #[arg(short = 'a', long, value_name = "TURNS")]
     same_angle: f32,
 
     /// Draw the map which was written, over the very ground the dataset's own
@@ -95,19 +95,19 @@ pub struct Args {
     image: Option<PathBuf>,
 
     /// How many cells across the layout the labels came from was.
-    #[arg(short = 'l', long, default_value_t = DEFAULT_LAYOUT_SIZE, value_name = "CELLS")]
+    #[arg(short = 'l', long, value_name = "CELLS")]
     layout_size: usize,
 
     /// How wide one cell of that layout was, in meters on the ground.
-    #[arg(short = 'c', long, default_value_t = DEFAULT_CELL_SIZE, value_name = "METERS")]
+    #[arg(short = 'c', long, value_name = "METERS")]
     background_cell_size: u32,
 
     /// How much white ground there was around the map, in meters.
-    #[arg(short = 'f', long, default_value_t = DEFAULT_FRAME, value_name = "METERS")]
+    #[arg(short = 'f', long, value_name = "METERS")]
     frame: f64,
 
     /// How many pixels of image one meter of ground came to.
-    #[arg(short = 'r', long, default_value_t = DEFAULT_RESOLUTION, value_name = "PX_PER_M")]
+    #[arg(short = 'r', long, value_name = "PX_PER_M")]
     resolution: f64,
 
     /// The scale to write the map at. Defaults to the symbol set's own.

@@ -52,7 +52,9 @@
 //!
 //! The backend is chosen when this is built, not when it is run: `flex` by
 //! default, which is pure Rust and slow; `--features wgpu` for any GPU with a
-//! Vulkan, Metal or DX12 driver; `--features cuda` for an NVIDIA one.
+//! Vulkan, Metal or DX12 driver; `--features cuda` for an NVIDIA one. Which
+//! GPU it runs on is `--gpu` (0 by default), numbered as `nvidia-smi` numbers
+//! them under CUDA.
 //!
 //! Started from the terminal interface, a run is detached, and reports to it
 //! through the folder named by the `MAURO_JOB_DIR` environment variable
@@ -70,18 +72,10 @@ use clap::{Parser, ValueEnum};
 
 use maur_o::dataset::{Classes, CLASSES_FILE};
 
-use maur_o::net::data::{CROP, DEFAULT_CROPS_PER_MAP};
-use maur_o::net::image_valid::DEFAULT_IMAGE_VALID;
 use maur_o::net::monitor::Monitor;
-use maur_o::net::training::{
-    train, TrainingConfig, DEFAULT_ANGLE_WEIGHT, DEFAULT_LEARNING_RATE, DEFAULT_PATIENCE,
-    DEFAULT_WEIGHT_DECAY,
-};
+use maur_o::net::training::{train, TrainingConfig};
 use maur_o::net::tree_training::{train_tree, TreeTrainingConfig};
-use maur_o::net::unet::{DEFAULT_BASE_CHANNELS, DEFAULT_SCALE_WEIGHT, DEPTH};
-
-/// Where the runs are written when no folder is named.
-const DEFAULT_TRAININGS: &str = "trainings";
+use maur_o::net::unet::DEPTH;
 
 /// Which network a run trains.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -114,8 +108,15 @@ pub struct Args {
     /// The training folder, which holds one timestamped folder per run: the
     /// checkpoints, the metrics and the weights of each go under that. Made if
     /// it is not there.
-    #[arg(default_value = DEFAULT_TRAININGS)]
     trainings: PathBuf,
+
+    /// Which GPU to train on, by its index: with --features cuda, CUDA's own
+    /// count in the order nvidia-smi lists them (the PCI bus's, which this
+    /// asks CUDA for unless CUDA_DEVICE_ORDER says otherwise); with
+    /// --features wgpu, the count of the discrete GPUs wgpu finds. The flex
+    /// backend runs on the CPU and ignores it.
+    #[arg(long, value_name = "INDEX")]
+    gpu: usize,
 
     /// The network to train. The U-Net reads a class for every pixel and is
     /// trained on crops of the maps; the tree answers with the curves which
@@ -126,57 +127,57 @@ pub struct Args {
     /// --overhang, --workers and --image-valid are the U-Net's; --size,
     /// --depth, --control-points, --samples and the two temperatures the
     /// tree's.
-    #[arg(long, value_enum, default_value_t = Model::Unet)]
+    #[arg(long, value_enum)]
     model: Model,
 
     /// How many passes over the dataset. A pass of the tree is one step per
     /// --batch-size pictures, which is short: it wants tens of them.
-    #[arg(short = 'e', long, default_value_t = 10, value_name = "COUNT")]
+    #[arg(short = 'e', long, value_name = "COUNT")]
     epochs: usize,
 
     /// How many crops in one step.
-    #[arg(short = 'b', long, default_value_t = 8, value_name = "CROPS")]
+    #[arg(short = 'b', long, value_name = "CROPS")]
     batch_size: usize,
 
     /// How many pixels square a crop is. Must divide by sixteen, which is
     /// what a U-Net of four levels halves and doubles.
-    #[arg(short = 'c', long, default_value_t = CROP, value_name = "PIXELS")]
+    #[arg(short = 'c', long, value_name = "PIXELS")]
     crop: usize,
 
     /// How many crops one pass takes from each map.
-    #[arg(long, default_value_t = DEFAULT_CROPS_PER_MAP, value_name = "COUNT")]
+    #[arg(long, value_name = "COUNT")]
     crops_per_map: usize,
 
     /// The feature maps at full resolution, doubling at every step down. The
     /// paper's is 64; this is a first model and starts lower.
-    #[arg(long, default_value_t = DEFAULT_BASE_CHANNELS, value_name = "COUNT")]
+    #[arg(long, value_name = "COUNT")]
     base_channels: usize,
 
     /// The rate the warmup climbs to, which the run then anneals down from.
     /// Not the rate of any particular step: the first steps are slower while
     /// the batch normalization finds its statistics, and the last are slower
     /// again -- see `maur_o::net::training::WarmupCosine`.
-    #[arg(short = 'l', long, default_value_t = DEFAULT_LEARNING_RATE, value_name = "RATE")]
+    #[arg(short = 'l', long, value_name = "RATE")]
     learning_rate: f64,
 
     /// What the angle term counts for beside the class term. The term is
     /// taken over the pixels which have an angle and no others, so this is
     /// what an angled pixel's direction is worth beside its symbol.
-    #[arg(long, default_value_t = DEFAULT_ANGLE_WEIGHT, value_name = "WEIGHT")]
+    #[arg(long, value_name = "WEIGHT")]
     angle_weight: f64,
 
     /// What the lines term counts for beside the ground's. Only a dataset
     /// made with --line-labels has one: the network then also answers, for
     /// every line symbol, whether a line of it runs through each pixel, and
     /// reports how much of them it found as the Line IoU.
-    #[arg(long, default_value_t = 1.0, value_name = "WEIGHT")]
+    #[arg(long, value_name = "WEIGHT")]
     line_weight: f64,
 
     /// What the scale term counts for beside the ground's. Only a dataset
     /// drawn over a range of densities (--min-resolution/--max-resolution)
     /// has one: the network then also says how dense a picture is, and
     /// reports how far out it was as the Scale error.
-    #[arg(long, default_value_t = DEFAULT_SCALE_WEIGHT, value_name = "WEIGHT")]
+    #[arg(long, value_name = "WEIGHT")]
     scale_weight: f64,
 
     /// How hard the weights are pulled back towards nothing at every step, as
@@ -187,14 +188,14 @@ pub struct Args {
     /// more than the default pulls the normalizations' own scale down with
     /// it, which costs more than it saves. Nought turns it off, which makes
     /// the optimizer plain Adam.
-    #[arg(long, default_value_t = DEFAULT_WEIGHT_DECAY, value_name = "SHARE")]
+    #[arg(long, value_name = "SHARE")]
     weight_decay: f64,
 
     /// How many epochs without a lower validation loss the run carries on
     /// for before it stops, short of --epochs. best.bpk is the epoch with
     /// the lowest, so every epoch after it which is no better is only
     /// overfitting. Nought never stops early.
-    #[arg(long, default_value_t = DEFAULT_PATIENCE, value_name = "EPOCHS")]
+    #[arg(long, value_name = "EPOCHS")]
     patience: usize,
 
     /// How far a crop may hang off the edge of a map, in pixels, with what
@@ -210,55 +211,55 @@ pub struct Args {
     /// The share of the maps kept for training; the rest validate against it.
     /// Split by map rather than by crop, so a validation score is a score for
     /// reading a map rather than for remembering one.
-    #[arg(long, default_value_t = 0.8, value_name = "SHARE")]
+    #[arg(long, value_name = "SHARE")]
     train_share: f64,
 
     /// How many threads decode maps ahead of the arithmetic.
-    #[arg(short = 'w', long, default_value_t = 4, value_name = "COUNT")]
+    #[arg(short = 'w', long, value_name = "COUNT")]
     workers: usize,
 
     /// How many of the validation split's pictures to read back into maps
     /// each epoch: they are drawn beside the originals under image_valid/, so
     /// that a run shows its work rather than only scoring it. Nought draws
     /// none, which is what a run in a hurry wants.
-    #[arg(long, default_value_t = DEFAULT_IMAGE_VALID, value_name = "COUNT")]
+    #[arg(long, value_name = "COUNT")]
     image_valid: usize,
 
     /// What the crop positions and the shuffling come out of. The same seed
     /// gives the same run.
-    #[arg(short = 's', long, default_value_t = 0)]
+    #[arg(short = 's', long)]
     seed: u64,
 
     /// The tree's: how many pixels square the pictures are reduced to. Must
     /// divide by sixteen.
-    #[arg(long, default_value_t = 64, value_name = "PIXELS")]
+    #[arg(long, value_name = "PIXELS")]
     size: usize,
 
     /// The tree's: how many cuts lie between its root and a leaf. The tree has
     /// two to the power of this many leaves, so this many symbols can be told
     /// apart by it at most.
-    #[arg(long, default_value_t = 4, value_name = "COUNT")]
+    #[arg(long, value_name = "COUNT")]
     depth: usize,
 
     /// The tree's: how many control points the Bézier of each cut has. More
     /// follow a wandering boundary closer.
-    #[arg(long, default_value_t = 8, value_name = "COUNT")]
+    #[arg(long, value_name = "COUNT")]
     control_points: usize,
 
     /// The tree's: how many points a cut is sampled at to measure how far a
     /// pixel is from it.
-    #[arg(long, default_value_t = 24, value_name = "COUNT")]
+    #[arg(long, value_name = "COUNT")]
     samples: usize,
 
     /// The tree's: how blurred its cuts are at the start of the run, in
     /// picture widths. Warm cuts feel each other, which is how the first of
     /// them are found.
-    #[arg(long, default_value_t = 0.08, value_name = "WIDTHS")]
+    #[arg(long, value_name = "WIDTHS")]
     temperature_start: f32,
 
     /// The tree's: how blurred its cuts are at the end of the run, which is
     /// how sharp the curves it ends with are.
-    #[arg(long, default_value_t = 0.012, value_name = "WIDTHS")]
+    #[arg(long, value_name = "WIDTHS")]
     temperature_end: f32,
 
     /// Show a live terminal dashboard of the metrics in place of the plain,
@@ -421,7 +422,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             &args.dataset,
             &args.trainings,
             config,
-            device(),
+            device(args.gpu),
             monitor.clone(),
         )
         .map(|_| ());
@@ -467,7 +468,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         &args.dataset,
         &args.trainings,
         config,
-        device(),
+        device(args.gpu),
         args.dashboard,
         monitor.clone(),
     )
@@ -520,24 +521,34 @@ mod backend {
     pub const BACKEND: &str = "flex (pure Rust, and slow: build with --features wgpu or \
                                --features cuda for a real run)";
 
-    /// The one device, whichever it is. No gradient tape over it: the
+    /// GPU `gpu`, numbered as `nvidia-smi` numbers them: CUDA's own order
+    /// is fastest first unless it is asked for the bus's, which is asked for
+    /// here before anything starts CUDA. No gradient tape over it: the
     /// trainers ask for that themselves.
     #[cfg(feature = "cuda")]
-    pub fn device() -> Device {
-        Device::cuda(burn::tensor::DeviceIndex::Default)
+    pub fn device(gpu: usize) -> Device {
+        if std::env::var_os("CUDA_DEVICE_ORDER").is_none() {
+            std::env::set_var("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
+        }
+        Device::cuda(burn::tensor::DeviceIndex::new(gpu))
     }
 
-    /// The one device, whichever it is.
+    /// Discrete GPU `gpu`, in wgpu's count of them.
     #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
-    pub fn device() -> Device {
-        Device::wgpu(burn::tensor::DeviceKind::DefaultDevice)
+    pub fn device(gpu: usize) -> Device {
+        Device::wgpu(burn::tensor::DeviceKind::DiscreteGpu(gpu))
     }
 
-    /// The one device, whichever it is.
+    /// The CPU, whichever GPU was asked for.
     #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
-    pub fn device() -> Device {
+    pub fn device(_gpu: usize) -> Device {
         Device::flex()
     }
+
+    /// Whether the backend runs on a GPU, and so whether `--gpu` means
+    /// anything.
+    pub const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "wgpu"));
 }
 
+pub use backend::ON_GPU;
 use backend::{device, BACKEND};

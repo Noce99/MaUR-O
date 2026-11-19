@@ -19,15 +19,18 @@
 //! which show up against the ground under it. Lettering is the one kind
 //! nothing draws with yet.
 //!
-//! `--just-opaque-areas` stops after the ground: the cells are filled and
-//! nothing is drawn over them, which leaves a map of area fills alone — and
-//! is the one map whose every pixel has an answer, so it is the one which is
-//! labelled.
+//! `--content` says how much of that is drawn: `all` of it (the default,
+//! which nothing labels); `areas`, which stops after the ground — the cells
+//! are filled and nothing is drawn over them, which leaves a map of area
+//! fills alone, the one map whose every pixel has an answer, so the one
+//! which is labelled; or `areas-and-lines`, the ground and the lines along
+//! the cell sides, labelled as two layers. `--just-opaque-areas` (`-j`) and
+//! `--line-labels` (`-L`) are the older names of the last two.
 //!
 //! A dataset is three folders and a file naming what the labels mean:
 //!
 //! ```text
-//! mauro net dataset --just-opaque-areas maps/ISOM_10k.omap dataset
+//! mauro net dataset --content areas maps/ISOM_10k.omap dataset
 //!
 //! dataset/classes.json       what channel each opaque area owns
 //! dataset/ISOM_10k.omap      the symbol set the maps were drawn with
@@ -54,18 +57,27 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use maur_o::dataset::{
-    create_dataset, Generated, Settings, CLASSES_FILE, DEFAULT_CELL_SIZE, DEFAULT_EMPTY_SIDES,
-    DEFAULT_LAYOUT_SIZE, DEFAULT_MAPS, DEFAULT_POINT_SYMBOLS, DEFAULT_TRANSPARENT_AREAS,
-    GROUND_TRUTH_FOLDER, IMAGES_FOLDER, MAPS_FOLDER, RESOLUTIONS_FILE,
+    create_dataset, Generated, Settings, CLASSES_FILE, GROUND_TRUTH_FOLDER, IMAGES_FOLDER,
+    MAPS_FOLDER, RESOLUTIONS_FILE,
 };
 use maur_o::progress::Progress;
-use maur_o::render::{DEFAULT_FRAME, DEFAULT_RESOLUTION};
 
-/// Where the maps go when no folder is named.
-const DEFAULT_FOLDER: &str = "dataset";
+/// How much of a map is drawn, and so what its labels say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Content {
+    /// Everything: the ground, the lines, the see-through areas and the
+    /// point symbols. Not labelled: a pixel drawn over has no one answer.
+    All,
+    /// The ground alone, labelled pixel by pixel.
+    Areas,
+    /// The ground and the lines along the cell sides, labelled as two
+    /// layers; no see-through areas or point symbols, which nothing would
+    /// label.
+    AreasAndLines,
+}
 
 #[derive(Parser)]
 #[command(
@@ -78,7 +90,7 @@ const DEFAULT_FOLDER: &str = "dataset";
              areas, lines run along some of the boundaries, see-through areas cover some of \
              the cells and point symbols are scattered into them -- each of them picked out \
              of the symbols which show up against the ground they land on.\n\n\
-             The folder comes out as maps/, images/ and, with --just-opaque-areas, gt/: the \
+             The folder comes out as maps/, images/ and, with --content areas, gt/: the \
              map, the picture of it and what each pixel of that picture is, which is a \
              training set. classes.json says what the labels mean.\n\n\
              The same options give the same maps: everything random comes from the seed."
@@ -89,53 +101,59 @@ pub struct Args {
     symbol_set: PathBuf,
 
     /// The folder the maps are written into. Made if it is not there.
-    #[arg(default_value = DEFAULT_FOLDER)]
     folder: PathBuf,
 
     /// How many cells a map is across: a map holds this squared.
-    #[arg(short = 'l', long, default_value_t = DEFAULT_LAYOUT_SIZE, value_name = "CELLS")]
+    #[arg(short = 'l', long, value_name = "CELLS")]
     layout_size: usize,
 
     /// How wide one cell is, in meters on the ground.
-    #[arg(short = 'c', long, default_value_t = DEFAULT_CELL_SIZE, value_name = "METERS")]
+    #[arg(short = 'c', long, value_name = "METERS")]
     background_cell_size: u32,
 
     /// How many maps to generate.
-    #[arg(short = 'n', long, default_value_t = DEFAULT_MAPS, value_name = "COUNT")]
+    #[arg(short = 'n', long, value_name = "COUNT")]
     maps: usize,
 
     /// The share of cell sides left without a line along them, from 0 for a
     /// line on every side to 1 for none at all.
-    #[arg(short = 'e', long, default_value_t = DEFAULT_EMPTY_SIDES, value_name = "SHARE")]
+    #[arg(short = 'e', long, value_name = "SHARE")]
     empty_sides: f64,
 
     /// The chance of a cell being covered by a transparent area.
-    #[arg(short = 't', long, default_value_t = DEFAULT_TRANSPARENT_AREAS, value_name = "CHANCE")]
+    #[arg(short = 't', long, value_name = "CHANCE")]
     transparent_areas: f64,
 
     /// The chance of a cell holding a point symbol. Two are half as likely
     /// as one, three half as likely again, and so on.
-    #[arg(short = 'p', long, default_value_t = DEFAULT_POINT_SYMBOLS, value_name = "CHANCE")]
+    #[arg(short = 'p', long, value_name = "CHANCE")]
     point_symbols: f64,
 
-    /// Draw nothing but the ground: the cells are filled with opaque areas
-    /// and the lines, the see-through areas and the point symbols are all
-    /// skipped, whatever --empty-sides, --transparent-areas and
-    /// --point-symbols say. The labels in gt/ are written only for these.
-    #[arg(short = 'j', long)]
+    /// What the maps hold, and so what their labels say. all: everything,
+    /// and no labels, since a pixel drawn over has no one answer. areas:
+    /// nothing but the ground -- the cells filled with opaque areas, and the
+    /// lines, the see-through areas and the point symbols all skipped,
+    /// whatever --empty-sides, --transparent-areas and --point-symbols say;
+    /// labelled pixel by pixel in gt/. areas-and-lines: the ground and the
+    /// lines along the cell sides, the lines labelled as a second layer over
+    /// the ground, which keeps its label under them -- yes-or-no per line
+    /// symbol, rebuilt from maps/ where wanted; no see-through areas or point
+    /// symbols, whatever --transparent-areas and --point-symbols say, since
+    /// they would go unlabelled.
+    #[arg(long, value_enum, value_name = "WHAT")]
+    content: Content,
+
+    /// The same as --content areas.
+    #[arg(short = 'j', long, conflicts_with_all = ["content", "line_labels"])]
     just_opaque_areas: bool,
 
-    /// Label the lines as a second layer over the ground. The lines along
-    /// the cell sides are drawn and the ground keeps its label under them;
-    /// the lines are labelled yes-or-no per line symbol, rebuilt from maps/
-    /// where wanted. Needs --transparent-areas 0 and --point-symbols 0, since
-    /// anything else drawn over the ground would go unlabelled.
-    #[arg(short = 'L', long)]
+    /// The same as --content areas-and-lines.
+    #[arg(short = 'L', long, conflicts_with = "content")]
     line_labels: bool,
 
     /// How many pixels of image one meter of ground comes to, which decides
     /// how big the images and their labels are.
-    #[arg(short = 'r', long, default_value_t = DEFAULT_RESOLUTION, value_name = "PX_PER_M")]
+    #[arg(short = 'r', long, value_name = "PX_PER_M")]
     resolution: f64,
 
     /// The lowest density a map is drawn at. With --max-resolution, each map
@@ -154,7 +172,7 @@ pub struct Args {
 
     /// How much white ground to leave around each map, in meters. It is part
     /// of the image, and the background class of the labels.
-    #[arg(short = 'f', long, default_value_t = DEFAULT_FRAME, value_name = "METERS")]
+    #[arg(short = 'f', long, value_name = "METERS")]
     frame: f64,
 
     /// Write the maps and nothing else. Drawing them is most of the work, so
@@ -164,7 +182,7 @@ pub struct Args {
     no_images: bool,
 
     /// Write the maps and their images, but not the gt/ labels, even where
-    /// --just-opaque-areas would otherwise have them written. classes.json
+    /// --content areas would otherwise have them written. classes.json
     /// still goes out, since it is what lets a label be computed from a map
     /// in maps/ instead of read from gt/ -- training reads it either way.
     #[arg(long)]
@@ -178,7 +196,7 @@ pub struct Args {
 
     /// What the randomness is seeded with. The same seed gives the same
     /// dataset.
-    #[arg(short = 's', long, default_value_t = 0)]
+    #[arg(short = 's', long)]
     seed: u64,
 }
 
@@ -244,6 +262,15 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         ));
     }
 
+    let content = if args.just_opaque_areas {
+        Content::Areas
+    } else if args.line_labels {
+        Content::AreasAndLines
+    } else {
+        args.content
+    };
+    // Nothing would label a see-through area or a point over the lines.
+    let overlays = content == Content::All;
     let settings = Settings {
         layout_size: args.layout_size,
         cell_size: args.background_cell_size,
@@ -251,10 +278,14 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         iof_rules: args.iof_rules,
         seed: args.seed,
         empty_sides: args.empty_sides,
-        transparent_areas: args.transparent_areas,
-        point_symbols: args.point_symbols,
-        just_opaque_areas: args.just_opaque_areas,
-        line_labels: args.line_labels,
+        transparent_areas: if overlays {
+            args.transparent_areas
+        } else {
+            0.0
+        },
+        point_symbols: if overlays { args.point_symbols } else { 0.0 },
+        just_opaque_areas: content == Content::Areas,
+        line_labels: content == Content::AreasAndLines,
         images: !args.no_images,
         ground_truth: !args.no_gt,
         resolution: args.resolution,
@@ -368,8 +399,8 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
                 "--no-gt was asked for".to_string()
             } else {
                 "a pixel's label is the one piece of ground cover under it, so only the images \
-                 of --just-opaque-areas maps are labelled, and of --line-labels maps, whose \
-                 lines are a layer of their own"
+                 of --content areas maps are labelled, and of --content areas-and-lines maps, \
+                 whose lines are a layer of their own"
                     .to_string()
             }
         );

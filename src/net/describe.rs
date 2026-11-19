@@ -327,6 +327,47 @@ impl NetDescriptor {
         self.root.param_count
     }
 
+    /// How many values the tensors of one pass hold, the symbols of their
+    /// shapes given (`B`, `H`, `W`, …): the input, and every leaf layer's
+    /// output once, however many places it goes to. Which is what a pass
+    /// keeps for its backward one, and so most of what training it costs in
+    /// memory beyond the weights. `None` where a shape names a symbol not
+    /// given or divides inexactly.
+    pub fn activation_count(&self, symbols: &[(&str, i64)]) -> Option<u64> {
+        fn size(edge: &Edge, symbols: &[(&str, i64)]) -> Option<u64> {
+            edge.shape.iter().try_fold(1u64, |n, dim| {
+                let d = u64::try_from(dim.eval(symbols)?).ok()?;
+                n.checked_mul(d)
+            })
+        }
+        fn walk(node: &Node, symbols: &[(&str, i64)]) -> Option<u64> {
+            let mut total = 0u64;
+            let mut counted: Vec<&str> = Vec::new();
+            for edge in &node.edges {
+                let from = edge.from.split(':').next().unwrap_or("");
+                let leaf = node
+                    .children
+                    .iter()
+                    .any(|c| c.id == from && c.children.is_empty());
+                if leaf && !counted.contains(&from) {
+                    counted.push(from);
+                    total += size(edge, symbols)?;
+                }
+            }
+            for child in &node.children {
+                total += walk(child, symbols)?;
+            }
+            Some(total)
+        }
+        let input = self
+            .root
+            .edges
+            .iter()
+            .find(|e| e.from.starts_with("@in"))
+            .map_or(Some(0), |e| size(e, symbols))?;
+        Some(input + walk(&self.root, symbols)?)
+    }
+
     /// A hash of the architecture: the same for the same network and
     /// different for a different one, and unaffected by the version and the
     /// [`Meta`]. 16 hex digits of FNV-1a over the sorted-key JSON — enough to

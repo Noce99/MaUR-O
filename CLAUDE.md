@@ -83,7 +83,13 @@ it reports through that folder (`net/monitor.rs`: `status`, `losses`, and a
 folders and `tui/watch.rs` draws one, so closing the TUI never touches the job. Each screen (`tui/screens/<subcommand>.rs`) is a
 `form::Tool` on the shared `form::Form`; a field naming its clap argument
 (`Field::arg("id")`) takes its help and default from clap, so don't copy those
-into the TUI. Adding or renaming a flag: update that subcommand's screen too —
+into the TUI. Defaults are not in the clap definitions: every option's default is in
+`config/defaults.toml` (a table per subcommand, a key per arg id), applied to
+the parser at run time by `src/bin/mauro/defaults.rs` — always build the
+parser with `crate::defaults::command()`, never `Cli::command()`/`Cli::parse`,
+or the defaults are missing and the args they make optional are required.
+A new option with a default gets a key there (`every_default_is_an_argument_and_parses`
+checks the keys), and the TUI's Ctrl+D writes that file. Adding or renaming a flag: update that subcommand's screen too —
 a stale arg id panics `Form::new`, caught by `every_tool_opens_and_draws_its_screen`,
 and a flag a screen still emits fails that screen's unit tests. Each
 subcommand module also has `exit_meaning(code)`, mirroring its doc comment's

@@ -98,8 +98,7 @@ use maur_o::vectorize::Simplify;
 
 use maur_o::net::predict::{
     at_scale, estimate_scale, load, read_back, read_back_tree, ReadBackSettings,
-    DEFAULT_LINE_THRESHOLD, OVERLAP, PREDICTED_SAME_ANGLE, PREDICTED_TOLERANCE, RESAMPLE_TOLERANCE,
-    TREE_TOLERANCE,
+    DEFAULT_LINE_THRESHOLD, OVERLAP, PREDICTED_TOLERANCE, RESAMPLE_TOLERANCE, TREE_TOLERANCE,
 };
 use maur_o::net::tree_training::load_tree;
 
@@ -145,7 +144,7 @@ pub struct Args {
     /// How far apart two neighbouring pixels' angles may be and still be one
     /// object's, as a share of a whole turn. `inf` never splits a region on
     /// its angle.
-    #[arg(short = 'a', long, default_value_t = PREDICTED_SAME_ANGLE, value_name = "TURNS")]
+    #[arg(short = 'a', long, value_name = "TURNS")]
     same_angle: f32,
 
     /// How many pixels square a tile of the picture is. Defaults to the crop
@@ -161,12 +160,12 @@ pub struct Args {
     /// The probability a pixel has to be given for a line to run through it,
     /// for a run whose network has a lines layer (a dataset made with
     /// --line-labels). Lower finds more of the lines and more that are not.
-    #[arg(long, default_value_t = DEFAULT_LINE_THRESHOLD, value_name = "PROBABILITY")]
+    #[arg(long, value_name = "PROBABILITY")]
     line_threshold: f32,
 
     /// How long a line has to be to be written, in pixels. A shorter one is a
     /// speck, or the spur a thinning leaves at the end of a band.
-    #[arg(long, default_value_t = LineSettings::default().min_length, value_name = "PIXELS")]
+    #[arg(long, value_name = "PIXELS")]
     min_line: f64,
 
     /// Draw the map which was written, over the very ground the picture

@@ -156,9 +156,7 @@ use maur_o::bus::{
 use maur_o::map_areas::{read_map_areas, single_color};
 use maur_o::osm::{read_osm, read_osm_str, BBox};
 use maur_o::osm_convert::convert;
-use maur_o::osm_download::{
-    overpass_error, overpass_query, parse_center, parse_size, MAX_AREA_KM2, OVERPASS_URL, TIMEOUT_S,
-};
+use maur_o::osm_download::{overpass_error, overpass_query, parse_center, parse_size, TIMEOUT_S};
 use maur_o::osm_orienteering::{OrienteeringStyle, Standard};
 use maur_o::osm_style::{
     carto_style_with_overlays, line_color, BusLook, Details, COURSE_PURPLE, MAP_AREA_FILL_ALPHA,
@@ -220,7 +218,7 @@ pub struct Args {
     around: Option<(f64, f64)>,
 
     /// The side of the --around square: 2km, 500m, or metres.
-    #[arg(long, value_parser = parse_size, default_value = "1km", value_name = "SIZE")]
+    #[arg(long, value_parser = parse_size, value_name = "SIZE")]
     size: f64,
 
     /// Keep the downloaded data in this .osm file.
@@ -228,17 +226,17 @@ pub struct Args {
     save_osm: Option<PathBuf>,
 
     /// The Overpass API server to download from.
-    #[arg(long, requires = "download", default_value = OVERPASS_URL, value_name = "URL")]
+    #[arg(long, requires = "download", value_name = "URL")]
     overpass_url: String,
 
     /// The largest area to download, in square kilometres.
-    #[arg(long, requires = "download", default_value_t = MAX_AREA_KM2, value_name = "KM2")]
+    #[arg(long, requires = "download", value_name = "KM2")]
     max_area: f64,
 
     /// The symbols to draw the map with: an orienteering standard (ISSprOM
     /// 2019 at 1:4000, ISOM 2017-2 at 1:10000), or openstreetmap.org's look.
     /// The options below, from --details on, are osm's only.
-    #[arg(long, value_enum, default_value = "issprom")]
+    #[arg(long, value_enum)]
     standard: StandardArg,
 
     /// Only convert this area: min_lon,min_lat,max_lon,max_lat in degrees.
@@ -248,7 +246,7 @@ pub struct Args {
     /// How much the map shows: 0 is carto's zoom 13 at 1:24000, 1 zoom 14
     /// at 1:17000, 2 zoom 15 at 1:10000, 3 zoom 16 at 1:5000, 4 zoom 17 at
     /// 1:2500.
-    #[arg(long, default_value_t = 3, value_name = "0-4",
+    #[arg(long, value_name = "0-4",
           value_parser = clap::value_parser!(u8).range(0..=i64::from(Details::MAX)))]
     details: u8,
 
@@ -301,13 +299,13 @@ pub struct Args {
     /// The widest a bundle of bus or train lines sharing a street may be,
     /// in carto pixels (0.28 mm each on the paper): wider, and all its lines
     /// are drawn thinner. A bus line alone is 3 pixels wide, a train 4.5.
-    #[arg(long, value_name = "PIXELS", default_value_t = 12.0)]
+    #[arg(long, value_name = "PIXELS")]
     bundle_width: f64,
 
     /// How close two stops on one bundle (the two sides of a street, say),
     /// or two stops off any, may be on the paper before they are drawn as
     /// one, in mm.
-    #[arg(long, value_name = "MM", default_value_t = 3.0, alias = "stop_merge")]
+    #[arg(long, value_name = "MM", alias = "stop_merge")]
     stop_merge: f64,
 
     /// Draw the areas of these maps, each with its name: a CSV table, one

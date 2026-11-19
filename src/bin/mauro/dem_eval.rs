@@ -44,7 +44,7 @@ pub struct Args {
     prediction: PathBuf,
 
     /// Where this run's own timestamped folder is created.
-    #[arg(long, default_value = "Results")]
+    #[arg(long)]
     results: PathBuf,
 }
 

@@ -45,6 +45,7 @@ together.
   - [Fonts and fontconfig](#fonts-and-fontconfig)
 - [Usage](#usage)
   - [The terminal interface](#the-terminal-interface)
+  - [The defaults](#the-defaults)
   - [`mauro render`](#mauro-render)
   - [`mauro benchmark create`](#mauro-benchmark-create)
   - [`mauro benchmark run`](#mauro-benchmark-run)
@@ -164,10 +165,23 @@ form to fill in.
 ./target/release/mauro
 ```
 
-Every tool has a screen: its options as a form, files and folders picked
-from the disk (type the start of a name to jump to it), and the help of the
-option being filled in beside it — the same text `--help` prints. Beside
-the form, what can be known before running:
+Every tool has a screen: its options as a form and, on the right, the help
+of the option being filled in — the same text `--help` prints — with, under
+it, a file picker for a field which is a path (type the start of a name to
+jump to it). `Enter`, or `→` at the end of the text, goes into the picker and
+`←` or `Esc` back to the fields; in the picker `Enter` walks into a folder or
+picks a file, `Space` picks whatever is selected and `Backspace` walks up. A
+folder field follows the folder the picker is in: walk into it and come back.
+
+Each value is drawn in the colour of where it stands: **green** at its
+option's default, **orange** changed from it, **red** wrong — a value the
+option does not take, or one the screen can tell will not work (a
+`net train` batch too large for the GPU picked, a `net dataset` range of
+resolutions upside down), with why at the top of the help. A `*` before a
+field marks one the command cannot do without. `Ctrl+D` makes what the
+focused field holds its option's new default (see [The defaults](#the-defaults)).
+
+Beside the form, what can be known before running:
 
 - `render` reads the map — scale, objects, symbols, where it is placed — and
   says how large the image will be, in pixels and on the ground, as the
@@ -178,6 +192,13 @@ the form, what can be known before running:
   to choose among;
 - `dem` reads the map; `benchmark run` reads the archive: how many maps and
   references it holds, and what they were drawn at;
+- `net train` lists the GPUs (`nvidia-smi`'s, the first by default) and
+  estimates the memory a training step of the batch asked for will want of
+  the one picked, against what it has free — out of the network's own
+  descriptor, so a rough figure but one which follows the architecture;
+- `net dataset` gives the densities as a range, `Min resolution` to
+  `Max resolution`: the same figure in both is one density for every map; and
+  shows only the options of the content picked (`--content`);
 - `net train` and `tiles serve` run until they are done or cancelled (`Esc`):
   the job screen shows the metrics of a training run, or the address a
   server listens on, as they come, in place of `net train`'s own `--dashboard`.
@@ -197,6 +218,21 @@ again from the shell.
 list) or `Ctrl+C` (anywhere) quits. Given no arguments where there is no
 terminal — in a script, or with its input or output redirected — `mauro`
 prints its help and exits with 1, as before.
+
+### The defaults
+
+Every option's default lives in [`config/defaults.toml`](config/defaults.toml),
+a table per subcommand (`[net.train]` for `mauro net train`) and a key per
+option (its clap id: `batch_size`, not `--batch-size`). The code carries none
+of its own: `mauro` reads the file when it builds its parser, so `--help`,
+the command line and the interface's forms all say what it says. Which file:
+the one `$MAURO_DEFAULTS` names, else the one in the source tree the binary
+was built from, else the copy compiled into the binary.
+
+`Ctrl+D` in the interface writes the focused field's value into that file,
+comments and layout kept, so it is the next run's default from the shell too —
+and, the file being in git, a default has a history. The defaults the option
+descriptions below mention are the file's as committed.
 
 ### `mauro render`
 
@@ -712,7 +748,8 @@ mauro net dataset [OPTIONS] <symbol-set> [folder]
 | `-e, --empty-sides <SHARE>` | The share of cell sides left without a line along them, 0 for a line on every side, 1 for none (default `0.5`). |
 | `-t, --transparent-areas <CHANCE>` | The chance of a cell being covered by a see-through area (default `0.1`). |
 | `-p, --point-symbols <CHANCE>` | The chance of a cell holding a point symbol; two are half as likely as one, three half as likely again (default `0.5`). |
-| `-j, --just-opaque-areas` | Draw nothing but the ground: the cells are filled with opaque areas and the lines, see-through areas and point symbols are all skipped, whatever the three options above say. Also what makes a dataset labelled — see [below](#a-training-set). |
+| `--content <WHAT>` | What the maps hold (default `all`). `all`: everything, unlabelled. `areas`: nothing but the ground — the cells are filled with opaque areas and the lines, see-through areas and point symbols are all skipped, whatever the three options above say; what makes a dataset labelled, see [below](#a-training-set). `areas-and-lines`: the ground and the lines, labelled as two layers; no see-through areas or point symbols, whatever their options say. |
+| `-j, --just-opaque-areas` / `-L, --line-labels` | The older names of `--content areas` and `--content areas-and-lines`. |
 | `-r, --resolution <PX_PER_M>` | How many pixels of image one meter of ground comes to (default `3`). With a range below, the density the images are sized at. |
 | `--min-resolution <PX_PER_M>` / `--max-resolution <PX_PER_M>` | Draw each map at a density of its own, log-uniform between the two (each defaults to `--resolution`, which has to lie between them) — see [Maps at more than one density](#a-training-set). |
 | `-f, --frame <METERS>` | How much white ground to leave around each map (default `50`). |
@@ -738,7 +775,7 @@ A map is built in six steps:
 5. **some cells are covered** by a see-through area;
 6. **point symbols are dropped** into the cells.
 
-`--just-opaque-areas` stops after step three, which leaves a map of ground
+`--content areas` (or `--just-opaque-areas`) stops after step three, which leaves a map of ground
 cover and nothing else: what a renderer makes of an area fill and a wandering
 boundary, with nothing drawn over it to say where a difference came from.
 
@@ -812,7 +849,7 @@ answers is a folder of numbers. `mauro net train` copies it and `classes.json` i
 run folder for the same reason.
 
 ```bash
-./target/release/mauro net dataset --just-opaque-areas -n 100 \
+./target/release/mauro net dataset --content areas -n 100 \
     maps/ISOM_10k.omap dataset
 ```
 
@@ -840,11 +877,11 @@ the layout covers plus the frame, known before anything is generated, rather
 than over whatever each map's objects came to — so a folder of them stacks
 into a batch without being cropped first.
 
-Only `--just-opaque-areas` maps and `--line-labels` maps are labelled: a
+Only `--content areas` maps and `--content areas-and-lines` maps are labelled: a
 pixel's answer is the one piece of ground cover under it, and there is no such
 answer for a pixel a see-through area or a point symbol was drawn over.
 
-**Lines are a second layer.** `--line-labels` draws the lines along the cell
+**Lines are a second layer.** `--content areas-and-lines` draws the lines along the cell
 sides and labels them apart from the ground, which keeps its own label under
 a line — a fence over a meadow is still a meadow between its dashes. Each line
 symbol has a channel of its own, a yes-or-no per pixel, so two lines which
@@ -852,8 +889,9 @@ cross are both on where they cross; the labels come from the line's geometry
 (a dashed line is one unbroken stroke, at least three pixels wide), and are
 rebuilt from `maps/` where they are wanted rather than kept in `gt/`.
 `classes.json` says how many line symbols there are (`lines`) and which.
-It needs `--transparent-areas 0 --point-symbols 0`, since anything else would
-be drawn and left unlabelled. A network trained on such a dataset answers for
+It draws no see-through areas and no point symbols, whatever
+`--transparent-areas` and `--point-symbols` say, since they would be drawn and
+left unlabelled. A network trained on such a dataset answers for
 the lines too, and `mauro net train` reports how much of them it found as the
 *Line IoU*.
 
@@ -870,7 +908,7 @@ set fixes on the paper. Each map's density is written to
 `resolutions.csv`, and the range to `classes.json`:
 
 ```bash
-./target/release/mauro net dataset --just-opaque-areas -n 300 \
+./target/release/mauro net dataset --content areas -n 300 \
     --resolution 3 --min-resolution 1 --max-resolution 6 maps/ISOM_10k.omap dataset
 ```
 
@@ -985,7 +1023,7 @@ and at what angle was its fill pattern turned. It is a **U-Net**, written with
 ```bash
 # A few hundred maps, all ground cover, drawn and labelled.
 cargo run --release -- net dataset \
-    --just-opaque-areas -n 300 maps/ISOM_10k.omap dataset
+    --content areas -n 300 maps/ISOM_10k.omap dataset
 
 # And a network read off them.
 cargo run --release -- net train dataset trainings
@@ -1000,7 +1038,9 @@ back or only drawn.
 **The backend is a build-time choice**, as the device the binaries ask
 burn for: `flex` by default — pure Rust, runs anywhere, and far too slow
 for a real run — with `--features wgpu` for any GPU with a Vulkan, Metal or
-DX12 driver and `--features cuda` for an NVIDIA one.
+DX12 driver and `--features cuda` for an NVIDIA one. `--gpu` picks which
+GPU (0 by default): under CUDA in the order `nvidia-smi` lists them, under
+wgpu in its count of the discrete ones.
 
 ### The shape of it
 

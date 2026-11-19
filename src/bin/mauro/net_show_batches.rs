@@ -55,7 +55,7 @@ use maur_o::dataset::{Classes, CLASSES_FILE};
 use maur_o::differences::compose;
 use maur_o::geometry::Rect;
 use maur_o::ground_truth::{BACKGROUND, NO_ROTATION};
-use maur_o::net::data::{MapBatcher, MapCrop, MapDataset, CROP, DEFAULT_CROPS_PER_MAP};
+use maur_o::net::data::{MapBatcher, MapCrop, MapDataset};
 use maur_o::net::predict::{load, resolve_angles, ReadBackSettings, ANGLE_LENGTH};
 use maur_o::net::unet::UNet;
 use maur_o::random::Random;
@@ -63,9 +63,6 @@ use maur_o::render::{render_map_over, to_rgb_image, Extent};
 use maur_o::symbol_kinds::{Catalogue, Entry};
 use maur_o::vectorize::{write_map, Placement, SymbolGrid};
 use maur_o::xml_reader::read_xml_map;
-
-/// Where the sheets go when no folder is named.
-const DEFAULT_INTO: &str = "batches";
 
 /// How many pixels a sheet leaves between one crop's row and the next.
 ///
@@ -90,26 +87,25 @@ pub struct Args {
     dataset: PathBuf,
 
     /// Where the sheets are written. Made if it is not there.
-    #[arg(default_value = DEFAULT_INTO)]
     into: PathBuf,
 
     /// How many batches to draw.
-    #[arg(short = 'n', long, default_value_t = 2, value_name = "COUNT")]
+    #[arg(short = 'n', long, value_name = "COUNT")]
     batches: usize,
 
     /// How many crops in one batch, which is how many rows a sheet has.
-    #[arg(short = 'b', long, default_value_t = 4, value_name = "CROPS")]
+    #[arg(short = 'b', long, value_name = "CROPS")]
     batch_size: usize,
 
     /// How many pixels square a crop is. Must divide by sixteen, as a run's
     /// must.
-    #[arg(short = 'c', long, default_value_t = CROP, value_name = "PIXELS")]
+    #[arg(short = 'c', long, value_name = "PIXELS")]
     crop: usize,
 
     /// How many crops one pass takes from each map. With the seed, this is
     /// what decides where a crop lands, so it has to be the run's figure for
     /// these to be the run's crops.
-    #[arg(long, default_value_t = DEFAULT_CROPS_PER_MAP, value_name = "COUNT")]
+    #[arg(long, value_name = "COUNT")]
     crops_per_map: usize,
 
     /// How far a crop may hang off the edge of a map, in pixels, with what
@@ -120,17 +116,17 @@ pub struct Args {
     overhang: Option<usize>,
 
     /// The share of the maps kept for training; the rest validate against it.
-    #[arg(long, default_value_t = 0.8, value_name = "SHARE")]
+    #[arg(long, value_name = "SHARE")]
     train_share: f64,
 
     /// Which half to draw from. The validation half by default: it is the one
     /// a score is quoted over, so it is the one worth checking.
-    #[arg(long, default_value = "valid", value_name = "HALF")]
+    #[arg(long, value_name = "HALF")]
     split: Half,
 
     /// What the crop positions and the pick of crops come out of. The same
     /// seed the run used gives the run's own crops.
-    #[arg(short = 's', long, default_value_t = 0, value_name = "SEED")]
+    #[arg(short = 's', long, value_name = "SEED")]
     seed: u64,
 
     /// A run folder under trainings/: adds a panel for what its network says
@@ -144,7 +140,7 @@ pub struct Args {
     /// out of padding rather than out of picture; leaving it out is what
     /// separates that from a class the network cannot tell apart anywhere.
     /// The pictures are drawn whole either way.
-    #[arg(long, default_value_t = 0, value_name = "PIXELS")]
+    #[arg(long, value_name = "PIXELS")]
     margin: usize,
 
     /// The weights to use with --run. Defaults to best.bpk in the run folder;

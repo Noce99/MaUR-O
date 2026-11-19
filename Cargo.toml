@@ -29,7 +29,7 @@ path = "src/bin/mauro/main.rs"
 
 [dependencies]
 quick-xml = "0.37"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "string"] }
 image = { version = "0.25", default-features = false, features = ["png", "bmp", "tiff", "jpeg"] }
 tiny-skia = "0.11"
 fontdb = "0.21"
@@ -91,6 +91,10 @@ ureq = "3"
 # the library never uses it, and o-mnia's wasm build never sees it.
 # crossterm comes with it, re-exported as ratatui::crossterm.
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+# The options' defaults, config/defaults.toml (src/bin/mauro/defaults.rs):
+# read when `mauro` builds its parser, and written back, comments kept, when
+# the terminal interface sets one. Already in the build through burn.
+toml_edit = "0.25"
 
 # Which backend the `net` module and its two binaries are built against.
 [features]

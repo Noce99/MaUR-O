@@ -27,6 +27,7 @@
 
 mod benchmark_create;
 mod benchmark_run;
+mod defaults;
 mod dem;
 mod dem_eval;
 mod net_dataset;
@@ -40,7 +41,7 @@ mod osm;
 mod render;
 mod tui;
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{FromArgMatches, Parser, Subcommand};
 use std::io::IsTerminal;
 use std::process::ExitCode;
 
@@ -101,7 +102,7 @@ fn main() -> ExitCode {
     }
     // Parsed in two steps, not with `Cli::try_parse`, because `osm` needs its
     // own `ArgMatches` to tell an option given from one left at its default.
-    let parsed = Cli::command()
+    let parsed = defaults::command()
         .try_get_matches()
         .and_then(|matches| Cli::from_arg_matches(&matches).map(|cli| (cli, matches)));
     let (cli, matches) = match parsed {

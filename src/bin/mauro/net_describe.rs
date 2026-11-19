@@ -39,7 +39,7 @@ use std::process::{Command, ExitCode};
 use clap::{Parser, ValueEnum};
 
 use maur_o::net::describe::{blessed, Meta, NetDescriptor, BLESSED};
-use maur_o::net::registry::{Registered, Registry, Status, DEFAULT_DIR};
+use maur_o::net::registry::{Registered, Registry, Status};
 
 /// Which network to describe.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -64,11 +64,11 @@ enum Which {
 )]
 pub struct Args {
     /// Which network to describe.
-    #[arg(value_enum, default_value_t = Which::All)]
+    #[arg(value_enum)]
     model: Which,
 
     /// The folder the versions are kept in. Made if it is not there.
-    #[arg(long, default_value = DEFAULT_DIR, value_name = "FOLDER")]
+    #[arg(long, value_name = "FOLDER")]
     networks_dir: PathBuf,
 
     /// Writes nothing: says whether every network's latest version is what

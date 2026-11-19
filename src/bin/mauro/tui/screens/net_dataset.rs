@@ -3,33 +3,39 @@
 use crate::tui::form::{Field, Form, Tool};
 use crate::tui::widgets::Pick;
 
-use super::MAP_EXTENSIONS;
+use super::{number, MAP_EXTENSIONS};
 
 const SYMBOL_SET: usize = 0;
 const FOLDER: usize = 1;
 const MAPS: usize = 2;
 const LAYOUT_SIZE: usize = 3;
 const CELL_SIZE: usize = 4;
-const EMPTY_SIDES: usize = 5;
-const TRANSPARENT: usize = 6;
-const POINTS: usize = 7;
-const CONTENT: usize = 8;
-const RESOLUTION: usize = 9;
-const MIN_RESOLUTION: usize = 10;
-const MAX_RESOLUTION: usize = 11;
-const FRAME: usize = 12;
-const NO_IMAGES: usize = 13;
-const NO_GT: usize = 14;
-const IOF_RULES: usize = 15;
-const SEED: usize = 16;
+const CONTENT: usize = 5;
+const EMPTY_SIDES: usize = 6;
+const TRANSPARENT: usize = 7;
+const POINTS: usize = 8;
+const MIN_RESOLUTION: usize = 9;
+const MAX_RESOLUTION: usize = 10;
+const FRAME: usize = 11;
+const NO_IMAGES: usize = 12;
+const NO_GT: usize = 13;
+const IOF_RULES: usize = 14;
+const SEED: usize = 15;
+/// Never shown: the density the images are sized at, which the range the
+/// two fields above give decides (see [`NetDataset::resolution`]).
+const RESOLUTION: usize = 16;
 
-/// What the maps are drawn with, and so what their labels say. A step up is
-/// the one before it and more: the labels of the areas are always there.
+/// What the maps are drawn with, and so what their labels say: `--content`'s
+/// values. A step up is the one before it and more.
+const ALL: &str = "all";
 const AREAS: &str = "areas";
-const AREAS_AND_LINES: &str = "areas and lines";
+const AREAS_AND_LINES: &str = "areas-and-lines";
 
 pub struct NetDataset {
     form: Form,
+    /// Whether the defaults give a range of their own, rather than leaving
+    /// it to `--resolution`.
+    range_defaults: bool,
 }
 
 impl NetDataset {
@@ -45,49 +51,97 @@ impl NetDataset {
                 Field::text("Cell size")
                     .arg("background_cell_size")
                     .unit("m"),
+                Field::choice("Content", &[ALL, AREAS, AREAS_AND_LINES]).arg("content"),
                 Field::text("Empty sides").arg("empty_sides"),
                 Field::text("Transparent").arg("transparent_areas"),
                 Field::text("Point symbols").arg("point_symbols"),
-                Field::choice("Content", &[AREAS, AREAS_AND_LINES]).help(
-                    "What the maps hold, and so what their labels say. areas: the ground cover \
-                     alone, one label per pixel. areas and lines: the ground cover with a line \
-                     along some of the cell sides, labelled as a second layer which leaves the \
-                     ground under the line as it was.",
-                ),
-                Field::text("Resolution").arg("resolution").unit("px/m"),
                 Field::text("Min resolution")
                     .arg("min_resolution")
-                    .unit("px/m"),
+                    .unit("px/m")
+                    .help(RANGE_HELP),
                 Field::text("Max resolution")
                     .arg("max_resolution")
-                    .unit("px/m"),
+                    .unit("px/m")
+                    .help(RANGE_HELP),
                 Field::text("Frame").arg("frame").unit("m"),
                 Field::toggle("No images").arg("no_images"),
                 Field::toggle("No labels").arg("no_gt"),
                 Field::toggle("IOF rules").arg("iof_rules"),
                 Field::text("Seed").arg("seed"),
+                Field::text("Resolution").arg("resolution"),
             ],
         );
+        // Without a range of their own, both ends are the one density.
+        let range_defaults =
+            form.default(MIN_RESOLUTION).is_some() || form.default(MAX_RESOLUTION).is_some();
+        let resolution = form.default(RESOLUTION).unwrap_or("3").to_string();
+        for end in [MIN_RESOLUTION, MAX_RESOLUTION] {
+            if form.default(end).is_none() {
+                form.set_default(end, &resolution);
+            }
+        }
+        form.show(RESOLUTION, false);
         form.open_picker(SYMBOL_SET);
-        let mut screen = Self { form };
+        let mut screen = Self {
+            form,
+            range_defaults,
+        };
         screen.update();
         screen
     }
 
-    fn lines(&self) -> bool {
-        self.form.choice(CONTENT) == AREAS_AND_LINES
+    fn content(&self) -> &str {
+        self.form.choice_value(CONTENT)
+    }
+
+    /// The range of densities, lowest first, or what is wrong with it.
+    fn range(&self) -> Result<(f64, f64), String> {
+        let low = number(self.form.text(MIN_RESOLUTION), "Min resolution")?;
+        let high = number(self.form.text(MAX_RESOLUTION), "Max resolution")?;
+        if low <= 0.0 || high <= 0.0 {
+            return Err("A resolution must be greater than zero.".to_string());
+        }
+        if low > high {
+            return Err(format!(
+                "Min resolution ({low}) is above Max resolution ({high})."
+            ));
+        }
+        Ok((low, high))
+    }
+
+    /// The density the images are sized at, for a range: the default one
+    /// where it lies in it, else the middle of it — the geometric mean, since
+    /// the densities are drawn log-uniform — rounded to a thousandth.
+    fn resolution(&self, low: f64, high: f64) -> String {
+        let default = self.form.default(RESOLUTION).unwrap_or("3");
+        match default.parse::<f64>() {
+            Ok(r) if low <= r && r <= high => default.to_string(),
+            _ => (((low * high).sqrt() * 1000.0).round() / 1000.0).to_string(),
+        }
     }
 
     /// Shows what the content picked draws, and hides what it does not: the
-    /// sides left empty are for lines, and the see-through areas and the point
-    /// symbols are not drawn by either of the contents so far.
+    /// sides left empty are for lines, which the ground alone has none of,
+    /// and the see-through areas and the point symbols are drawn only by
+    /// `all`. A range upside down is drawn red.
     fn update(&mut self) {
-        let lines = self.lines();
-        self.form.show(EMPTY_SIDES, lines);
-        self.form.show(TRANSPARENT, false);
-        self.form.show(POINTS, false);
+        let content = self.content().to_string();
+        self.form.show(EMPTY_SIDES, content != AREAS);
+        self.form.show(TRANSPARENT, content == ALL);
+        self.form.show(POINTS, content == ALL);
+        let problem = self.range().err();
+        self.form.set_problem(MIN_RESOLUTION, problem.clone());
+        self.form.set_problem(MAX_RESOLUTION, problem);
     }
 }
+
+/// What the two ends of the density range are, said on both.
+const RANGE_HELP: &str = "The densities the maps are drawn at, in pixels per meter of ground: \
+    each map at one of its own, log-uniform between the two, over as much ground as the \
+    image's pixels cover at it, so only the symbols show how dense a picture is (and the \
+    U-Net trained on it learns to say). The same figure in both draws every map at that \
+    one density. The images are sized at the default resolution where it lies in the \
+    range, else at the range's middle.";
 
 impl Tool for NetDataset {
     fn form(&self) -> &Form {
@@ -98,10 +152,27 @@ impl Tool for NetDataset {
         &mut self.form
     }
 
-    fn changed(&mut self, field: usize) {
-        if field == CONTENT {
-            self.update();
+    fn changed(&mut self, _field: usize) {
+        self.update();
+    }
+
+    /// The two ends of the range are made the defaults together, with the
+    /// density the images are sized at, which has to lie between them: one
+    /// end alone could leave the other on the wrong side of it.
+    fn save_default(&mut self, field: usize) -> Result<String, String> {
+        if field != MIN_RESOLUTION && field != MAX_RESOLUTION {
+            return self.form.save_default(field);
         }
+        let (low, high) = self.range()?;
+        let resolution = self.resolution(low, high);
+        self.form.set_text(RESOLUTION, resolution.clone());
+        self.form.save_default(RESOLUTION)?;
+        self.form.save_default(MIN_RESOLUTION)?;
+        self.form.save_default(MAX_RESOLUTION)?;
+        self.range_defaults = true;
+        Ok(format!(
+            "The resolutions default to {low}–{high} px/m now, the images sized at {resolution}."
+        ))
     }
 
     fn explain(&self) -> fn(i32) -> Option<&'static str> {
@@ -122,26 +193,23 @@ impl Tool for NetDataset {
         form.push_option(&mut args, MAPS, "--maps");
         form.push_option(&mut args, LAYOUT_SIZE, "--layout-size");
         form.push_option(&mut args, CELL_SIZE, "--background-cell-size");
-        form.push_option(&mut args, EMPTY_SIDES, "--empty-sides");
-        if self.lines() {
-            // The see-through areas and the points would be drawn and left
-            // unlabelled, which the generator refuses.
-            args.extend(
-                [
-                    "--line-labels",
-                    "--transparent-areas",
-                    "0",
-                    "--point-symbols",
-                    "0",
-                ]
-                .map(str::to_string),
-            );
-        } else {
-            args.push("--just-opaque-areas".to_string());
+        if Some(self.content()) != form.default(CONTENT) {
+            args.extend(["--content".to_string(), self.content().to_string()]);
         }
-        form.push_option(&mut args, RESOLUTION, "--resolution");
-        form.push_option(&mut args, MIN_RESOLUTION, "--min-resolution");
-        form.push_option(&mut args, MAX_RESOLUTION, "--max-resolution");
+        form.push_option(&mut args, EMPTY_SIDES, "--empty-sides");
+        form.push_option(&mut args, TRANSPARENT, "--transparent-areas");
+        form.push_option(&mut args, POINTS, "--point-symbols");
+        let (low, high) = self.range()?;
+        let resolution = self.resolution(low, high);
+        if Some(resolution.as_str()) != form.default(RESOLUTION) {
+            args.extend(["--resolution".to_string(), resolution]);
+        }
+        // One density is --resolution alone, unless the defaults would make
+        // a range of it.
+        if low < high || self.range_defaults {
+            form.push_option(&mut args, MIN_RESOLUTION, "--min-resolution");
+            form.push_option(&mut args, MAX_RESOLUTION, "--max-resolution");
+        }
         form.push_option(&mut args, FRAME, "--frame");
         form.push_flag(&mut args, NO_IMAGES, "--no-images");
         form.push_flag(&mut args, NO_GT, "--no-gt");
@@ -154,8 +222,8 @@ impl Tool for NetDataset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::form::command;
     use crate::tui::form::tests::{press, type_into};
+    use crate::tui::form::{command, State};
     use ratatui::crossterm::event::KeyCode;
 
     #[test]
@@ -163,10 +231,7 @@ mod tests {
         let mut screen = NetDataset::new();
         assert!(command(&screen).unwrap_err().contains("Pick"));
         type_into(&mut screen.form, SYMBOL_SET, "a.omap");
-        assert_eq!(
-            command(&screen).unwrap(),
-            ["net", "dataset", "a.omap", "--just-opaque-areas"]
-        );
+        assert_eq!(command(&screen).unwrap(), ["net", "dataset", "a.omap"]);
         type_into(&mut screen.form, MAPS, "5");
         assert_eq!(command(&screen).unwrap()[3..5], ["--maps", "5"]);
     }
@@ -178,40 +243,46 @@ mod tests {
     }
 
     #[test]
-    fn areas_alone_is_the_default_and_draws_nothing_over_the_ground() {
+    fn the_content_is_mauros_own_option_and_its_default() {
         let mut screen = NetDataset::new();
         type_into(&mut screen.form, SYMBOL_SET, "a.omap");
+        assert_eq!(screen.form.choice_value(CONTENT), ALL);
+        assert_eq!(screen.form.state(CONTENT), State::Default);
+        // Everything is drawn: every overlay's option is there to set.
+        for field in [EMPTY_SIDES, TRANSPARENT, POINTS] {
+            assert!(screen.form.shown(field));
+        }
+        type_into(&mut screen.form, TRANSPARENT, "0.3");
         let args = command(&screen).unwrap();
-        assert!(
-            args.contains(&"--just-opaque-areas".to_string()),
-            "{args:?}"
-        );
-        assert!(!args.contains(&"--line-labels".to_string()), "{args:?}");
-        assert!(!screen.form.shown(EMPTY_SIDES));
+        assert_eq!(args[3..], ["--transparent-areas", "0.3"]);
     }
 
     #[test]
-    fn areas_and_lines_labels_the_lines_and_draws_nothing_else_over_them() {
+    fn areas_alone_draws_nothing_over_the_ground() {
         let mut screen = NetDataset::new();
         type_into(&mut screen.form, SYMBOL_SET, "a.omap");
         next_content(&mut screen);
-        assert_eq!(screen.form.choice(CONTENT), AREAS_AND_LINES);
-        let args = command(&screen).unwrap();
-        assert!(
-            !args.contains(&"--just-opaque-areas".to_string()),
-            "{args:?}"
-        );
+        assert_eq!(screen.form.choice_value(CONTENT), AREAS);
+        assert_eq!(screen.form.state(CONTENT), State::Changed);
+        assert_eq!(command(&screen).unwrap()[3..], ["--content", "areas"]);
+        for field in [EMPTY_SIDES, TRANSPARENT, POINTS] {
+            assert!(!screen.form.shown(field));
+        }
+    }
+
+    #[test]
+    fn areas_and_lines_has_the_sides_to_leave_empty_and_nothing_else() {
+        let mut screen = NetDataset::new();
+        type_into(&mut screen.form, SYMBOL_SET, "a.omap");
+        next_content(&mut screen);
+        next_content(&mut screen);
+        assert_eq!(screen.form.choice_value(CONTENT), AREAS_AND_LINES);
+        type_into(&mut screen.form, EMPTY_SIDES, "0.7");
         assert_eq!(
-            args[3..],
-            [
-                "--line-labels",
-                "--transparent-areas",
-                "0",
-                "--point-symbols",
-                "0"
-            ]
+            command(&screen).unwrap()[3..],
+            ["--content", "areas-and-lines", "--empty-sides", "0.7"]
         );
-        assert!(screen.form.shown(EMPTY_SIDES));
+        assert!(!screen.form.shown(TRANSPARENT) && !screen.form.shown(POINTS));
     }
 
     #[test]
@@ -219,11 +290,13 @@ mod tests {
         let mut screen = NetDataset::new();
         type_into(&mut screen.form, SYMBOL_SET, "a.omap");
         next_content(&mut screen);
-        type_into(&mut screen.form, RESOLUTION, "2");
+        type_into(&mut screen.form, MIN_RESOLUTION, "2");
+        type_into(&mut screen.form, MAX_RESOLUTION, "2");
         type_into(&mut screen.form, SEED, "7");
         let args = command(&screen).unwrap();
         let after = |flag: &str| args.iter().position(|a| a == flag).map(|at| &args[at + 1]);
         assert_eq!(after("--resolution").map(String::as_str), Some("2"));
+        assert!(!args.iter().any(|a| a.contains("-min-")), "{args:?}");
         assert_eq!(after("--seed").map(String::as_str), Some("7"));
     }
 
@@ -241,5 +314,26 @@ mod tests {
         let after = |flag: &str| args.iter().position(|a| a == flag).map(|at| &args[at + 1]);
         assert_eq!(after("--min-resolution").map(String::as_str), Some("1"));
         assert_eq!(after("--max-resolution").map(String::as_str), Some("6"));
+        assert_eq!(after("--resolution"), None, "the default lies in it");
+
+        // A range the default is outside of sizes the images in its middle.
+        type_into(&mut screen.form, MIN_RESOLUTION, "4");
+        type_into(&mut screen.form, MAX_RESOLUTION, "9");
+        let args = command(&screen).unwrap();
+        let after = |flag: &str| args.iter().position(|a| a == flag).map(|at| &args[at + 1]);
+        assert_eq!(after("--resolution").map(String::as_str), Some("6"));
+
+        // Upside down, it is red and no command.
+        type_into(&mut screen.form, MIN_RESOLUTION, "10");
+        screen.changed(MIN_RESOLUTION);
+        assert!(command(&screen).unwrap_err().contains("above"));
+        assert!(matches!(screen.form.state(MAX_RESOLUTION), State::Error(_)));
+    }
+
+    #[test]
+    fn empty_sides_come_after_the_content_they_belong_to() {
+        const { assert!(CONTENT < EMPTY_SIDES) };
+        let screen = NetDataset::new();
+        assert!(!screen.form.shown(RESOLUTION), "the range says it");
     }
 }

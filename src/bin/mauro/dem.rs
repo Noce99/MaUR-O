@@ -31,7 +31,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use maur_o::contours_to_raster_config::{Config, DEFAULT_CONFIG_PATH};
+use maur_o::contours_to_raster_config::Config;
 use maur_o::contours_to_raster_svg::{
     write_contours_function_svg, write_final_svg, write_step1_close_search_svg,
     write_step1_growing_svg, write_step1_svg, write_step2_svg, write_step3_anti_rain_svg,
@@ -63,11 +63,11 @@ pub struct Args {
     output_file: Option<PathBuf>,
 
     /// Where this run's own timestamped folder is created.
-    #[arg(long, default_value = "Results")]
+    #[arg(long)]
     results: PathBuf,
 
     /// The config file with the algorithm's parameters.
-    #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
+    #[arg(long)]
     config: PathBuf,
 
     /// The vertical distance, in meters, between two adjacent contour
@@ -78,7 +78,7 @@ pub struct Args {
     /// baseline -- see `step5_elevation_raster::write_tiff`'s own doc
     /// comment). Does not affect the `--create_svg` hypsometric PNG, whose
     /// colors are scaled by this run's own min/max regardless.
-    #[arg(long, default_value_t = 5.0)]
+    #[arg(long)]
     equidistance: f64,
 
     /// Write the nine per-step validation SVGs Contours-to-Raster.md's

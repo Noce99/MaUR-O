@@ -28,7 +28,7 @@ use std::io;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::FromArgMatches;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{DefaultTerminal, Frame};
 
@@ -146,7 +146,9 @@ impl App {
 /// Whether `mauro` takes `args` (the arguments after `mauro`); clap's own
 /// complaint where it does not.
 pub fn check(args: &[String]) -> Result<(), String> {
-    crate::Cli::try_parse_from(std::iter::once("mauro").chain(args.iter().map(String::as_str)))
+    crate::defaults::command()
+        .try_get_matches_from(std::iter::once("mauro").chain(args.iter().map(String::as_str)))
+        .and_then(|matches| crate::Cli::from_arg_matches(&matches))
         .map(|_| ())
         .map_err(|e| {
             let text = e.to_string();
@@ -246,9 +248,11 @@ mod tests {
             }
             app.handle(key(KeyCode::Enter));
             assert!(matches!(app.screen, Screen::Tool(_)), "{title}");
-            // Past the picker, where the screen opened on one.
-            if screen(&mut app).contains("Pick: ") {
-                app.handle(key(KeyCode::Esc));
+            // Out of the picker, where the screen opened in one.
+            if let Screen::Tool(tool) = &app.screen {
+                if tool.form().in_picker() {
+                    app.handle(key(KeyCode::Left));
+                }
             }
             let shown = screen(&mut app);
             assert!(shown.contains(title), "{title} missing from:\n{shown}");
@@ -266,8 +270,8 @@ mod tests {
     fn esc_goes_back_and_q_quits() {
         let mut app = App::new();
         app.handle(key(KeyCode::Enter));
-        assert!(screen(&mut app).contains("Pick: Map"));
-        app.handle(key(KeyCode::Esc)); // closes the picker
+        assert!(screen(&mut app).contains("Browse: Map"));
+        app.handle(key(KeyCode::Esc)); // out of the picker, to the fields
         assert!(matches!(app.screen, Screen::Tool(_)));
         assert!(screen(&mut app).contains("[ Render ]"));
         app.handle(key(KeyCode::Esc));

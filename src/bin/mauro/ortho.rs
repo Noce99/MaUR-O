@@ -114,7 +114,7 @@ pub struct Args {
     pixel_size: Option<f64>,
 
     /// How far beyond the map's objects to download, in meters on the ground.
-    #[arg(long, value_name = "METERS", default_value_t = 50.0)]
+    #[arg(long, value_name = "METERS")]
     margin: f64,
 
     /// Where to write the image. Defaults to the output map's name with

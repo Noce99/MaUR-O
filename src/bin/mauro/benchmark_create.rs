@@ -53,7 +53,6 @@ use clap::Parser;
 
 use maur_o::naming::{self, Plan};
 use maur_o::progress::{stage, Progress};
-use maur_o::render::{DEFAULT_FRAME, DEFAULT_RESOLUTION};
 use maur_o::report;
 
 /// How many stages a run has, for the headings.
@@ -116,15 +115,15 @@ pub struct Args {
     force: bool,
 
     /// Resolution of the reference images, in pixels per meter on the ground.
-    #[arg(short = 'r', long, default_value_t = DEFAULT_RESOLUTION)]
+    #[arg(short = 'r', long)]
     resolution: f64,
 
     /// Width of the white frame added on each side, in meters on the ground.
-    #[arg(short = 'f', long, default_value_t = DEFAULT_FRAME)]
+    #[arg(short = 'f', long)]
     frame: f64,
 
     /// Only use maps whose name contains this.
-    #[arg(long, default_value = "", value_name = "TEXT")]
+    #[arg(long, value_name = "TEXT")]
     filter: String,
 }
 
