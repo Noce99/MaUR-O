@@ -83,6 +83,8 @@
 //! [`crate::dataset::resolution_of`] reads from `classes.json` instead.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataset::{Dataset, DatasetError};
@@ -186,6 +188,43 @@ struct Entry {
     resolution: Option<f64>,
 }
 
+/// What a pass number is spread over the crop seeds by: an odd number with
+/// its bits well mixed (the golden ratio's, as a 64-bit fraction), so that
+/// pass `p`'s seeds land nowhere near pass `p + 1`'s, nor near the
+/// validation half's.
+const PASS_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Which pass over a dataset its loader is on, shared between the dataset
+/// and whoever is told when a pass ends.
+///
+/// burn asks a dataset for item `n` and nothing more — no epoch — so a crop
+/// decided by `n` alone is the same crop every epoch: a run of eight crops
+/// per map sees the same few corners of each map, every pass, and nothing
+/// else of it, which is a fixed set of pictures a network can learn by heart.
+/// This is the epoch, handed to the dataset from outside: the training
+/// loop's once-an-epoch hook ([`crate::net::training`]) sets it once a pass
+/// is over and before the next one starts, so that every pass crops each map
+/// somewhere new, while item `n` of one pass is still the same crop however
+/// often it is asked for.
+///
+/// Nought, the first pass, crops where a dataset without one always did. A
+/// validation half's is never moved on: its crops are the same every epoch,
+/// which is what makes one epoch's score comparable with the next.
+#[derive(Clone, Debug, Default)]
+pub struct Pass(Arc<AtomicUsize>);
+
+impl Pass {
+    /// The pass the loader is on, from nought.
+    pub fn get(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    /// Moves the loader on to pass `pass`.
+    pub fn set(&self, pass: usize) {
+        self.0.store(pass, Ordering::SeqCst);
+    }
+}
+
 /// The maps of a dataset folder, cropped.
 #[derive(Debug)]
 pub struct MapDataset {
@@ -240,11 +279,13 @@ pub struct MapDataset {
     /// `classes.json` names no symbol set to read them from.
     symmetry: Vec<u32>,
     /// What the crop positions come out of. A dataset is asked for the same
-    /// item more than once — every epoch, for one — and an item which
-    /// changed between two asks would make a validation score mean nothing,
-    /// so the position of crop `n` is decided by `n` and this, and not by
-    /// when it was asked for.
+    /// item more than once and an item which changed between two asks would
+    /// make a score mean nothing, so the position of crop `n` is decided by
+    /// `n`, this and the [`Pass`], and not by when it was asked for.
     seed: u64,
+    /// Which pass over the maps the crops are for — see [`Pass`]. Nought
+    /// unless a training loop moves it on.
+    pass: Pass,
 }
 
 impl MapDataset {
@@ -437,6 +478,7 @@ impl MapDataset {
             overhang: 0,
             symmetry: symmetry_of(folder, classes),
             seed,
+            pass: Pass::default(),
         })
     }
 
@@ -523,6 +565,20 @@ impl MapDataset {
         self.crop
     }
 
+    /// The handle which moves this dataset on to its next pass, so that it
+    /// crops each map somewhere new — see [`Pass`]. A clone of the one the
+    /// dataset reads, so it still reaches it once a loader owns the dataset.
+    pub fn pass(&self) -> Pass {
+        self.pass.clone()
+    }
+
+    /// What crop `index` of the current pass is positioned by.
+    fn crop_seed(&self, index: usize) -> u64 {
+        self.seed
+            .wrapping_add(index as u64)
+            .wrapping_add((self.pass.get() as u64).wrapping_mul(PASS_STRIDE))
+    }
+
     /// How many opaque areas the labels were written for, which is what a
     /// network read off them has to have a channel each for.
     pub fn classes(&self) -> usize {
@@ -574,7 +630,7 @@ impl MapDataset {
             // works out for those same item indices.
             for crop in 0..self.crops_per_map {
                 let index = map * self.crops_per_map + crop;
-                let mut random = Random::from_seed(self.seed.wrapping_add(index as u64));
+                let mut random = Random::from_seed(self.crop_seed(index));
                 let (left, top) = self.corner(&mut random, width, height);
 
                 for row in 0..size {
@@ -663,6 +719,9 @@ impl MapDataset {
             overhang: self.overhang,
             symmetry: self.symmetry.clone(),
             seed,
+            // A pass of each half's own: moving the training half on must
+            // leave the validation half's crops where they were.
+            pass: Pass::default(),
         };
         // Different seeds, so the two halves do not crop at the same corners.
         (
@@ -777,8 +836,9 @@ impl Dataset<MapCrop> for MapDataset {
             image_path.display(),
         );
 
-        // The same index gives the same corner however often it is asked for.
-        let mut random = Random::from_seed(self.seed.wrapping_add(index as u64));
+        // The same index gives the same corner however often it is asked for
+        // within a pass, and another corner in the next pass.
+        let mut random = Random::from_seed(self.crop_seed(index));
         let (left, top) = self.corner(&mut random, width, height);
 
         let pixels = self.crop * self.crop;
@@ -1085,6 +1145,58 @@ mod tests {
                 crop.top,
             );
         }
+    }
+
+    /// A pass moved on crops the maps somewhere new, the same pass crops
+    /// them where it did, and the validation half never moves with it.
+    #[test]
+    fn a_new_pass_crops_somewhere_new_and_only_the_half_it_belongs_to() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let folder = dir.path().join("dataset");
+        let settings = crate::dataset::Settings {
+            layout_size: 2,
+            cell_size: 40,
+            maps: 4,
+            just_opaque_areas: true,
+            resolution: 2.0,
+            frame: 10.0,
+            ..crate::dataset::Settings::default()
+        };
+        crate::dataset::create_dataset(
+            Path::new("tests/data/turning_patterns.xmap"),
+            &folder,
+            &settings,
+            |_, _| {},
+        )
+        .expect("the dataset generates");
+
+        let (train, valid) = MapDataset::load(&folder, 0)
+            .expect("the dataset loads")
+            .with_crop(16)
+            .expect("a crop which fits")
+            .with_crops_per_map(4)
+            .split(0.5);
+        let corners = |dataset: &MapDataset| -> Vec<(isize, isize)> {
+            (0..dataset.len())
+                .map(|index| {
+                    let crop = dataset.get(index).expect("a crop");
+                    (crop.left, crop.top)
+                })
+                .collect()
+        };
+
+        let first = corners(&train);
+        assert_eq!(corners(&train), first, "the same pass crops the same");
+        let held = corners(&valid);
+
+        let pass = train.pass();
+        pass.set(1);
+        let second = corners(&train);
+        assert_ne!(second, first, "the next pass crops somewhere new");
+        assert_eq!(corners(&valid), held, "the validation half stays put");
+
+        pass.set(0);
+        assert_eq!(corners(&train), first, "a pass is decided by its number");
     }
 
     /// A folder with nothing to train on says so, rather than handing back a

@@ -60,6 +60,7 @@ together.
   - [`mauro net image-to-map`](#mauro-net-image-to-map)
   - [The angle, and why it is folded](#the-angle-and-why-it-is-folded)
   - [Weight decay](#weight-decay)
+  - [New crops every epoch, and early stopping](#new-crops-every-epoch-and-early-stopping)
   - [`mauro net show-batches`](#mauro-net-show-batches)
   - [`mauro net describe`](#mauro-net-describe)
 - [Using it as a library](#using-it-as-a-library)
@@ -1119,8 +1120,8 @@ cargo run --release --features cuda -- net train --model tree \
 
 It is trained on the **whole picture**, reduced to `--size` pixels (a divisor of
 16), rather than on crops, so an epoch is short — a few dozen of them make a run.
-`--crop`, `--crops-per-map`, `--angle-weight`, `--line-weight`, `--scale-weight`, `--weight-decay`, `--overhang`,
-`--workers` and `--image-valid` are the U-Net's and are ignored. A run is
+`--crop`, `--crops-per-map`, `--angle-weight`, `--line-weight`, `--scale-weight`, `--weight-decay`, `--patience`,
+`--overhang`, `--workers` and `--image-valid` are the U-Net's and are ignored. A run is
 `TreeNet_<date>/` holding `tree.json`, `architecture.txt`, `best.bpk` and
 `valid.png` (*picture | label | answer*). It reports to the terminal interface
 like any other run and can be paused and stopped.
@@ -1357,6 +1358,30 @@ and makes the optimizer plain Adam.
 This is *not* what keeps a checkpoint readable — that is the weights file,
 which is written at full precision because a normalization's running **variance** does
 not fit in an `f16`. The two are separate.
+
+### New crops every epoch, and early stopping
+
+An epoch is `--crops-per-map` crops of every training map, and **each epoch
+crops every map in new places**. burn asks a dataset for item `n` and tells it
+nothing else, so a crop placed by `n` alone would be the same crop every
+epoch. With eight crops of 64 pixels, that is the same seventh of each
+480-pixel map every time and nothing of the rest, a fixed set of pictures a
+network can learn by heart. One overnight run did exactly that: pixel
+accuracy stayed the same on both splits (95.8%), but the line IoU reached 90
+on the training half and stopped at 70 on validation from about epoch 20, and
+the scale error went *up* on validation while it fell on training. The epoch
+is now handed to the training half from burn's once-an-epoch hook. Within an
+epoch, a crop is still fixed by its index. The **validation** maps are cropped
+in the same places every epoch, so one epoch's score can be compared with the
+next. The first epoch crops where runs before this change always did, which is
+also what [`mauro net show-batches`](#mauro-net-show-batches) draws.
+
+That run's validation loss was lowest at epoch 23 and never lower in the
+forty-six epochs after it, about five hours spent overfitting. So a U-Net run
+now **stops early**: after `--patience` epochs (10 by default) without a lower
+validation loss, it ends short of `--epochs` and says so. `best.bpk` is chosen
+by that same validation loss, so stopping takes nothing from it.
+`--patience 0` runs every epoch asked for.
 
 ### `mauro net show-batches`
 

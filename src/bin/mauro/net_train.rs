@@ -6,7 +6,8 @@
 //! `--control-points`, `--samples`, `--temperature-start` and
 //! `--temperature-end`; the U-Net's `--crop`, `--crops-per-map`,
 //! `--angle-weight`, `--line-weight`, `--scale-weight`, `--weight-decay`,
-//! `--overhang`, `--workers` and `--image-valid` do not apply to it.
+//! `--patience`, `--overhang`, `--workers` and `--image-valid` do not apply
+//! to it.
 //!
 //! A dataset drawn over a range of densities (`mauro net dataset
 //! --min-resolution/--max-resolution`) gives the U-Net a scale head as well:
@@ -42,6 +43,13 @@
 //! run logged, and `best.bpk` — the weights of the epoch which validated best
 //! — at the end of it.
 //!
+//! Every epoch crops each training map somewhere new, so that a run cannot
+//! learn a fixed set of crops by heart; the validation maps are cropped in the
+//! same places every epoch, so that their scores compare. A U-Net run stops
+//! before `--epochs` once `--patience` epochs (10 by default, `0` never) have
+//! gone by without a lower validation loss: `best.bpk` is that lowest epoch,
+//! so what comes after it is only overfitting.
+//!
 //! The backend is chosen when this is built, not when it is run: `flex` by
 //! default, which is pure Rust and slow; `--features wgpu` for any GPU with a
 //! Vulkan, Metal or DX12 driver; `--features cuda` for an NVIDIA one.
@@ -66,7 +74,8 @@ use maur_o::net::data::{CROP, DEFAULT_CROPS_PER_MAP};
 use maur_o::net::image_valid::DEFAULT_IMAGE_VALID;
 use maur_o::net::monitor::Monitor;
 use maur_o::net::training::{
-    train, TrainingConfig, DEFAULT_ANGLE_WEIGHT, DEFAULT_LEARNING_RATE, DEFAULT_WEIGHT_DECAY,
+    train, TrainingConfig, DEFAULT_ANGLE_WEIGHT, DEFAULT_LEARNING_RATE, DEFAULT_PATIENCE,
+    DEFAULT_WEIGHT_DECAY,
 };
 use maur_o::net::tree_training::{train_tree, TreeTrainingConfig};
 use maur_o::net::unet::{DEFAULT_BASE_CHANNELS, DEFAULT_SCALE_WEIGHT, DEPTH};
@@ -113,7 +122,7 @@ pub struct Args {
     /// cut the picture into its areas and a symbol for each, and is trained on
     /// the whole pictures reduced to --size. The options of the other model
     /// are ignored: --crop, --crops-per-map, --angle-weight, --line-weight,
-    /// --scale-weight, --weight-decay,
+    /// --scale-weight, --weight-decay, --patience,
     /// --overhang, --workers and --image-valid are the U-Net's; --size,
     /// --depth, --control-points, --samples and the two temperatures the
     /// tree's.
@@ -180,6 +189,13 @@ pub struct Args {
     /// the optimizer plain Adam.
     #[arg(long, default_value_t = DEFAULT_WEIGHT_DECAY, value_name = "SHARE")]
     weight_decay: f64,
+
+    /// How many epochs without a lower validation loss the run carries on
+    /// for before it stops, short of --epochs. best.bpk is the epoch with
+    /// the lowest, so every epoch after it which is no better is only
+    /// overfitting. Nought never stops early.
+    #[arg(long, default_value_t = DEFAULT_PATIENCE, value_name = "EPOCHS")]
+    patience: usize,
 
     /// How far a crop may hang off the edge of a map, in pixels, with what
     /// is past the edge filled in as the white paper a map is printed on.
@@ -429,6 +445,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         .with_line_weight(args.line_weight)
         .with_scale_weight(args.scale_weight)
         .with_weight_decay(args.weight_decay)
+        .with_patience(args.patience)
         .with_image_valid(args.image_valid)
         .with_seed(args.seed);
 

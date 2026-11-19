@@ -90,7 +90,7 @@ use burn::train::checkpoint::{
     ComposedCheckpointingStrategy, KeepLastNCheckpoints, MetricCheckpointingStrategy,
 };
 use burn::train::metric::state::{FormatOptions, NumericMetricState};
-use burn::train::metric::store::{Aggregate, Direction, Split};
+use burn::train::metric::store::{Aggregate, Direction, EventStoreClient, Split};
 use burn::train::metric::{
     Adaptor, ItemLazy, LossInput, LossMetric, Metric, MetricAttributes, MetricMetadata, MetricName,
     Numeric, NumericAttributes, NumericEntry, SerializedEntry,
@@ -98,14 +98,15 @@ use burn::train::metric::{
 use burn::train::renderer::tui::TuiMetricsRendererWrapper;
 use burn::train::renderer::CliMetricsRenderer;
 use burn::train::{
-    InferenceStep, Learner, LearnerSummary, SupervisedTraining, TrainOutput, TrainStep,
+    EarlyStoppingStrategy, InferenceStep, Learner, LearnerSummary, MetricEarlyStoppingStrategy,
+    StoppingCondition, SupervisedTraining, TrainOutput, TrainStep,
 };
 
 use crate::dataset::{Classes, CLASSES_FILE};
 use crate::symbol_kinds::Catalogue;
 use crate::xml_reader::read_xml_map;
 
-use crate::net::data::{MapBatch, MapBatcher, MapDataset, CROP, DEFAULT_CROPS_PER_MAP};
+use crate::net::data::{MapBatch, MapBatcher, MapDataset, Pass, CROP, DEFAULT_CROPS_PER_MAP};
 use crate::net::image_valid::{ImageValidation, DEFAULT_IMAGE_VALID, IMAGE_VALID};
 use crate::net::monitor::{Gated, Monitor};
 use crate::net::predict::{save_weights, ReadBackSettings};
@@ -194,6 +195,17 @@ pub const DEFAULT_LEARNING_RATE: f64 = 3.0e-4;
 ///
 /// Nought turns it off, and turns [`AdamWConfig`] back into plain Adam.
 pub const DEFAULT_WEIGHT_DECAY: f64 = 0.1;
+
+/// How many epochs a run carries on for without its validation loss coming
+/// down before it stops. See [`TrainingConfig::patience`].
+///
+/// Ten, from the run this was added after: a hundred epochs asked for, the
+/// validation loss at its lowest at epoch 23 and no lower in the forty-six
+/// after it, while the training loss went on falling to under half of it --
+/// the line and scale heads learning the training maps rather than maps.
+/// Its noisier stretches went five or six epochs without a new best and then
+/// found one; ten is past that, and short next to the hours the rest cost.
+pub const DEFAULT_PATIENCE: usize = 10;
 
 /// The ceiling on the norm of one step's gradient.
 ///
@@ -1223,6 +1235,13 @@ pub struct TrainingConfig {
     /// turns it off.
     #[config(default = "DEFAULT_WEIGHT_DECAY")]
     pub weight_decay: f64,
+    /// How many epochs without a new lowest validation loss the run puts up
+    /// with before it stops, short of [`TrainingConfig::epochs`]: the epoch
+    /// `best.bpk` comes from is the lowest, so every epoch past it which is
+    /// no better is time spent overfitting. Nought never stops early. See
+    /// [`DEFAULT_PATIENCE`].
+    #[config(default = "DEFAULT_PATIENCE")]
+    pub patience: usize,
     /// What the crop positions and the shuffling come out of. The same seed
     /// gives the same run.
     #[config(default = 0)]
@@ -1303,6 +1322,70 @@ pub const KEPT_CHECKPOINTS: usize = 5;
 /// in memory is `f32` throughout; what breaks is every use of the file
 /// afterwards. See the module documentation of [`crate::net::predict`].
 const BEST_WEIGHTS: &str = "best";
+
+/// What burn's once-an-epoch hook does for a U-Net run. burn has one slot for
+/// it — [`SupervisedTraining::early_stopping`] — and three things want it:
+///
+/// * the training half's [`Pass`], moved on so that the next epoch crops
+///   every map somewhere new rather than at the corners it was cropped at
+///   last time. burn calls the hook after an epoch's validation and before
+///   the next epoch asks its loader for anything, so that is where a pass
+///   ends;
+/// * the sheets under `image_valid/` ([`ImageValidation`]), which always
+///   answer "carry on";
+/// * the stop itself, burn's own [`MetricEarlyStoppingStrategy`] on the
+///   validation loss, the metric `best.bpk` is chosen by — where the run
+///   asked for one ([`TrainingConfig::patience`]).
+#[derive(Clone)]
+struct EpochHook {
+    phase: ImageValidation,
+    pass: Pass,
+    stopping: Option<MetricEarlyStoppingStrategy>,
+    patience: usize,
+}
+
+impl EpochHook {
+    /// The hook of a run whose sheets are `phase`, whose training half is
+    /// moved on by `pass`, and which stops after `patience` epochs without a
+    /// better validation loss (never, for nought).
+    fn new(phase: ImageValidation, pass: Pass, patience: usize) -> EpochHook {
+        let stopping = (patience > 0).then(|| {
+            MetricEarlyStoppingStrategy::new(
+                &LossMetric::new(),
+                Aggregate::Mean,
+                Direction::Lowest,
+                Split::Valid,
+                StoppingCondition::NoImprovementSince { n_epochs: patience },
+            )
+        });
+        EpochHook {
+            phase,
+            pass,
+            stopping,
+            patience,
+        }
+    }
+}
+
+impl EarlyStoppingStrategy for EpochHook {
+    fn should_stop(&mut self, epoch: usize, store: &EventStoreClient) -> bool {
+        // Epoch `epoch` is over and was pass `epoch - 1`; the next one is
+        // pass `epoch`.
+        self.pass.set(epoch);
+        self.phase.should_stop(epoch, store);
+        let stop = self
+            .stopping
+            .as_mut()
+            .is_some_and(|stopping| stopping.should_stop(epoch, store));
+        if stop {
+            println!(
+                "no lower validation loss in the last {} epochs: the run stops at epoch {epoch}",
+                self.patience,
+            );
+        }
+        stop
+    }
+}
 
 /// The phase a run shows its work with, built out of what its folder now
 /// holds: the symbol set the dataset was drawn with, and the `classes.json`
@@ -1671,6 +1754,9 @@ pub fn train(
     // Behind the monitor's gate, where there is one, which is how a pause
     // holds the run: no crops, no steps.
     let gate = monitor.as_ref().map(Monitor::gate).unwrap_or_default();
+    // Taken before the loader owns the training half: what moves it on to a
+    // new set of crops each epoch -- see `EpochHook`.
+    let pass = train.pass();
     let train_loader = burn::data::dataloader::DataLoaderBuilder::new(MapBatcher)
         .batch_size(config.batch_size)
         .num_workers(config.workers)
@@ -1753,10 +1839,9 @@ pub fn train(
                 .build(),
         )
         .num_epochs(config.epochs)
-        // Not a stopping strategy: the one hook burn calls once an epoch. It
-        // always answers that the run should carry on — see
-        // `crate::net::image_valid`.
-        .early_stopping(phase)
+        // The one hook burn calls once an epoch, which three things share:
+        // see `EpochHook`.
+        .early_stopping(EpochHook::new(phase, pass, config.patience))
         .summary();
     let training = if let Some(monitor) = &monitor {
         monitor.watch(training.interrupter());

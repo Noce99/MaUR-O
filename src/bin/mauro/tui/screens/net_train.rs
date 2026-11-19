@@ -16,26 +16,28 @@ const ANGLE_WEIGHT: usize = 9;
 const LINE_WEIGHT: usize = 10;
 const SCALE_WEIGHT: usize = 11;
 const WEIGHT_DECAY: usize = 12;
-const OVERHANG: usize = 13;
-const TRAIN_SHARE: usize = 14;
-const WORKERS: usize = 15;
-const IMAGE_VALID: usize = 16;
-const SEED: usize = 17;
-const SIZE: usize = 18;
-const DEPTH: usize = 19;
-const CONTROL_POINTS: usize = 20;
-const SAMPLES: usize = 21;
-const TEMPERATURE_START: usize = 22;
-const TEMPERATURE_END: usize = 23;
+const PATIENCE: usize = 13;
+const OVERHANG: usize = 14;
+const TRAIN_SHARE: usize = 15;
+const WORKERS: usize = 16;
+const IMAGE_VALID: usize = 17;
+const SEED: usize = 18;
+const SIZE: usize = 19;
+const DEPTH: usize = 20;
+const CONTROL_POINTS: usize = 21;
+const SAMPLES: usize = 22;
+const TEMPERATURE_START: usize = 23;
+const TEMPERATURE_END: usize = 24;
 
 /// The fields only the U-Net has, and the ones only the tree has.
-const UNET_ONLY: [usize; 9] = [
+const UNET_ONLY: [usize; 10] = [
     CROP,
     CROPS_PER_MAP,
     ANGLE_WEIGHT,
     LINE_WEIGHT,
     SCALE_WEIGHT,
     WEIGHT_DECAY,
+    PATIENCE,
     OVERHANG,
     WORKERS,
     IMAGE_VALID,
@@ -76,6 +78,7 @@ impl NetTrain {
                 Field::text("Line weight").arg("line_weight"),
                 Field::text("Scale weight").arg("scale_weight"),
                 Field::text("Weight decay").arg("weight_decay"),
+                Field::text("Patience").arg("patience").unit("epochs"),
                 Field::text("Overhang").arg("overhang").unit("px"),
                 Field::text("Train share").arg("train_share"),
                 Field::text("Workers").arg("workers"),
@@ -161,6 +164,7 @@ impl Tool for NetTrain {
         form.push_option(&mut args, LINE_WEIGHT, "--line-weight");
         form.push_option(&mut args, SCALE_WEIGHT, "--scale-weight");
         form.push_option(&mut args, WEIGHT_DECAY, "--weight-decay");
+        form.push_option(&mut args, PATIENCE, "--patience");
         form.push_option(&mut args, OVERHANG, "--overhang");
         form.push_option(&mut args, TRAIN_SHARE, "--train-share");
         form.push_option(&mut args, WORKERS, "--workers");
