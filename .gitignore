@@ -30,3 +30,8 @@ BOO26.sh
 trainings
 *.csv
 .cargo
+
+
+.claude/
+.gitattributes
+graphify-out/
