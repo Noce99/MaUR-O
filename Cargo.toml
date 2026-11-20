@@ -78,9 +78,10 @@ ureq = "3"
 # crossterm comes with it, re-exported as ratatui::crossterm.
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 # The PMTiles v3 container `mot_archive` keeps MOT tiles in. Only what it needs:
-# the writer, the synchronous reader (no tokio runtime of ours), and zstd for
-# the tiles. Native only, like `ureq`, so the wasm build never sees it.
-pmtiles = { version = "0.28", default-features = false, features = ["write", "zstd"] }
+# the writer and the synchronous reader (no tokio runtime of ours); the tiles are
+# gzip, which the crate always has. Native only, like `ureq`, so the wasm build
+# never sees it.
+pmtiles = { version = "0.28", default-features = false, features = ["write"] }
 
 [dev-dependencies]
 assert_cmd = "2"

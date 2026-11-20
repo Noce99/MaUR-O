@@ -4,8 +4,14 @@
 //! directory maps a tile to a byte range, so a viewer can fetch one tile with
 //! an HTTP range request from a static host. The `pmtiles` crate does the
 //! container; this module puts the [`Tile`] payload of [`crate::mot`] in it,
-//! compressed with zstd, and keeps what a reader needs to know about the
+//! compressed with gzip, and keeps what a reader needs to know about the
 //! layer in the archive's metadata.
+//!
+//! Gzip because a browser decompresses it itself (`DecompressionStream`), so a
+//! viewer that draws the tiles in the browser needs no decompressor of its own;
+//! on the maps measured it is no bigger than zstd at the level the writer used
+//! (`MOT-Format.md`). An archive written when the tiles were zstd is not read:
+//! it is to be built again.
 //!
 //! Native only: the wasm build reads the container itself.
 
@@ -171,7 +177,7 @@ pub fn write(
         (south, north) = (south.min(y - size), north.max(y));
     }
     let mut builder = PmTilesWriter::new(TileType::Unknown)
-        .tile_compression(Compression::Zstd)
+        .tile_compression(Compression::Gzip)
         .min_zoom(info.min_zoom)
         .max_zoom(info.max_zoom)
         .metadata(info.to_json());
@@ -211,6 +217,17 @@ impl Archive {
     pub fn open(path: &Path) -> Result<Archive, String> {
         let reader = PmTilesReader::new_with_path(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let compression = reader.get_header().tile_compression;
+        if !matches!(compression, Compression::Gzip | Compression::None) {
+            return Err(format!(
+                "{}: its tiles are compressed with {}, which this version does not read \
+                 (MOT tiles are gzip): build the archive again with `mauro tiles build`",
+                path.display(),
+                compression
+                    .content_encoding()
+                    .unwrap_or("an unknown compression")
+            ));
+        }
         let metadata = reader.get_metadata().map_err(|e| e.to_string())?;
         let info = ArchiveInfo::from_json(&metadata)?;
         Ok(Archive { reader, info })
@@ -321,6 +338,45 @@ mod tests {
             .tile(TileId { z: 14, x: 1, y: 1 })
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn tiles_are_gzip_and_an_archive_of_another_compression_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.pmtiles");
+        let id = TileId {
+            z: 14,
+            x: 8700,
+            y: 5900,
+        };
+        let info = ArchiveInfo {
+            layer: "ISOM 2017-2".into(),
+            grid_cm: 5,
+            min_zoom: 14,
+            max_zoom: 14,
+            sources: Vec::new(),
+        };
+        write(&path, &BTreeMap::from([(id, tile(0))]), &info).unwrap();
+        let reader = PmTilesReader::new_with_path(&path).unwrap();
+        assert_eq!(reader.get_header().tile_compression, Compression::Gzip);
+        // The raw bytes of the tile are a gzip stream (its magic number).
+        let raw = reader.get_tile(coord(id).unwrap()).unwrap().unwrap();
+        assert_eq!(raw[..2], [0x1f, 0x8b]);
+
+        // An archive written when the tiles were zstd: said so, not misread.
+        let old = dir.path().join("old.pmtiles");
+        let mut writer = PmTilesWriter::new(TileType::Unknown)
+            .precompressed(Compression::Zstd)
+            .metadata(info.to_json())
+            .create(BufWriter::new(File::create(&old).unwrap()))
+            .unwrap();
+        writer.add_tile(coord(id).unwrap(), b"not read").unwrap();
+        writer.finalize().unwrap();
+        let error = Archive::open(&old).err().unwrap();
+        assert!(
+            error.contains("zstd") && error.contains("build the archive again"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -146,8 +146,11 @@ to get ground coordinates.
   (14 by default) has every object as drawn; a coarser one is built from the
   same objects by the rules of their symbols ([Zoom levels](#zoom-levels)).
   An object has the same id at every level.
-- Each tile is compressed as a unit (zstd or brotli; brotli if the browser
-  should decompress it natively).
+- Each tile is compressed as a unit, with **gzip**: a browser decompresses it
+  itself (`DecompressionStream`), so a viewer drawing tiles in the browser needs
+  no decompressor of its own. On Corno and Borgo Panigale it came out 2.5%
+  smaller than the zstd (level 3) the writer used before; zstd -19 or brotli
+  would save a little more, at the cost of a decompressor in the viewer.
 
 ### Zoom levels
 
@@ -316,7 +319,8 @@ decompressing the whole map.
 ### Measurements of the codec
 
 `mauro tiles build` on the same two maps, 5 cm grid, zoom 14, each tile
-compressed on its own with zstd -19. Objects of hidden symbols and drawing aids are
+compressed on its own with zstd -19 (the archives are gzip now; these sizes
+were taken before). Objects of hidden symbols and drawing aids are
 left out (in Corno they are 44,000 of 57,000 objects, the reason it is so much
 smaller than the estimate above); symbols not in the ISOM table are remapped or
 dropped (Bologna is an ISSprOM map, so most of its objects are stored under

@@ -129,7 +129,7 @@ one file per step; read that document first.
 | `mot_symbols.rs` | A MOT layer's symbol table (ISOM 2017-2 or ISSprOM 2019, built from the shipped reference maps, and the detection of which a map is drawn to) the closest-symbol rule (same code, the symbol it is a variant of, or the same name), and each symbol's zoom rule (the zoom it appears at, a size under which it is too small to see, how far its line may be thinned). |
 | `mot_history.rs` | The history of a MOT map, pure: the changesets (`ChangeLog`, time → changeset), and a tile's versions (`VersionedTile`): applying a changeset's adds, removes and replaces, the tile as of a changeset, undoing a changeset as a new one, and the head (a plain tile payload) and the history sidecar as bytes. No archive, no authors. |
 | `mot_render.rs` | Draws a MOT tile with the crate's renderer: turns its objects back into a `Map` with the ISOM symbols, in paper millimetres at the scale asked for (a Mercator meter is `1 / cos(latitude)` ground meters), and paints the window of the tile asked for, which may be a part of it (overzoom), and the coverage areas (tinted or only outlined, the edges a tile cut not drawn); `coverage_mask` and `composite` stack layers by priority, each hiding the ones below inside its coverage. |
-| `mot_archive.rs` | MOT tiles in a PMTiles v3 archive (the `pmtiles` crate, zstd per tile, the layer's symbol set, grid, zoom range and the file each coverage came from in the metadata), and reading a tile or a box back. Native only. |
+| `mot_archive.rs` | MOT tiles in a PMTiles v3 archive (the `pmtiles` crate, gzip per tile, the layer's symbol set, grid, zoom range and the file each coverage came from in the metadata), and reading a tile or a box back. Native only. |
 
 ### Orthophotos
 
