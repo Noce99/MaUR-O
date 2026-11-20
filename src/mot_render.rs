@@ -6,10 +6,16 @@
 //! millimetres on a paper at the scale asked for — and the renderer that draws
 //! `.omap` files draws it, so a tile looks as Mapper draws the map.
 //!
-//! The scale is the viewer's choice (`MOT-Format.md`): a tile has ground
-//! coordinates, and the same tile at 1:4000 or 1:15000 is the same objects with
-//! symbols a different size on the ground. A Mercator meter is longer than a
-//! ground meter by `1 / cos(latitude)`, taken at the middle of the tile drawn.
+//! A tile has ground coordinates and a symbol set has paper millimetres, so
+//! the scale joins them: the same tile at 1:4000 or 1:15000 is the same objects
+//! with symbols a different size on the ground. A symbol set is drawn true to
+//! the ground only at its own scale, the one its reference map is drawn at
+//! ([`TileRenderer::symbol_scale`]: 1:10000 for ISOM, whose 1:15000 maps have
+//! symbols two thirds that size on paper and so the same on the ground, and
+//! 1:4000 for ISSprOM); [`TileRenderer::render`] takes the scale, so another
+//! is possible but draws the symbols bigger or smaller than the maps did. A
+//! Mercator meter is longer than a ground meter by `1 / cos(latitude)`, taken at
+//! the middle of the tile drawn.
 //!
 //! Any tile of the pyramid can be drawn from the tile of a coarser or finer level
 //! that holds its ground: [`TileRenderer::render`] takes the tile with the data
@@ -56,6 +62,8 @@ pub struct TileRenderer {
     template: Map,
     /// For each id of the symbol table, its symbol's index in the template.
     symbol_index: Vec<Option<usize>>,
+    /// The scale the symbol set is drawn at in its reference map.
+    symbol_scale: f64,
 }
 
 impl TileRenderer {
@@ -64,6 +72,7 @@ impl TileRenderer {
         let (mut template, _) =
             read_xml_map_str(table.reference()).expect("the shipped symbol sets are well-formed");
         template.objects.clear();
+        let symbol_scale = f64::from(template.scale_denominator);
         let symbol_index = (0..table.len() as u16)
             .map(|id| {
                 let code = &table.get(id)?.code;
@@ -76,11 +85,22 @@ impl TileRenderer {
         TileRenderer {
             template,
             symbol_index,
+            symbol_scale,
         }
     }
 
+    /// The scale (its denominator) at which the symbols are as big on the ground
+    /// as on the maps drawn to the standard: the one the symbol set's reference
+    /// map is drawn at. What to give [`TileRenderer::render`] for a tile to look
+    /// as the maps it came from.
+    pub fn symbol_scale(&self) -> f64 {
+        self.symbol_scale
+    }
+
     /// `view`, drawn at 1:`scale` into a square of `pixels` pixels, from the
-    /// objects of `tile`, which is the tile `data`. `view` is `data` or a part of
+    /// objects of `tile`, which is the tile `data`. At a `scale` other than
+    /// [`TileRenderer::symbol_scale`] the symbols are bigger or smaller on the
+    /// ground than on the maps. `view` is `data` or a part of
     /// it, a tile of a finer zoom inside it. Transparent where nothing is drawn.
     ///
     /// An error where `view` is not inside `data` or the image cannot be made.
@@ -557,7 +577,57 @@ mod tests {
     }
 
     #[test]
-    fn the_scale_is_the_viewers_choice() {
+    fn each_symbol_set_is_drawn_at_the_scale_of_its_reference_map() {
+        assert_eq!(
+            TileRenderer::new(&SymbolTable::isom()).symbol_scale(),
+            10_000.0
+        );
+        assert_eq!(
+            TileRenderer::new(&SymbolTable::issprom()).symbol_scale(),
+            4_000.0
+        );
+    }
+
+    #[test]
+    fn a_line_is_as_wide_on_the_ground_as_on_the_map_at_the_symbol_scale() {
+        // A contour of ISOM is 0.14 mm on a 1:15000 map, 2.1 m on the ground; the
+        // 1:10000 symbol set draws it 0.21 mm wide, the same 2.1 m at its scale.
+        let table = SymbolTable::isom();
+        let mut renderer = TileRenderer::new(&table);
+        let id = TileId {
+            z: 14,
+            x: 8700,
+            y: 5900,
+        };
+        let size = TileId::size(id.z);
+        let units = (size * 100.0 / 5.0) as i32;
+        let mut tile = Tile::new(5);
+        tile.objects.push(TileObject {
+            id: 0,
+            symbol: table.id_of("101").unwrap(),
+            rotation: 0.0,
+            shape: Shape::Path(None),
+            nodes: vec![node(units / 2, 0, 0), node(units / 2, units, 0)],
+        });
+        let scale = renderer.symbol_scale();
+        let (lat, _) = lat_lon(id.origin().0 + size / 2.0, id.origin().1 - size / 2.0);
+        // 2048 pixels for about 2.4 km of Mercator: a pixel about 0.85 m of ground.
+        let pixels = 2048;
+        let ground_per_pixel = size * lat.to_radians().cos() / f64::from(pixels);
+        let pixmap = renderer
+            .render(id, &tile, id, scale, pixels, CoverageStyle::None)
+            .unwrap();
+        let row = pixels as usize / 3 * pixels as usize;
+        let wide = pixmap.pixels()[row..row + pixels as usize]
+            .iter()
+            .map(|p| f64::from(p.alpha()) / 255.0)
+            .sum::<f64>();
+        let meters = wide * ground_per_pixel;
+        assert!((meters - 2.1).abs() < 0.3, "{meters} m");
+    }
+
+    #[test]
+    fn a_fill_covers_the_same_ground_at_any_scale() {
         let table = SymbolTable::isom();
         let mut renderer = TileRenderer::new(&table);
         let id = TileId {
