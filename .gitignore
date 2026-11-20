@@ -33,3 +33,4 @@ trainings
 graphify-out/
 .claude/settings.local.json
 CLAUDE.local.md
+human_test_map/
