@@ -50,7 +50,7 @@ stop_merge = 3
 margin = 50
 
 [net.dataset]
-folder = "dataset/map_to_omap_datasets/area_and_lines_10000"
+folder = "dataset/map_to_omap_datasets/area_and_lines_v2_10000"
 layout_size = 3
 background_cell_size = 50
 maps = 10000
@@ -63,7 +63,7 @@ frame = 5
 seed = 0
 min_resolution = 1
 max_resolution = 4
-symbol_set = "symbols_sets/simple_line_and_colors.omap"
+symbol_set = "symbols_sets/simple_ISSprOM.omap"
 
 [net.describe]
 model = "all"
@@ -82,14 +82,14 @@ trainings = "trainings"
 gpu = 1
 model = "unet"
 epochs = 50
-batch_size = 110
+batch_size = 60
 crop = 80
 crops_per_map = 8
-base_channels = 16
+base_channels = 32
 learning_rate = 0.0003
 angle_weight = 0.2
 line_weight = 15
-scale_weight = 10
+scale_weight = 5
 weight_decay = 0.1
 patience = 10
 train_share = 0.8
@@ -102,7 +102,7 @@ control_points = 8
 samples = 24
 temperature_start = 0.08
 temperature_end = 0.012
-dataset = "dataset/map_to_omap_datasets/area_and_lines_10000"
+dataset = "dataset/map_to_omap_datasets/area_and_lines_v2_10000"
 
 [net.image-to-map]
 same_angle = 0.05
