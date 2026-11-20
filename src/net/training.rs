@@ -191,7 +191,7 @@ pub const DEFAULT_LEARNING_RATE: f64 = 3.0e-4;
 /// What this is **not** is what keeps a checkpoint readable. Even at a tenth
 /// the pre-normalization variances still reach 1e5 over a long run; what
 /// makes that harmless is writing them down in full precision, which is
-/// [`BEST_WEIGHTS`]. The two are separate repairs to the same run.
+/// `BEST_WEIGHTS`. The two are separate repairs to the same run.
 ///
 /// Nought turns it off, and turns [`AdamWConfig`] back into plain Adam.
 pub const DEFAULT_WEIGHT_DECAY: f64 = 0.1;
@@ -307,8 +307,8 @@ const WARMUP_STEPS: usize = 500;
 const FINAL_SHARE: f64 = 0.05;
 
 /// A learning rate which is warmed up and then annealed: linearly from
-/// nothing to `peak` over [`WARMUP_STEPS`] steps, then down a cosine to
-/// [`FINAL_SHARE`] of `peak` by the last step of the run.
+/// nothing to `peak` over `WARMUP_STEPS` steps, then down a cosine to
+/// `FINAL_SHARE` of `peak` by the last step of the run.
 ///
 /// Both halves are here for the same reason. Adam at a rate which suits the
 /// middle of a run is too large for its first steps, when the batch
@@ -331,7 +331,7 @@ pub struct WarmupCosine {
 impl WarmupCosine {
     /// The schedule for a run of `total` steps peaking at `peak`.
     ///
-    /// The warmup is [`WARMUP_STEPS`] steps, or half the run where the run is
+    /// The warmup is `WARMUP_STEPS` steps, or half the run where the run is
     /// shorter than twice that — a short run should not be all warmup.
     pub fn new(peak: LearningRate, total: usize) -> WarmupCosine {
         let total = total.max(1);

@@ -106,7 +106,7 @@ pub struct Entry {
 /// Hidden and helper symbols are left out of all five: they draw nothing, and
 /// a generated map which used one would come out with an empty cell and no
 /// way to tell that apart from a rendering bug. So is the OpenOrienteering
-/// logo, see [`is_the_mapper_logo`].
+/// logo, see `is_the_mapper_logo`.
 #[derive(Debug, Default)]
 pub struct Catalogue {
     /// The areas which cover what is under them.

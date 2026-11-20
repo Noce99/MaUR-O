@@ -371,7 +371,7 @@ impl Layout {
     /// ground.
     ///
     /// Inside the cell whatever its sides did: a side strays at most
-    /// [`MAX_SWAY`] of a cell from the straight line between its corners,
+    /// `MAX_SWAY` of a cell from the straight line between its corners,
     /// which leaves the middle of the square well clear of all four.
     pub fn cell_center(&self, column: usize, row: usize) -> Point {
         let corner = self.corner(column, row);
@@ -388,7 +388,7 @@ impl Layout {
     /// dropped near a boundary draws over it, which is where a renderer has
     /// to decide what covers what. Found by trying points of the cell's
     /// bounding box until one lands inside the cell itself, and after
-    /// [`PLACEMENT_TRIES`] of those the middle of the square, which is
+    /// `PLACEMENT_TRIES` of those the middle of the square, which is
     /// inside every cell there can be.
     pub fn random_point_in_cell(
         &self,

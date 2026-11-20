@@ -450,7 +450,7 @@ impl ReadBack {
 /// to a picture of any size.
 ///
 /// `symbol_set` has to be the file the network's classes are places in;
-/// `symbols` its opaque areas, which is [`Catalogue::opaque_areas`] of the
+/// `symbols` its opaque areas, which is [`Catalogue::opaque_areas`](crate::symbol_kinds::Catalogue::opaque_areas) of the
 /// same file.
 #[allow(clippy::too_many_arguments)]
 pub fn read_back(
