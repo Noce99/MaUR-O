@@ -769,9 +769,9 @@ mauro tiles serve [--host 127.0.0.1] [--port 8080] [--workers N] <archive>...
 
 It prints the address it listens on (`--port 0` picks a free one) and serves
 until stopped: the page at `/`, each layer's symbol set, zoom range and bounds at
-`/info.json`, and tiles at `/tiles/{z}/{x}/{y}.png?scale=S&size=P&layers=I,J`,
-drawn at 1:S (10000 by default) into P pixels (512), of the layers numbered (all
-by default).
+`/info.json`, and tiles at `/tiles/{z}/{x}/{y}.png?size=P&layers=I,J&scale=S`,
+drawn into P pixels (512), of the layers numbered (all by default), each at its
+symbol set's own scale (1:10000 for ISOM, 1:4000 for ISSprOM), or all at 1:S.
 
 An archive is a layer, a symbol set. With several (maps in ISOM and in ISSprOM,
 say) the one named first has the highest priority: where two cover the same
@@ -780,9 +780,11 @@ The page lists the layers, can switch each off, and says which hides which. A zo
 finest is that level overzoomed; a coarser one, or an empty tile, is a
 transparent image; where the zoom is too coarse for any symbol to appear, a tile
 shows the area the maps cover, tinted, and over the symbols that area is an
-outline. The page pans and zooms, can show the tile borders, and
-chooses the symbol scale: a fixed one, or one true to the screen, where a
-millimetre of paper is as big at every zoom. This is a tool to look at an
+outline. The page pans and zooms and can show the tile borders. Each layer is drawn
+at the scale of its symbol set's reference map, where the symbols are as big
+on the ground as on the maps (an ISOM map at 1:15000 has its symbols two
+thirds the size on paper of one at 1:10000, the same on the ground), so a
+tile looks as the maps do at every zoom. This is a tool to look at an
 archive, not a server to expose: it listens on `127.0.0.1` unless told
 otherwise.
 

@@ -128,6 +128,23 @@ fn it_draws_a_tile_and_overzooms_the_finest_level() {
 }
 
 #[test]
+fn a_layer_is_drawn_at_its_symbol_sets_scale_unless_one_is_asked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::start(&[&make_archive(dir.path())]);
+    let t = tile_at(16);
+    let tile = |scale: &str| {
+        let (status, body) = server.get(&format!("/tiles/16/{}/{}.png?size=256{scale}", t.x, t.y));
+        assert!(status.contains("200"), "{status}");
+        body
+    };
+    // The sample is an ISOM map, whose symbol set is drawn at 1:10000.
+    let own = tile("");
+    assert!(own.len() > 1000, "{} bytes", own.len());
+    assert_eq!(own, tile("&scale=10000"));
+    assert_ne!(own, tile("&scale=4000"));
+}
+
+#[test]
 fn a_tile_too_coarse_for_symbols_shows_what_the_map_covers() {
     let dir = tempfile::tempdir().unwrap();
     let server = Server::start(&[&make_archive(dir.path())]);
@@ -154,6 +171,7 @@ fn a_tile_with_nothing_is_a_small_transparent_image_and_a_bad_path_is_404() {
     assert!(server.get("/tiles/14/99999999/0.png").0.contains("404"));
     assert!(server.get("/tiles/x/y/z.png").0.contains("404"));
     assert!(server.get("/tiles/14/0/0.png?scale=-3").0.contains("400"));
+    assert!(server.get("/tiles/14/0/0.png?scale=big").0.contains("400"));
 }
 
 #[test]

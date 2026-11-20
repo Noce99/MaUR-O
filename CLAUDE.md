@@ -219,7 +219,7 @@ as a new change; the head stays a plain tile payload). `convert_levels` builds t
 generalising by those rules; `mot_archive.rs` keeps the
 tiles in a PMTiles file through the `pmtiles` crate (native only, like `ureq`,
 so the wasm build never sees it). `mot_render.rs` draws a tile by turning it back
-into a `Map` (the ISOM symbols, paper mm at a scale the viewer picks) and handing
+into a `Map` (the layer's symbols, paper mm at the scale of the symbol set's reference map: `TileRenderer::symbol_scale`) and handing
 it to the same `Renderer` as `.omap` files; `mauro tiles serve` puts that behind a
 small HTTP server and a one-page viewer, with the layers (one archive per symbol set)
 stacked by priority and masked by each one's coverage (`composite`) as a way to look at an archive. The

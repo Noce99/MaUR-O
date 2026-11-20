@@ -33,15 +33,6 @@
   <h1>MOT viewer</h1>
   <div id="layer">…</div>
   <div id="layers"></div>
-  <label>Symbol scale
-    <select id="scale">
-      <option value="auto">true to the screen</option>
-      <option value="4000">1:4000</option>
-      <option value="7500">1:7500</option>
-      <option value="10000">1:10000</option>
-      <option value="15000">1:15000</option>
-    </select>
-  </label>
   <label><input type="checkbox" id="grid"> tile borders</label>
   <label><button id="fit">Fit to the data</button></label>
   <div id="hint"></div>
@@ -53,7 +44,7 @@
 const TILE = 256;
 const mapEl = document.getElementById("map"), tilesEl = document.getElementById("tiles");
 const statusEl = document.getElementById("status"), hintEl = document.getElementById("hint");
-const scaleEl = document.getElementById("scale"), gridEl = document.getElementById("grid");
+const gridEl = document.getElementById("grid");
 let info = null;
 const view = { lat: 44.5, lon: 11.3, zoom: 12 };
 const shown = new Map();          // "z/x/y" -> {img, grid}
@@ -82,14 +73,6 @@ function layerParam() {
   if (boxes.length < 2 || boxes.every(b => b.checked)) return "";
   return "&layers=" + boxes.filter(b => b.checked).map(b => b.dataset.index).join(",");
 }
-// Symbol scale for a tile: fixed, or the one at which a millimetre of paper is
-// as many pixels as on a screen (96 dpi), whatever the zoom.
-function scaleFor(z, ty) {
-  if (scaleEl.value !== "auto") return Number(scaleEl.value);
-  const lat = unproject(0, (ty + 0.5) * TILE, z).lat;
-  const metersPerPixel = 156543.03392 * Math.cos(lat * Math.PI / 180) / 2 ** z;
-  return Math.max(100, Math.round(metersPerPixel * 1000 * 3.78 / 100) * 100);
-}
 
 function render() {
   const w = mapEl.clientWidth, h = mapEl.clientHeight;
@@ -105,7 +88,7 @@ function render() {
     if (!e) {
       const img = new Image();
       img.draggable = false;
-      img.src = `/tiles/${tz}/${wx}/${ty}.png?scale=${scaleFor(tz, ty)}${layerParam()}`;
+      img.src = `/tiles/${tz}/${wx}/${ty}.png?${layerParam().slice(1)}`;
       const grid = document.createElement("div");
       grid.className = "grid"; grid.textContent = `${tz}/${wx}/${ty}`;
       tilesEl.append(img, grid);
@@ -149,7 +132,6 @@ document.getElementById("in").onclick = () => zoomAt(mapEl.clientWidth / 2, mapE
 document.getElementById("out").onclick = () => zoomAt(mapEl.clientWidth / 2, mapEl.clientHeight / 2, -1);
 window.addEventListener("keydown", e => { if (e.key === "+" || e.key === "=") document.getElementById("in").click(); if (e.key === "-") document.getElementById("out").click(); });
 window.addEventListener("resize", render);
-scaleEl.onchange = reload;
 gridEl.onchange = render;
 
 function fit() {

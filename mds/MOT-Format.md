@@ -92,10 +92,16 @@ follows a map's real outline instead of a rectangle.
 ### Scale
 
 Scale is **not stored in the data**. Geometry is in ground metres; a symbol's
-size is paper millimetres × the *display* scale, and choosing it is the
-viewer's job (a sprint map shown at 1:4000 gets one black-cross size, shown at
-1:2000 another). The data may carry an optional *suggested display scale* per
-coverage polygon, a hint and nothing more.
+size is paper millimetres × the *display* scale. A layer's symbol set is true
+to the ground at one scale, the one its reference map is drawn at (1:10000 for
+ISOM, whose 1:15000 maps have symbols two thirds that size on paper and so the
+same on the ground; 1:4000 for ISSprOM): drawn at it, a tile looks as the maps
+it came from at every zoom, and that is what the renderer's
+`TileRenderer::symbol_scale` gives and `mauro tiles serve` uses. Another scale
+is possible, but it draws the symbols bigger or smaller than the maps did (a
+scale following the zoom keeps them one size on screen, so they shrink against
+the ground as one zooms in). The data may carry an optional *suggested display
+scale* per coverage polygon, a hint and nothing more.
 
 The converter from `.omap` multiplies paper millimetres by the map's own scale
 to get ground coordinates.

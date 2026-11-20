@@ -12,7 +12,7 @@
 //! |---|---|
 //! | `/` | the viewer, one HTML page |
 //! | `/info.json` | each layer's symbol set, zoom range (and the coarsest zoom with symbols) and bounds |
-//! | `/tiles/{z}/{x}/{y}.png?scale=S&size=P&layers=I,J` | a tile drawn at 1:S (10000 by default) into P pixels (512), of the layers numbered (all by default) |
+//! | `/tiles/{z}/{x}/{y}.png?size=P&layers=I,J&scale=S` | a tile drawn into P pixels (512), of the layers numbered (all by default), each at its symbol set's own scale (1:10000 for ISOM, 1:4000 for ISSprOM) or at 1:S |
 //!
 //! One archive is one layer, one symbol set. With several, the one named first has
 //! the highest priority: where two of them cover the same ground only the higher
@@ -22,9 +22,10 @@
 //! A tile of a zoom finer than the archive's finest is that level overzoomed;
 //! one with nothing in it, or coarser than the archive's coarsest, is a
 //! transparent image. Where the zoom is too coarse for any symbol to appear, a
-//! tile shows what the maps cover, tinted; over the symbols it is an outline. The scale is a parameter, as it is the viewer's choice: the page
-//! offers fixed ones and one true to the screen, where a millimetre of paper
-//! is as big on screen at every zoom.
+//! tile shows what the maps cover, tinted; over the symbols it is an outline.
+//! Each layer is drawn at the scale of its symbol set's reference map, where its
+//! symbols are as big on the ground as on the maps, so a tile looks as the maps
+//! do at every zoom; `scale` draws them all at another, bigger or smaller.
 //!
 //! This is a tool for looking at an archive, not a server to expose: it listens
 //! on `127.0.0.1` unless told otherwise and does no more than read requests
@@ -226,14 +227,19 @@ fn tile_reply(shared: &Shared, renderers: &mut [TileRenderer], path: &str, query
     if z > 30 || (u64::from(x)) >= 1u64 << z || u64::from(y) >= 1u64 << z {
         return text("404 Not Found", "not a tile");
     }
-    let scale: f64 = param(query, "scale")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(10_000.0);
+    // Each layer at its own symbol set's scale, unless one is asked for.
+    let scale: Option<f64> = match param(query, "scale") {
+        None => None,
+        Some(v) => match v.parse() {
+            Ok(s) => Some(s),
+            Err(_) => return text("400 Bad Request", "bad scale"),
+        },
+    };
     let size: u32 = param(query, "size")
         .and_then(|v| v.parse().ok())
         .unwrap_or(512)
         .clamp(64, 1024);
-    if !(scale >= 1.0 && scale.is_finite()) {
+    if scale.is_some_and(|s| !(s >= 1.0 && s.is_finite())) {
         return text("400 Bad Request", "bad scale");
     }
     // The layers to show, by their place in the order given: all by default.
@@ -255,7 +261,7 @@ fn tile_reply(shared: &Shared, renderers: &mut [TileRenderer], path: &str, query
             }
         }
     };
-    let key = format!("{z}/{x}/{y}/{scale}/{size}/{shown:?}");
+    let key = format!("{z}/{x}/{y}/{scale:?}/{size}/{shown:?}");
     if let Some(hit) = shared.cache.lock().unwrap().get(&key) {
         return png(Arc::clone(hit));
     }
@@ -263,7 +269,9 @@ fn tile_reply(shared: &Shared, renderers: &mut [TileRenderer], path: &str, query
     // Lowest priority first, as `composite` wants them.
     let mut drawings = Vec::new();
     for &i in shown.iter().rev() {
-        match layer_tile(&shared.layers[i], &mut renderers[i], view, scale, size) {
+        let renderer = &mut renderers[i];
+        let scale = scale.unwrap_or_else(|| renderer.symbol_scale());
+        match layer_tile(&shared.layers[i], renderer, view, scale, size) {
             Ok(Some(layer)) => drawings.push(layer),
             Ok(None) => {}
             Err(e) => return text("500 Internal Server Error", &e),
