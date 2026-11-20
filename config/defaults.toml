@@ -50,14 +50,14 @@ stop_merge = 3
 margin = 50
 
 [net.dataset]
-folder = "dataset/map_to_omap_datasets/areas_and_lines_px_per_m_vary_10000"
+folder = "dataset/map_to_omap_datasets/area_and_lines_10000"
 layout_size = 3
 background_cell_size = 50
 maps = 10000
 empty_sides = 0.5
 transparent_areas = 0.1
 point_symbols = 0.5
-content = "all"
+content = "areas-and-lines"
 resolution = 3
 frame = 5
 seed = 0
@@ -79,17 +79,17 @@ resolution = 3
 
 [net.train]
 trainings = "trainings"
-gpu = 0
+gpu = 1
 model = "unet"
-epochs = 10
-batch_size = 8
-crop = 256
+epochs = 50
+batch_size = 110
+crop = 80
 crops_per_map = 8
 base_channels = 16
 learning_rate = 0.0003
 angle_weight = 0.2
-line_weight = 1
-scale_weight = 1
+line_weight = 15
+scale_weight = 10
 weight_decay = 0.1
 patience = 10
 train_share = 0.8
@@ -102,6 +102,7 @@ control_points = 8
 samples = 24
 temperature_start = 0.08
 temperature_end = 0.012
+dataset = "dataset/map_to_omap_datasets/area_and_lines_10000"
 
 [net.image-to-map]
 same_angle = 0.05
