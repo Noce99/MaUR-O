@@ -58,6 +58,9 @@ Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 | `mauro dem-eval` | Score a predicted DEM GeoTIFF against a ground-truth one (MSE/RMSE/MAE + error maps). |
 | `mauro osm` | Convert OpenStreetMap XML (a file, or downloaded for an area from the Overpass API with `--download`) into an `.omap` drawn to ISSprOM 2019 (default) or ISOM 2017-2, or (`--standard osm`, optionally with GTFS feeds) styled like openstreetmap-carto. |
 | `mauro ortho` | Download a map's aerial orthophoto from the best open WMS for its place (European national/regional agencies) and add it to the map as a georeferenced template. |
+| `mauro tiles build` | Convert maps into a MOT archive: the tiled, compact world-map format of `mds/MOT-Format.md` (draft), in PMTiles. |
+| `mauro tiles query` | List the objects of a MOT archive around a place (`--around`/`--bbox`), by symbol, reading only the tiles it touches. |
+| `mauro tiles serve` | Serve a MOT archive as a slippy map to look at in a browser (a std-only HTTP server, one HTML page embedded in the binary); tiles are drawn server-side by the crate's renderer. A development viewer, not o-mnia's. |
 
 `src/bin/mauro/main.rs` is only the dispatcher (the clap `Cli`, one module per
 subcommand, each module's `Args` and `pub fn main(args) -> ExitCode`). A usage
@@ -77,9 +80,6 @@ subcommand module also has `exit_meaning(code)`, mirroring its doc comment's
 exit codes, which the job screen shows; keep the two in sync. Full CLI
 flags for each are documented in its module's own top-of-file doc comment
 (`src/bin/mauro/*.rs`) and in `README.md`'s Usage section. When changing a
-| `mauro tiles build` | Convert maps into a MOT archive: the tiled, compact world-map format of `mds/MOT-Format.md` (draft), in PMTiles. |
-| `mauro tiles query` | List the objects of a MOT archive around a place (`--around`/`--bbox`), by symbol, reading only the tiles it touches. |
-| `mauro tiles serve` | Serve a MOT archive as a slippy map to look at in a browser (a std-only HTTP server, one HTML page embedded in the binary); tiles are drawn server-side by the crate's renderer. A development viewer, not o-mnia's. |
 flag, default or exit code, update both (and `--help` text in the clap
 definition) — they are kept in sync by hand.
 
