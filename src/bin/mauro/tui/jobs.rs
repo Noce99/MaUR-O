@@ -10,6 +10,9 @@
 //!
 //! ```text
 //! job         what was started: `kind=`, `command=`, `started=`
+//! parameters  every option it was started with, given or defaulted, as of
+//!             then: `given|default|unset`, the name and the value, a tab
+//!             apart, one per line
 //! output.log  what the process printed, both streams
 //! status, losses, control
 //!             the run's side of [`maur_o::net::monitor`]
@@ -26,6 +29,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use maur_o::net::monitor::{Control, State, Status, JOB_DIR_ENV};
 
 use super::job::command_line;
+use crate::defaults::{Parameter, Source};
+
+/// The file in a job's folder its parameters are written to.
+const PARAMETERS_FILE: &str = "parameters";
 
 /// What kind of job this is, which is the tab it is listed under.
 pub const TRAINING: &str = "Training";
@@ -86,6 +93,14 @@ pub enum Health {
 }
 
 impl Job {
+    /// The options it was started with, where it wrote them down (a job
+    /// started before they were has none).
+    pub fn parameters(&self) -> Option<Vec<Parameter>> {
+        fs::read_to_string(self.dir.join(PARAMETERS_FILE))
+            .ok()
+            .map(|text| read_parameters(&text))
+    }
+
     /// What the job last said of itself.
     pub fn status(&self) -> Option<Status> {
         Status::read(&self.dir)
@@ -178,6 +193,40 @@ fn read(dir: &Path) -> Option<Job> {
     })
 }
 
+/// `parameters` as [`PARAMETERS_FILE`] holds them.
+fn write_parameters(parameters: &[Parameter]) -> String {
+    parameters
+        .iter()
+        .map(|p| {
+            let given = match p.source {
+                Source::CommandLine => "given",
+                Source::Default => "default",
+                Source::Unset => "unset",
+            };
+            format!("{given}\t{}\t{}\n", p.name, p.value)
+        })
+        .collect()
+}
+
+/// What [`write_parameters`] wrote.
+fn read_parameters(text: &str) -> Vec<Parameter> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let given = match fields.next()? {
+                "given" => Source::CommandLine,
+                "default" => Source::Default,
+                _ => Source::Unset,
+            };
+            Some(Parameter {
+                name: fields.next()?.to_string(),
+                value: fields.next().unwrap_or("").to_string(),
+                source: given,
+            })
+        })
+        .collect()
+}
+
 /// Starts `mauro` with `args` as a job of `kind`, detached.
 pub fn start(kind: &str, args: &[String]) -> Result<Job, String> {
     let secs = SystemTime::now()
@@ -195,6 +244,11 @@ pub fn start(kind: &str, args: &[String]) -> Result<Job, String> {
         format!("kind={kind}\ncommand={command}\nstarted={secs}\n"),
     )
     .map_err(|e| format!("cannot write the job's description: {e}"))?;
+    // Written now, since a default may change before the job is looked at.
+    if let Ok(parameters) = crate::defaults::parameters(args) {
+        fs::write(dir.join(PARAMETERS_FILE), write_parameters(&parameters))
+            .map_err(|e| format!("cannot write the job's parameters: {e}"))?;
+    }
 
     let log = fs::File::create(dir.join("output.log"))
         .map_err(|e| format!("cannot write the job's log: {e}"))?;
@@ -259,5 +313,17 @@ mod tests {
         assert_eq!(job.command, "mauro net train data");
         assert_eq!(job.health(), Health::Waiting);
         assert!(read(dir.path()).is_none());
+        assert_eq!(job.parameters(), None, "started before they were written");
+    }
+
+    #[test]
+    fn the_parameters_read_back_as_written() {
+        let args: Vec<String> = ["net", "train", "my data", "--crop", "128"]
+            .map(str::to_string)
+            .to_vec();
+        let parameters = crate::defaults::parameters(&args).unwrap();
+        let text = write_parameters(&parameters);
+        assert!(text.starts_with("given\t<dataset>\tmy data\n"), "{text}");
+        assert_eq!(read_parameters(&text), parameters);
     }
 }

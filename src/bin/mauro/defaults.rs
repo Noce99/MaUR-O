@@ -179,6 +179,90 @@ pub fn command() -> Command {
     with(|doc, _| apply(crate::Cli::command(), doc.as_table(), ""))
 }
 
+/// Where a [`Parameter`]'s value came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The command line.
+    CommandLine,
+    /// The defaults.
+    Default,
+    /// Nowhere: an option left out which has no default.
+    Unset,
+}
+
+/// One argument of a command line, and the value it ran with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Parameter {
+    /// How the command line names it: `--batch-size`, or `<dataset>`.
+    pub name: String,
+    /// Its value, several joined with `,`; empty where it is unset.
+    pub value: String,
+    pub source: Source,
+}
+
+/// Every argument of the subcommand `args` (the arguments after `mauro`)
+/// runs, and the value each runs with — given or defaulted — as of now: the
+/// positionals in their order, then the options in the order `--help` lists
+/// them. Or clap's complaint where `mauro` does not take `args`.
+pub fn parameters(args: &[String]) -> Result<Vec<Parameter>, String> {
+    let mut command = command();
+    command.build();
+    let mut matches = command
+        .clone()
+        .try_get_matches_from(std::iter::once("mauro").chain(args.iter().map(String::as_str)))
+        .map_err(|e| e.to_string().lines().next().unwrap_or_default().to_string())?;
+    // Down to the subcommand which runs.
+    while let Some((name, sub)) = matches.subcommand() {
+        let sub = sub.clone();
+        command = command
+            .find_subcommand(name)
+            .ok_or_else(|| format!("mauro has no subcommand {name}"))?
+            .clone();
+        matches = sub;
+    }
+    let mut arguments: Vec<&clap::Arg> = command
+        .get_arguments()
+        .filter(|a| !matches!(a.get_id().as_str(), "help" | "version"))
+        .collect();
+    arguments.sort_by_key(|a| {
+        (
+            !a.is_positional(),
+            a.get_index().unwrap_or(0),
+            a.get_display_order(),
+        )
+    });
+    Ok(arguments
+        .into_iter()
+        .map(|arg| {
+            let id = arg.get_id().as_str();
+            let name = match arg.get_long() {
+                Some(long) => format!("--{long}"),
+                None => format!("<{id}>"),
+            };
+            let value = matches
+                .get_raw(id)
+                .map(|values| {
+                    values
+                        .map(|v| v.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let source = match matches.value_source(id) {
+                Some(clap::parser::ValueSource::CommandLine)
+                | Some(clap::parser::ValueSource::EnvVariable) => Source::CommandLine,
+                Some(_) => Source::Default,
+                None => Source::Unset,
+            };
+            Parameter {
+                name,
+                value,
+                source,
+            }
+        })
+        .collect())
+}
+
 /// The default of argument `id` of `mauro <subcommand…>`, where there is one.
 #[cfg(test)]
 pub fn get(subcommand: &[&str], id: &str) -> Option<String> {
@@ -348,6 +432,30 @@ mod tests {
             let file: DocumentMut = text.parse().unwrap();
             walk(&plain, file.as_table());
         }
+    }
+
+    #[test]
+    fn a_command_lines_parameters_are_every_argument_given_or_not() {
+        let args: Vec<String> = ["net", "train", "data", "--batch-size", "16"]
+            .map(str::to_string)
+            .to_vec();
+        let all = parameters(&args).unwrap();
+        let find = |name: &str| all.iter().find(|p| p.name == name).unwrap().clone();
+        assert_eq!(all[0].name, "<dataset>", "the positionals first");
+        assert_eq!(all[1].name, "<trainings>");
+        assert_eq!(find("<dataset>").value, "data");
+        let batch = find("--batch-size");
+        assert_eq!(
+            (batch.value.as_str(), batch.source),
+            ("16", Source::CommandLine)
+        );
+        let epochs = find("--epochs");
+        assert_eq!(epochs.source, Source::Default);
+        assert_eq!(Some(epochs.value), get(&["net", "train"], "epochs"));
+        assert_eq!(find("--overhang").source, Source::Unset);
+        assert_eq!(find("--dashboard").value, "false");
+        assert!(!all.iter().any(|p| p.name == "--help"));
+        assert!(parameters(&["net".into(), "train".into(), "--no-such".into()]).is_err());
     }
 
     #[test]

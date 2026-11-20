@@ -30,16 +30,21 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Axis, Block, Chart, Dataset, Gauge, GraphType, Paragraph, Wrap};
+use ratatui::widgets::{
+    Axis, Block, Chart, Dataset, Gauge, GraphType, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 use ratatui::Frame;
 
 use maur_o::net::monitor::{
     Control, LossPoint, State, Status, ACCURACY_FILE, LINE_IOU_FILE, LOSSES_FILE, SCALE_ERROR_FILE,
 };
 
+use super::form::{CHANGED_COLOR, DEFAULT_COLOR};
 use super::gpu::{Gpu, Probe};
 use super::jobs::{Health, Job};
 use super::Action;
+use crate::defaults::{Parameter, Source};
 
 /// What the chart shows. Tab goes through the ones the run has numbers for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,11 +110,16 @@ pub struct Watch {
     message: Option<String>,
     /// Asks the driver what the GPUs are doing.
     gpu: Probe,
+    /// What the job was started with, where it wrote that down.
+    parameters: Option<Vec<Parameter>>,
+    /// How far down the parameters panel is scrolled, in rows.
+    parameters_scroll: usize,
 }
 
 impl Watch {
     /// The screen of `job`, read once straight away.
     pub fn new(job: Job) -> Self {
+        let parameters = job.parameters();
         let mut watch = Self {
             health: job.health(),
             status: job.status(),
@@ -130,6 +140,8 @@ impl Watch {
             confirming: false,
             message: None,
             gpu: Probe::start(),
+            parameters,
+            parameters_scroll: 0,
         };
         watch.read_losses();
         watch
@@ -205,6 +217,14 @@ impl Watch {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left => return Action::Back,
             KeyCode::Tab | KeyCode::BackTab => self.view = self.next_view(),
+            // The parameters panel's scroll: clamped to what there is when
+            // it is drawn, where the panel's height is known.
+            KeyCode::Up => self.parameters_scroll = self.parameters_scroll.saturating_sub(1),
+            KeyCode::Down => self.parameters_scroll += 1,
+            KeyCode::PageUp => self.parameters_scroll = self.parameters_scroll.saturating_sub(10),
+            KeyCode::PageDown => self.parameters_scroll += 10,
+            KeyCode::Home => self.parameters_scroll = 0,
+            KeyCode::End => self.parameters_scroll = usize::MAX / 2,
             KeyCode::Char('p') | KeyCode::Char(' ') if self.running() => {
                 let paused = matches!(self.health, Health::Alive(State::Paused));
                 let control = if paused { Control::Run } else { Control::Pause };
@@ -233,7 +253,7 @@ impl Watch {
         Action::None
     }
 
-    pub fn draw(&self, frame: &mut Frame) {
+    pub fn draw(&mut self, frame: &mut Frame) {
         let panel = self.gpu_panel();
         let gpu_height = match &panel {
             GpuPanel::Hidden => 0,
@@ -247,9 +267,32 @@ impl Watch {
             Constraint::Length(3),
         ])
         .areas(frame.area());
-        let [commands, loss] =
+        let [left, loss] =
             Layout::horizontal([Constraint::Length(46), Constraint::Min(20)]).areas(top);
-        self.draw_commands(frame, commands);
+        // The commands as tall as they are, leaving the parameters at least
+        // a few rows; the parameters the rest.
+        let commands_lines = self.commands_lines();
+        let wanted = commands_lines
+            .iter()
+            .map(|l| {
+                l.width()
+                    .max(1)
+                    .div_ceil(left.width.saturating_sub(2).max(1) as usize)
+            })
+            .sum::<usize>() as u16
+            + 2;
+        let [commands, parameters] = Layout::vertical([
+            Constraint::Length(wanted.min(left.height.saturating_sub(5))),
+            Constraint::Min(0),
+        ])
+        .areas(left);
+        frame.render_widget(
+            Paragraph::new(commands_lines)
+                .wrap(Wrap { trim: false })
+                .block(Block::bordered().title(" Commands ")),
+            commands,
+        );
+        self.draw_parameters(frame, parameters);
         self.draw_loss(frame, loss);
         draw_gpu(frame, gpu, &panel);
         self.draw_bars(frame, epoch, whole);
@@ -299,7 +342,69 @@ impl Watch {
         }
     }
 
-    fn draw_commands(&self, frame: &mut Frame, area: Rect) {
+    /// What the job was started with, one option a row, read only; scrolled
+    /// with ↑ ↓, a bar at the side where they do not all fit.
+    fn draw_parameters(&mut self, frame: &mut Frame, area: Rect) {
+        let block = Block::bordered().title(" Parameters · ↑↓ scroll ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let Some(parameters) = &self.parameters else {
+            frame.render_widget(
+                Paragraph::new("Not recorded: the job was started before they were.")
+                    .dim()
+                    .wrap(Wrap { trim: true }),
+                inner,
+            );
+            return;
+        };
+        let height = inner.height as usize;
+        let overflow = parameters.len().saturating_sub(height);
+        self.parameters_scroll = self.parameters_scroll.min(overflow);
+        let name_width = parameters
+            .iter()
+            .map(|p| p.name.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(inner.width as usize / 2);
+        let lines: Vec<Line> = parameters
+            .iter()
+            .skip(self.parameters_scroll)
+            .take(height)
+            .map(|p| {
+                let (value, style) = match p.source {
+                    Source::CommandLine => (p.value.clone(), Style::new().fg(CHANGED_COLOR)),
+                    Source::Default => (p.value.clone(), Style::new().fg(DEFAULT_COLOR)),
+                    Source::Unset => ("—".to_string(), Style::new().dim()),
+                };
+                Line::from(vec![
+                    Span::raw(format!("{:<name_width$} ", p.name)).bold(),
+                    Span::styled(value, style),
+                ])
+            })
+            .collect();
+        // Room for the bar where it is wanted.
+        let text = if overflow > 0 {
+            Rect {
+                width: inner.width.saturating_sub(1),
+                ..inner
+            }
+        } else {
+            inner
+        };
+        frame.render_widget(Paragraph::new(lines), text);
+        if overflow > 0 {
+            let mut state = ScrollbarState::new(overflow + 1).position(self.parameters_scroll);
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None),
+                inner,
+                &mut state,
+            );
+        }
+    }
+
+    fn commands_lines(&self) -> Vec<Line<'static>> {
         let (state, color) = self.state_line();
         let mut lines = vec![
             Line::from(Span::styled(state, Style::new().fg(color).bold())),
@@ -365,15 +470,11 @@ impl Watch {
             "Esc",
             "back — the job goes on without this screen".into(),
         ));
+        lines.push(key("↑↓", "scroll the parameters".into()));
         if let Some(message) = &self.message {
             lines.push(Line::styled(message.clone(), Style::new().fg(Color::Red)));
         }
-        frame.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered().title(" Commands ")),
-            area,
-        );
+        lines
     }
 
     /// The training loss as at most `buckets` averaged points, the
@@ -693,6 +794,52 @@ mod tests {
         watch.gpu = Probe::fixed(Default::default());
         watch.points = points.iter().filter_map(|l| LossPoint::parse(l)).collect();
         watch
+    }
+
+    /// Every row `watch` draws on a terminal `width` by `height`.
+    fn rows(watch: &mut Watch, width: u16, height: u16) -> Vec<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| watch.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|c| c.symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn the_parameters_are_listed_and_scroll_where_they_do_not_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        let args: Vec<String> = ["net", "train", "d", "--batch-size", "16"]
+            .map(str::to_string)
+            .to_vec();
+        let parameters = crate::defaults::parameters(&args).unwrap();
+        let mut watch = Watch::new(job_in(dir.path()));
+        watch.gpu = Probe::fixed(Default::default());
+        watch.parameters = Some(parameters.clone());
+
+        let shown = rows(&mut watch, 110, 30).join("\n");
+        assert!(shown.contains("Parameters"), "{shown}");
+        assert!(shown.contains("<dataset>"), "{shown}");
+        assert!(shown.contains("--batch-size"), "{shown}");
+        // Thirty options do not fit in thirty rows less the rest: scrolled to
+        // the end, the last is in sight and the first is not.
+        let last = &parameters.last().unwrap().name;
+        assert!(!shown.contains(last.as_str()), "{last} is out of sight");
+        watch.handle(KeyEvent::from(KeyCode::End));
+        let shown = rows(&mut watch, 110, 30).join("\n");
+        assert!(shown.contains(last.as_str()), "{shown}");
+        assert!(!shown.contains("<dataset>"), "{shown}");
+        assert!(watch.parameters_scroll < parameters.len(), "clamped");
+        watch.handle(KeyEvent::from(KeyCode::Home));
+        assert_eq!(watch.parameters_scroll, 0);
+
+        // A job started before they were recorded says so.
+        watch.parameters = None;
+        let shown = rows(&mut watch, 110, 30).join("\n");
+        assert!(shown.contains("Not recorded"), "{shown}");
     }
 
     #[test]

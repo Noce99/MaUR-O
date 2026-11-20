@@ -202,6 +202,9 @@ Beside the form, what can be known before running:
 - `net train` and `tiles serve` run until they are done or cancelled (`Esc`):
   the job screen shows the metrics of a training run, or the address a
   server listens on, as they come, in place of `net train`'s own `--dashboard`.
+  Under its commands, a training's watcher lists every option the run was
+  started with, read only: the ones given in orange, the defaults (as they were
+  when it started) in green; `↑`/`↓` scroll it where it does not fit.
   A training which runs on a GPU also gets a bar of that GPU's memory (how much
   is used of how much there is, and how much of it is this job's) with its load,
   temperature, power draw and clock in the title. It needs `nvidia-smi`, which

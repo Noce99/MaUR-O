@@ -156,6 +156,7 @@ impl NetTrain {
             classes: None,
         };
         screen.update();
+        screen.read_classes();
         screen.tick();
         screen
     }
@@ -175,12 +176,25 @@ impl NetTrain {
         }
     }
 
-    /// Reads what the dataset picked says of itself.
+    /// Reads what the dataset picked says of itself, and marks it red where
+    /// it is not one a run can be trained on.
     fn read_classes(&mut self) {
-        self.classes = self
-            .form
-            .given(DATASET)
-            .and_then(|dir| Classes::read(&std::path::Path::new(dir).join(CLASSES_FILE)).ok());
+        let dir = self.form.given(DATASET).map(std::path::PathBuf::from);
+        let read = dir
+            .as_ref()
+            .map(|dir| Classes::read(&dir.join(CLASSES_FILE)));
+        let problem = match (&dir, &read) {
+            (Some(dir), Some(Err(_))) if !dir.is_dir() => {
+                Some("There is no such folder.".to_string())
+            }
+            (Some(_), Some(Err(_))) => Some(format!(
+                "No {CLASSES_FILE} in it: not a labelled dataset. Generate one with Content \
+                 areas or areas-and-lines; all draws what nothing could label."
+            )),
+            _ => None,
+        };
+        self.classes = read.and_then(Result::ok);
+        self.form.set_problem(DATASET, problem);
     }
 
     /// The GPUs the driver lists, as choices: `1 · NVIDIA GeForce RTX 4060 Ti`.
@@ -396,6 +410,21 @@ mod tests {
         type_into(&mut screen.form, EPOCHS, "3");
         assert_eq!(command(&screen).unwrap()[3..], ["--epochs", "3"]);
         assert!(!screen.form.shown(GPU), "no GPU to pick on the CPU");
+    }
+
+    #[test]
+    fn a_folder_with_no_classes_is_red() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut screen = screen();
+        type_into(&mut screen.form, DATASET, &dir.path().display().to_string());
+        screen.changed(DATASET);
+        let State::Error(why) = screen.form.state(DATASET) else {
+            panic!("{:?}", screen.form.state(DATASET));
+        };
+        assert!(why.contains("classes.json"), "{why}");
+        type_into(&mut screen.form, DATASET, "no/such/folder");
+        screen.changed(DATASET);
+        assert!(matches!(screen.form.state(DATASET), State::Error(w) if w.contains("no such")));
     }
 
     #[test]

@@ -199,3 +199,25 @@ fn a_unet_on_a_range_of_densities_learns_to_say_how_dense_a_picture_is() {
         .success()
         .stdout(predicates::str::contains("resampled to 50x50"));
 }
+
+/// A run refused before it starts — here, a folder with no classes.json —
+/// says so to the job folder it was given, so that the terminal interface
+/// shows a run which failed rather than one which went silent.
+#[test]
+fn a_refused_run_reports_its_failure_to_the_job_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let job = dir.path().join("job");
+    mauro()
+        .args(["net", "train"])
+        .arg(dir.path())
+        .arg(dir.path().join("trainings"))
+        .env(maur_o::net::monitor::JOB_DIR_ENV, &job)
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("--content areas"));
+    let status = maur_o::net::monitor::Status::read(&job).expect("a status was written");
+    assert_eq!(status.state, maur_o::net::monitor::State::Failed);
+    assert!(status
+        .message
+        .is_some_and(|m| m.contains("classes.json") && !m.starts_with("Error: ")));
+}

@@ -285,8 +285,9 @@ fn notes_of(dataset: &std::path::Path) -> Result<Classes, String> {
     let path = dataset.join(CLASSES_FILE);
     let classes = Classes::read(&path).map_err(|e| {
         format!(
-            "{e}\nA dataset to train on is what generate_maps_dataset writes with \
-             --just-opaque-areas; without that flag there are no labels and no {CLASSES_FILE}.",
+            "{e}\nA dataset to train on is what mauro net dataset writes with \
+             --content areas or --content areas-and-lines; the default, --content all, \
+             draws what nothing could label, and writes no {CLASSES_FILE}.",
         )
     })?;
 
@@ -498,8 +499,26 @@ pub fn main(args: Args) -> ExitCode {
             if !message.is_empty() {
                 eprintln!("{message}");
             }
+            report_refusal(&message);
             code
         }
+    }
+}
+
+/// A run refused before it started — a dataset which cannot be trained on,
+/// say — has reported nothing to whoever is watching it, which would see a
+/// job gone silent rather than one which failed: it is told so here. A run
+/// which got as far as reporting has said how it ended itself.
+fn report_refusal(message: &str) {
+    let Some(dir) = std::env::var_os(maur_o::net::monitor::JOB_DIR_ENV) else {
+        return;
+    };
+    if maur_o::net::monitor::Status::read(std::path::Path::new(&dir)).is_some() {
+        return;
+    }
+    if let Some(monitor) = Monitor::from_env() {
+        let message = message.strip_prefix("Error: ").unwrap_or(message);
+        monitor.end(&Err(message.to_string()));
     }
 }
 
