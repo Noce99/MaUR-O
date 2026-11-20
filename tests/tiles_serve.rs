@@ -145,6 +145,26 @@ fn a_layer_is_drawn_at_its_symbol_sets_scale_unless_one_is_asked_for() {
 }
 
 #[test]
+fn tiles_a_page_gave_up_on_do_not_stop_the_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::start(&[&make_archive(dir.path())]);
+    let t = tile_at(16);
+    // Asked for and hung up on at once, as a page does with the tiles it
+    // scrolls away from: the server skips them and goes on.
+    for size in 300..340 {
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        let request = format!(
+            "GET /tiles/16/{}/{}.png?size={size} HTTP/1.1\r\nHost: x\r\n\r\n",
+            t.x, t.y
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+    }
+    let (status, body) = server.get(&format!("/tiles/16/{}/{}.png?size=256", t.x, t.y));
+    assert!(status.contains("200") && body.starts_with(PNG));
+    assert!(body.len() > 1000, "{} bytes", body.len());
+}
+
+#[test]
 fn a_tile_too_coarse_for_symbols_shows_what_the_map_covers() {
     let dir = tempfile::tempdir().unwrap();
     let server = Server::start(&[&make_archive(dir.path())]);

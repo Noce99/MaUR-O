@@ -74,38 +74,66 @@ function layerParam() {
   return "&layers=" + boxes.filter(b => b.checked).map(b => b.dataset.index).join(",");
 }
 
+// Pixels a tile is drawn into: as many as the screen has for its 256.
+const PIXELS = clamp(TILE * Math.ceil(window.devicePixelRatio || 1), 256, 1024);
+let frame = 0;
+function later() { if (!frame) frame = requestAnimationFrame(() => { frame = 0; render(); }); }
+function drop(key, e) {
+  e.img.onload = e.img.onerror = null;
+  e.img.removeAttribute("src");   // stops a load still on its way
+  e.img.remove(); e.grid.remove(); shown.delete(key);
+}
+
 function render() {
   const w = mapEl.clientWidth, h = mapEl.clientHeight;
-  const tz = clamp(Math.floor(view.zoom), 0, 24), k = 2 ** (view.zoom - tz), size = TILE * k;
+  // The level nearest the view, shown between 0.71 and 1.41 times its size.
+  const tz = clamp(Math.round(view.zoom), 0, 24), k = 2 ** (view.zoom - tz);
   const c = project(view.lat, view.lon, tz), n = 2 ** tz;
   const x0 = Math.floor((c.x - w / 2 / k) / TILE), x1 = Math.floor((c.x + w / 2 / k) / TILE);
   const y0 = Math.max(0, Math.floor((c.y - h / 2 / k) / TILE)), y1 = Math.min(n - 1, Math.floor((c.y + h / 2 / k) / TILE));
-  const want = new Set();
+  // The tiles wanted, the middle of the screen first: the order they are asked for.
+  const wanted = [];
   for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
+    wanted.push({ tx, ty, d: Math.hypot((tx + 0.5) * TILE - c.x, (ty + 0.5) * TILE - c.y) });
+  }
+  wanted.sort((a, b) => a.d - b.d);
+  const want = new Set();
+  let ready = true;
+  for (const { tx, ty } of wanted) {
     const wx = ((tx % n) + n) % n, key = `${tz}/${tx}/${ty}`;
     want.add(key);
     let e = shown.get(key);
     if (!e) {
       const img = new Image();
       img.draggable = false;
-      img.src = `/tiles/${tz}/${wx}/${ty}.png?${layerParam().slice(1)}`;
       const grid = document.createElement("div");
       grid.className = "grid"; grid.textContent = `${tz}/${wx}/${ty}`;
+      e = { img, grid, z: tz, x: tx, y: ty, loaded: false };
+      img.onload = img.onerror = () => { e.loaded = true; later(); };
+      img.src = `/tiles/${tz}/${wx}/${ty}.png?size=${PIXELS}${layerParam()}`;
       tilesEl.append(img, grid);
-      e = { img, grid }; shown.set(key, e);
+      shown.set(key, e);
     }
-    const left = (tx * TILE - c.x) * k + w / 2, top = (ty * TILE - c.y) * k + h / 2;
-    for (const el of [e.img, e.grid]) { el.style.left = left + "px"; el.style.top = top + "px"; el.style.width = size + "px"; el.style.height = size + "px"; }
-    e.grid.style.display = gridEl.checked ? "block" : "none";
+    ready = ready && e.loaded;
   }
-  for (const [key, e] of shown) if (!want.has(key)) { e.img.remove(); e.grid.remove(); shown.delete(key); }
+  // Tiles of another level stay, under the new ones, until those have come.
+  for (const [key, e] of shown) {
+    const mine = e.z === tz;
+    if (!want.has(key) && (mine || ready || !e.loaded)) { drop(key, e); continue; }
+    const ez = 2 ** (view.zoom - e.z), ec = project(view.lat, view.lon, e.z), size = TILE * ez;
+    const left = (e.x * TILE - ec.x) * ez + w / 2, top = (e.y * TILE - ec.y) * ez + h / 2;
+    if (left > w || top > h || left + size < 0 || top + size < 0) { drop(key, e); continue; }
+    for (const el of [e.img, e.grid]) { el.style.left = left + "px"; el.style.top = top + "px"; el.style.width = size + "px"; el.style.height = size + "px"; }
+    e.img.style.zIndex = mine ? 1 : 0;
+    e.grid.style.display = mine && gridEl.checked ? "block" : "none";
+  }
   const coarse = info && view.zoom < info.object_min_zoom;
   hintEl.style.display = coarse ? "block" : "none";
   if (coarse) hintEl.textContent = `Below zoom ${info.object_min_zoom} no symbol is drawn yet: the blue areas are what the maps cover.`;
   statusEl.textContent = `zoom ${view.zoom.toFixed(2)} · ${view.lat.toFixed(5)}, ${view.lon.toFixed(5)}`;
   history.replaceState(null, "", `#${view.zoom.toFixed(2)}/${view.lat.toFixed(5)}/${view.lon.toFixed(5)}`);
 }
-function reload() { for (const e of shown.values()) { e.img.remove(); e.grid.remove(); } shown.clear(); render(); }
+function reload() { for (const [key, e] of [...shown]) drop(key, e); render(); }
 
 function zoomAt(px, py, dz) {
   const w = mapEl.clientWidth, h = mapEl.clientHeight;

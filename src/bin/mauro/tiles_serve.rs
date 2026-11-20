@@ -294,6 +294,21 @@ fn tile_reply(shared: &Shared, renderers: &mut [TileRenderer], path: &str, query
     }
 }
 
+/// Whether the other end has closed `stream`, having sent its request: nothing
+/// it could still be waiting for. A look that does not wait or take anything.
+fn hung_up(stream: &TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let looked = stream.peek(&mut [0u8; 1]);
+    let _ = stream.set_nonblocking(false);
+    match looked {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+    }
+}
+
 fn handle(shared: &Shared, renderers: &mut [TileRenderer], mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut request = Vec::new();
@@ -325,6 +340,10 @@ fn handle(shared: &Shared, renderers: &mut [TileRenderer], mut stream: TcpStream
                 body: Arc::new(info_json(shared).into_bytes()),
                 cacheable: false,
             },
+            // A tile the page no longer wants (it scrolled away, or zoomed) has
+            // had its connection closed while it waited: not drawn, so the
+            // workers get on with the ones on screen.
+            p if p.starts_with("/tiles/") && hung_up(&stream) => return,
             p if p.starts_with("/tiles/") => tile_reply(shared, renderers, p, query),
             _ => text("404 Not Found", "not found"),
         }
