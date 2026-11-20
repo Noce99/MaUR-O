@@ -1336,19 +1336,23 @@ const BEST_WEIGHTS: &str = "best";
 /// * the stop itself, burn's own [`MetricEarlyStoppingStrategy`] on the
 ///   validation loss, the metric `best.bpk` is chosen by — where the run
 ///   asked for one ([`TrainingConfig::patience`]).
+///
+/// And, last, the device's memory handed back to the driver: see
+/// [`EpochHook::release_memory`].
 #[derive(Clone)]
 struct EpochHook {
     phase: ImageValidation,
     pass: Pass,
     stopping: Option<MetricEarlyStoppingStrategy>,
     patience: usize,
+    device: Device,
 }
 
 impl EpochHook {
     /// The hook of a run whose sheets are `phase`, whose training half is
     /// moved on by `pass`, and which stops after `patience` epochs without a
     /// better validation loss (never, for nought).
-    fn new(phase: ImageValidation, pass: Pass, patience: usize) -> EpochHook {
+    fn new(phase: ImageValidation, pass: Pass, patience: usize, device: Device) -> EpochHook {
         let stopping = (patience > 0).then(|| {
             MetricEarlyStoppingStrategy::new(
                 &LossMetric::new(),
@@ -1363,7 +1367,32 @@ impl EpochHook {
             pass,
             stopping,
             patience,
+            device,
         }
+    }
+
+    /// Gives the pages no tensor is using back to the driver, on every
+    /// stream of the device.
+    ///
+    /// cubecl gives every thread which touches the device a stream of its
+    /// own, and every stream its own pools: the training step, each of the
+    /// loader's workers (a batch is made on the worker that crops it), the
+    /// validation loader's, the metrics' thread, the checkpointer. A pool
+    /// keeps what it once needed, so each sits at its own high-water mark,
+    /// and the marks only rise — the validation loader's pages are idle the
+    /// whole of a training epoch and the training loader's the whole of a
+    /// validation. What fails is an allocation on one stream with the others
+    /// holding the device: cubecl's own rescue for an allocation which does
+    /// not fit cleans the stream it failed on and no other, so it cannot
+    /// reach what is lying idle elsewhere. That is a run which falls over
+    /// with out of device memory several epochs in, at whatever batch size —
+    /// a larger batch only gets there sooner.
+    ///
+    /// [`Device::memory_cleanup`] cleans every stream. Once an epoch, after
+    /// its validation and its sheets and before the next one starts, is when
+    /// the least is live and the most has gone idle.
+    fn release_memory(&self) {
+        self.device.memory_cleanup();
     }
 }
 
@@ -1377,6 +1406,7 @@ impl EarlyStoppingStrategy for EpochHook {
             .stopping
             .as_mut()
             .is_some_and(|stopping| stopping.should_stop(epoch, store));
+        self.release_memory();
         if stop {
             println!(
                 "no lower validation loss in the last {} epochs: the run stops at epoch {epoch}",
@@ -1841,7 +1871,7 @@ pub fn train(
         .num_epochs(config.epochs)
         // The one hook burn calls once an epoch, which three things share:
         // see `EpochHook`.
-        .early_stopping(EpochHook::new(phase, pass, config.patience))
+        .early_stopping(EpochHook::new(phase, pass, config.patience, device.clone()))
         .summary();
     let training = if let Some(monitor) = &monitor {
         monitor.watch(training.interrupter());
