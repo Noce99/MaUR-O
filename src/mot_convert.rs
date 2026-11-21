@@ -344,12 +344,13 @@ fn convert_cut(
     // A Mercator meter is longer than a ground meter by this much there.
     let stretch = 1.0 / place(middle.0, middle.1).0.to_radians().cos().max(0.05);
     // The angle from a tile's east to the map's own east there, which every
-    // rotation in the map has to be turned by.
+    // rotation in the map has to be turned by: counterclockwise, as Mapper
+    // measures rotations (Mercator's `y` grows north, so it is the usual angle).
     let (a, b) = (
         project(middle.0, middle.1),
         project(middle.0 + 1.0, middle.1),
     );
-    let frame = (-(b.1 - a.1)).atan2(b.0 - a.0);
+    let frame = (b.1 - a.1).atan2(b.0 - a.0);
 
     // What each symbol of the map becomes, worked out once, and for one stored
     // as another symbol, the note saying so (with its count, once known).
@@ -1783,6 +1784,64 @@ mod tests {
             (turned - std::f64::consts::FRAC_PI_2).abs() < 1e-3,
             "{turned}"
         );
+    }
+
+    /// A map whose north is east of true north (declination east) is turned
+    /// clockwise on the earth; Mapper's rotations are counterclockwise, so its
+    /// symbols and fill patterns are stored turned by minus that much. Magnetic
+    /// north lines drawn as a pattern then point to magnetic north, not as far
+    /// west of true north.
+    #[test]
+    fn a_map_turned_clockwise_turns_its_symbols_and_patterns_clockwise() {
+        let mut map = empty_map();
+        // Placed from its anchor: true north is the declination away.
+        map.georeferencing.as_mut().unwrap().epsg = 0;
+        let declination = 5.0;
+        let anchor = GeographicAnchor {
+            declination,
+            ..anchor()
+        };
+        let point = object_of(
+            &map,
+            |s| matches!(s, Symbol::Point(_)),
+            ObjectKind::Point,
+            vec![Coord::new(0.0, 0.0, 0)],
+        );
+        let area = object_of(
+            &map,
+            |s| matches!(s, Symbol::Area(a) if !a.patterns.is_empty()),
+            ObjectKind::Path(PathObject::default()),
+            vec![
+                Coord::new(-5.0, -5.0, 0),
+                Coord::new(5.0, -5.0, 0),
+                Coord::new(5.0, 5.0, 0),
+                Coord::new(-5.0, 5.0, coord_flag::CLOSE_POINT),
+            ],
+        );
+        map.objects.extend([point, area]);
+        let converted =
+            convert(&map, &anchor, &SymbolTable::isom(), 0, &Options::default()).unwrap();
+        let tile = converted.tiles.values().next().unwrap();
+        let expected = -declination.to_radians();
+        let point = tile
+            .objects
+            .iter()
+            .find(|o| o.shape == Shape::Point)
+            .unwrap();
+        assert!(
+            (point.rotation - expected).abs() < 1e-3,
+            "{}",
+            point.rotation
+        );
+        let pattern = tile
+            .objects
+            .iter()
+            .find_map(|o| match &o.shape {
+                Shape::Path(Some(p)) => Some(p.rotation),
+                _ => None,
+            })
+            .unwrap();
+        assert!((pattern - expected).abs() < 1e-3, "{pattern}");
     }
 
     #[test]
