@@ -211,11 +211,32 @@ pub struct Renderer<'m> {
     /// The symbol whose object is being added, stamped onto every renderable
     /// it produces. -1 outside `add_object`.
     current_symbol_id: i32,
+    /// Where the map will be drawn, in mm on the paper, where only a part of it
+    /// will: area fill patterns are laid out there and not over the rest of
+    /// their area (see [`Renderer::new_within`]).
+    window: Option<Rect>,
 }
 
 impl<'m> Renderer<'m> {
     /// Creates the renderables for all objects of the map.
     pub fn new(map: &'m Map) -> Renderer<'m> {
+        Renderer::build(map, None)
+    }
+
+    /// Creates the renderables for drawing only `window` (mm on the paper) of
+    /// the map: as [`new`](Self::new), but an area's fill pattern is laid out
+    /// only where it can reach into the window, not over the whole area. A
+    /// pattern's lines and the elements along them sit on a grid fixed by the
+    /// pattern and the area's origin, not by where the layout starts, so what
+    /// falls in the window is the same as with `new`; a large patterned area
+    /// seen through a small window (a tile of a big map) no longer costs every
+    /// element of the whole area. The extent, being of what is drawn, is then
+    /// that of the window's part of the patterns.
+    pub fn new_within(map: &'m Map, window: Rect) -> Renderer<'m> {
+        Renderer::build(map, Some(window))
+    }
+
+    fn build(map: &'m Map, window: Option<Rect>) -> Renderer<'m> {
         let mut renderer = Renderer {
             map,
             renderables: Vec::new(),
@@ -223,6 +244,7 @@ impl<'m> Renderer<'m> {
             extent: Rect::default(),
             current_clip: None,
             current_symbol_id: -1,
+            window,
         };
         for object in &map.objects {
             renderer.add_object(object);
@@ -258,6 +280,7 @@ impl<'m> Renderer<'m> {
             extent: Rect::default(),
             current_clip: None,
             current_symbol_id: -1,
+            window: None,
         };
         if let Some(index) = object.symbol_index {
             let symbol = &map.symbols[index];
@@ -535,10 +558,10 @@ impl<'m> Renderer<'m> {
         symbol: &PointSymbol,
         position: Point,
         rotation: f64,
-        outline: &Path,
+        outline: &EvenOdd,
         mode: i32,
     ) {
-        let contains = |p: Point| -> bool { outline.contains_even_odd(p) };
+        let contains = |p: Point| -> bool { outline.contains(p) };
         let completely = |center: Point, r: f64| {
             contains(Point::new(center.x - r, center.y))
                 && contains(Point::new(center.x, center.y - r))
@@ -1676,7 +1699,7 @@ impl<'m> Renderer<'m> {
         second: Point,
         delta_offset: f64,
         delta_rotation: f64,
-        outline: &Path,
+        outline: &EvenOdd,
     ) {
         if pattern.pattern_type == fill_pattern_type::LINE {
             let mut line = Path::new();
@@ -1743,9 +1766,13 @@ impl<'m> Renderer<'m> {
         delta_rotation_in: f64,
         origin: Point,
     ) {
-        // Taken by value up front where needed below: placing symbols may
-        // grow the clip vector.
-        let outline = self.clips.get(clip).cloned().unwrap_or_default();
+        // Flattened once up front for the elements' inside tests (placing
+        // symbols may grow the clip vector, so it is not borrowed from it);
+        // only a pattern that tests its elements needs it.
+        let outline = match self.clips.get(clip) {
+            Some(path) if pattern.no_clipping != 0 => EvenOdd::new(path),
+            _ => EvenOdd::default(),
+        };
         if pattern.line_spacing <= 0.0 {
             return;
         }
@@ -1786,6 +1813,29 @@ impl<'m> Renderer<'m> {
             -point_extent.left(),
             -point_extent.top(),
         );
+        // Only where an element can reach into the window being drawn: the
+        // window grown by the same extent. The grid the elements sit on does
+        // not depend on the canvas, so those kept are where they would be.
+        if let Some(window) = self.window {
+            let reach = window.adjusted(
+                -point_extent.right(),
+                -point_extent.bottom(),
+                -point_extent.left(),
+                -point_extent.top(),
+            );
+            let (left, top) = (
+                canvas.left().max(reach.left()),
+                canvas.top().max(reach.top()),
+            );
+            let (right, bottom) = (
+                canvas.right().min(reach.right()),
+                canvas.bottom().min(reach.bottom()),
+            );
+            if left >= right || top >= bottom {
+                return;
+            }
+            canvas = Rect::from_ltrb(left, top, right, bottom);
+        }
 
         // The origin of the object moves the pattern, across the lines and
         // along them. The y axis points down, hence the reflections.

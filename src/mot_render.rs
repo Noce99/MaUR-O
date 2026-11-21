@@ -165,7 +165,14 @@ impl TileRenderer {
         let ppm = f64::from(pixels) / window.width();
         let transform = Transform::from_translate(-window.left() as f32, -window.top() as f32)
             .post_concat(Transform::from_scale(ppm as f32, ppm as f32));
-        Renderer::new(&self.template).paint(&mut pixmap.as_mut(), transform);
+        // Built for the window only: a large patterned area (stony ground,
+        // say) is laid out where it is seen, not over the whole tile.
+        Renderer::new_within(&self.template, window).paint_rect(
+            &mut pixmap.as_mut(),
+            transform,
+            Some(window),
+            &[],
+        );
         self.template.objects.clear();
         if coverage != CoverageStyle::None {
             draw_coverage(
@@ -574,6 +581,64 @@ mod tests {
             .render(data, &tile, data, SCALE, 64, CoverageStyle::None)
             .unwrap();
         assert!(pixmap.pixels().iter().all(|p| p.alpha() == 0));
+    }
+
+    /// A large area of a dot-pattern symbol (with a curved edge and a hole)
+    /// drawn through a small window: laying the pattern out in the window
+    /// only must not move a single dot.
+    #[test]
+    fn a_pattern_laid_out_in_the_window_only_draws_the_same_pixels() {
+        use crate::map::coord_flag::{CLOSE_POINT, CURVE_START};
+        let (mut map, _) = read_xml_map_str(SymbolTable::isom().reference()).unwrap();
+        map.objects.clear();
+        for (code, rotation) in [("211", 0.0), ("210", 0.4), ("212", 2.0)] {
+            let index = map
+                .symbols
+                .iter()
+                .position(|s| s.code() == code && !s.is_helper_symbol())
+                .unwrap();
+            let mut object = Object::new(ObjectKind::Path(PathObject {
+                pattern_rotation: rotation,
+                pattern_origin: Point::new(3.3, -7.1),
+            }));
+            object.symbol_id = map.symbol_ids[index];
+            object.symbol_index = Some(index);
+            object.coords = vec![
+                Coord::new(-12.0, -10.0, 0),
+                Coord::new(105.0, -9.0, CURVE_START),
+                Coord::new(120.0, 25.0, 0),
+                Coord::new(118.0, 75.0, 0),
+                Coord::new(102.0, 108.0, 0),
+                Coord::new(-8.0, 100.0, 0),
+                Coord::new(-12.0, -10.0, CLOSE_POINT),
+                Coord::new(38.0, 38.0, 0),
+                Coord::new(50.0, 38.0, 0),
+                Coord::new(50.0, 50.0, 0),
+                Coord::new(38.0, 38.0, CLOSE_POINT),
+            ];
+            map.objects.clear();
+            map.objects.push(object);
+            for window in [
+                Rect::new(30.9, 35.2, 20.0, 20.0),
+                Rect::new(105.0, 60.0, 25.0, 25.0),
+            ] {
+                let transform =
+                    Transform::from_translate(-window.left() as f32, -window.top() as f32)
+                        .post_concat(Transform::from_scale(10.0, 10.0));
+                let draw = |renderer: Renderer| {
+                    let mut pixmap = Pixmap::new(256, 256).unwrap();
+                    renderer.paint_rect(&mut pixmap.as_mut(), transform, Some(window), &[]);
+                    pixmap
+                };
+                let whole = draw(Renderer::new(&map));
+                let within = draw(Renderer::new_within(&map, window));
+                assert!(
+                    whole.pixels().iter().any(|p| p.alpha() > 0),
+                    "{code}: drawn"
+                );
+                assert!(whole.data() == within.data(), "{code} at {window:?}");
+            }
+        }
     }
 
     #[test]
