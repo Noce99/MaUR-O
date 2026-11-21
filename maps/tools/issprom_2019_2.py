@@ -395,6 +395,10 @@ o.insert_after('512.2', lower)
 for code in ('104', '104.1', '201', '202.1', '513.1', '518', '799'):
     o.sub(code, r'(<line_symbol [^>]*?end_length="\d+")(?! show_at_least_one_symbol)',
           r'\1 show_at_least_one_symbol="true"')
+# 311 Small fountain or well has no north arrow in the specification (unlike
+# 308, 310 or 313 beside it): a square fountain is drawn turned as it stands.
+# Mapper's 2019 set has it square to the paper.
+o.sub('311', r'<point_symbol (?!rotatable)', '<point_symbol rotatable="true" ')
 # 513.2: "Passable retaining wall", minimum length 2.4 -> 1.4 (errata 01.02.2024).
 rename('513.2', 'Passable retaining wall')
 o.sub('513.2', r'minimum_length="2400"', 'minimum_length="1400"')

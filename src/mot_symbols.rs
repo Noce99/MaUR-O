@@ -949,6 +949,18 @@ mod tests {
     }
 
     #[test]
+    fn a_small_fountain_turns_as_it_stands() {
+        // No north arrow beside 311 in ISSprOM 2019-2, unlike 313.
+        let (map, _) = read_xml_map_str(Standard::Issprom.reference()).unwrap();
+        let point = |code: &str| match map.symbols.iter().find(|s| s.code() == code) {
+            Some(Symbol::Point(p)) => p.is_rotatable,
+            _ => panic!("{code} is a point"),
+        };
+        assert!(point("311"));
+        assert!(!point("313"));
+    }
+
+    #[test]
     fn a_bad_symbol_map_says_which_line() {
         for (text, says) in [
             ("501 501", "line 1: a line before any [standard] section"),
