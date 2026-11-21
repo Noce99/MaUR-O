@@ -25,7 +25,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::map::{Map, ObjectKind, Symbol};
+use crate::map::{fill_pattern_type, FillPattern, Map, ObjectKind, PartRef, Point, Symbol};
 use crate::mot::node_flag;
 use crate::mot::{
     Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, COVERAGE_SYMBOL, WORLD_HALF,
@@ -386,9 +386,31 @@ pub fn convert_with_extent(
             ObjectKind::Path(p)
                 if wants_pattern(p.pattern_rotation, (p.pattern_origin.x, p.pattern_origin.y)) =>
             {
-                Some((
+                let mut patterns = Vec::new();
+                fill_patterns(map, symbol, &mut patterns);
+                // The middle of the object's box, in paper mm: the same for
+                // every piece of it in every tile and level.
+                let (mut lo, mut hi) = (
+                    Point::new(f64::MAX, f64::MAX),
+                    Point::new(f64::MIN, f64::MIN),
+                );
+                for c in &object.coords {
+                    lo = Point::new(lo.x.min(c.x), lo.y.min(c.y));
+                    hi = Point::new(hi.x.max(c.x), hi.y.max(c.y));
+                }
+                let origin = pattern_anchor(
+                    &patterns,
                     p.pattern_rotation,
-                    project(p.pattern_origin.x, p.pattern_origin.y),
+                    p.pattern_origin,
+                    (lo + hi) * 0.5,
+                );
+                // The tiles turn every pattern with the map (see
+                // `mot_render`); the object's own turn is for those that
+                // follow it.
+                let turned = patterns.is_empty() || patterns.iter().any(|p| p.rotatable);
+                Some((
+                    if turned { p.pattern_rotation } else { 0.0 },
+                    project(origin.x, origin.y),
                 ))
             }
             _ => None,
@@ -592,6 +614,84 @@ fn store_coverage(
 }
 
 /// Whether a path has a closed part: an area, or a ring drawn as a line.
+/// The fill patterns `symbol` lays out, those of a combined symbol's parts
+/// included.
+fn fill_patterns<'a>(map: &'a Map, symbol: &'a Symbol, out: &mut Vec<&'a FillPattern>) {
+    match symbol {
+        Symbol::Area(a) => out.extend(a.patterns.iter()),
+        Symbol::Combined(c) => {
+            for part in &c.parts {
+                let part = match *part {
+                    PartRef::Shared(i) => map.symbols.get(i),
+                    PartRef::Private(i) => c.owned_parts.get(i),
+                    PartRef::None => None,
+                };
+                // A combined symbol may not hold another combined one, but a
+                // file can say anything: one level deep only.
+                if let Some(Symbol::Area(a)) = part {
+                    out.extend(a.patterns.iter());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The pattern origin `origin` (paper mm) of an object whose patterns are
+/// `patterns`, turned by `rotation` where rotatable, moved by whole periods of
+/// the patterns to as near `near` as they allow: the same lines and the same
+/// elements along them, laid out from beside the object.
+///
+/// Mapper lays patterns out from the paper's origin unless an object says
+/// otherwise, and a map's paper origin may be hundreds of kilometres from its
+/// objects (a projected reference point at an easting of 0, say). A tile is
+/// drawn on a paper of its own latitude's scale, and from that far the
+/// slightest difference of scale between two tiles moves the elements by a
+/// good part of their spacing; from beside the object, by next to nothing.
+/// The periods are the map's own patterns', so where a tile's symbol is the
+/// map's at the map's scale the elements are where Mapper puts them, and
+/// neighbouring areas of one symbol still line up; drawn with other sizes the
+/// pattern is only anchored near the object.
+///
+/// The lines across which the elements repeat are those of the first pattern
+/// and of the first pattern at another angle (the two hatchings of an
+/// out-of-bounds area); where the patterns are all on one angle, the origin
+/// moves freely along their lines unless they lay elements along them.
+fn pattern_anchor(patterns: &[&FillPattern], rotation: f64, origin: Point, near: Point) -> Point {
+    // (unit vector, period): moving the origin by a multiple of the period
+    // along the vector leaves the pattern as it was. As the renderer lays the
+    // patterns out: y down, the normal of lines at angle r is (sin r, cos r).
+    let mut periods: Vec<(Point, f64)> = Vec::new();
+    for p in patterns {
+        if p.line_spacing <= 0.0 {
+            continue;
+        }
+        let r = p.angle + if p.rotatable { rotation } else { 0.0 };
+        periods.push((Point::new(r.sin(), r.cos()), p.line_spacing));
+        if p.pattern_type == fill_pattern_type::POINT && p.point_distance > 0.0 {
+            periods.push((Point::new(r.cos(), -r.sin()), p.point_distance));
+        }
+    }
+    let Some(&(u1, p1)) = periods.first() else {
+        return origin;
+    };
+    let cross = |a: Point, b: Point| a.x * b.y - a.y * b.x;
+    let v = near - origin;
+    let whole = |u: Point, p: f64| (u.dot(v) / p).round() * p;
+    let a = whole(u1, p1);
+    let shift = match periods.iter().find(|(u, _)| cross(u1, *u).abs() > 1e-6) {
+        Some(&(u2, p2)) => {
+            // dot(shift, u1) = a, dot(shift, u2) = b
+            let b = whole(u2, p2);
+            let det = cross(u1, u2);
+            Point::new((a * u2.y - b * u1.y) / det, (u1.x * b - u2.x * a) / det)
+        }
+        // Lines only, all at one angle: free along them.
+        None => u1 * a + (v - u1 * u1.dot(v)),
+    };
+    origin + shift
+}
+
 fn flags_closed(coords: &[crate::map::Coord]) -> bool {
     coords.iter().any(|c| c.flags & node_flag::CLOSE_POINT != 0)
 }
@@ -1580,5 +1680,112 @@ mod tests {
             "{:?}",
             converted.warnings
         );
+    }
+
+    /// The patterns of the symbol `code` of `map`.
+    fn patterns_of<'a>(map: &'a Map, code: &str) -> Vec<&'a FillPattern> {
+        let symbol = map.symbols.iter().find(|s| s.code() == code).unwrap();
+        let mut patterns = Vec::new();
+        fill_patterns(map, symbol, &mut patterns);
+        patterns
+    }
+
+    #[test]
+    fn a_pattern_origin_moves_by_whole_periods_to_beside_the_object() {
+        let (map, _) = read_xml_map_str(ISOM).unwrap();
+        let near = Point::new(41_234.567, -25_678.901);
+        // Dots on a square grid (turned with the object), the two hatchings
+        // of an out-of-bounds area, lines all one way (marsh), and two dot
+        // patterns offset from each other (vineyard).
+        for code in ["211", "709", "308", "414"] {
+            let patterns = patterns_of(&map, code);
+            let origin = Point::new(3.3, -7.1);
+            let moved = pattern_anchor(&patterns, 0.3, origin, near);
+            let shift = moved - origin;
+            let mut largest: f64 = 0.0;
+            for p in patterns {
+                let r = p.angle + if p.rotatable { 0.3 } else { 0.0 };
+                let whole = |along: f64, period: f64| {
+                    let n = along / period;
+                    assert!((n - n.round()).abs() < 1e-6, "{code}: {n} periods");
+                };
+                whole(shift.dot(Point::new(r.sin(), r.cos())), p.line_spacing);
+                largest = largest.max(p.line_spacing);
+                if p.pattern_type == fill_pattern_type::POINT {
+                    whole(shift.dot(Point::new(r.cos(), -r.sin())), p.point_distance);
+                    largest = largest.max(p.point_distance);
+                }
+            }
+            let left = (moved - near).length();
+            assert!(left <= 2.0 * largest, "{code}: {left} mm from the object");
+        }
+    }
+
+    #[test]
+    fn a_far_pattern_origin_is_stored_beside_its_object() {
+        let mut map = empty_map();
+        // 40 m of paper from the paper's origin: 400 km at 1:10000, as a map
+        // whose projected reference point is at an easting of 0 has.
+        let (x, y) = (40_000.0, -3_000.0);
+        let square = |x: f64, y: f64| {
+            vec![
+                Coord::new(x, y, 0),
+                Coord::new(x + 20.0, y, 0),
+                Coord::new(x + 20.0, y + 20.0, 0),
+                Coord::new(x, y + 20.0, 0),
+                Coord::new(x, y, coord_flag::CLOSE_POINT),
+            ]
+        };
+        let turned = PathObject {
+            pattern_rotation: 1.0,
+            pattern_origin: Point::new(0.0, 0.0),
+        };
+        // Stony ground turns with the object; cultivated land does not.
+        for code in ["211", "412"] {
+            let o = object_of(
+                &map,
+                |s| s.code() == code,
+                ObjectKind::Path(PathObject { ..turned }),
+                square(x, y),
+            );
+            map.objects.push(o);
+        }
+        let converted = convert(
+            &map,
+            &anchor(),
+            &SymbolTable::isom(),
+            0,
+            &Options::default(),
+        )
+        .unwrap();
+        let mut rotations = Vec::new();
+        for tile in converted.tiles.values() {
+            for o in &tile.objects {
+                let Shape::Path(Some(pattern)) = &o.shape else {
+                    continue;
+                };
+                let (cx, cy) = (
+                    o.nodes.iter().map(|n| f64::from(n.x)).sum::<f64>() / o.nodes.len() as f64,
+                    o.nodes.iter().map(|n| f64::from(n.y)).sum::<f64>() / o.nodes.len() as f64,
+                );
+                let (dx, dy) = (
+                    f64::from(pattern.origin.0) - cx,
+                    f64::from(pattern.origin.1) - cy,
+                );
+                // 5 cm units: within 200 m of the 200 m square's nodes.
+                assert!(
+                    dx.hypot(dy) < 4_000.0,
+                    "the origin is {dx}, {dy} units away"
+                );
+                rotations.push((o.symbol, pattern.rotation));
+            }
+        }
+        let table = SymbolTable::isom();
+        let rotation = |code: &str| {
+            let id = table.id_of(code).unwrap();
+            rotations.iter().find(|r| r.0 == id).unwrap().1
+        };
+        // The map's turn only, for the pattern that does not follow the object.
+        assert!((rotation("211") - rotation("412") - 1.0).abs() < 1e-9);
     }
 }
