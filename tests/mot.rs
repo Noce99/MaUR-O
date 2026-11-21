@@ -331,3 +331,33 @@ fn something_that_is_not_an_archive_is_exit_2() {
         .assert()
         .code(2);
 }
+
+#[test]
+fn an_ocad_map_in_a_utm_zone_goes_into_an_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("ocad.pmtiles");
+    Command::cargo_bin("mauro")
+        .unwrap()
+        .args(["tiles", "build", "--output"])
+        .arg(&archive)
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/maps/SampleMap.ocd"))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("SampleMap.ocd (ISOM 2017-2): "));
+    assert!(std::fs::metadata(&archive).unwrap().len() > 0);
+}
+
+#[test]
+fn an_ocad_map_placed_nowhere_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("mauro")
+        .unwrap()
+        .args(["tiles", "build", "--output"])
+        .arg(dir.path().join("ocad.pmtiles"))
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/maps/testit.ocd"))
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "has no geographic reference point",
+        ));
+}

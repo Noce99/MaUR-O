@@ -27,7 +27,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::map::{fill_pattern_type, FillPattern, Map, ObjectKind, PartRef, Point, Symbol};
+use crate::map::{
+    fill_pattern_type, FillPattern, Georeferencing, Map, ObjectKind, PartRef, Point, Symbol,
+};
 use crate::mot::node_flag;
 use crate::mot::{
     Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, COVERAGE_SYMBOL, WORLD_HALF,
@@ -35,9 +37,12 @@ use crate::mot::{
 use crate::mot_clip::{clip_line, clip_ring, flatten, simplify, Rect, Vertex};
 use crate::mot_cut::cut_hidden;
 use crate::mot_symbols::{Match, SymbolTable, ZoomRule};
+use crate::ocd::{is_ocd_file, ocd_to_omap_xml};
 use crate::orthophoto::{
-    ground_to_geographic, paper_to_geographic, true_north_rotation, web_mercator, GeographicAnchor,
+    geographic_anchor, ground_to_geographic, paper_to_geographic, true_north_rotation,
+    web_mercator, GeographicAnchor,
 };
+use crate::xml_reader::read_xml_map_str;
 
 /// What to build.
 #[derive(Clone, Copy, Debug)]
@@ -184,6 +189,79 @@ pub fn paper_extent(map: &Map) -> Option<[f64; 4]> {
     Some([x0, y0, x1, y1])
 }
 
+/// Where a map's paper lies on the earth, exactly as [`convert`] places it
+/// (see the module's doc): for drawing the map itself where its tiles are.
+pub struct Placement<'m> {
+    georef: &'m Georeferencing,
+    anchor: GeographicAnchor,
+    north: f64,
+    meters_per_mm: f64,
+}
+
+impl<'m> Placement<'m> {
+    /// `map`, placed at `anchor`; an error where it has no georeferencing.
+    pub fn new(map: &'m Map, anchor: &GeographicAnchor) -> Result<Placement<'m>, String> {
+        let georef = map
+            .georeferencing
+            .as_ref()
+            .ok_or("the map is not georeferenced")?;
+        let scale = if georef.scale > 0 {
+            georef.scale
+        } else {
+            map.scale_denominator
+        };
+        Ok(Placement {
+            georef,
+            anchor: *anchor,
+            north: true_north_rotation(georef, anchor),
+            meters_per_mm: f64::from(scale) / 1000.0,
+        })
+    }
+
+    /// A point on the paper (mm, `y` down) as `(latitude, longitude)` in degrees.
+    pub fn geographic(&self, x: f64, y: f64) -> (f64, f64) {
+        paper_to_geographic(self.georef, (x, y)).unwrap_or_else(|| {
+            ground_to_geographic(
+                self.georef,
+                &self.anchor,
+                self.north,
+                (x * self.meters_per_mm, y * self.meters_per_mm),
+            )
+        })
+    }
+
+    /// A point on the paper in Mercator meters, `y` growing north.
+    pub fn mercator(&self, x: f64, y: f64) -> (f64, f64) {
+        let (lat, lon) = self.geographic(x, y);
+        web_mercator(lat, lon)
+    }
+}
+
+/// A map file as `mauro tiles build` reads it: the map, and where on the earth
+/// it is, `None` where the file does not say. A Mapper file says so beside its
+/// projected CRS (`<ref_point_deg>`); an OCAD file is converted first
+/// ([`crate::ocd`]) and placed from its reference point where its CRS is a UTM
+/// zone, the only ones OCAD's georeferencing gives without degrees that this
+/// crate projects.
+pub fn read_placed_map(bytes: &[u8]) -> Result<(Map, Option<GeographicAnchor>), String> {
+    let text = if is_ocd_file(bytes) {
+        ocd_to_omap_xml(bytes)?.xml
+    } else {
+        String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())?
+    };
+    let (map, _) = read_xml_map_str(&text)?;
+    let anchor = geographic_anchor(&text).or_else(|| {
+        let g = map.georeferencing.as_ref()?;
+        let (lat, lon) = paper_to_geographic(g, (g.map_ref_point_x, g.map_ref_point_y))?;
+        Some(GeographicAnchor {
+            lat,
+            lon,
+            declination: 0.0,
+        })
+    });
+    Ok((map, anchor))
+}
+
 /// Converts `map`, placed at `anchor`, into tiles of `table`'s symbols.
 ///
 /// Ids are assigned from `first_id`. An error where the map has no
@@ -243,17 +321,9 @@ fn convert_cut(
     extent: Option<[f64; 4]>,
     cut: &BTreeMap<usize, crate::map::CoordList>,
 ) -> Result<Converted, String> {
-    let georef = map
-        .georeferencing
-        .as_ref()
-        .ok_or("the map is not georeferenced")?;
-    let scale = if georef.scale > 0 {
-        georef.scale
-    } else {
-        map.scale_denominator
-    };
-    let meters_per_mm = f64::from(scale) / 1000.0;
-    let north = true_north_rotation(georef, anchor);
+    let placement = Placement::new(map, anchor)?;
+    let georef = placement.georef;
+    let meters_per_mm = placement.meters_per_mm;
     let grid_cm = level_grid_cm(options.zoom, options.detail_zoom, options.grid_cm);
     let grid = Grid::new(grid_cm);
     let coarse = options.zoom < options.detail_zoom;
@@ -261,21 +331,9 @@ fn convert_cut(
     let pixel = TileId::size(options.zoom) / 256.0;
 
     // paper mm -> (lat, lon)
-    let place = |x: f64, y: f64| -> (f64, f64) {
-        paper_to_geographic(georef, (x, y)).unwrap_or_else(|| {
-            ground_to_geographic(
-                georef,
-                anchor,
-                north,
-                (x * meters_per_mm, y * meters_per_mm),
-            )
-        })
-    };
+    let place = |x: f64, y: f64| placement.geographic(x, y);
     // paper mm -> Mercator meters, y growing north
-    let project = |x: f64, y: f64| -> (f64, f64) {
-        let (lat, lon) = place(x, y);
-        web_mercator(lat, lon)
-    };
+    let project = |x: f64, y: f64| placement.mercator(x, y);
 
     // Where the map is, on the paper: the middle of what it covers (its
     // reference point may be far from it).
@@ -1967,5 +2025,36 @@ mod tests {
         };
         // The map's turn only, for the pattern that does not follow the object.
         assert!((rotation("211") - rotation("412") - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_placement_puts_the_paper_where_the_tiles_have_it() {
+        // In a UTM zone, by the projection; elsewhere, from the anchor.
+        let utm_map = empty_map();
+        let mut local = empty_map();
+        local.georeferencing.as_mut().unwrap().epsg = 0;
+        for map in [utm_map, local] {
+            let placement = Placement::new(&map, &anchor()).unwrap();
+            let g = map.georeferencing.as_ref().unwrap();
+            let (lat, lon) = placement.geographic(g.map_ref_point_x, g.map_ref_point_y);
+            assert!((lat - anchor().lat).abs() < 1e-7, "{lat}");
+            assert!((lon - anchor().lon).abs() < 1e-7, "{lon}");
+            // A millimetre east on the paper is the scale's meters east.
+            let a = placement.mercator(g.map_ref_point_x, g.map_ref_point_y);
+            let b = placement.mercator(g.map_ref_point_x + 1.0, g.map_ref_point_y);
+            let ground = (b.0 - a.0).hypot(b.1 - a.1) * anchor().lat.to_radians().cos();
+            assert!((ground - 10.0).abs() < 0.05, "{ground} m");
+            // Within the grid convergence (1.6° here, in zone 32).
+            assert!((b.1 - a.1).abs() < (b.0 - a.0) * 0.05, "east is east");
+        }
+        assert!(Placement::new(&Map::default(), &anchor()).is_err());
+    }
+
+    #[test]
+    fn a_mapper_file_says_where_it_is_and_one_without_a_place_is_none() {
+        let (map, anchor) = read_placed_map(ISOM.as_bytes()).unwrap();
+        assert!(!map.symbols.is_empty());
+        assert_eq!(anchor, geographic_anchor(ISOM));
+        assert!(read_placed_map(b"\xff\xfe not a map").is_err());
     }
 }

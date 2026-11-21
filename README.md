@@ -700,6 +700,11 @@ stored by id in a table (ISOM 2017-2 or ISSprOM 2019-2) instead of as definition
 mauro tiles build [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 0] [--grid-cm 5] [--buffer 0.03125] [--symbol-map FILE] --output world.pmtiles <map-file>...
 ```
 
+The maps are Mapper files (`.omap`, `.xmap`) or OCAD files (`.ocd`, converted
+as `mauro render` converts them). Each must say where on the earth it is: a
+Mapper file's geographic reference point, or an OCAD file's reference point in
+a UTM zone; one that does not is skipped with a warning.
+
 The symbols of a map are stored in the table of the standard it is drawn to:
 `--standard auto` (the default) finds it for each map, from what the map says
 and from which table's symbols its objects use; `isom` or `issprom` stores every

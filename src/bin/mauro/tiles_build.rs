@@ -6,8 +6,10 @@
 //!               [--buffer 0.03125] --output world.pmtiles <map-file>...
 //! ```
 //!
-//! Each map must be georeferenced with a geographic reference point (Mapper's
-//! `<ref_point_deg>`, which every georeferenced map it saves has) so it can be
+//! The maps are Mapper files or OCAD files (converted as `mauro render` converts
+//! them). Each map must be georeferenced with a geographic reference point (Mapper's
+//! `<ref_point_deg>`, which every georeferenced map it saves has; an OCAD file in a
+//! UTM zone is placed from its reference point) so it can be
 //! placed on the earth; one that is not is skipped with a warning. All the
 //! maps go into one archive, their objects merged tile by tile.
 //!
@@ -60,11 +62,9 @@ use std::process::ExitCode;
 use clap::{Parser, ValueEnum};
 use maur_o::mot::{Tile, TileId};
 use maur_o::mot_archive::{write, ArchiveInfo};
-use maur_o::mot_convert::{convert_levels, merge_tiles, Options};
+use maur_o::mot_convert::{convert_levels, merge_tiles, read_placed_map, Options};
 use maur_o::mot_symbols::{SymbolMap, SymbolTable};
-use maur_o::orthophoto::geographic_anchor;
 use maur_o::osm_orienteering::Standard;
-use maur_o::xml_reader::read_xml_map_str;
 
 /// Which symbol set the maps are stored in.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -78,7 +78,7 @@ enum StandardArg {
 }
 
 #[derive(Parser)]
-#[command(about = "Converts Mapper maps into a MOT archive (tiled world map, in PMTiles).")]
+#[command(about = "Converts Mapper or OCAD maps into a MOT archive (tiled world map, in PMTiles).")]
 pub struct Args {
     /// The maps to convert (.omap or .xmap).
     #[arg(value_name = "MAP_FILE", required = true)]
@@ -174,21 +174,21 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
     let mut groups: Vec<Group> = Vec::new();
     let mut converted_maps = 0usize;
     for path in &args.maps {
-        let text = std::fs::read_to_string(path).map_err(|e| {
+        let bytes = std::fs::read(path).map_err(|e| {
             (
                 ExitCode::from(2),
                 format!("Error: cannot read {}: {e}", path.display()),
             )
         })?;
-        let Some(anchor) = geographic_anchor(&text) else {
+        let (map, anchor) = read_placed_map(&bytes)
+            .map_err(|e| (ExitCode::from(2), format!("Error: {}: {e}", path.display())))?;
+        let Some(anchor) = anchor else {
             eprintln!(
                 "Warning: {} has no geographic reference point; skipped",
                 path.display()
             );
             continue;
         };
-        let (map, _) = read_xml_map_str(&text)
-            .map_err(|e| (ExitCode::from(2), format!("Error: {}: {e}", path.display())))?;
         let standard = match args.standard {
             StandardArg::Isom => Standard::Isom,
             StandardArg::Issprom => Standard::Issprom,
