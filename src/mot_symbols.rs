@@ -167,6 +167,23 @@ pub struct SymbolEntry {
     /// spaces them depends on that length, so a piece of the line would not
     /// meet its neighbour's.
     pub whole: bool,
+    /// The width of the widest line it draws, in millimetres; 0 for none. What
+    /// tells a [`SymbolMap`] which of a road's or a stairway's footprints a
+    /// symbol is.
+    pub width: f64,
+}
+
+/// The widest line `symbol`, one of `map`'s, draws, in millimetres.
+fn widest_line(symbol: &Symbol, map: &Map) -> f64 {
+    let mut leaves = Vec::new();
+    symbol_leaves(symbol, map, &mut leaves);
+    leaves
+        .iter()
+        .filter_map(|leaf| match leaf {
+            Symbol::Line(s) => Some(s.line_width),
+            _ => None,
+        })
+        .fold(0.0, f64::max)
 }
 
 /// How [`SymbolTable::closest`] found a symbol, best first.
@@ -178,6 +195,128 @@ pub enum Match {
     Parent,
     /// The same name, of the same kind.
     Name,
+    /// A line of the table's [`SymbolMap`].
+    Table,
+}
+
+/// A cross-reference table: which symbol of a standard each symbol of a
+/// family of maps is, for maps whose codes mean something other than the
+/// standard's (an older edition, an older standard, a club's own set). Read
+/// from a text file:
+///
+/// ```text
+/// # The symbols of our maps, in ISSprOM 2019-2
+/// [ISSprOM 2019-2]
+/// 501.2                501.2 512.3      # an area becomes 512.3, a line 501.2
+/// 501.0.5 "Traffico"   501.18
+/// 501.0.5              501.6 501.7 501.8 501.9
+/// 602                  -
+/// ```
+///
+/// A section names the standard of the lines that follow. A line is a code of
+/// the maps' own, optionally a name in quotes, and the codes of the standard it
+/// becomes, or `-` for a symbol to leave out. Of those codes, the ones that
+/// draw the same [kind](SymbolKind) of thing count, and of them the one whose
+/// widest line is closest in width to the map's symbol's: a road becomes the
+/// footprint it is drawn at. Where none is of the right kind, the symbol is
+/// matched as if the line were not there. A name says the line is for the
+/// symbols of that code whose name starts with it (ignoring case), and comes
+/// before a line for the code alone. A map drawn to the standard itself, as it
+/// says, is matched by its codes only.
+#[derive(Clone, Debug, Default)]
+pub struct SymbolMap {
+    rules: Vec<MapRule>,
+}
+
+#[derive(Clone, Debug)]
+struct MapRule {
+    /// The line of the file, for messages.
+    line: usize,
+    standard: String,
+    code: String,
+    /// Lower case.
+    name: Option<String>,
+    /// Empty for a symbol left out.
+    targets: Vec<String>,
+}
+
+impl SymbolMap {
+    /// Reads a table from the text of its file.
+    pub fn parse(text: &str) -> Result<SymbolMap, String> {
+        let standards = [Standard::Isom, Standard::Issprom].map(|s| s.name());
+        let mut rules = Vec::new();
+        let mut standard: Option<&str> = None;
+        for (i, raw) in text.lines().enumerate() {
+            let line = i + 1;
+            let err = |what: &str| format!("line {line}: {what}");
+            // A comment runs from a `#` outside quotes to the end of the line.
+            let mut quoted = false;
+            let end = raw
+                .char_indices()
+                .find(|&(_, c)| {
+                    if c == '"' {
+                        quoted = !quoted;
+                    }
+                    c == '#' && !quoted
+                })
+                .map_or(raw.len(), |(at, _)| at);
+            let text = raw[..end].trim();
+            if text.is_empty() {
+                continue;
+            }
+            if let Some(section) = text.strip_prefix('[') {
+                let name = section
+                    .strip_suffix(']')
+                    .ok_or_else(|| err("a section is a standard's name in brackets"))?
+                    .trim();
+                standard = Some(
+                    standards
+                        .into_iter()
+                        .find(|s| s.eq_ignore_ascii_case(name))
+                        .ok_or_else(|| {
+                            err(&format!(
+                                "{name:?} is not a standard (one of {})",
+                                standards.join(", ")
+                            ))
+                        })?,
+                );
+                continue;
+            }
+            let standard = standard.ok_or_else(|| err("a line before any [standard] section"))?;
+            let (code, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+            let mut rest = rest.trim_start();
+            let mut name = None;
+            if let Some(quoted) = rest.strip_prefix('"') {
+                let (inside, after) = quoted
+                    .split_once('"')
+                    .ok_or_else(|| err("a name without its closing quote"))?;
+                name = Some(inside.trim().to_lowercase());
+                rest = after;
+            }
+            let targets: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
+            let targets = match targets.as_slice() {
+                [] => return Err(err("no symbol to become (or `-` to leave it out)")),
+                [dash] if dash == "-" => Vec::new(),
+                _ if targets.iter().any(|t| t == "-") => {
+                    return Err(err("`-` is a line's only target"))
+                }
+                _ => targets,
+            };
+            rules.push(MapRule {
+                line,
+                standard: standard.to_string(),
+                code: code.to_string(),
+                name,
+                targets,
+            });
+        }
+        Ok(SymbolMap { rules })
+    }
+
+    /// Whether the table has no lines.
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
 }
 
 /// The symbols of a layer.
@@ -187,6 +326,16 @@ pub struct SymbolTable {
     which: Standard,
     entries: Vec<SymbolEntry>,
     by_code: HashMap<String, u16>,
+    crossref: Vec<CrossRule>,
+}
+
+/// A line of a [`SymbolMap`], for one table.
+struct CrossRule {
+    line: usize,
+    code: String,
+    name: Option<String>,
+    /// Ids of the table; empty for a symbol left out.
+    targets: Vec<u16>,
 }
 
 impl SymbolTable {
@@ -221,6 +370,7 @@ impl SymbolTable {
                 kind,
                 rule: zoom_rule(code, kind),
                 whole: lays_out_along(symbol, &map),
+                width: widest_line(symbol, &map),
             });
         }
         SymbolTable {
@@ -228,7 +378,64 @@ impl SymbolTable {
             which,
             entries,
             by_code,
+            crossref: Vec::new(),
         }
+    }
+
+    /// The table, matching a map's symbols by the lines of `symbols` for this
+    /// standard before anything else. An error names a line whose code is not
+    /// one of the standard's.
+    pub fn with_symbol_map(mut self, symbols: &SymbolMap) -> Result<SymbolTable, String> {
+        for rule in symbols.rules.iter().filter(|r| r.standard == self.standard) {
+            let targets = rule
+                .targets
+                .iter()
+                .map(|code| {
+                    self.id_of(code).ok_or_else(|| {
+                        format!(
+                            "line {}: {code} is not a symbol of {}",
+                            rule.line, self.standard
+                        )
+                    })
+                })
+                .collect::<Result<Vec<u16>, String>>()?;
+            self.crossref.push(CrossRule {
+                line: rule.line,
+                code: rule.code.clone(),
+                name: rule.name.clone(),
+                targets,
+            });
+        }
+        Ok(self)
+    }
+
+    /// The line of the [`SymbolMap`] for `symbol`, one of `map`'s.
+    fn crossref_for(&self, symbol: &Symbol, map: &Map) -> Option<&CrossRule> {
+        let own = map
+            .symbol_set
+            .as_deref()
+            .is_some_and(|set| set.trim().eq_ignore_ascii_case(self.standard));
+        if own {
+            return None;
+        }
+        let code = symbol.code();
+        let name = symbol.name().trim().to_lowercase();
+        let of_code = || self.crossref.iter().filter(move |r| r.code == code);
+        of_code()
+            .find(|r| r.name.as_deref().is_some_and(|n| name.starts_with(n)))
+            .or_else(|| of_code().find(|r| r.name.is_none()))
+    }
+
+    /// Whether the table's [`SymbolMap`] says to leave `symbol`, one of `map`'s,
+    /// out.
+    pub fn left_out(&self, symbol: &Symbol, map: &Map) -> bool {
+        self.crossref_for(symbol, map)
+            .is_some_and(|r| r.targets.is_empty())
+    }
+
+    /// The line of the [`SymbolMap`] that matched `symbol`, for messages.
+    pub fn crossref_line(&self, symbol: &Symbol, map: &Map) -> Option<usize> {
+        self.crossref_for(symbol, map).map(|r| r.line)
     }
 
     /// The table with this name ("ISOM 2017-2", "ISSprOM 2019-2"), as an archive
@@ -342,14 +549,34 @@ impl SymbolTable {
     }
 
     /// The symbol of this table that looks most like `symbol`, one of `map`'s,
-    /// which is usually of another edition or another standard. In order: the
-    /// same code; the code of the symbol this is a variant of ("302.1" is a
-    /// variant of "302"); the same name. Each must draw the same
-    /// [kind](SymbolKind) of thing. `None` where nothing is close, and the
-    /// object has to be dropped.
+    /// which is usually of another edition or another standard. In order: what
+    /// the table's [`SymbolMap`] says; the same code; the code of the symbol
+    /// this is a variant of ("302.1" is a variant of "302"); the same name.
+    /// Each must draw the same [kind](SymbolKind) of thing. `None` where
+    /// nothing is close, or the symbol map leaves it out, and the object has to
+    /// be dropped.
     pub fn closest(&self, symbol: &Symbol, map: &Map) -> Option<(u16, Match)> {
         let kind = SymbolKind::of(symbol, map);
         let fits = |id: u16| self.get(id).is_some_and(|e| e.kind == kind);
+
+        if let Some(rule) = self.crossref_for(symbol, map) {
+            if rule.targets.is_empty() {
+                return None;
+            }
+            let width = widest_line(symbol, map);
+            let nearest = rule
+                .targets
+                .iter()
+                .copied()
+                .filter(|&id| fits(id))
+                .min_by(|&a, &b| {
+                    let off = |id: u16| (self.entries[usize::from(id)].width - width).abs();
+                    off(a).total_cmp(&off(b))
+                });
+            if let Some(id) = nearest {
+                return Some((id, Match::Table));
+            }
+        }
 
         let mut code = symbol.code();
         if let Some(id) = self.id_of(code).filter(|&id| fits(id)) {
@@ -560,5 +787,168 @@ mod tests {
             (table.get(id).unwrap().code.as_str(), how),
             ("501", Match::Parent)
         );
+    }
+
+    fn line(code: &str, name: &str, width: f64) -> Symbol {
+        Symbol::Line(LineSymbol {
+            code: code.into(),
+            name: name.into(),
+            line_width: width,
+            ..Default::default()
+        })
+    }
+
+    fn area(code: &str, name: &str) -> Symbol {
+        Symbol::Area(AreaSymbol {
+            code: code.into(),
+            name: name.into(),
+            ..Default::default()
+        })
+    }
+
+    const CLUB: &str = "
+        # a club's set
+        [ISSprOM 2019-2]
+        501.0.5 \"Traffico\"  501.16 501.17 501.18 501.19
+        501.0.5             501.6 501.7 501.8 501.9   # by width
+        501.2               512.3
+        602                 -
+        708                 710.1
+        [ISOM 2017-2]
+        501.0.5             501
+    ";
+
+    fn club_table() -> SymbolTable {
+        SymbolTable::issprom()
+            .with_symbol_map(&SymbolMap::parse(CLUB).unwrap())
+            .unwrap()
+    }
+
+    fn code_of(table: &SymbolTable, symbol: &Symbol, map: &Map) -> Option<(String, Match)> {
+        table
+            .closest(symbol, map)
+            .map(|(id, how)| (table.get(id).unwrap().code.clone(), how))
+    }
+
+    #[test]
+    fn a_symbol_map_picks_the_footprint_closest_in_width() {
+        let table = club_table();
+        let map = Map::default();
+        for (width, code) in [
+            (0.35, "501.6"),
+            (0.45, "501.7"),
+            (0.7, "501.8"),
+            (1.4, "501.9"),
+        ] {
+            let road = line("501.0.5", "Paved road, urban", width);
+            assert_eq!(
+                code_of(&table, &road, &map),
+                Some((code.to_string(), Match::Table)),
+                "{width}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_with_a_name_comes_before_the_code_alone() {
+        let table = club_table();
+        let road = line("501.0.5", "traffico intenso", 0.7);
+        assert_eq!(
+            code_of(&table, &road, &Map::default()),
+            Some(("501.18".to_string(), Match::Table))
+        );
+    }
+
+    #[test]
+    fn a_symbol_map_line_of_another_kind_falls_back_to_the_code() {
+        let table = club_table();
+        let map = Map::default();
+        // An area 501.2 is the old multilevel; there is no line among the
+        // targets, so a line 501.2 is the standard's own.
+        assert_eq!(
+            code_of(&table, &area("501.2", "Multilevel"), &map),
+            Some(("512.3".to_string(), Match::Table))
+        );
+        assert_eq!(
+            code_of(&table, &line("501.2", "Step", 0.1), &map),
+            Some(("501.2".to_string(), Match::Code))
+        );
+        assert_eq!(
+            code_of(&table, &line("708", "Uncrossable boundary", 1.0), &map),
+            Some(("708".to_string(), Match::Code))
+        );
+    }
+
+    #[test]
+    fn a_symbol_map_can_leave_a_symbol_out() {
+        let table = club_table();
+        let mark = Symbol::Point(PointSymbol {
+            code: "602".into(),
+            name: "Registration mark".into(),
+            ..Default::default()
+        });
+        assert!(table.closest(&mark, &Map::default()).is_none());
+        assert!(table.left_out(&mark, &Map::default()));
+        assert!(!table.left_out(&area("501.2", "Multilevel"), &Map::default()));
+    }
+
+    #[test]
+    fn a_map_drawn_to_the_standard_is_matched_by_its_codes() {
+        let table = club_table();
+        let map = Map {
+            symbol_set: Some("ISSprOM 2019-2".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            code_of(&table, &area("501.2", "Multilevel"), &map),
+            Some(("501".to_string(), Match::Parent))
+        );
+    }
+
+    #[test]
+    fn a_symbol_map_section_is_for_its_standard_only() {
+        let isom = SymbolTable::isom()
+            .with_symbol_map(&SymbolMap::parse(CLUB).unwrap())
+            .unwrap();
+        let road = line("501.0.5", "Traffico", 0.7);
+        assert_eq!(
+            code_of(&isom, &road, &Map::default()).map(|(c, _)| c),
+            isom.closest(&road, &Map::default())
+                .map(|(id, _)| isom.get(id).unwrap().code.clone())
+        );
+        assert_ne!(
+            code_of(&isom, &road, &Map::default()).map(|(_, how)| how),
+            Some(Match::Table),
+            "ISOM's 501 is an area, not a line"
+        );
+    }
+
+    #[test]
+    fn a_bad_symbol_map_says_which_line() {
+        for (text, says) in [
+            ("501 501", "line 1: a line before any [standard] section"),
+            (
+                "[ISSprOM 2019]\n",
+                "line 1: \"ISSprOM 2019\" is not a standard",
+            ),
+            ("[ISSprOM 2019-2]\n\n501.0.5", "line 3: no symbol to become"),
+            (
+                "[ISSprOM 2019-2]\n501 \"x 501",
+                "line 2: a name without its closing quote",
+            ),
+            (
+                "[ISSprOM 2019-2]\n501 - 501.5",
+                "line 2: `-` is a line's only target",
+            ),
+        ] {
+            let err = SymbolMap::parse(text).unwrap_err();
+            assert!(err.starts_with(says), "{text:?}: {err}");
+        }
+        let unknown = SymbolMap::parse("[ISSprOM 2019-2]\n# none\n501.0.5 999.9").unwrap();
+        let err = SymbolTable::issprom()
+            .with_symbol_map(&unknown)
+            .err()
+            .unwrap();
+        assert_eq!(err, "line 3: 999.9 is not a symbol of ISSprOM 2019-2");
     }
 }

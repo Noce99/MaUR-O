@@ -18,7 +18,9 @@
 //! before its extension. A symbol of the map that is not in the table is stored
 //! as the closest one (same code, the symbol it is a variant of,
 //! or the same name) or, where there is none, its objects are dropped; either
-//! is reported as a warning, with how many objects it concerns. Objects of
+//! is reported as a warning, with how many objects it concerns. Maps whose codes
+//! are their own (a club's set, an older edition) are matched first by a
+//! cross-reference table, `--symbol-map` (see `SymbolMap`). Objects of
 //! hidden symbols and drawing aids are left out: they draw nothing.
 //!
 //! | option | default | |
@@ -27,6 +29,7 @@
 //! | `--min-zoom` | 0 | the coarsest zoom level |
 //! | `--grid-cm` | 5 | resolution of the nodes, in centimetres of Mercator |
 //! | `--buffer` | 0.03125 | how far past its edge a tile keeps what it holds, as a fraction of its side |
+//! | `--symbol-map` | none | a cross-reference table from the maps' own codes to the standard's |
 //!
 //! The levels from `--zoom` up to `--min-zoom` are all written. The finest has
 //! every object as drawn. A coarser level has only what the rules of each symbol
@@ -58,7 +61,7 @@ use clap::{Parser, ValueEnum};
 use maur_o::mot::{Tile, TileId};
 use maur_o::mot_archive::{write, ArchiveInfo};
 use maur_o::mot_convert::{convert_levels, merge_tiles, Options};
-use maur_o::mot_symbols::SymbolTable;
+use maur_o::mot_symbols::{SymbolMap, SymbolTable};
 use maur_o::orthophoto::geographic_anchor;
 use maur_o::osm_orienteering::Standard;
 use maur_o::xml_reader::read_xml_map_str;
@@ -110,6 +113,15 @@ pub struct Args {
     /// Resolution of the nodes, in centimetres of Mercator.
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=100), value_name = "CM")]
     grid_cm: u32,
+
+    /// A cross-reference table saying which symbol of the standard each symbol
+    /// of the maps is, for maps whose codes are their own: a `[standard]`
+    /// section, then lines of a code (and a name in quotes, for the symbols of
+    /// that code it starts), the codes it may become (the one of the same kind
+    /// and closest in line width is taken), or `-` to leave it out. It comes
+    /// before matching by code, for every map not drawn to the standard itself.
+    #[arg(long, value_name = "FILE")]
+    symbol_map: Option<PathBuf>,
 }
 
 fn parse_buffer(text: &str) -> Result<f64, String> {
@@ -125,6 +137,26 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             ExitCode::from(1),
             "Error: --min-zoom is finer than --zoom".into(),
         ));
+    }
+    let symbol_map = match &args.symbol_map {
+        None => SymbolMap::default(),
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| {
+                (
+                    ExitCode::from(1),
+                    format!("Error: cannot read {}: {e}", path.display()),
+                )
+            })?;
+            SymbolMap::parse(&text)
+                .map_err(|e| (ExitCode::from(1), format!("Error: {}: {e}", path.display())))?
+        }
+    };
+    // Every line of the table must name symbols its standard has, whether or
+    // not a map is stored in it.
+    for standard in [Standard::Isom, Standard::Issprom] {
+        SymbolTable::new(standard)
+            .with_symbol_map(&symbol_map)
+            .map_err(|e| (ExitCode::from(1), format!("Error: symbol map: {e}")))?;
     }
     let options = Options {
         zoom: args.zoom,
@@ -162,7 +194,9 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             StandardArg::Issprom => Standard::Issprom,
             StandardArg::Auto => SymbolTable::detect(&map),
         };
-        let table = SymbolTable::new(standard);
+        let table = SymbolTable::new(standard)
+            .with_symbol_map(&symbol_map)
+            .expect("checked above");
         let index = match groups.iter().position(|g| g.standard == standard) {
             Some(i) => i,
             None => {

@@ -55,7 +55,9 @@ fn the_default_is_a_sprint_map_with_the_whole_issprom_symbol_set() {
         .arg(&out)
         .assert()
         .success()
-        .stdout(predicates::str::contains("ISSprOM 2019-2, map scale 1:4000"))
+        .stdout(predicates::str::contains(
+            "ISSprOM 2019-2, map scale 1:4000",
+        ))
         .stdout(predicates::str::contains("EPSG:32632"));
 
     let (map, _warnings) = read_xml_map(&out).unwrap();

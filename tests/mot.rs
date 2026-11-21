@@ -194,6 +194,56 @@ fn a_standard_can_be_asked_for() {
 }
 
 #[test]
+fn a_symbol_map_comes_before_the_codes() {
+    let dir = tempfile::tempdir().unwrap();
+    let map = make_map_in(dir.path(), "isom");
+    let table = dir.path().join("club.txt");
+    std::fs::write(&table, "[ISSprOM 2019-2]\n521  -   # no buildings\n").unwrap();
+    let out = dir.path().join("sprint.pmtiles");
+    Command::cargo_bin("mauro")
+        .unwrap()
+        .args(["tiles", "build"])
+        .args(["--standard", "issprom", "--output"])
+        .arg(&out)
+        .arg("--symbol-map")
+        .arg(&table)
+        .arg(&map)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "is left out by line 2 of the symbol map",
+        ));
+    Command::cargo_bin("mauro")
+        .unwrap()
+        .args(["tiles", "query"])
+        .args(["--around", HERE, "--size", "300m"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Building").not());
+}
+
+#[test]
+fn a_symbol_map_naming_a_symbol_the_standard_lacks_is_exit_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let map = make_map_in(dir.path(), "issprom");
+    let table = dir.path().join("club.txt");
+    std::fs::write(&table, "[ISOM 2017-2]\n501.0.5  999.9\n").unwrap();
+    Command::cargo_bin("mauro")
+        .unwrap()
+        .args(["tiles", "build", "--output"])
+        .arg(dir.path().join("out.pmtiles"))
+        .arg("--symbol-map")
+        .arg(&table)
+        .arg(&map)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "line 2: 999.9 is not a symbol of ISOM 2017-2",
+        ));
+}
+
+#[test]
 fn a_map_without_a_place_is_skipped_and_with_nothing_left_it_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("out.pmtiles");

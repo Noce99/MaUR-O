@@ -697,7 +697,7 @@ Converts maps into a MOT archive, the tiled world-map format of
 stored by id in a table (ISOM 2017-2 or ISSprOM 2019-2) instead of as definitions.
 
 ```
-mauro tiles build [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 0] [--grid-cm 5] [--buffer 0.03125] --output world.pmtiles <map-file>...
+mauro tiles build [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 0] [--grid-cm 5] [--buffer 0.03125] [--symbol-map FILE] --output world.pmtiles <map-file>...
 ```
 
 The symbols of a map are stored in the table of the standard it is drawn to:
@@ -706,6 +706,23 @@ and from which table's symbols its objects use; `isom` or `issprom` stores every
 map in that one. An archive holds one symbol set, so maps of both give two
 archives, written as the output name with `.isom` or `.issprom` before its
 extension.
+
+Maps whose codes are their own (a club's set, an older edition, ISSOM codes)
+are matched first by a cross-reference table, `--symbol-map`. Each line names
+a code of the maps (and, in quotes, the start of a name, for the symbols of that
+code it fits) and the codes of the standard it may become: of those, the one of
+the same kind (point, line, area) whose line is closest in width, so a road or a
+stairway becomes its footprint; `-` leaves the symbol out. Lines go under a
+`[ISSprOM 2019-2]` or `[ISOM 2017-2]` section, and a map that says it is drawn
+to that standard is matched by its codes only:
+
+```text
+[ISSprOM 2019-2]
+501.2               512.3                   # Mapper 2019's multilevel stripes
+501.0.5 "Traffico"  501.16 501.17 501.18 501.19
+501.0.5             501.6 501.7 501.8 501.9
+602                 -
+```
 
 Each map must have a geographic reference point (`<ref_point_deg>`, which
 Mapper writes for every georeferenced map); one without is skipped with a

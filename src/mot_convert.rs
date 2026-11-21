@@ -275,8 +275,12 @@ pub fn convert_with_extent(
                     target.code,
                     target.name,
                     match how {
-                        Match::Parent => "the symbol it is a variant of",
-                        _ => "the same name",
+                        Match::Parent => "the symbol it is a variant of".to_string(),
+                        Match::Table => format!(
+                            "line {} of the symbol map",
+                            table.crossref_line(symbol, map).unwrap_or(0)
+                        ),
+                        _ => "the same name".to_string(),
                     }
                 ))
             }
@@ -556,14 +560,24 @@ pub fn convert_with_extent(
             .filter_map(|(note, n)| note.map(|note| format!("{note}: {n} objects"))),
     );
     for (index, &n) in dropped_symbols.iter().enumerate() {
-        if n > 0 {
-            converted.warnings.push(format!(
-                "symbol {} has no close symbol in {}, so its {} objects were dropped",
-                describe(&map.symbols[index]),
-                table.standard,
-                n
-            ));
+        if n == 0 {
+            continue;
         }
+        let symbol = &map.symbols[index];
+        converted
+            .warnings
+            .push(match table.crossref_line(symbol, map) {
+                Some(line) if table.left_out(symbol, map) => format!(
+                    "symbol {} is left out by line {line} of the symbol map: {n} objects",
+                    describe(symbol)
+                ),
+                _ => format!(
+                    "symbol {} has no close symbol in {}, so its {} objects were dropped",
+                    describe(symbol),
+                    table.standard,
+                    n
+                ),
+            });
     }
     Ok(converted)
 }
