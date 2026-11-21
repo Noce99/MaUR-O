@@ -452,7 +452,8 @@ Mapper), as the data's licence, the
 | `osm` | openstreetmap-carto (see [below](#openstreetmaporgs-look)) | by `--details` |
 
 With `issprom` or `isom` the map holds the standard's whole symbol set,
-exactly as Mapper ships it (`maps/ISSprOM_4k.omap`, `maps/ISOM_10k.omap`),
+as `maps/ISSprOM_4k.omap` and `maps/ISOM_10k.omap` have it (Mapper's own sets;
+the sprint one brought to ISSprOM 2019-2 by `maps/tools/issprom_2019_2.py`),
 and every feature it can place drawn with it:
 
 - buildings (521) — houses wall to wall, or mapped less than 0.5 m apart,

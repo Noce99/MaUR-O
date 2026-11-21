@@ -5,8 +5,9 @@
 //! # The symbol set is the standard's own
 //!
 //! Nothing here defines a symbol. Each standard's symbol set is a reference
-//! map shipped in `maps/` (`ISSprOM_4k.omap`, `ISOM_10k.omap`, Mapper's own
-//! sets), and its colours and symbols go into the written map as that file
+//! map shipped in `maps/` (`ISOM_10k.omap`, Mapper's own set; `ISSprOM_4k.omap`,
+//! Mapper's ISSprOM 2019 brought to 2019-2 by `maps/tools/issprom_2019_2.py`),
+//! and its colours and symbols go into the written map as that file
 //! spells them ([`crate::xml_reader::read_fragments_str`]): every symbol of
 //! the standard, the ones no feature was drawn with too, as a map Mapper
 //! starts from one of its sets has them. The map is at the set's own scale,
@@ -357,7 +358,7 @@ impl OrienteeringStyle {
                 "fence" | "wire_fence" => Some("518"),
                 "railing" | "guard_rail" => Some("516"),
                 "hedge" if tags.is("area", "yes") => None,
-                "hedge" => Some(self.pick("410.1", "410.4")),
+                "hedge" => Some(self.pick("411.1", "410.4")),
                 "ditch" => Some("306"),
                 _ => None,
             }
