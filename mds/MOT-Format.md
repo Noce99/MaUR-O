@@ -245,9 +245,14 @@ Curves are coded losslessly in version 1. Coarse zoom levels flatten them.
 Coordinates are stored in **Web Mercator** grid units, relative to
 the tile origin. Ground resolution is then at least as fine as the grid size at every
 latitude, at a small cost in bits at high latitudes. The converter has to
-reproject: ground = paper × map scale, rotated by the grivation, projected from
-the map's CRS to Mercator. Maps without a georeference cannot be placed and are
-rejected.
+reproject: projected = paper × map scale × the grid and auxiliary scale factors,
+rotated by the grivation, from the projected reference point (Mapper's own
+transform), then from the map's CRS to Mercator. This holds however far the map
+is from its reference point: a file whose UTM reference point slipped to an
+easting of 0 has its objects drawn 600 km from it, and they are still where
+Mapper shows them. A map in a CRS the converter cannot project is laid out from
+its geographic reference point on the ellipsoid instead, good to a few meters in
+ten kilometers. Maps without a georeference cannot be placed and are rejected.
 
 ## History
 

@@ -17,11 +17,13 @@
 //! every tile it crosses. A point or a text is in every tile whose grown box
 //! holds it.
 //!
-//! The map is placed from its [`GeographicAnchor`] (the reference point in
-//! degrees) laid out on the ellipsoid, turned by the map's grivation, as
-//! [`crate::orthophoto`] does it. That is good to a few meters in ten
-//! kilometers, which is enough to put a map in the right tile but not to
-//! overlay it exactly on a survey of the same ground.
+//! A map in a UTM zone is placed exactly as Mapper places it
+//! ([`paper_to_geographic`]: paper to the projected CRS by the
+//! georeferencing, then off it by the projection), however far its objects
+//! are from its reference point. Any other map is placed from its
+//! [`GeographicAnchor`] (the reference point in degrees) laid out on the
+//! ellipsoid, turned by the map's grivation, as [`crate::orthophoto`] does it,
+//! which is good to a few meters in ten kilometers.
 
 use std::collections::BTreeMap;
 
@@ -33,7 +35,7 @@ use crate::mot::{
 use crate::mot_clip::{clip_line, clip_ring, flatten, simplify, Rect, Vertex};
 use crate::mot_symbols::{Match, SymbolTable, ZoomRule};
 use crate::orthophoto::{
-    ground_to_geographic, true_north_rotation, web_mercator, GeographicAnchor,
+    ground_to_geographic, paper_to_geographic, true_north_rotation, web_mercator, GeographicAnchor,
 };
 
 /// What to build.
@@ -223,25 +225,37 @@ pub fn convert_with_extent(
     let coarse = options.zoom < options.detail_zoom;
     // A pixel of a 256 pixel tile of this level, in Mercator meters.
     let pixel = TileId::size(options.zoom) / 256.0;
-    // A Mercator meter is longer than a ground meter by this much here.
-    let stretch = 1.0 / anchor.lat.to_radians().cos().max(0.05);
 
+    // paper mm -> (lat, lon)
+    let place = |x: f64, y: f64| -> (f64, f64) {
+        paper_to_geographic(georef, (x, y)).unwrap_or_else(|| {
+            ground_to_geographic(
+                georef,
+                anchor,
+                north,
+                (x * meters_per_mm, y * meters_per_mm),
+            )
+        })
+    };
     // paper mm -> Mercator meters, y growing north
     let project = |x: f64, y: f64| -> (f64, f64) {
-        let (lat, lon) = ground_to_geographic(
-            georef,
-            anchor,
-            north,
-            (x * meters_per_mm, y * meters_per_mm),
-        );
+        let (lat, lon) = place(x, y);
         web_mercator(lat, lon)
     };
 
-    // The angle from a tile's east to the map's own east, which every
+    // Where the map is, on the paper: the middle of what it covers (its
+    // reference point may be far from it).
+    let middle = extent.map_or(
+        (georef.map_ref_point_x, georef.map_ref_point_y),
+        |[west, north, east, south]| ((west + east) / 2.0, (north + south) / 2.0),
+    );
+    // A Mercator meter is longer than a ground meter by this much there.
+    let stretch = 1.0 / place(middle.0, middle.1).0.to_radians().cos().max(0.05);
+    // The angle from a tile's east to the map's own east there, which every
     // rotation in the map has to be turned by.
     let (a, b) = (
-        project(georef.map_ref_point_x, georef.map_ref_point_y),
-        project(georef.map_ref_point_x + 1.0, georef.map_ref_point_y),
+        project(middle.0, middle.1),
+        project(middle.0 + 1.0, middle.1),
     );
     let frame = (-(b.1 - a.1)).atan2(b.0 - a.0);
 
@@ -283,14 +297,18 @@ pub fn convert_with_extent(
         coverage_id: None,
     };
     // A UTM easting a long way outside its zone's strip means the file's
-    // georeference is wrong (an easting of 0 is the usual slip), and the map
-    // would be stored where Mapper shows it, not where it is.
+    // georeference has slipped (an easting of 0 is the usual one). Mapper
+    // still shows the objects in place, and so are they here; but its
+    // grivation, scale factor and geographic reference point were worked out
+    // for that far point.
     let utm_zone = matches!(georef.epsg, 32601..=32660 | 32701..=32760 | 25828..=25838);
     if utm_zone && !(100_000.0..=900_000.0).contains(&georef.ref_point_x) {
+        let (lat, lon) = place(middle.0, middle.1);
         converted.warnings.push(format!(
-            "the map's projected reference point has an easting of {}, far outside a UTM zone: \
-             its georeference looks wrong, and it is placed at lat {:.4}, lon {:.4}",
-            georef.ref_point_x, anchor.lat, anchor.lon
+            "the map's projected reference point has an easting of {}, far outside its UTM zone: \
+             the map is placed as Mapper places it (around lat {lat:.4}, lon {lon:.4}), but its \
+             georeference is worth setting again in Mapper, with a reference point on the map",
+            georef.ref_point_x
         ));
     }
     let mut remapped_symbols = vec![0usize; map.symbols.len()];
@@ -917,6 +935,7 @@ mod tests {
     use super::*;
     use crate::map::{coord_flag, Coord, Georeferencing, Object, PathObject};
     use crate::mot::node_flag;
+    use crate::osm_convert::{utm, utm_inverse};
     use crate::osm_orienteering::ISOM;
     use crate::xml_reader::read_xml_map_str;
 
@@ -929,18 +948,80 @@ mod tests {
         }
     }
 
-    /// The ISOM reference map with nothing on it, placed at the anchor.
+    /// The ISOM reference map with nothing on it, placed at the anchor: its
+    /// projected reference point is the anchor's, in UTM zone 32.
     fn empty_map() -> Map {
         let (mut map, _) = read_xml_map_str(ISOM).unwrap();
         map.objects.clear();
+        let (ref_point_x, ref_point_y) = utm(32, (anchor().lon, anchor().lat));
         map.georeferencing = Some(Georeferencing {
             scale: 10000,
             epsg: 32632,
-            ref_point_x: 700_000.0,
-            ref_point_y: 4_900_000.0,
+            ref_point_x,
+            ref_point_y,
             ..Default::default()
         });
         map
+    }
+
+    /// A map whose projected reference point slipped to an easting of 0, as
+    /// Corno alle Scale's did: its objects are drawn some 640 km east of it,
+    /// with the grivation and grid scale factor of that far point, and Mapper
+    /// shows them where they are. So must the tiles: a point the georeference
+    /// puts at UTM 32N (645 773, 4 889 977) is stored there, within a metre,
+    /// not where the geographic reference point (lon 2.77) laid out on the
+    /// ellipsoid would put it, some 30 km away.
+    #[test]
+    fn a_map_far_from_its_reference_point_is_placed_as_mapper_places_it() {
+        let mut map = empty_map();
+        map.georeferencing = Some(Georeferencing {
+            scale: 15000,
+            epsg: 32632,
+            ref_point_x: 0.0,
+            ref_point_y: 4_884_408.909961,
+            grivation: 5.74,
+            grivation_specified: true,
+            grid_scale_factor: 1.002676,
+            ..Default::default()
+        });
+        let paper = (42684.328, -4662.612);
+        let o = object_of(
+            &map,
+            |s| matches!(s, Symbol::Point(_)),
+            ObjectKind::Point,
+            vec![Coord::new(paper.0, paper.1, 0)],
+        );
+        map.objects.push(o);
+        // What the file says it is: lat 43.9427, lon 2.7700.
+        let far = GeographicAnchor {
+            lat: 43.94268593,
+            lon: 2.77002108,
+            declination: 1.41,
+        };
+        let converted = convert(&map, &far, &SymbolTable::isom(), 0, &Options::default()).unwrap();
+        assert!(converted
+            .warnings
+            .iter()
+            .any(|w| w.contains("easting of 0")));
+        let (id, tile) = converted.tiles.iter().next().unwrap();
+        let (x, y) = tile.node_mercator(*id, &tile.objects[0].nodes[0]);
+        // Mapper's transform, by hand: rotate by -grivation, scale, translate.
+        let s = 15.0 * 1.002676;
+        let (sin_g, cos_g) = 5.74f64.to_radians().sin_cos();
+        let (lx, ly) = (paper.0 * s, paper.1 * s);
+        let e = lx * cos_g - ly * sin_g;
+        let n = 4_884_408.909961 - (lx * sin_g + ly * cos_g);
+        assert!(
+            (e - 645_773.0).abs() < 2.0 && (n - 4_889_977.0).abs() < 2.0,
+            "{e}, {n}"
+        );
+        let (lon, lat) = utm_inverse(32, (e, n));
+        let (ex, ey) = web_mercator(lat, lon);
+        // A Mercator meter is about 1.4 ground meters at 44 degrees.
+        assert!(
+            (x - ex).abs() < 1.4 && (y - ey).abs() < 1.4,
+            "{x},{y} vs {ex},{ey}"
+        );
     }
 
     /// An object of the first visible symbol of the given kind.

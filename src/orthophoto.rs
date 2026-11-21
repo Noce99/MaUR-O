@@ -39,7 +39,7 @@
 use crate::geometry::Rect;
 use crate::geotiff::ground_to_projected;
 use crate::map::{Georeferencing, Map};
-use crate::osm_convert::utm;
+use crate::osm_convert::{utm, utm_inverse};
 use crate::stats::coordinate_bounds;
 
 /// Web Mercator: what nearly every WMS offers, whatever else it does.
@@ -319,17 +319,52 @@ pub fn footprint(
 /// only keeps the declination beside them, so where the CRS is one this
 /// crate can project, that is what to trust.
 pub(crate) fn true_north_rotation(georef: &Georeferencing, anchor: &GeographicAnchor) -> f64 {
-    let zone = match georef.epsg {
-        32601..=32660 => georef.epsg - 32600,
-        25828..=25838 => georef.epsg - 25800,
-        _ => return anchor.declination,
+    let Some(zone) = utm_zone_of(georef.epsg) else {
+        return anchor.declination;
     };
     let step = 1e-4;
-    let (e0, n0) = utm(zone as u32, (anchor.lon, anchor.lat));
-    let (e1, n1) = utm(zone as u32, (anchor.lon, anchor.lat + step));
+    let (e0, n0) = utm(zone, (anchor.lon, anchor.lat));
+    let (e1, n1) = utm(zone, (anchor.lon, anchor.lat + step));
     // True north in the grid, east of grid north: minus the convergence.
     let true_north_in_grid = (e1 - e0).atan2(n1 - n0).to_degrees();
     georef.grivation - true_north_in_grid
+}
+
+/// The zone of a northern-hemisphere UTM CRS (WGS 84 `326zz` or ETRS89
+/// `258zz`), the ones this crate projects exactly.
+pub(crate) fn utm_zone_of(epsg: i32) -> Option<u32> {
+    match epsg {
+        32601..=32660 => Some((epsg - 32600) as u32),
+        25828..=25838 => Some((epsg - 25800) as u32),
+        _ => None,
+    }
+}
+
+/// A point on the paper (mm, `y` down) to `(latitude, longitude)` in degrees,
+/// exactly as Mapper places it: onto the projected CRS by the
+/// georeferencing's affine transform (reference points, grivation, and the
+/// grid times the auxiliary scale factor), then off it by the projection's
+/// inverse. `None` for a CRS other than a northern UTM zone.
+///
+/// Unlike laying the map out from its geographic reference point (as the
+/// footprint here does), this holds however far the map is from its
+/// reference point: a file whose projected reference point has an easting of
+/// 0 (a usual slip) has its objects drawn some 600 km from it, where Mapper
+/// still shows them in the right place.
+pub fn paper_to_geographic(georef: &Georeferencing, (x, y): (f64, f64)) -> Option<(f64, f64)> {
+    let zone = utm_zone_of(georef.epsg)?;
+    let s = f64::from(georef.scale.max(1)) / 1000.0
+        * georef.grid_scale_factor
+        * georef.auxiliary_scale_factor;
+    let (lx, ly) = (
+        (x - georef.map_ref_point_x) * s,
+        (y - georef.map_ref_point_y) * s,
+    );
+    let (sin_g, cos_g) = georef.grivation.to_radians().sin_cos();
+    let easting = georef.ref_point_x + lx * cos_g - ly * sin_g;
+    let northing = georef.ref_point_y - (lx * sin_g + ly * cos_g);
+    let (lon, lat) = utm_inverse(zone, (easting, northing));
+    Some((lat, lon))
 }
 
 /// A point on the ground (unrotated map meters, as [`ground_to_projected`]

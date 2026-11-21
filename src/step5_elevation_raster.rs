@@ -1328,6 +1328,7 @@ mod tests {
             grivation: 7.1,
             grivation_specified: true,
             auxiliary_scale_factor: 1.000014,
+            grid_scale_factor: 1.0,
         };
         let origin = c(2252.39, -2312.17);
         let px_size = 1.0;
@@ -1416,6 +1417,7 @@ mod tests {
             grivation: 7.1,
             grivation_specified: true,
             auxiliary_scale_factor: 1.000014,
+            grid_scale_factor: 1.0,
         };
         let origin = c(0.0, 0.0);
         let px_size = 1.0;

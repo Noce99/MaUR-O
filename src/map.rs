@@ -1075,14 +1075,20 @@ pub struct Georeferencing {
     /// undeclared is not a map declared to be unrotated, and anything
     /// solving a georeference has to know which it is looking at.
     pub grivation_specified: bool,
-    /// The combined ground-to-grid scale factor (Mapper's own
-    /// `combined_scale_factor`: a projection's grid scale factor times the
-    /// elevation/auxiliary scale factor) -- only the latter is ever actually
-    /// stored in the file, as `<georeferencing auxiliary_scale_factor="…">`,
-    /// so this is that value alone. `1.0` (the multiplicative identity, not
-    /// `f64::default()`'s `0.0`) where the file names none -- which is why
-    /// this struct's own `Default` is hand-written rather than derived.
+    /// The elevation (auxiliary) scale factor, `<georeferencing
+    /// auxiliary_scale_factor="…">`. Mapper's `combined_scale_factor`, which
+    /// its transform from paper to the projected CRS scales by, is this times
+    /// [`grid_scale_factor`](Self::grid_scale_factor). `1.0` (the
+    /// multiplicative identity, not `f64::default()`'s `0.0`) where the file
+    /// names none -- which is why this struct's own `Default` is hand-written
+    /// rather than derived.
     pub auxiliary_scale_factor: f64,
+    /// The projection's grid scale factor at the reference point,
+    /// `<georeferencing grid_scale_factor="…">` (Mapper 0.9 and later write
+    /// it). Next to 1 for a reference point near the map, but not for one far
+    /// from it: 1.0027 at a UTM easting of 0, which is 1.7 km in 640. `1.0`
+    /// where the file names none.
+    pub grid_scale_factor: f64,
 }
 
 impl Default for Georeferencing {
@@ -1097,6 +1103,7 @@ impl Default for Georeferencing {
             grivation: 0.0,
             grivation_specified: false,
             auxiliary_scale_factor: 1.0,
+            grid_scale_factor: 1.0,
         }
     }
 }

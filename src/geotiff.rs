@@ -351,6 +351,7 @@ mod tests {
             grivation: 7.1,
             grivation_specified: true,
             auxiliary_scale_factor: 1.000014,
+            grid_scale_factor: 1.0,
         }
     }
 

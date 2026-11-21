@@ -442,6 +442,7 @@ impl<'a> XmlMapReader<'a> {
             grivation: attr_double(start, "grivation", 0.0),
             grivation_specified: has_attr(start, "grivation"),
             auxiliary_scale_factor: attr_double(start, "auxiliary_scale_factor", 1.0),
+            grid_scale_factor: attr_double(start, "grid_scale_factor", 1.0),
             ..Default::default()
         };
 
@@ -1337,6 +1338,21 @@ mod tests {
             (georef.ref_point_x, georef.ref_point_y),
             (682364.0, 4952128.0)
         );
+        // Neither scale factor is named: both are the identity.
+        assert_eq!(
+            (georef.grid_scale_factor, georef.auxiliary_scale_factor),
+            (1.0, 1.0)
+        );
+    }
+
+    /// Both scale factors, as Mapper 0.9 writes them.
+    #[test]
+    fn reads_the_grid_and_auxiliary_scale_factors() {
+        let xml = r#"<map><georeferencing scale="15000" grid_scale_factor="1.002676" auxiliary_scale_factor="0.99999" grivation="5.74"><projected_crs id="UTM"><spec language="PROJ.4">+proj=utm +datum=WGS84 +zone=32</spec><ref_point x="0" y="4884408.909961"/></projected_crs></georeferencing></map>"#;
+        let (map, _) = read_xml_map_str(xml).unwrap();
+        let georef = map.georeferencing.unwrap();
+        assert_eq!(georef.grid_scale_factor, 1.002676);
+        assert_eq!(georef.auxiliary_scale_factor, 0.99999);
     }
 
     #[test]

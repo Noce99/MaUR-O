@@ -86,6 +86,43 @@ pub fn utm(zone: u32, (lon, lat): (f64, f64)) -> (f64, f64) {
     )
 }
 
+/// UTM `(easting, northing)` in meters, in the northern-hemisphere grid of
+/// `zone`, to `(lon, lat)` in degrees: the inverse of [`utm`].
+///
+/// Krüger's series to the third power of the third flattening, as [`utm`],
+/// good to well under a millimetre within a zone (and to centimetres a zone's
+/// width outside it).
+pub fn utm_inverse(zone: u32, (easting, northing): (f64, f64)) -> (f64, f64) {
+    let n = WGS84_F / (2.0 - WGS84_F);
+    let big_a = WGS84_A / (1.0 + n) * (1.0 + n * n / 4.0 + n.powi(4) / 64.0);
+    let beta = [
+        n / 2.0 - 2.0 * n * n / 3.0 + 37.0 * n.powi(3) / 96.0,
+        n * n / 48.0 + n.powi(3) / 15.0,
+        17.0 * n.powi(3) / 480.0,
+    ];
+    let delta = [
+        2.0 * n - 2.0 * n * n / 3.0 - 2.0 * n.powi(3),
+        7.0 * n * n / 3.0 - 8.0 * n.powi(3) / 5.0,
+        56.0 * n.powi(3) / 15.0,
+    ];
+    let xi = northing / (UTM_K0 * big_a);
+    let eta = (easting - 500_000.0) / (UTM_K0 * big_a);
+    let (mut xi1, mut eta1) = (xi, eta);
+    for (j, b) in beta.iter().enumerate() {
+        let k = 2.0 * (j as f64 + 1.0);
+        xi1 -= b * (k * xi).sin() * (k * eta).cosh();
+        eta1 -= b * (k * xi).cos() * (k * eta).sinh();
+    }
+    let chi = (xi1.sin() / eta1.cosh()).asin();
+    let mut phi = chi;
+    for (j, d) in delta.iter().enumerate() {
+        phi += d * (2.0 * (j as f64 + 1.0) * chi).sin();
+    }
+    let lon0 = (f64::from(zone) - 1.0) * 6.0 - 180.0 + 3.0;
+    let lambda = eta1.sinh().atan2(xi1.cos());
+    (lon0 + lambda.to_degrees(), phi.to_degrees())
+}
+
 /// Degrees on the earth to millimetres on the paper.
 pub struct Projection {
     /// The UTM zone everything is projected into.
@@ -2345,6 +2382,26 @@ mod tests {
         // Not above, where the other area is: below, just clear of it.
         assert!(name.center.1 > 10.0 && name.center.1 < 16.0, "{name:?}");
         assert!(name.points().iter().all(|&p| !inside_ring(p, &small)));
+    }
+
+    /// [`utm_inverse`] undoes [`utm`], in the zone and far outside it.
+    #[test]
+    fn utm_inverse_undoes_utm() {
+        for (lon, lat) in [
+            (11.343, 44.4938),
+            (10.82, 44.13),
+            (2.77, 43.94),
+            (9.0, 0.5),
+            (14.9, 70.0),
+        ] {
+            let (e, n) = utm(32, (lon, lat));
+            let (lon2, lat2) = utm_inverse(32, (e, n));
+            // A millionth of a degree is about 10 cm.
+            assert!(
+                (lon2 - lon).abs() < 1e-6 && (lat2 - lat).abs() < 1e-6,
+                "{lon},{lat} -> {lon2},{lat2}"
+            );
+        }
     }
 
     #[test]
