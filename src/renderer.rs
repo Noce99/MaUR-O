@@ -215,12 +215,16 @@ pub struct Renderer<'m> {
     /// will: area fill patterns are laid out there and not over the rest of
     /// their area (see [`Renderer::new_within`]).
     window: Option<Rect>,
+    /// Whether a line symbol's "show at least one symbol" holds for each part of
+    /// a line as a whole rather than for each of its sections between dash
+    /// points (see [`Renderer::for_tiles`]).
+    at_least_one_per_line: bool,
 }
 
 impl<'m> Renderer<'m> {
     /// Creates the renderables for all objects of the map.
     pub fn new(map: &'m Map) -> Renderer<'m> {
-        Renderer::build(map, None)
+        Renderer::build(map, None, false)
     }
 
     /// Creates the renderables for drawing only `window` (mm on the paper) of
@@ -233,10 +237,24 @@ impl<'m> Renderer<'m> {
     /// element of the whole area. The extent, being of what is drawn, is then
     /// that of the window's part of the patterns.
     pub fn new_within(map: &'m Map, window: Rect) -> Renderer<'m> {
-        Renderer::build(map, Some(window))
+        Renderer::build(map, Some(window), false)
     }
 
-    fn build(map: &'m Map, window: Option<Rect>) -> Renderer<'m> {
+    /// As [`new_within`](Self::new_within), for drawing a tile in a standard's
+    /// symbol set: a line symbol which shows at least one mid symbol does so once
+    /// per line, not once per section between dash points as Mapper does.
+    ///
+    /// The standards ask for the shortest line to show its dot or tag (a 518
+    /// fence too short for its tags is drawn as a 515 wall); where the marks fall
+    /// along a longer one is the mapper's, who leaves a short piece of a line
+    /// without them by putting a dash point at its start. Mapper's rule would
+    /// put one there all the same, wherever a standard's set has the option on
+    /// and the map's own set had it off.
+    pub fn for_tiles(map: &'m Map, window: Rect) -> Renderer<'m> {
+        Renderer::build(map, Some(window), true)
+    }
+
+    fn build(map: &'m Map, window: Option<Rect>, at_least_one_per_line: bool) -> Renderer<'m> {
         let mut renderer = Renderer {
             map,
             renderables: Vec::new(),
@@ -245,6 +263,7 @@ impl<'m> Renderer<'m> {
             current_clip: None,
             current_symbol_id: -1,
             window,
+            at_least_one_per_line,
         };
         for object in &map.objects {
             renderer.add_object(object);
@@ -281,6 +300,7 @@ impl<'m> Renderer<'m> {
             current_clip: None,
             current_symbol_id: -1,
             window: None,
+            at_least_one_per_line: false,
         };
         if let Some(index) = object.symbol_index {
             let symbol = &map.symbols[index];
@@ -680,11 +700,13 @@ fn section_boundaries(part: &PathPart) -> Vec<f64> {
 /// Follows Mapper's `LineSymbol::createMidSymbolRenderables()`: the number
 /// of segments which fits the length best is determined first, and the
 /// segment and end lengths are then adjusted so that the symbols are
-/// distributed evenly.
+/// distributed evenly. `at_least_one` stands for the symbol's
+/// `show_at_least_one_symbol` (see [`mid_symbol_positions`]).
 fn mid_symbol_positions_section(
     offset: f64,
     length: f64,
     symbol: &LineSymbol,
+    at_least_one: bool,
     positions: &mut Vec<f64>,
 ) {
     let num_gaps = symbol.mid_symbols_per_spot - 1;
@@ -706,7 +728,7 @@ fn mid_symbol_positions_section(
 
     if end_length > 0.0 {
         if length <= symbols_length {
-            if symbol.show_at_least_one_symbol {
+            if at_least_one {
                 positions.push(offset);
                 positions.push(offset + length);
             }
@@ -743,7 +765,7 @@ fn mid_symbol_positions_section(
         if adjusted_segment < 0.0 {
             return;
         }
-        if !symbol.show_at_least_one_symbol
+        if !at_least_one
             && higher_count <= 0
             && length <= 2.0 * end_length - (segment_length + symbols_length) / 2.0
         {
@@ -791,7 +813,12 @@ fn mid_symbol_positions_section(
 }
 
 /// Distributes the mid symbols of a solid line along a whole path part.
-fn mid_symbol_positions(part: &PathPart, symbol: &LineSymbol) -> Vec<f64> {
+///
+/// Mapper shows at least one symbol in each section between dash points when
+/// the symbol asks for it. With `per_line`, it is the part as a whole that
+/// shows at least one: its sections are laid out without the option, and only
+/// where none of them has a symbol is the part laid out as one section with it.
+fn mid_symbol_positions(part: &PathPart, symbol: &LineSymbol, per_line: bool) -> Vec<f64> {
     let mut positions = Vec::new();
 
     // The symbol at the very start of an open part is added only once.
@@ -800,13 +827,19 @@ fn mid_symbol_positions(part: &PathPart, symbol: &LineSymbol) -> Vec<f64> {
     }
 
     let boundaries = section_boundaries(part);
-    for i in 0..boundaries.len().saturating_sub(1) {
+    let sections = boundaries.len().saturating_sub(1);
+    let at_least_one = symbol.show_at_least_one_symbol && !(per_line && sections > 1);
+    for i in 0..sections {
         mid_symbol_positions_section(
             boundaries[i],
             boundaries[i + 1] - boundaries[i],
             symbol,
+            at_least_one,
             &mut positions,
         );
+    }
+    if positions.is_empty() && symbol.show_at_least_one_symbol && !at_least_one {
+        mid_symbol_positions_section(0.0, part.length(), symbol, true, &mut positions);
     }
     positions
 }
@@ -1308,7 +1341,8 @@ impl<'m> Renderer<'m> {
                     && symbol.mid_symbols_per_spot > 0
                 {
                     for part in &parts {
-                        for position in mid_symbol_positions(part, symbol) {
+                        let per_line = self.at_least_one_per_line;
+                        for position in mid_symbol_positions(part, symbol, per_line) {
                             place(self, Some(mid_symbol), part, position);
                         }
                     }

@@ -34,7 +34,10 @@
 //! A line whose symbol lays dashes or symbols out along the whole of it is in
 //! the tile whole, not cut ([`crate::mot_symbols::SymbolEntry::whole`]), because
 //! how Mapper spaces them depends on the length of the line: drawn from a piece
-//! they would not meet the neighbouring tile's.
+//! they would not meet the neighbouring tile's. A symbol which shows at least
+//! one dot or tag along a line shows it once per line, not once per section
+//! between dash points as Mapper does ([`Renderer::for_tiles`]): the dash
+//! points a mapper put to keep a short piece of a line bare are kept.
 
 use tiny_skia::{
     BlendMode, FillRule, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke, Transform,
@@ -191,7 +194,7 @@ impl TileRenderer {
             .post_concat(Transform::from_scale(ppm as f32, ppm as f32));
         // Built for the window only: a large patterned area (stony ground,
         // say) is laid out where it is seen, not over the whole tile.
-        Renderer::new_within(&self.template, window).paint_rect(
+        Renderer::for_tiles(&self.template, window).paint_rect(
             &mut pixmap.as_mut(),
             transform,
             Some(window),
@@ -900,5 +903,47 @@ mod tests {
         let a = drawn(4_000.0);
         let b = drawn(15_000.0);
         assert!((40..120).contains(&a) && (40..120).contains(&b), "{a} {b}");
+    }
+
+    #[test]
+    fn a_dash_point_keeps_a_short_piece_of_a_line_bare_and_a_short_line_shows_its_tag() {
+        // A 518 fence, whose set shows at least one tag: Mapper puts one in each
+        // section between dash points, a tile one in the line.
+        let (mut map, _) = read_xml_map_str(
+            crate::osm_orienteering::Standard::Issprom.reference(),
+        )
+        .unwrap();
+        map.objects.clear();
+        let index = map.symbols.iter().position(|s| s.code() == "518").unwrap();
+        let symbol_id = map.symbol_ids[index];
+        let window = Rect::new(-10.0, -10.0, 40.0, 40.0);
+        // How much is drawn of a line through `points` (mm, flags).
+        let mut drawn = |points: &[(f64, f64, i32)], tiles: bool| -> usize {
+            let mut object = Object::new(ObjectKind::Path(PathObject::default()));
+            object.symbol_id = symbol_id;
+            object.symbol_index = Some(index);
+            object.coords = points.iter().map(|&(x, y, f)| Coord::new(x, y, f)).collect();
+            map.objects = vec![object];
+            let renderer = if tiles {
+                Renderer::for_tiles(&map, window)
+            } else {
+                Renderer::new_within(&map, window)
+            };
+            renderer.renderables.len()
+        };
+        let dash = crate::map::coord_flag::DASH_POINT;
+
+        // 20 mm with tags, then a 1.4 mm return the mapper kept bare.
+        let long = [(0.0, 0.0, 0), (20.0, 0.0, 0)];
+        let with_return = [(0.0, 0.0, 0), (20.0, 0.0, dash), (20.0, 1.4, 0)];
+        assert_eq!(drawn(&with_return, true), drawn(&long, true));
+        assert!(drawn(&with_return, false) > drawn(&long, false));
+
+        // A 2 mm fence split by a dash point: one tag, as without the dash
+        // point, where Mapper puts one in each half.
+        let short = [(0.0, 0.0, 0), (2.0, 0.0, 0)];
+        let split = [(0.0, 0.0, 0), (1.0, 0.0, dash), (2.0, 0.0, 0)];
+        assert_eq!(drawn(&split, true), drawn(&short, false));
+        assert!(drawn(&split, false) > drawn(&split, true));
     }
 }
