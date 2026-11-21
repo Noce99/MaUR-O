@@ -935,13 +935,17 @@ mod tests {
     }
 
     #[test]
-    fn a_short_passable_wall_still_shows_a_dot() {
+    fn a_short_line_still_shows_its_dots_or_tags() {
+        // Or a short passable wall is a plain line, a cliff its top line, an
+        // uncrossable fence a wall.
         let (map, _) = read_xml_map_str(Standard::Issprom.reference()).unwrap();
-        let wall = map.symbols.iter().find(|s| s.code() == "513.1").unwrap();
-        let Symbol::Line(line) = wall else {
-            panic!("513.1 is a line")
-        };
-        assert!(line.show_at_least_one_symbol);
+        for code in ["104", "104.1", "201", "202.1", "513.1", "518", "799"] {
+            let symbol = map.symbols.iter().find(|s| s.code() == code).unwrap();
+            let Symbol::Line(line) = symbol else {
+                panic!("{code} is a line")
+            };
+            assert!(line.show_at_least_one_symbol, "{code}");
+        }
     }
 
     #[test]
