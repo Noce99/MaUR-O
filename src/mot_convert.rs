@@ -33,6 +33,7 @@ use crate::mot::{
     Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, COVERAGE_SYMBOL, WORLD_HALF,
 };
 use crate::mot_clip::{clip_line, clip_ring, flatten, simplify, Rect, Vertex};
+use crate::mot_cut::cut_hidden;
 use crate::mot_symbols::{Match, SymbolTable, ZoomRule};
 use crate::orthophoto::{
     ground_to_geographic, paper_to_geographic, true_north_rotation, web_mercator, GeographicAnchor,
@@ -194,7 +195,18 @@ pub fn convert(
     first_id: u64,
     options: &Options,
 ) -> Result<Converted, String> {
-    convert_with_extent(map, anchor, table, first_id, options, paper_extent(map))
+    let cuts = cut_hidden(map, table);
+    let mut result = convert_cut(
+        map,
+        anchor,
+        table,
+        first_id,
+        options,
+        paper_extent(map),
+        &cuts.coords,
+    )?;
+    result.warnings.extend(cuts.warnings);
+    Ok(result)
 }
 
 /// [`convert`] with the box the map covers given (see [`paper_extent`]), which a
@@ -208,6 +220,28 @@ pub fn convert_with_extent(
     first_id: u64,
     options: &Options,
     extent: Option<[f64; 4]>,
+) -> Result<Converted, String> {
+    convert_cut(
+        map,
+        anchor,
+        table,
+        first_id,
+        options,
+        extent,
+        &BTreeMap::new(),
+    )
+}
+
+/// [`convert_with_extent`] with the coordinates of the areas cut (see
+/// [`crate::mot_cut`]) in place of their own, by index in [`Map::objects`].
+fn convert_cut(
+    map: &Map,
+    anchor: &GeographicAnchor,
+    table: &SymbolTable,
+    first_id: u64,
+    options: &Options,
+    extent: Option<[f64; 4]>,
+    cut: &BTreeMap<usize, crate::map::CoordList>,
 ) -> Result<Converted, String> {
     let georef = map
         .georeferencing
@@ -343,7 +377,8 @@ pub fn convert_with_extent(
             continue;
         };
         let symbol = &map.symbols[index];
-        if !symbol.is_visible() || object.coords.is_empty() {
+        let coords = cut.get(&position).unwrap_or(&object.coords);
+        if !symbol.is_visible() || coords.is_empty() {
             converted.hidden += 1;
             continue;
         }
@@ -369,13 +404,13 @@ pub fn convert_with_extent(
         // Kept whole at the finest level only: a coarser one draws its dashes
         // too small to tell, and is thinned anyway.
         let keep_whole = !coarse && table.get(id_in_table).is_some_and(|e| e.whole);
-        let closed = flags_closed(&object.coords);
+        let closed = flags_closed(coords);
         if coarse && options.zoom < rule.min_zoom {
             converted.generalized += 1;
             continue;
         }
-        let mut places: Vec<(f64, f64)> = object.coords.iter().map(|c| project(c.x, c.y)).collect();
-        let mut flags: Vec<i32> = object.coords.iter().map(|c| c.flags).collect();
+        let mut places: Vec<(f64, f64)> = coords.iter().map(|c| project(c.x, c.y)).collect();
+        let mut flags: Vec<i32> = coords.iter().map(|c| c.flags).collect();
         if coarse && matches!(object.kind, ObjectKind::Path(_)) {
             match generalize(&places, &flags, pixel, &rule) {
                 Some((p, f)) => (places, flags) = (p, f),
@@ -416,7 +451,7 @@ pub fn convert_with_extent(
                     Point::new(f64::MAX, f64::MAX),
                     Point::new(f64::MIN, f64::MIN),
                 );
-                for c in &object.coords {
+                for c in coords {
                     lo = Point::new(lo.x.min(c.x), lo.y.min(c.y));
                     hi = Point::new(hi.x.max(c.x), hi.y.max(c.y));
                 }
@@ -888,8 +923,11 @@ pub fn convert_levels(
     options: &Options,
 ) -> Result<Converted, String> {
     let detail = options.zoom;
+    // Once for every level: the areas the standard would draw over what the map
+    // draws over them.
+    let cuts = cut_hidden(map, table);
     let extent = paper_extent(map);
-    let mut result = convert_with_extent(
+    let mut result = convert_cut(
         map,
         anchor,
         table,
@@ -899,7 +937,9 @@ pub fn convert_levels(
             ..*options
         },
         extent,
+        &cuts.coords,
     )?;
+    result.warnings.extend(cuts.warnings);
     result.levels.push(LevelSummary {
         zoom: detail,
         objects: result.objects,
@@ -907,7 +947,7 @@ pub fn convert_levels(
         tiles: result.tiles.len(),
     });
     for zoom in (min_zoom..detail).rev() {
-        let level = convert_with_extent(
+        let level = convert_cut(
             map,
             anchor,
             table,
@@ -918,6 +958,7 @@ pub fn convert_levels(
                 ..*options
             },
             extent,
+            &cuts.coords,
         )?;
         result.levels.push(LevelSummary {
             zoom,

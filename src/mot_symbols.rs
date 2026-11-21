@@ -171,10 +171,18 @@ pub struct SymbolEntry {
     /// tells a [`SymbolMap`] which of a road's or a stairway's footprints a
     /// symbol is.
     pub width: f64,
+    /// The priority, in the standard's colour order, of the topmost colour its
+    /// areas are filled with (lower is drawn on top); `None` for no plain fill.
+    pub fill: Option<i32>,
+    /// The priority of the topmost colour it paints solid, fill or line.
+    pub paint: Option<i32>,
+    /// Whether it draws a line as well as what it fills: an area with its own
+    /// outline (a building, a paved area with its border).
+    pub outlined: bool,
 }
 
 /// The widest line `symbol`, one of `map`'s, draws, in millimetres.
-fn widest_line(symbol: &Symbol, map: &Map) -> f64 {
+pub(crate) fn widest_line(symbol: &Symbol, map: &Map) -> f64 {
     let mut leaves = Vec::new();
     symbol_leaves(symbol, map, &mut leaves);
     leaves
@@ -371,6 +379,9 @@ impl SymbolTable {
                 rule: zoom_rule(code, kind),
                 whole: lays_out_along(symbol, &map),
                 width: widest_line(symbol, &map),
+                fill: crate::mot_cut::fill_priority(symbol, &map),
+                paint: crate::mot_cut::paint_priority(symbol, &map),
+                outlined: kind == SymbolKind::Area && crate::mot_cut::draws_a_line(symbol, &map),
             });
         }
         SymbolTable {
@@ -921,6 +932,16 @@ mod tests {
             Some(Match::Table),
             "ISOM's 501 is an area, not a line"
         );
+    }
+
+    #[test]
+    fn a_short_passable_wall_still_shows_a_dot() {
+        let (map, _) = read_xml_map_str(Standard::Issprom.reference()).unwrap();
+        let wall = map.symbols.iter().find(|s| s.code() == "513.1").unwrap();
+        let Symbol::Line(line) = wall else {
+            panic!("513.1 is a line")
+        };
+        assert!(line.show_at_least_one_symbol);
     }
 
     #[test]
