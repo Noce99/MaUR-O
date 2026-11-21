@@ -2308,10 +2308,36 @@ impl Path {
     /// outside a polygon flattened to it. This is not performance sensitive
     /// the way per-frame flattening is (it runs once per pattern point, on
     /// already-computed outlines), so it can afford to.
+    ///
+    /// To test many points against one path, flatten it once with [`EvenOdd`].
     pub fn contains_even_odd(&self, point: Point) -> bool {
+        EvenOdd::new(self).contains(point)
+    }
+}
+
+/// A path flattened once for many [`Path::contains_even_odd`] tests: the same
+/// test, without flattening the path again for every point. A fill pattern
+/// tests each of its elements against its area's outline, and an area holds
+/// thousands of them.
+#[derive(Clone, Debug, Default)]
+pub struct EvenOdd {
+    polygons: Vec<Vec<Point>>,
+}
+
+impl EvenOdd {
+    /// The flattening of `path` the test uses.
+    pub fn new(path: &Path) -> EvenOdd {
         const CONTAINS_TOLERANCE: f64 = 1e-9;
+        EvenOdd {
+            polygons: path.to_subpath_polygons_tol(CONTAINS_TOLERANCE),
+        }
+    }
+
+    /// Whether `point` is inside, by the odd-even rule (see
+    /// [`Path::contains_even_odd`]).
+    pub fn contains(&self, point: Point) -> bool {
         let mut crossings = 0u32;
-        for polygon in self.to_subpath_polygons_tol(CONTAINS_TOLERANCE) {
+        for polygon in &self.polygons {
             let n = polygon.len();
             if n < 2 {
                 continue;
