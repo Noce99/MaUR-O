@@ -211,6 +211,19 @@ rotation (rotatable symbols only), geometry, and the extras a symbol kind needs:
 | Area | path with holes | pattern rotation and origin, only where the symbol has a pattern |
 | Text | one or two anchors | text, horizontal/vertical alignment, box size |
 
+An area's **pattern origin** is stored beside the object, not where the map file
+has it: Mapper lays patterns out from the paper's origin unless an object says
+otherwise, and that can be hundreds of kilometres from the map (a projected
+reference point at an easting of 0). `tiles build` moves it by whole periods of
+the map's own patterns to the middle of the object's box, so it lays out the same
+lines and dots; drawn from that far, the slightest difference of scale between
+two tiles (each is drawn at its own latitude's) would move every dot. The
+**pattern rotation** is the map's turn on the earth plus, for a pattern Mapper
+turns with the object, the object's own: a renderer lays every pattern of a tile
+out from the origin at that rotation, since square to a tile's paper (as Mapper
+draws a pattern that does not turn) would be square to the tile, and start again
+at each one's corner.
+
 ### Paths
 
 A path is a command stream, like MVT's, extended with cubic curves:

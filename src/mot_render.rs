@@ -15,7 +15,16 @@
 //! 1:4000 for ISSprOM); [`TileRenderer::render`] takes the scale, so another
 //! is possible but draws the symbols bigger or smaller than the maps did. A
 //! Mercator meter is longer than a ground meter by `1 / cos(latitude)`, taken at
-//! the middle of the tile drawn.
+//! the middle of the tile holding the data: every view of one tile is then on
+//! one paper, and a fill pattern's elements (laid out on the paper) fall in
+//! the same places in each, not a little apart across the edges between views.
+//!
+//! Every fill pattern is turned with the map and laid out from the pattern
+//! origin the tile keeps for the object, near the object (see
+//! [`crate::mot_convert`]), as Mapper lays out a rotatable one. Mapper lays a
+//! pattern which is not rotatable out from the paper's origin, square to the
+//! paper; in a tile the paper is the tile's, so it would start again at each
+//! tile's corner and lose the map's turn.
 //!
 //! Any tile of the pyramid can be drawn from the tile of a coarser or finer level
 //! that holds its ground: [`TileRenderer::render`] takes the tile with the data
@@ -32,7 +41,7 @@ use tiny_skia::{
 };
 
 use crate::geometry::Rect;
-use crate::map::{Coord, Map, Object, ObjectKind, PathObject, Point, TextObject};
+use crate::map::{Coord, Map, Object, ObjectKind, PathObject, Point, Symbol, TextObject};
 use crate::mot::{lat_lon, node_flag, Shape, Tile, TileId, TileObject, COVERAGE_SYMBOL};
 use crate::mot_symbols::SymbolTable;
 use crate::renderer::Renderer;
@@ -72,6 +81,18 @@ impl TileRenderer {
         let (mut template, _) =
             read_xml_map_str(table.reference()).expect("the shipped symbol sets are well-formed");
         template.objects.clear();
+        // Every pattern turned with the map and laid out from the object's
+        // pattern origin (see the module's doc).
+        fn turn_with_the_map(symbols: &mut [Symbol]) {
+            for symbol in symbols {
+                match symbol {
+                    Symbol::Area(a) => a.patterns.iter_mut().for_each(|p| p.rotatable = true),
+                    Symbol::Combined(c) => turn_with_the_map(&mut c.owned_parts),
+                    _ => {}
+                }
+            }
+        }
+        turn_with_the_map(&mut template.symbols);
         let symbol_scale = f64::from(template.scale_denominator);
         let symbol_index = (0..table.len() as u16)
             .map(|id| {
@@ -126,7 +147,10 @@ impl TileRenderer {
         let (view_west, view_north) = view.origin();
         let (data_west, data_north) = data.origin();
         let view_size = TileId::size(view.z);
-        let (lat, _) = lat_lon(view_west + view_size / 2.0, view_north - view_size / 2.0);
+        // The data tile's latitude, not the view's: the same paper for every view
+        // of the tile, or a pattern's elements would move from view to view.
+        let data_size = TileId::size(data.z);
+        let (lat, _) = lat_lon(data_west + data_size / 2.0, data_north - data_size / 2.0);
         // Millimetres of paper per Mercator meter, and per unit of this tile.
         let per_meter = lat.to_radians().cos() * 1000.0 / scale;
         let per_unit = f64::from(tile.grid_cm) / 100.0 * per_meter;
@@ -689,6 +713,166 @@ mod tests {
             .sum::<f64>();
         let meters = wide * ground_per_pixel;
         assert!((meters - 2.1).abs() < 0.3, "{meters} m");
+    }
+
+    /// The tile `data` with one square area of the symbol `code`, `side` Mercator
+    /// meters across around the Mercator point `middle`, its pattern laid out
+    /// from the Mercator point `origin`.
+    fn tile_with_an_area(
+        table: &SymbolTable,
+        data: TileId,
+        code: &str,
+        middle: (f64, f64),
+        side: f64,
+        origin: (f64, f64),
+    ) -> Tile {
+        let (west, north) = data.origin();
+        let unit = |(x, y): (f64, f64)| {
+            (
+                ((x - west) / 0.05).round() as i32,
+                ((north - y) / 0.05).round() as i32,
+            )
+        };
+        let (x0, y0) = unit((middle.0 - side / 2.0, middle.1 + side / 2.0));
+        let (x1, y1) = unit((middle.0 + side / 2.0, middle.1 - side / 2.0));
+        let mut tile = Tile::new(5);
+        tile.objects.push(TileObject {
+            id: 0,
+            symbol: table.id_of(code).unwrap(),
+            rotation: 0.0,
+            shape: Shape::Path(Some(crate::mot::Pattern {
+                rotation: 0.0246,
+                origin: unit(origin),
+            })),
+            nodes: vec![
+                node(x0, y0, 0),
+                node(x1, y0, 0),
+                node(x1, y1, 0),
+                node(x0, y1, 0),
+                node(x0, y0, node_flag::CLOSE_POINT as u8),
+            ],
+        });
+        tile
+    }
+
+    /// How many pixels of two images of one size differ by more than a shade
+    /// of antialiasing: an edge a hundredth of a pixel away (the 5 cm grid
+    /// rounds a point from each tile's own corner) is the same picture.
+    fn differing(a: &Pixmap, b: &Pixmap) -> usize {
+        a.pixels()
+            .iter()
+            .zip(b.pixels())
+            .filter(|(p, q)| {
+                let d = |x: u8, y: u8| x.abs_diff(y);
+                d(p.red(), q.red())
+                    .max(d(p.green(), q.green()))
+                    .max(d(p.blue(), q.blue()))
+                    .max(d(p.alpha(), q.alpha()))
+                    > 32
+            })
+            .count()
+    }
+
+    fn middle(id: TileId) -> (f64, f64) {
+        let (west, north) = id.origin();
+        let size = TileId::size(id.z);
+        (west + size / 2.0, north - size / 2.0)
+    }
+
+    /// Four views side by side are their parent view, dot for dot, though the
+    /// pattern is laid out from 900 km away (a map whose paper origin is at a
+    /// UTM easting of 0): every view of a data tile is drawn on one paper.
+    #[test]
+    fn the_views_of_a_tile_lay_a_pattern_out_alike() {
+        let table = SymbolTable::isom();
+        let mut renderer = TileRenderer::new(&table);
+        let data = TileId {
+            z: 14,
+            x: 8683,
+            y: 5931,
+        };
+        let parent = TileId {
+            z: 18,
+            x: 8683 * 16 + 7,
+            y: 5931 * 16 + 7,
+        };
+        let (mx, my) = middle(parent);
+        let tile = tile_with_an_area(
+            &table,
+            data,
+            "211",
+            (mx, my),
+            400.0,
+            (mx - 892_000.0, my - 74_000.0),
+        );
+        let whole = renderer
+            .render(data, &tile, parent, SCALE, 512, CoverageStyle::None)
+            .unwrap();
+        let mut stitched = Pixmap::new(512, 512).unwrap();
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let view = TileId {
+                z: 19,
+                x: parent.x * 2 + dx,
+                y: parent.y * 2 + dy,
+            };
+            let part = renderer
+                .render(data, &tile, view, SCALE, 256, CoverageStyle::None)
+                .unwrap();
+            stitched.draw_pixmap(
+                (256 * dx) as i32,
+                (256 * dy) as i32,
+                part.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+        }
+        let dots = whole
+            .pixels()
+            .iter()
+            .filter(|p| p.alpha() > 0 && p.red() < 128)
+            .count();
+        assert!(dots > 2000, "the view is dotted: {dots}");
+        let off = differing(&whole, &stitched);
+        assert!(off < 100, "{off} pixels differ");
+    }
+
+    /// The same area, with the pattern origin near it that `tiles build` stores,
+    /// in a tile of zoom 14 and in one of zoom 15 (another corner, another
+    /// latitude) draws the same dots: a rotatable pattern (stony ground) and one
+    /// that Mapper lays out square to the paper (cultivated land) alike.
+    #[test]
+    fn a_pattern_is_drawn_alike_from_any_tile_holding_it() {
+        let table = SymbolTable::isom();
+        let mut renderer = TileRenderer::new(&table);
+        let coarse = TileId {
+            z: 14,
+            x: 8683,
+            y: 5931,
+        };
+        let fine = TileId {
+            z: 15,
+            x: 8683 * 2 + 1,
+            y: 5931 * 2 + 1,
+        };
+        let view = TileId {
+            z: 17,
+            x: fine.x * 4 + 1,
+            y: fine.y * 4 + 2,
+        };
+        let (mx, my) = middle(view);
+        for code in ["211", "412"] {
+            let origin = (mx + 37.3, my - 81.9);
+            let drawn = |renderer: &mut TileRenderer, data: TileId| {
+                let tile = tile_with_an_area(&table, data, code, (mx, my), 600.0, origin);
+                renderer
+                    .render(data, &tile, view, SCALE, 512, CoverageStyle::None)
+                    .unwrap()
+            };
+            let (a, b) = (drawn(&mut renderer, coarse), drawn(&mut renderer, fine));
+            let off = differing(&a, &b);
+            assert!(off < 100, "{code}: {off} pixels differ");
+        }
     }
 
     #[test]
