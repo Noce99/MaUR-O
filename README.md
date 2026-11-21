@@ -1045,6 +1045,16 @@ DX12 driver and `--features cuda` for an NVIDIA one. `--gpu` picks which
 GPU (0 by default): under CUDA in the order `nvidia-smi` lists them, under
 wgpu in its count of the discrete ones.
 
+Both GPU features turn on burn's `autotune`, `fusion` and `persistence`. With
+autotune off, every convolution runs as burn's naive direct kernel, which made
+a step about 7× slower. With fusion off, every elementwise op is a kernel
+launch of its own. Autotune benchmarks every convolution and matmul shape the
+first time it meets it, a few minutes before the first step completes.
+`persistence` keeps those results and the compiled kernels in a database
+under `target/environment/` when `mauro` is run from inside the source tree,
+and under the user cache folder (`~/.cache/cubecl` on Linux) otherwise, so a
+later run with the same shapes on the same GPU starts without that wait.
+
 ### The shape of it
 
 Four levels down and four back up, base 16 channels doubling at each step, a
@@ -1425,6 +1435,28 @@ now **stops early**: after `--patience` epochs (10 by default) without a lower
 validation loss, it ends short of `--epochs` and says so. `best.bpk` is chosen
 by that same validation loss, so stopping takes nothing from it.
 `--patience 0` runs every epoch asked for.
+
+### Starting from a past run
+
+`--from <RUN>` starts a U-Net from a past run's weights instead of random
+ones, either to carry on after a run that failed or to build on a long one:
+
+```bash
+cargo run --release --features cuda -- net train dataset trainings \
+    --from trainings/UNet_2026_11_20__19_24_16
+```
+
+A run folder gives its `best.bpk`. A run that failed or was stopped before
+writing one gives its latest checkpoint instead, whether as `checkpoint/007/model.bpk`
+(a run that ended) or burn's own `checkpoint/model-7.bpk` (one that never
+did). A `.bpk` inside a run folder may also be named directly. The past run
+must have trained the same network: the same classes, `--base-channels`, line
+symbols and scale head. Anything else is refused before a run folder is made.
+Only the weights carry over: the new run gets its own folder, a fresh
+optimizer, and a learning rate that warms up and anneals over its own
+`--epochs`, so a lower `--learning-rate` is usually what a continuation wants.
+The loss is weighted by the new dataset's class balance, and the new run's
+`training.json` names the exact file it started from under `from`.
 
 ### `mauro net show-batches`
 

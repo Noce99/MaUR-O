@@ -50,6 +50,15 @@
 //! gone by without a lower validation loss: `best.bpk` is that lowest epoch,
 //! so what comes after it is only overfitting.
 //!
+//! `--from <RUN>` starts a U-Net from a past run's weights instead of random
+//! ones: a run folder, which gives its `best.bpk` (or, for a run that failed
+//! or was stopped before writing one, its latest checkpoint), or a `.bpk`
+//! inside a run folder. The past run must have trained the same network: the
+//! same classes, `--base-channels`, line symbols and scale head. Only the
+//! weights carry over. The new run gets its own folder, a fresh optimizer,
+//! and a learning rate that warms up and anneals over its own `--epochs`.
+//! Its `training.json` names the file it started from, under `from`.
+//!
 //! The backend is chosen when this is built, not when it is run: `flex` by
 //! default, which is pure Rust and slow; `--features wgpu` for any GPU with a
 //! Vulkan, Metal or DX12 driver; `--features cuda` for an NVIDIA one. Which
@@ -262,6 +271,17 @@ pub struct Args {
     #[arg(long, value_name = "WIDTHS")]
     temperature_end: f32,
 
+    /// Start the U-Net from a past run's weights instead of random ones: the
+    /// run's folder, which gives its best.bpk, or its latest checkpoint if
+    /// it failed or was stopped before writing one; or a .bpk inside a run
+    /// folder, such as checkpoint/007/model.bpk. That run must have trained
+    /// the same network: the same classes, --base-channels, line symbols and
+    /// scale head. Only the weights carry over. This run is a new one in
+    /// its own folder, with a fresh optimizer and a learning rate that warms
+    /// up and anneals over its own --epochs.
+    #[arg(long, value_name = "RUN")]
+    from: Option<PathBuf>,
+
     /// Show a live terminal dashboard of the metrics in place of the plain,
     /// scrolling log -- a full-screen view of the loss, the accuracy and the
     /// angle error as they come in, epoch by epoch.
@@ -394,6 +414,15 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         ));
     }
 
+    if args.model == Model::Tree && args.from.is_some() {
+        return Err((
+            ExitCode::from(1),
+            "Error: --from starts a U-Net from a past run's weights; the tree network has no \
+             such option."
+                .to_string(),
+        ));
+    }
+
     let notes = notes_of(&args.dataset).map_err(|e| (ExitCode::from(2), format!("Error: {e}")))?;
     let classes = notes.classes;
 
@@ -449,7 +478,8 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         .with_weight_decay(args.weight_decay)
         .with_patience(args.patience)
         .with_image_valid(args.image_valid)
-        .with_seed(args.seed);
+        .with_seed(args.seed)
+        .with_from(args.from);
 
     println!(
         "{BACKEND}: a U-Net of {DEPTH} levels from {} channels, {classes} symbols and the frame \

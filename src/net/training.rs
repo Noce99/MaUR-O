@@ -109,7 +109,7 @@ use crate::xml_reader::read_xml_map;
 use crate::net::data::{MapBatch, MapBatcher, MapDataset, Pass, CROP, DEFAULT_CROPS_PER_MAP};
 use crate::net::image_valid::{ImageValidation, DEFAULT_IMAGE_VALID, IMAGE_VALID};
 use crate::net::monitor::{Gated, Monitor};
-use crate::net::predict::{save_weights, ReadBackSettings};
+use crate::net::predict::{load_weights, save_weights, ReadBackSettings};
 use crate::net::unet::{UNet, UNetConfig, DEFAULT_BASE_CHANNELS, DEFAULT_SCALE_WEIGHT, DEPTH};
 
 /// Where the scale loss turns from a squared error into a straight one, as a
@@ -1246,6 +1246,16 @@ pub struct TrainingConfig {
     /// gives the same run.
     #[config(default = 0)]
     pub seed: u64,
+    /// The weights the network starts from instead of random ones: a past
+    /// run's folder, or a `.bpk` in one — see [`starting_weights`]. Only the
+    /// weights are carried over. The optimizer's state, the learning-rate
+    /// schedule and the epoch count start fresh, so the new run warms up and
+    /// anneals over its own `epochs`. [`train`] resolves a folder to the
+    /// file it took before it writes the configuration out, so a run's
+    /// `training.json` names the exact weights it started from. `None`
+    /// starts from random weights.
+    #[config(default = "None")]
+    pub from: Option<PathBuf>,
 }
 
 impl TrainingConfig {
@@ -1633,6 +1643,116 @@ fn best_epoch(run: &Path) -> Option<usize> {
         .map(|entry| entry.step)
 }
 
+/// The run a set of weights to start from belongs to, and the weights file
+/// itself.
+///
+/// `from` is either a run folder or a `.bpk` inside one. For a folder:
+///
+/// * its `best.bpk`, the epoch which validated best, where the run got as
+///   far as writing it;
+/// * otherwise its latest checkpoint, which is what a run that failed or was
+///   killed has. Both layouts are read: `checkpoint/007/model.bpk`, which a
+///   run that ended renumbers its checkpoints into, and burn's own
+///   `checkpoint/model-7.bpk`, which a run that never ended still has.
+///
+/// For a file, the run is the nearest folder above it holding a
+/// `training.json`, which is what says what shape of network the weights
+/// were written for.
+pub fn starting_weights(from: &Path) -> Result<(PathBuf, PathBuf), String> {
+    if from.is_file() {
+        let run = from
+            .ancestors()
+            .skip(1)
+            .take(3)
+            .find(|folder| folder.join("training.json").is_file())
+            .ok_or_else(|| {
+                format!(
+                    "{} is in no run folder: there is no training.json above it to say what \
+                     network its weights were written for",
+                    from.display(),
+                )
+            })?;
+        return Ok((run.to_path_buf(), from.to_path_buf()));
+    }
+    if !from.join("training.json").is_file() {
+        return Err(format!(
+            "{} is not a U-Net run folder: it holds no training.json",
+            from.display(),
+        ));
+    }
+    let best = from.join(BEST_WEIGHTS).with_extension("bpk");
+    if best.is_file() {
+        return Ok((from.to_path_buf(), best));
+    }
+    match latest_checkpoint(&from.join("checkpoint")) {
+        Some((_, weights)) => Ok((from.to_path_buf(), weights)),
+        None => Err(format!(
+            "{} has no weights to start from: no best.bpk and no checkpoint. A run which \
+             stopped before it finished its first epoch saved none.",
+            from.display(),
+        )),
+    }
+}
+
+/// The latest epoch's model weights under a run's `checkpoint/` folder,
+/// with its epoch: `007/model.bpk` once a run has ended and renumbered them,
+/// `model-7.bpk` as burn writes them while a run is going.
+fn latest_checkpoint(checkpoints: &Path) -> Option<(usize, PathBuf)> {
+    std::fs::read_dir(checkpoints)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let path = entry.path();
+            if path.is_dir() {
+                let epoch = name.parse::<usize>().ok()?;
+                let weights = path.join("model.bpk");
+                weights.is_file().then_some((epoch, weights))
+            } else {
+                let epoch = name
+                    .strip_prefix("model-")?
+                    .strip_suffix(".bpk")?
+                    .parse::<usize>()
+                    .ok()?;
+                Some((epoch, path))
+            }
+        })
+        .max_by_key(|(epoch, _)| *epoch)
+}
+
+/// Whether weights written for the network `old` describes fit the one
+/// `new` describes: the same classes, widths, lines layer and scale head.
+/// Everything else (the loss weights, the crops, the rates) may differ
+/// between the two, since none of it changes a tensor's shape.
+fn same_network(old: &TrainingConfig, new: &TrainingConfig) -> Result<(), String> {
+    let differences: Vec<String> = [
+        ("classes", old.classes, new.classes),
+        ("base channels", old.base_channels, new.base_channels),
+        ("line symbols", old.lines, new.lines),
+        (
+            "scale head",
+            usize::from(old.scale_head),
+            usize::from(new.scale_head),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, old, new)| old != new)
+    .map(|(what, old, new)| match what {
+        "scale head" => format!(
+            "the old network {} a scale head and this dataset {}",
+            if old == 1 { "has" } else { "has no" },
+            if new == 1 { "wants one" } else { "wants none" },
+        ),
+        _ => format!("{what}: {old} there, {new} here"),
+    })
+    .collect();
+    if differences.is_empty() {
+        Ok(())
+    } else {
+        Err(differences.join("; "))
+    }
+}
+
 /// Trains a U-Net on the dataset in `dataset`, writing the run into a folder
 /// of its own under `into`, and returning that folder.
 ///
@@ -1688,6 +1808,22 @@ pub fn train(
         .with_overhang(config.overhang.unwrap_or(config.crop / 2));
     config.lines = all.lines();
     config.scale_head = all.varies();
+
+    // Also before the run's folder is made: weights which cannot be found, or
+    // which were written for another shape of network, leave nothing behind.
+    // Resolved to the file itself, which is what `training.json` records.
+    if let Some(from) = config.from.take() {
+        let (past, weights) = starting_weights(&from)?;
+        let old = TrainingConfig::read(&past.join("training.json"))?;
+        same_network(&old, &config).map_err(|differences| {
+            format!(
+                "the weights in {} were written for another network than this run builds \
+                 ({differences})",
+                weights.display(),
+            )
+        })?;
+        config.from = Some(weights);
+    }
 
     let run = run_directory(into, extract_type_name::<UNet>())?;
     config
@@ -1767,6 +1903,18 @@ pub fn train(
         // that decides whether it is tracked, and the learner forks the
         // model onto the device it trains on but does not make it track.
         .init(&device.clone().autodiff());
+    // The past run's weights in place of the random ones. The class weights
+    // are not among them (a record holds parameters, and the loss's weights
+    // are a constant), so the loss is still weighted by this dataset's own
+    // balance, counted just above.
+    let model = match &config.from {
+        Some(weights) => {
+            let model = load_weights(model, weights)?;
+            println!("{}: the weights the run starts from", weights.display());
+            model
+        }
+        None => model,
+    };
     let architecture = run.join("architecture.txt");
     std::fs::write(&architecture, format!("{model}\n"))
         .map_err(|e| format!("cannot write {}: {e}", architecture.display()))?;
@@ -1973,7 +2121,11 @@ mod tests {
     fn folder(names: &[&str]) -> tempfile::TempDir {
         let directory = tempfile::tempdir().expect("a temporary folder");
         for name in names {
-            std::fs::write(directory.path().join(name), []).expect("a file");
+            let path = directory.path().join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("a folder");
+            }
+            std::fs::write(path, []).expect("a file");
         }
         directory
     }
@@ -2348,6 +2500,118 @@ mod tests {
         let read = TrainingConfig::read(file.path()).expect("it reads");
         assert!(read.scale_head);
         assert_eq!((read.classes, read.lines), (7, 2));
+    }
+
+    /// A run folder to start from gives its best weights where it has them,
+    /// and its latest checkpoint where it does not, in either layout a
+    /// checkpoint folder is found in.
+    #[test]
+    fn a_run_starts_from_its_best_weights_or_else_its_latest_checkpoint() {
+        let run = folder(&[
+            "training.json",
+            "checkpoint/model-3.bpk",
+            "checkpoint/model-12.bpk",
+            "checkpoint/optim-12.bpk",
+        ]);
+        let (found, weights) = starting_weights(run.path()).expect("a checkpoint");
+        assert_eq!(found, run.path());
+        // By number, not by name: "model-3" sorts after "model-12".
+        assert_eq!(weights, run.path().join("checkpoint/model-12.bpk"));
+
+        // A run which ended has renumbered them into folders.
+        let ended = folder(&[
+            "training.json",
+            "checkpoint/09/model.bpk",
+            "checkpoint/10/model.bpk",
+            "checkpoint/10/optim.bpk",
+        ]);
+        let (_, weights) = starting_weights(ended.path()).expect("a checkpoint");
+        assert_eq!(weights, ended.path().join("checkpoint/10/model.bpk"));
+
+        // And best.bpk wins over any of them.
+        std::fs::write(ended.path().join("best.bpk"), b"").expect("written");
+        let (_, weights) = starting_weights(ended.path()).expect("the best");
+        assert_eq!(weights, ended.path().join("best.bpk"));
+
+        // A file names itself, and its run is the folder above it with a
+        // training.json.
+        let file = ended.path().join("checkpoint/09/model.bpk");
+        let (found, weights) = starting_weights(&file).expect("a file");
+        assert_eq!((found.as_path(), weights), (ended.path(), file));
+    }
+
+    /// What has no weights, or is no run, is refused, and says why.
+    #[test]
+    fn a_run_with_nothing_to_start_from_is_refused() {
+        let empty = folder(&["training.json", "checkpoint/scheduler-1.bpk"]);
+        let message = starting_weights(empty.path()).unwrap_err();
+        assert!(message.contains("no weights"), "{message}");
+
+        let no_run = folder(&["best.bpk"]);
+        let message = starting_weights(no_run.path()).unwrap_err();
+        assert!(message.contains("training.json"), "{message}");
+        let message = starting_weights(&no_run.path().join("best.bpk")).unwrap_err();
+        assert!(message.contains("no run folder"), "{message}");
+    }
+
+    /// Weights fit a network of the same shape, whatever else the two runs
+    /// were set up with, and one which differs is named.
+    #[test]
+    fn weights_fit_only_the_network_they_were_written_for() {
+        let old = TrainingConfig::new(5).with_base_channels(16).with_lines(2);
+        let new = TrainingConfig::new(5)
+            .with_base_channels(16)
+            .with_lines(2)
+            .with_learning_rate(1e-5)
+            .with_crop(128);
+        assert!(same_network(&old, &new).is_ok());
+
+        let wider = new.clone().with_base_channels(32);
+        let message = same_network(&old, &wider).unwrap_err();
+        assert!(
+            message.contains("base channels: 16 there, 32 here"),
+            "{message}"
+        );
+
+        let scaled = new.with_scale_head(true);
+        let message = same_network(&old, &scaled).unwrap_err();
+        assert!(message.contains("scale head"), "{message}");
+    }
+
+    /// Weights loaded into the network a run trains are the old run's, and
+    /// still get gradients: a record which came back off the tape would make
+    /// a run which never moves.
+    #[test]
+    fn loaded_weights_are_the_saved_ones_and_still_train() {
+        use burn::optim::GradientsParams;
+
+        let device = Device::flex().autodiff();
+        let build = || UNetConfig::new(3).with_base_channels(4).init(&device);
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let saved = build();
+        let file = dir.path().join("model.bpk");
+        save_weights(saved.clone(), &file).expect("saved");
+
+        let loaded = load_weights(build(), &file).expect("loaded");
+        let image = Tensor::<4>::ones([1, 3, 16, 16], &device);
+        let answer = |net: &UNet| -> Vec<f32> {
+            net.forward(image.clone())
+                .into_data()
+                .try_to_vec::<f32>()
+                .expect("floats")
+        };
+        assert_eq!(answer(&saved), answer(&loaded), "not the saved weights");
+
+        let batch = MapBatch {
+            image: image.clone(),
+            class: Tensor::<3, burn::tensor::Int>::zeros([1, 16, 16], &device),
+            angle: Tensor::zeros([1, 2, 16, 16], &device),
+            lines: None,
+            scale: Tensor::zeros([1, 1], &device),
+        };
+        let gradients = loaded.forward_step(batch).loss.backward();
+        let gradients = GradientsParams::from_grads(gradients, &loaded);
+        assert!(!gradients.is_empty(), "no parameter got a gradient");
     }
 
     /// The scale loss is a squared error near the answer and a straight one

@@ -37,9 +37,10 @@ const CONTROL_POINTS: usize = 22;
 const SAMPLES: usize = 23;
 const TEMPERATURE_START: usize = 24;
 const TEMPERATURE_END: usize = 25;
+const FROM: usize = 26;
 
 /// The fields only the U-Net has, and the ones only the tree has.
-const UNET_ONLY: [usize; 10] = [
+const UNET_ONLY: [usize; 11] = [
     CROP,
     CROPS_PER_MAP,
     ANGLE_WEIGHT,
@@ -50,6 +51,7 @@ const UNET_ONLY: [usize; 10] = [
     OVERHANG,
     WORKERS,
     IMAGE_VALID,
+    FROM,
 ];
 const TREE_ONLY: [usize; 6] = [
     SIZE,
@@ -141,6 +143,7 @@ impl NetTrain {
                 Field::text("Samples").arg("samples"),
                 Field::text("Temperature start").arg("temperature_start"),
                 Field::text("Temperature end").arg("temperature_end"),
+                Field::path("From", Pick::FileOrFolder(&["bpk"])).arg("from"),
             ],
         );
         // Until the driver answers, the one the default names.
@@ -371,6 +374,9 @@ impl Tool for NetTrain {
         form.push_option(&mut args, SAMPLES, "--samples");
         form.push_option(&mut args, TEMPERATURE_START, "--temperature-start");
         form.push_option(&mut args, TEMPERATURE_END, "--temperature-end");
+        if let Some(from) = form.given(FROM) {
+            args.extend(["--from".to_string(), from.to_string()]);
+        }
         Ok(args)
     }
 }
@@ -474,5 +480,22 @@ mod tests {
             command(&screen).unwrap(),
             ["net", "train", "data", "--model", "tree", "--depth", "5"]
         );
+    }
+
+    /// A past run to start from is passed as --from, and only for the
+    /// U-Net: the tree has no such option.
+    #[test]
+    fn a_past_run_to_start_from_is_the_unets_alone() {
+        let mut screen = screen();
+        assert!(screen.form.shown(FROM));
+        type_into(&mut screen.form, FROM, "trainings/old");
+        assert_eq!(
+            command(&screen).unwrap(),
+            ["net", "train", "data", "--from", "trainings/old"]
+        );
+        press(&mut screen.form, MODEL, KeyCode::Right);
+        screen.changed(MODEL);
+        assert!(!screen.form.shown(FROM));
+        assert!(!command(&screen).unwrap().contains(&"--from".to_string()));
     }
 }

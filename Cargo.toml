@@ -109,9 +109,16 @@ flex = ["burn/flex"]
 # `--features wgpu` is the whole of what a GPU run needs.
 #
 # Any GPU with a Vulkan/Metal/DX12 driver, which is what a real run wants.
-wgpu = ["burn/wgpu"]
+#
+# Both GPU features turn on burn's `autotune` and `fusion`, which the
+# `default-features = false` above otherwise leaves off. Without autotune every
+# convolution is burn's naive direct kernel, and without fusion every
+# elementwise op is a kernel launch of its own. `persistence` keeps autotune's
+# results and the compiled kernels on disk between runs, so only the first run
+# at a given batch shape pays for the tuning.
+wgpu = ["burn/wgpu", "burn/autotune", "burn/fusion", "burn/persistence"]
 # NVIDIA, through CUDA, which is faster again where there is one.
-cuda = ["burn/cuda"]
+cuda = ["burn/cuda", "burn/autotune", "burn/fusion", "burn/persistence"]
 
 [dev-dependencies]
 assert_cmd = "2"
