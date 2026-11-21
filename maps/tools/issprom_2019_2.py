@@ -389,6 +389,10 @@ no_icon('512.2')
 
 o.insert_after('512.2', lower)
 
+# 513.1: a short passable wall still shows a dot, or it reads as a plain line
+# (Mapper's 2019 set has no show_at_least_one_symbol here).
+o.sub('513.1', r'(<line_symbol color="\d+" line_width="210" minimum_length="\d+"[^>]*?end_length="1875")',
+      r'\1 show_at_least_one_symbol="true"')
 # 513.2: "Passable retaining wall", minimum length 2.4 -> 1.4 (errata 01.02.2024).
 rename('513.2', 'Passable retaining wall')
 o.sub('513.2', r'minimum_length="2400"', 'minimum_length="1400"')
