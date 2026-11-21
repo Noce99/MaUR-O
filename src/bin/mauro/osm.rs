@@ -1,5 +1,5 @@
 //! Turns OpenStreetMap data into an OpenOrienteering Mapper map: an
-//! orienteering map drawn to ISSprOM 2019 or ISOM 2017-2, or one that looks
+//! orienteering map drawn to ISSprOM 2019-2 or ISOM 2017-2, or one that looks
 //! like openstreetmap.org's own Standard map.
 //!
 //! ```text
@@ -54,7 +54,7 @@
 //!
 //! | standard | symbol set | scale |
 //! |---|---|---|
-//! | `issprom` (default) | ISSprOM 2019, sprint | 1:4000 |
+//! | `issprom` (default) | ISSprOM 2019-2, sprint | 1:4000 |
 //! | `isom` | ISOM 2017-2, forest | 1:10000 |
 //! | `osm` | openstreetmap-carto, see below | by `--details` |
 //!
@@ -167,7 +167,7 @@ use maur_o::osm_style::{
 /// The symbols the map is drawn with.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum StandardArg {
-    /// ISSprOM 2019, sprint orienteering, at 1:4000.
+    /// ISSprOM 2019-2, sprint orienteering, at 1:4000.
     Issprom,
     /// ISOM 2017-2, forest orienteering, at 1:10000.
     Isom,
@@ -197,7 +197,7 @@ const OSM_ONLY: &[&str] = &[
 #[command(
     about = "Converts OpenStreetMap data into an OpenOrienteering Mapper map",
     long_about = "Converts OpenStreetMap data (.osm) into an OpenOrienteering Mapper map: an \
-             orienteering map drawn to ISSprOM 2019 or ISOM 2017-2, or one drawn like \
+             orienteering map drawn to ISSprOM 2019-2 or ISOM 2017-2, or one drawn like \
              openstreetmap.org's Standard style."
 )]
 pub struct Args {

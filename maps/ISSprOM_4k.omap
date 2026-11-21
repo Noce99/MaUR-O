@@ -40,7 +40,7 @@
 <color priority="34" name="OpenOrienteering Orange" c="0" m="0.474" y="0.895" k="0.09" opacity="1"><spotcolors knockout="true"><component factor="0.5" spotcolor="9"/><component factor="1" spotcolor="31"/></spotcolors><cmyk method="spotcolor"/><rgb method="spotcolor" r="0.91" g="0.497" b="0.105"/></color>
 </colors>
 <barrier version="6" required="0.6.0">
-<symbols count="193" id="ISSprOM 2019">
+<symbols count="193" id="ISSprOM 2019-2">
 <symbol type="2" id="0" code="101" name="Contour"><description>A line joining points of equal height.
 The standard vertical interval between contours is 2 or 2.5 m. To emphasize the 3-dimensional effect of the contour line image, contour lines shall be represented as continuous lines through all symbols, also Building (521) and Canopy (522).
 Slope lines may be drawn on the lower side of a contour line to clarify the direction of slope. When used, they should be placed in re-entrants.

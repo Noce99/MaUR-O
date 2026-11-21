@@ -56,7 +56,7 @@ Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 | `mauro benchmark run` | Run a benchmark archive: render every map, diff against the reference, write a report under `Results/`. |
 | `mauro dem` | Run the 5-step elevation-extraction pipeline (see below) on one map, writing an elevation GeoTIFF. |
 | `mauro dem-eval` | Score a predicted DEM GeoTIFF against a ground-truth one (MSE/RMSE/MAE + error maps). |
-| `mauro osm` | Convert OpenStreetMap XML (a file, or downloaded for an area from the Overpass API with `--download`) into an `.omap` drawn to ISSprOM 2019 (default) or ISOM 2017-2, or (`--standard osm`, optionally with GTFS feeds) styled like openstreetmap-carto. |
+| `mauro osm` | Convert OpenStreetMap XML (a file, or downloaded for an area from the Overpass API with `--download`) into an `.omap` drawn to ISSprOM 2019-2 (default) or ISOM 2017-2, or (`--standard osm`, optionally with GTFS feeds) styled like openstreetmap-carto. |
 | `mauro ortho` | Download a map's aerial orthophoto from the best open WMS for its place (European national/regional agencies) and add it to the map as a georeferenced template. |
 | `mauro tiles build` | Convert maps into a MOT archive: the tiled, compact world-map format of `mds/MOT-Format.md` (draft), in PMTiles. |
 | `mauro tiles query` | List the objects of a MOT archive around a place (`--around`/`--bbox`), by symbol, reading only the tiles it touches. |
@@ -209,7 +209,7 @@ paths, so CI never depends on anyone's server.
 
 Design and decisions: `mds/MOT-Format.md` (a draft). `mot.rs` is the pure part:
 Web Mercator tile addressing, the integer grid, and the tile payload codec.
-`mot_symbols.rs` is a layer's symbol table (ISOM 2017-2 or ISSprOM 2019, and which
+`mot_symbols.rs` is a layer's symbol table (ISOM 2017-2 or ISSprOM 2019-2, and which
 of them a map is drawn to), the
 closest-symbol rule and each symbol's zoom rule (when it appears, how small it
 may be, how much its line may be thinned); `mot_convert.rs` places a `Map` on the earth and stores each

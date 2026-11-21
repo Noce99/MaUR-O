@@ -1,5 +1,5 @@
 //! What OpenStreetMap features look like on an orienteering map: the symbol
-//! set of a mapping standard — ISSprOM 2019 for sprint, ISOM 2017-2 for the
+//! set of a mapping standard — ISSprOM 2019-2 for sprint, ISOM 2017-2 for the
 //! forest — and the tag rules deciding which feature gets which symbol.
 //!
 //! # The symbol set is the standard's own
@@ -63,7 +63,7 @@ use crate::osm_convert::{OsmRules, Strip};
 use crate::osm_style::{surface, Surface};
 use crate::xml_reader::{read_fragments_str, Fragments};
 
-/// The ISSprOM 2019 symbol set, at 1:4000.
+/// The ISSprOM 2019-2 symbol set, at 1:4000.
 pub(crate) const ISSPROM: &str = include_str!("../maps/ISSprOM_4k.omap");
 /// The ISOM 2017-2 symbol set, at 1:10000.
 pub(crate) const ISOM: &str = include_str!("../maps/ISOM_10k.omap");
@@ -71,17 +71,17 @@ pub(crate) const ISOM: &str = include_str!("../maps/ISOM_10k.omap");
 /// A mapping standard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standard {
-    /// ISSprOM 2019, for sprint orienteering, at 1:4000.
+    /// ISSprOM 2019-2, for sprint orienteering, at 1:4000.
     Issprom,
     /// ISOM 2017-2, for forest orienteering, at 1:10000.
     Isom,
 }
 
 impl Standard {
-    /// The standard's name, as Mapper's symbol sets give it.
+    /// The standard's name, as the reference maps give it.
     pub fn name(self) -> &'static str {
         match self {
-            Standard::Issprom => "ISSprOM 2019",
+            Standard::Issprom => "ISSprOM 2019-2",
             Standard::Isom => "ISOM 2017-2",
         }
     }

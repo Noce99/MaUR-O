@@ -15,7 +15,7 @@
 //! be drawn whole at once, so what is kept at each zoom is the symbol's
 //! business, not the converter's.
 //!
-//! The tables are ISOM 2017-2 and ISSprOM 2019, each built from the reference
+//! The tables are ISOM 2017-2 and ISSprOM 2019-2, each built from the reference
 //! map the crate already ships; its ids are the order of that map's symbols.
 //! This is provisional until the tables are frozen as files of their own.
 
@@ -195,7 +195,7 @@ impl SymbolTable {
         SymbolTable::new(Standard::Isom)
     }
 
-    /// The ISSprOM 2019 table.
+    /// The ISSprOM 2019-2 table.
     pub fn issprom() -> SymbolTable {
         SymbolTable::new(Standard::Issprom)
     }
@@ -231,7 +231,7 @@ impl SymbolTable {
         }
     }
 
-    /// The table with this name ("ISOM 2017-2", "ISSprOM 2019"), as an archive
+    /// The table with this name ("ISOM 2017-2", "ISSprOM 2019-2"), as an archive
     /// records the layer it holds.
     pub fn by_name(name: &str) -> Option<SymbolTable> {
         [Standard::Isom, Standard::Issprom]
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn a_table_is_found_by_its_name_and_has_its_own_symbols() {
-        for name in ["ISOM 2017-2", "ISSprOM 2019"] {
+        for name in ["ISOM 2017-2", "ISSprOM 2019-2"] {
             let table = SymbolTable::by_name(name).unwrap();
             assert_eq!(table.standard, name);
             assert!(table.len() > 100);
@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn the_standard_of_a_map_is_what_it_says_or_what_its_symbols_are() {
         let (mut map, _) = read_xml_map_str(SymbolTable::issprom().reference()).unwrap();
-        map.symbol_set = Some("ISSprOM 2019".into());
+        map.symbol_set = Some("ISSprOM 2019-2".into());
         assert_eq!(SymbolTable::detect(&map), Standard::Issprom);
         map.symbol_set = Some("ISOM 2017-2".into());
         assert_eq!(SymbolTable::detect(&map), Standard::Isom);

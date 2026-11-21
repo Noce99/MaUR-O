@@ -155,7 +155,7 @@ fn maps_of_two_standards_make_two_archives_each_in_its_own_symbols() {
         .assert()
         .success()
         .stderr(
-            predicate::str::contains("ISSprOM 2019").and(predicate::str::contains("ISOM 2017-2")),
+            predicate::str::contains("ISSprOM 2019-2").and(predicate::str::contains("ISOM 2017-2")),
         );
     assert!(
         !out.exists(),
@@ -189,7 +189,7 @@ fn a_standard_can_be_asked_for() {
         .arg(&map)
         .assert()
         .success()
-        .stderr(predicate::str::contains("(ISSprOM 2019)"));
+        .stderr(predicate::str::contains("(ISSprOM 2019-2)"));
     assert!(out.exists());
 }
 

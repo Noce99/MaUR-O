@@ -11,7 +11,7 @@
 //! placed on the earth; one that is not is skipped with a warning. All the
 //! maps go into one archive, their objects merged tile by tile.
 //!
-//! The symbols are those of a table: ISOM 2017-2 or ISSprOM 2019, found for each
+//! The symbols are those of a table: ISOM 2017-2 or ISSprOM 2019-2, found for each
 //! map from what it says it is drawn to and from the symbols its objects use
 //! (`--standard auto`), or the one asked for. One archive holds one symbol set:
 //! maps of both give two archives, written as `FILE` with `.isom` and `.issprom`
@@ -70,7 +70,7 @@ enum StandardArg {
     Auto,
     /// Every map in ISOM 2017-2.
     Isom,
-    /// Every map in ISSprOM 2019.
+    /// Every map in ISSprOM 2019-2.
     Issprom,
 }
 

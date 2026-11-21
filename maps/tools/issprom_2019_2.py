@@ -495,6 +495,9 @@ o.put('509.1', strip_icon(re.sub(r'<combined_symbol parts="2">.*</combined_symbo
                   dash_length=1000, break_length=1500) + '</symbol></part></combined_symbol>',
     o.get('509.1'), flags=re.S)))
 
+# The set names itself as the standard it is.
+o.t = re.sub(r'(<symbols count="\d+") id="ISSprOM 2019"', r'\1 id="ISSprOM 2019-2"', o.t)
+assert 'id="ISSprOM 2019-2"' in o.t
 o.fix_counts()
 open(dst, 'w', encoding='utf-8').write(o.t)
 print('symbols', len(o._top_symbols()))

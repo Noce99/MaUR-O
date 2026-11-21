@@ -26,7 +26,7 @@ It also ships tools that go beyond drawing a map:
   against a ground-truth one;
 - **`mauro osm`** turns OpenStreetMap data — from a file, or downloaded for
   an area — into a Mapper map: a base for an orienteering map drawn to
-  ISSprOM 2019 or ISOM 2017-2, or a map styled like openstreetmap.org,
+  ISSprOM 2019-2 or ISOM 2017-2, or a map styled like openstreetmap.org,
   optionally with bus and train lines from GTFS feeds;
 - **`mauro ortho`** downloads the aerial orthophoto of a map's ground from
   a national or regional mapping agency (about fifty open services across
@@ -447,7 +447,7 @@ Mapper), as the data's licence, the
 
 | `--standard` | symbol set | scale |
 | --- | --- | --- |
-| `issprom` (default) | ISSprOM 2019, sprint | 1:4000 |
+| `issprom` (default) | ISSprOM 2019-2, sprint | 1:4000 |
 | `isom` | ISOM 2017-2, forest | 1:10000 |
 | `osm` | openstreetmap-carto (see [below](#openstreetmaporgs-look)) | by `--details` |
 
@@ -694,7 +694,7 @@ reached or answered with something other than a photo.
 Converts maps into a MOT archive, the tiled world-map format of
 `mds/MOT-Format.md` (a draft): one PMTiles file whose tiles, Web Mercator
 `z/x/y`, hold the objects of every map that touches them, with the symbols
-stored by id in a table (ISOM 2017-2 or ISSprOM 2019) instead of as definitions.
+stored by id in a table (ISOM 2017-2 or ISSprOM 2019-2) instead of as definitions.
 
 ```
 mauro tiles build [--standard auto|isom|issprom] [--zoom 14] [--min-zoom 0] [--grid-cm 5] [--buffer 0.03125] --output world.pmtiles <map-file>...

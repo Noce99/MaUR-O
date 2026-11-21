@@ -201,7 +201,7 @@ fn archives_are_layers_and_the_first_has_the_priority() {
     let server = Server::start(&[&sprint, &forest]);
     let (_, info) = server.get("/info.json");
     let info = String::from_utf8(info).unwrap();
-    let first = info.find("\"layer\":\"ISSprOM 2019\"").unwrap();
+    let first = info.find("\"layer\":\"ISSprOM 2019-2\"").unwrap();
     let second = info.rfind("\"layer\":\"ISOM 2017-2\"").unwrap();
     assert!(info.contains("\"layers\":[") && first < second, "{info}");
 
