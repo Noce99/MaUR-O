@@ -26,6 +26,13 @@ use crate::osm_orienteering::Standard;
 use crate::xml_reader::read_xml_map_str;
 
 /// What a symbol draws.
+///
+/// A combined symbol is several symbols drawn over one object, and what it
+/// draws is what its parts draw: an area if any part fills one (a paved area
+/// with its border), a line otherwise (a railway's rails and sleepers). That,
+/// and not how the symbol is built, is what says whether one symbol can stand
+/// in for another: an open line given a symbol that fills would be drawn as
+/// the polygon it outlines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolKind {
     /// A symbol for a single position.
@@ -36,29 +43,26 @@ pub enum SymbolKind {
     Area,
     /// A symbol for text.
     Text,
-    /// Several symbols drawn over one object: a line or an area.
-    Combined,
 }
 
 impl SymbolKind {
-    /// The kind of `symbol`.
-    pub fn of(symbol: &Symbol) -> SymbolKind {
+    /// What `symbol`, one of `map`'s, draws.
+    pub fn of(symbol: &Symbol, map: &Map) -> SymbolKind {
         match symbol {
             Symbol::Point(_) => SymbolKind::Point,
             Symbol::Line(_) => SymbolKind::Line,
             Symbol::Area(_) => SymbolKind::Area,
             Symbol::Text(_) => SymbolKind::Text,
-            Symbol::Combined(_) => SymbolKind::Combined,
+            Symbol::Combined(_) => {
+                let mut leaves = Vec::new();
+                symbol_leaves(symbol, map, &mut leaves);
+                if leaves.iter().any(|leaf| matches!(leaf, Symbol::Area(_))) {
+                    SymbolKind::Area
+                } else {
+                    SymbolKind::Line
+                }
+            }
         }
-    }
-
-    /// Whether one of this kind can stand in for one of `other`. A combined
-    /// symbol is made of lines and areas, so it can stand in for either.
-    pub fn compatible(self, other: SymbolKind) -> bool {
-        use SymbolKind::*;
-        self == other
-            || (self == Combined && matches!(other, Line | Area))
-            || (other == Combined && matches!(self, Line | Area))
     }
 }
 
@@ -107,12 +111,12 @@ fn zoom_rule(code: &str, kind: SymbolKind) -> ZoomRule {
         // The north lines of a map.
         601 => 12,
         _ => match kind {
-            SymbolKind::Area | SymbolKind::Combined => 13,
+            SymbolKind::Area => 13,
             _ => 14,
         },
     };
     let (min_size_px, simplify_px) = match kind {
-        SymbolKind::Area | SymbolKind::Combined => (4.0, 0.5),
+        SymbolKind::Area => (4.0, 0.5),
         SymbolKind::Line => (8.0, 0.5),
         SymbolKind::Point | SymbolKind::Text => (0.0, 0.0),
     };
@@ -172,7 +176,7 @@ pub enum Match {
     Code,
     /// The code of the symbol this one is a variant of ("302" for "302.1").
     Parent,
-    /// The same name, of a compatible kind.
+    /// The same name, of the same kind.
     Name,
 }
 
@@ -210,7 +214,7 @@ impl SymbolTable {
                 continue;
             }
             by_code.insert(code.to_string(), entries.len() as u16);
-            let kind = SymbolKind::of(symbol);
+            let kind = SymbolKind::of(symbol, &map);
             entries.push(SymbolEntry {
                 code: code.to_string(),
                 name: symbol.name().to_string(),
@@ -269,11 +273,11 @@ impl SymbolTable {
                 if objects[i] == 0 || !symbol.is_visible() {
                     continue;
                 }
-                let kind = SymbolKind::of(symbol);
+                let kind = SymbolKind::of(symbol, map);
                 let Some(entry) = table.id_of(symbol.code()).and_then(|id| table.get(id)) else {
                     continue;
                 };
-                if !entry.kind.compatible(kind) {
+                if entry.kind != kind {
                     continue;
                 }
                 let same_name = entry.name.eq_ignore_ascii_case(symbol.name());
@@ -337,14 +341,15 @@ impl SymbolTable {
         self.by_code.get(code).copied()
     }
 
-    /// The symbol of this table that looks most like `symbol`, which is
-    /// usually one of another edition or another standard. In order: the same
-    /// code; the code of the symbol this is a variant of ("302.1" is a variant
-    /// of "302"); the same name. Each must be of a compatible kind. `None`
-    /// where nothing is close, and the object has to be dropped.
-    pub fn closest(&self, symbol: &Symbol) -> Option<(u16, Match)> {
-        let kind = SymbolKind::of(symbol);
-        let fits = |id: u16| self.get(id).is_some_and(|e| e.kind.compatible(kind));
+    /// The symbol of this table that looks most like `symbol`, one of `map`'s,
+    /// which is usually of another edition or another standard. In order: the
+    /// same code; the code of the symbol this is a variant of ("302.1" is a
+    /// variant of "302"); the same name. Each must draw the same
+    /// [kind](SymbolKind) of thing. `None` where nothing is close, and the
+    /// object has to be dropped.
+    pub fn closest(&self, symbol: &Symbol, map: &Map) -> Option<(u16, Match)> {
+        let kind = SymbolKind::of(symbol, map);
+        let fits = |id: u16| self.get(id).is_some_and(|e| e.kind == kind);
 
         let mut code = symbol.code();
         if let Some(id) = self.id_of(code).filter(|&id| fits(id)) {
@@ -361,7 +366,7 @@ impl SymbolTable {
             let found = self
                 .entries
                 .iter()
-                .position(|e| e.kind.compatible(kind) && e.name.eq_ignore_ascii_case(name));
+                .position(|e| e.kind == kind && e.name.eq_ignore_ascii_case(name));
             if let Some(i) = found {
                 return Some((i as u16, Match::Name));
             }
@@ -373,7 +378,7 @@ impl SymbolTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map::PointSymbol;
+    use crate::map::{AreaSymbol, CombinedSymbol, LineSymbol, PartRef, PointSymbol};
 
     #[test]
     fn the_isom_table_has_the_standards_symbols() {
@@ -476,7 +481,7 @@ mod tests {
             name: "no such name".into(),
             ..Default::default()
         });
-        let (id, how) = table.closest(&symbol).unwrap();
+        let (id, how) = table.closest(&symbol, &Map::default()).unwrap();
         assert_eq!(table.get(id).unwrap().code, entry.code);
         assert_eq!(how, Match::Parent);
     }
@@ -491,7 +496,7 @@ mod tests {
             name: "no such name".into(),
             ..Default::default()
         });
-        assert!(table.closest(&symbol).is_none());
+        assert!(table.closest(&symbol, &Map::default()).is_none());
     }
 
     #[test]
@@ -502,6 +507,58 @@ mod tests {
             name: "no such name".into(),
             ..Default::default()
         });
-        assert!(table.closest(&symbol).is_none());
+        assert!(table.closest(&symbol, &Map::default()).is_none());
+    }
+
+    #[test]
+    fn a_combined_symbol_draws_an_area_if_any_part_fills_one() {
+        // A paved area with its border: an area and a line.
+        let mut map = Map::default();
+        map.symbols.push(Symbol::Line(LineSymbol::default()));
+        let paved = Symbol::Combined(CombinedSymbol {
+            parts: vec![PartRef::Shared(0), PartRef::Private(0)],
+            owned_parts: vec![Symbol::Area(AreaSymbol::default())],
+            ..Default::default()
+        });
+        assert_eq!(SymbolKind::of(&paved, &map), SymbolKind::Area);
+        // Rails and sleepers: lines only.
+        let railway = Symbol::Combined(CombinedSymbol {
+            parts: vec![PartRef::Shared(0), PartRef::Private(0)],
+            owned_parts: vec![Symbol::Line(LineSymbol::default())],
+            ..Default::default()
+        });
+        assert_eq!(SymbolKind::of(&railway, &map), SymbolKind::Line);
+    }
+
+    #[test]
+    fn a_line_never_becomes_a_symbol_that_fills() {
+        // ISSprOM's 501 is a paved area with its border, a combined symbol. A
+        // map's own road line coded as a variant of it ("501.0.5") must not be
+        // stored as 501, or each road would be drawn as the polygon it outlines.
+        let table = SymbolTable::issprom();
+        let paved = table.get(table.id_of("501").unwrap()).unwrap();
+        assert_eq!(paved.kind, SymbolKind::Area);
+        let road = Symbol::Line(LineSymbol {
+            code: "501.0.5".into(),
+            name: "Traffico".into(),
+            ..Default::default()
+        });
+        let found = table.closest(&road, &Map::default());
+        assert!(
+            found.is_none_or(|(id, _)| table.get(id).unwrap().kind == SymbolKind::Line),
+            "{:?}",
+            found.map(|(id, _)| table.get(id).unwrap())
+        );
+        // An area of the same family still is one.
+        let area = Symbol::Area(AreaSymbol {
+            code: "501.0.1".into(),
+            name: "Paved area, urban".into(),
+            ..Default::default()
+        });
+        let (id, how) = table.closest(&area, &Map::default()).unwrap();
+        assert_eq!(
+            (table.get(id).unwrap().code.as_str(), how),
+            ("501", Match::Parent)
+        );
     }
 }

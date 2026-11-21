@@ -259,16 +259,17 @@ pub fn convert_with_extent(
     );
     let frame = (-(b.1 - a.1)).atan2(b.0 - a.0);
 
-    // What each symbol of the map becomes, worked out once.
+    // What each symbol of the map becomes, worked out once, and for one stored
+    // as another symbol, the note saying so (with its count, once known).
     let mut mapped: Vec<Option<u16>> = Vec::with_capacity(map.symbols.len());
-    let mut notes: Vec<String> = Vec::new();
+    let mut notes: Vec<Option<String>> = Vec::with_capacity(map.symbols.len());
     for symbol in &map.symbols {
-        let found = table.closest(symbol);
-        match found {
-            Some((id, Match::Code)) => mapped.push(Some(id)),
-            Some((id, how)) => {
+        let found = table.closest(symbol, map);
+        mapped.push(found.map(|(id, _)| id));
+        notes.push(match found {
+            Some((id, how)) if how != Match::Code => {
                 let target = table.get(id).expect("an id of the table");
-                notes.push(format!(
+                Some(format!(
                     "symbol {} stored as {} \"{}\" ({})",
                     describe(symbol),
                     target.code,
@@ -277,11 +278,10 @@ pub fn convert_with_extent(
                         Match::Parent => "the symbol it is a variant of",
                         _ => "the same name",
                     }
-                ));
-                mapped.push(Some(id));
+                ))
             }
-            None => mapped.push(None),
-        }
+            _ => None,
+        });
     }
 
     let mut converted = Converted {
@@ -547,12 +547,13 @@ pub fn convert_with_extent(
         store_coverage(&mut converted.tiles, &corners, id, options, grid_cm);
     }
 
+    // `notes` and `remapped_symbols` both have one entry per symbol of the map.
     converted.warnings.extend(
         notes
             .into_iter()
             .zip(&remapped_symbols)
             .filter(|(_, &n)| n > 0)
-            .map(|(note, n)| format!("{note}: {n} objects")),
+            .filter_map(|(note, n)| note.map(|note| format!("{note}: {n} objects"))),
     );
     for (index, &n) in dropped_symbols.iter().enumerate() {
         if n > 0 {
@@ -1761,6 +1762,49 @@ mod tests {
             "{:?}",
             converted.warnings
         );
+    }
+
+    /// A symbol stored as another is said so, with the number of its own
+    /// objects: the notes are kept per symbol of the map, and so is the count,
+    /// however many of the map's symbols are stored as themselves before it.
+    #[test]
+    fn a_symbol_stored_as_another_is_reported_with_its_own_count() {
+        let mut map = empty_map();
+        let mut push_variant = |code: &str, objects: usize| {
+            map.symbols.push(Symbol::Point(crate::map::PointSymbol {
+                code: code.into(),
+                name: "no such name".into(),
+                ..Default::default()
+            }));
+            let id = 90000 + map.symbols.len() as i32;
+            map.symbol_ids.push(id);
+            for _ in 0..objects {
+                let mut o = Object::new(ObjectKind::Point);
+                o.symbol_id = id;
+                o.symbol_index = Some(map.symbols.len() - 1);
+                o.coords = vec![Coord::new(0.0, 0.0, 0)];
+                map.objects.push(o);
+            }
+        };
+        push_variant("417.77", 3);
+        push_variant("418.77", 2);
+        let converted = convert_map(&map);
+        assert_eq!(converted.remapped, 5);
+        for expected in [
+            "symbol 417.77 \"no such name\" stored as 417 ",
+            "symbol 418.77 \"no such name\" stored as 418 ",
+        ] {
+            let warning = converted
+                .warnings
+                .iter()
+                .find(|w| w.starts_with(expected))
+                .unwrap_or_else(|| panic!("{expected} in {:?}", converted.warnings));
+            let count = if expected.contains("417") { 3 } else { 2 };
+            assert!(
+                warning.ends_with(&format!(": {count} objects")),
+                "{warning}"
+            );
+        }
     }
 
     /// The patterns of the symbol `code` of `map`.
