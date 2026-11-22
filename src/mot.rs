@@ -140,6 +140,30 @@ pub fn lat_lon(x: f64, y: f64) -> (f64, f64) {
     )
 }
 
+/// Meters on the ground per Mercator meter at `latitude` (degrees): east-west,
+/// then north-south. Web Mercator projects the ellipsoid's latitudes as if
+/// they were a sphere's, so it is not conformal: the two differ, by some 0.3%,
+/// and neither is quite `cos(latitude)`. A symbol drawn with one scale for
+/// both is that much off, which no one sees; a fill pattern laid out from a
+/// point a few hundred metres away is off by a fraction of its period.
+pub fn ground_per_mercator(latitude: f64) -> (f64, f64) {
+    // WGS 84's first eccentricity, squared; Web Mercator's sphere has the
+    // ellipsoid's equatorial radius.
+    const E2: f64 = 0.006_694_379_990_14;
+    let (sin, cos) = latitude.to_radians().sin_cos();
+    let w = 1.0 - E2 * sin * sin;
+    (cos / w.sqrt(), cos * (1.0 - E2) / (w * w.sqrt()))
+}
+
+/// The direction from `a` to `b` (Mercator meters, `y` north) on the ground at
+/// `latitude`: counterclockwise from east, in radians. Not quite the direction
+/// in Mercator, which stretches north-south a little more than east-west
+/// ([`ground_per_mercator`]).
+pub fn ground_angle(a: (f64, f64), b: (f64, f64), latitude: f64) -> f64 {
+    let (gx, gy) = ground_per_mercator(latitude);
+    ((b.1 - a.1) * gy).atan2((b.0 - a.0) * gx)
+}
+
 /// The resolution of a tile's coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Grid {

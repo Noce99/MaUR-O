@@ -14,10 +14,12 @@
 //! symbols two thirds that size on paper and so the same on the ground, and
 //! 1:4000 for ISSprOM); [`TileRenderer::render`] takes the scale, so another
 //! is possible but draws the symbols bigger or smaller than the maps did. A
-//! Mercator meter is longer than a ground meter by `1 / cos(latitude)`, taken at
-//! the middle of the tile holding the data: every view of one tile is then on
-//! one paper, and a fill pattern's elements (laid out on the paper) fall in
-//! the same places in each, not a little apart across the edges between views.
+//! Mercator meter is longer than a ground meter by about `1 / cos(latitude)`,
+//! a little more north-south than east-west
+//! ([`crate::mot::ground_per_mercator`]), taken at the
+//! middle of the tile holding the data: every view of one tile is then on one
+//! paper, and a fill pattern's elements (laid out on the paper) fall in the
+//! same places in each, not a little apart across the edges between views.
 //!
 //! Every fill pattern is turned with the map and laid out from the pattern
 //! origin the tile keeps for the object, near the object (see
@@ -45,7 +47,9 @@ use tiny_skia::{
 
 use crate::geometry::Rect;
 use crate::map::{Coord, Map, Object, ObjectKind, PathObject, Point, Symbol, TextObject};
-use crate::mot::{lat_lon, node_flag, Shape, Tile, TileId, TileObject, COVERAGE_SYMBOL};
+use crate::mot::{
+    ground_per_mercator, lat_lon, node_flag, Shape, Tile, TileId, TileObject, COVERAGE_SYMBOL,
+};
 use crate::mot_symbols::SymbolTable;
 use crate::renderer::Renderer;
 use crate::xml_reader::read_xml_map_str;
@@ -155,14 +159,18 @@ impl TileRenderer {
         let data_size = TileId::size(data.z);
         let (lat, _) = lat_lon(data_west + data_size / 2.0, data_north - data_size / 2.0);
         // Millimetres of paper per Mercator meter, and per unit of this tile.
-        let per_meter = lat.to_radians().cos() * 1000.0 / scale;
-        let per_unit = f64::from(tile.grid_cm) / 100.0 * per_meter;
+        // East-west and north-south: the paper is the ground's, and Mercator
+        // stretches the two a little differently.
+        let (gx, gy) = ground_per_mercator(lat);
+        let per_meter = (gx * 1000.0 / scale, gy * 1000.0 / scale);
+        let grid_m = f64::from(tile.grid_cm) / 100.0;
+        let per_unit = (grid_m * per_meter.0, grid_m * per_meter.1);
         // The window to draw, in paper millimetres from the data tile's corner.
         let window = Rect::new(
-            (view_west - data_west) * per_meter,
-            (data_north - view_north) * per_meter,
-            view_size * per_meter,
-            view_size * per_meter,
+            (view_west - data_west) * per_meter.0,
+            (data_north - view_north) * per_meter.1,
+            view_size * per_meter.0,
+            view_size * per_meter.1,
         );
         let near = window.adjusted(-REACH_MM, -REACH_MM, REACH_MM, REACH_MM);
 
@@ -170,8 +178,8 @@ impl TileRenderer {
         let mut objects = Vec::new();
         // The same window in the tile's own units, to cull objects before the work
         // of building them: a view into a tile which holds thousands.
-        let (u0, u1) = (near.left() / per_unit, near.right() / per_unit);
-        let (v0, v1) = (near.top() / per_unit, near.bottom() / per_unit);
+        let (u0, u1) = (near.left() / per_unit.0, near.right() / per_unit.0);
+        let (v0, v1) = (near.top() / per_unit.1, near.bottom() / per_unit.1);
         for o in &tile.objects {
             let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
             for n in &o.nodes {
@@ -189,9 +197,12 @@ impl TileRenderer {
         self.template.objects = objects;
 
         let mut pixmap = Pixmap::new(pixels, pixels).ok_or("cannot make an image that size")?;
-        let ppm = f64::from(pixels) / window.width();
+        let ppm = (
+            f64::from(pixels) / window.width(),
+            f64::from(pixels) / window.height(),
+        );
         let transform = Transform::from_translate(-window.left() as f32, -window.top() as f32)
-            .post_concat(Transform::from_scale(ppm as f32, ppm as f32));
+            .post_concat(Transform::from_scale(ppm.0 as f32, ppm.1 as f32));
         // Built for the window only: a large patterned area (stony ground,
         // say) is laid out where it is seen, not over the whole tile.
         Renderer::for_tiles(&self.template, window).paint_rect(
@@ -214,9 +225,9 @@ impl TileRenderer {
 
     /// The map's object for a tile's, in paper millimetres; `None` where its
     /// symbol is not in the template.
-    fn object(&self, o: &TileObject, per_unit: f64) -> Option<Object> {
+    fn object(&self, o: &TileObject, per_unit: (f64, f64)) -> Option<Object> {
         let index = (*self.symbol_index.get(usize::from(o.symbol))?)?;
-        let point = |x: i32, y: i32| (f64::from(x) * per_unit, f64::from(y) * per_unit);
+        let point = |x: i32, y: i32| (f64::from(x) * per_unit.0, f64::from(y) * per_unit.1);
         let kind = match &o.shape {
             Shape::Point => ObjectKind::Point,
             Shape::Path(pattern) => ObjectKind::Path(match pattern {
@@ -235,7 +246,7 @@ impl TileRenderer {
                 v_align: i32::from(t.v_align),
                 box_size: t
                     .box_size
-                    .map(|(w, h)| (f64::from(w) * per_unit, f64::from(h) * per_unit)),
+                    .map(|(w, h)| (f64::from(w) * per_unit.0, f64::from(h) * per_unit.1)),
             }),
         };
         let mut object = Object::new(kind);

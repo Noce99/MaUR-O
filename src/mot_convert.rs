@@ -25,14 +25,14 @@
 //! ellipsoid, turned by the map's grivation, as [`crate::orthophoto`] does it,
 //! which is good to a few meters in ten kilometers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::map::{
     fill_pattern_type, FillPattern, Georeferencing, Map, ObjectKind, PartRef, Point, Symbol,
 };
 use crate::mot::node_flag;
 use crate::mot::{
-    Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, COVERAGE_SYMBOL, WORLD_HALF,
+    ground_angle, Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, COVERAGE_SYMBOL, WORLD_HALF,
 };
 use crate::mot_adapt::{adapt, Adapted};
 use crate::mot_clip::{clip_line, clip_ring, flatten, simplify, Rect, Vertex};
@@ -235,6 +235,38 @@ impl<'m> Placement<'m> {
         let (lat, lon) = self.geographic(x, y);
         web_mercator(lat, lon)
     }
+
+    /// The point of the paper placed at `target` (Mercator meters): the inverse
+    /// of [`mercator`](Self::mercator), by Newton's method from `guess`. The
+    /// placement is all but affine, so it takes two or three steps.
+    pub fn paper(&self, target: (f64, f64), guess: (f64, f64)) -> (f64, f64) {
+        let mut p = guess;
+        for _ in 0..8 {
+            let m = self.mercator(p.0, p.1);
+            let (dx, dy) = (target.0 - m.0, target.1 - m.1);
+            // d(Mercator) / d(paper) at p.
+            let h = 0.5;
+            let (xp, xm) = (self.mercator(p.0 + h, p.1), self.mercator(p.0 - h, p.1));
+            let (yp, ym) = (self.mercator(p.0, p.1 + h), self.mercator(p.0, p.1 - h));
+            let j = [
+                [(xp.0 - xm.0) / (2.0 * h), (yp.0 - ym.0) / (2.0 * h)],
+                [(xp.1 - xm.1) / (2.0 * h), (yp.1 - ym.1) / (2.0 * h)],
+            ];
+            let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+            if det.abs() < 1e-12 {
+                break;
+            }
+            let step = (
+                (j[1][1] * dx - j[0][1] * dy) / det,
+                (j[0][0] * dy - j[1][0] * dx) / det,
+            );
+            p = (p.0 + step.0, p.1 + step.1);
+            if step.0.abs() + step.1.abs() < 1e-6 {
+                break;
+            }
+        }
+        p
+    }
 }
 
 /// A map file as `mauro tiles build` reads it: the map, and where on the earth
@@ -351,7 +383,7 @@ fn convert_cut(
         project(middle.0, middle.1),
         project(middle.0 + 1.0, middle.1),
     );
-    let frame = (b.1 - a.1).atan2(b.0 - a.0);
+    let frame = ground_angle(a, b, place(middle.0, middle.1).0);
 
     // What each symbol of the map becomes, worked out once, and for one stored
     // as another symbol, the note saying so (with its count, once known).
@@ -409,6 +441,8 @@ fn convert_cut(
             georef.ref_point_x
         ));
     }
+    // The point of the paper in the middle of each tile, for the patterns.
+    let mut near_tile: HashMap<TileId, (f64, f64)> = HashMap::new();
     let mut remapped_symbols = vec![0usize; map.symbols.len()];
     let mut dropped_symbols = vec![0usize; map.symbols.len()];
 
@@ -511,14 +545,23 @@ fn convert_cut(
                     _ => false,
                 }
         };
+        // The patterns of an area: laid out from a point of the lattice near
+        // each tile (below), not one for the whole object. The paper is not
+        // quite flat on the earth, and a lattice laid out from far away (the
+        // middle of a large area of north lines or of scattered trees) is off
+        // by a fraction of its period by the time it reaches the tile.
         let pattern_place = match &object.kind {
             ObjectKind::Path(p)
                 if wants_pattern(p.pattern_rotation, (p.pattern_origin.x, p.pattern_origin.y)) =>
             {
                 let mut patterns = Vec::new();
                 fill_patterns(map, symbol, &mut patterns);
-                // The middle of the object's box, in paper mm: the same for
-                // every piece of it in every tile and level.
+                // The tiles turn every pattern with the map (see
+                // `mot_render`); the object's own turn is for those that
+                // follow it.
+                let turned = patterns.is_empty() || patterns.iter().any(|p| p.rotatable);
+                // The object's box on the paper, which the point the lattice is
+                // laid out near stays in.
                 let (mut lo, mut hi) = (
                     Point::new(f64::MAX, f64::MAX),
                     Point::new(f64::MIN, f64::MIN),
@@ -527,19 +570,12 @@ fn convert_cut(
                     lo = Point::new(lo.x.min(c.x), lo.y.min(c.y));
                     hi = Point::new(hi.x.max(c.x), hi.y.max(c.y));
                 }
-                let origin = pattern_anchor(
-                    &patterns,
+                Some((
+                    (lo, hi),
+                    patterns,
                     p.pattern_rotation,
                     p.pattern_origin,
-                    (lo + hi) * 0.5,
-                );
-                // The tiles turn every pattern with the map (see
-                // `mot_render`); the object's own turn is for those that
-                // follow it.
-                let turned = patterns.is_empty() || patterns.iter().any(|p| p.rotatable);
-                Some((
                     if turned { p.pattern_rotation } else { 0.0 },
-                    project(origin.x, origin.y),
                 ))
             }
             _ => None,
@@ -590,12 +626,31 @@ fn convert_cut(
             };
             let shape = match &object.kind {
                 ObjectKind::Point => Shape::Point,
-                ObjectKind::Path(_) => {
-                    Shape::Path(pattern_place.map(|(pattern_rotation, origin)| Pattern {
-                        rotation: pattern_rotation + frame,
-                        origin: to_grid(origin),
-                    }))
-                }
+                ObjectKind::Path(_) => Shape::Path(pattern_place.as_ref().map(
+                    |((lo, hi), patterns, rotation, origin, stored)| {
+                        let near = *near_tile.entry(tile_id).or_insert_with(|| {
+                            let (west, top) = tile_id.origin();
+                            let half = TileId::size(options.zoom) / 2.0;
+                            placement.paper((west + half, top - half), middle)
+                        });
+                        let at = pattern_anchor(
+                            patterns,
+                            *rotation,
+                            *origin,
+                            Point::new(near.0.clamp(lo.x, hi.x), near.1.clamp(lo.y, hi.y)),
+                        );
+                        // The map's turn there, not at its middle: the
+                        // meridians converge across a map, by some 0.04° over
+                        // 5 km, and a pattern turned by the middle's slides
+                        // off its paper's lattice a few hundred metres away.
+                        let (a, b) = (project(at.x, at.y), project(at.x + 1.0, at.y));
+                        let turn = ground_angle(a, b, place(at.x, at.y).0);
+                        Pattern {
+                            rotation: stored + turn,
+                            origin: to_grid(a),
+                        }
+                    },
+                )),
                 ObjectKind::Text(t) => Shape::Text(Text {
                     text: t.text.clone(),
                     h_align: t.h_align.clamp(0, 3) as u8,
@@ -780,7 +835,9 @@ fn fill_patterns<'a>(map: &'a Map, symbol: &'a Symbol, out: &mut Vec<&'a FillPat
 /// The pattern origin `origin` (paper mm) of an object whose patterns are
 /// `patterns`, turned by `rotation` where rotatable, moved by whole periods of
 /// the patterns to as near `near` as they allow: the same lines and the same
-/// elements along them, laid out from beside the object.
+/// elements along them, laid out from beside the object. Each tile's piece of
+/// an object is given its own, from the point of the object nearest the
+/// tile's middle, and turned as the map is there.
 ///
 /// Mapper lays patterns out from the paper's origin unless an object says
 /// otherwise, and a map's paper origin may be hundreds of kilometres from its
@@ -2094,8 +2151,11 @@ mod tests {
             let id = table.id_of(code).unwrap();
             rotations.iter().find(|r| r.0 == id).unwrap().1
         };
-        // The map's turn only, for the pattern that does not follow the object.
-        assert!((rotation("211") - rotation("412") - 1.0).abs() < 1e-9);
+        // The map's turn only, for the pattern that does not follow the object
+        // (taken where each pattern is laid out from: the two lattices' points
+        // are a little apart).
+        let off = rotation("211") - rotation("412") - 1.0;
+        assert!(off.abs() < 1e-5, "{off}");
     }
 
     #[test]
