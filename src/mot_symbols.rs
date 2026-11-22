@@ -176,6 +176,15 @@ pub struct SymbolEntry {
     pub fill: Option<i32>,
     /// The priority of the topmost colour it paints solid, fill or line.
     pub paint: Option<i32>,
+    /// For a line, which side of it the symbol draws on, in mm: positive to the
+    /// right of the line's direction, 0 for both alike
+    /// ([`crate::mot_adapt::line_side`]).
+    pub side: f64,
+    /// For a line, whether it paints its middle in a colour (a road's infill),
+    /// not only borders or symbols along it (a stairway's outline and steps).
+    pub body: bool,
+    /// For a plain area (one colour, no patterns), that colour.
+    pub fill_rgb: Option<(f32, f32, f32)>,
     /// Whether it draws a line as well as what it fills: an area with its own
     /// outline (a building, a paved area with its border).
     pub outlined: bool,
@@ -381,6 +390,18 @@ impl SymbolTable {
                 width: widest_line(symbol, &map),
                 fill: crate::mot_cut::fill_priority(symbol, &map),
                 paint: crate::mot_cut::paint_priority(symbol, &map),
+                side: if kind == SymbolKind::Line {
+                    crate::mot_adapt::line_side(symbol, &map)
+                } else {
+                    0.0
+                },
+                body: crate::mot_adapt::body(symbol, &map).is_some(),
+                fill_rgb: match symbol {
+                    Symbol::Area(a) if a.color >= 0 && a.patterns.is_empty() => {
+                        map.color(a.color).map(|c| c.rgb)
+                    }
+                    _ => None,
+                },
                 outlined: kind == SymbolKind::Area && crate::mot_cut::draws_a_line(symbol, &map),
             });
         }
@@ -447,6 +468,26 @@ impl SymbolTable {
     /// The line of the [`SymbolMap`] that matched `symbol`, for messages.
     pub fn crossref_line(&self, symbol: &Symbol, map: &Map) -> Option<usize> {
         self.crossref_for(symbol, map).map(|r| r.line)
+    }
+
+    /// The plain area of the table (one colour, no patterns) whose colour is
+    /// closest to `rgb`, where one is close: what fills a middle which a symbol
+    /// of the table leaves empty and a map's own symbol paints in that colour.
+    pub fn closest_plain_area(&self, rgb: (f32, f32, f32)) -> Option<u16> {
+        // Out of 1 in each of red, green and blue: about as far as one tint of a
+        // standard's colour is from the next.
+        const CLOSE: f32 = 0.1;
+        let distance = |c: (f32, f32, f32)| {
+            ((c.0 - rgb.0).powi(2) + (c.1 - rgb.1).powi(2) + (c.2 - rgb.2).powi(2)).sqrt()
+        };
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.kind == SymbolKind::Area)
+            .filter_map(|(id, e)| Some((id, distance(e.fill_rgb?))))
+            .filter(|&(_, d)| d <= CLOSE)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id as u16)
     }
 
     /// The table with this name ("ISOM 2017-2", "ISSprOM 2019-2"), as an archive

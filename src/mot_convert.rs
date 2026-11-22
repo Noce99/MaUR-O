@@ -34,8 +34,8 @@ use crate::mot::node_flag;
 use crate::mot::{
     Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, COVERAGE_SYMBOL, WORLD_HALF,
 };
+use crate::mot_adapt::{adapt, Adapted};
 use crate::mot_clip::{clip_line, clip_ring, flatten, simplify, Rect, Vertex};
-use crate::mot_cut::cut_hidden;
 use crate::mot_symbols::{Match, SymbolTable, ZoomRule};
 use crate::ocd::{is_ocd_file, ocd_to_omap_xml};
 use crate::orthophoto::{
@@ -273,7 +273,7 @@ pub fn convert(
     first_id: u64,
     options: &Options,
 ) -> Result<Converted, String> {
-    let cuts = cut_hidden(map, table);
+    let adapted = adapt(map, table);
     let mut result = convert_cut(
         map,
         anchor,
@@ -281,9 +281,9 @@ pub fn convert(
         first_id,
         options,
         paper_extent(map),
-        &cuts.coords,
+        &adapted,
     )?;
-    result.warnings.extend(cuts.warnings);
+    result.warnings.extend(adapted.warnings);
     Ok(result)
 }
 
@@ -306,12 +306,13 @@ pub fn convert_with_extent(
         first_id,
         options,
         extent,
-        &BTreeMap::new(),
+        &Adapted::default(),
     )
 }
 
-/// [`convert_with_extent`] with the coordinates of the areas cut (see
-/// [`crate::mot_cut`]) in place of their own, by index in [`Map::objects`].
+/// [`convert_with_extent`] with the objects adapted to the standard's symbols
+/// (see [`crate::mot_adapt`]): the coordinates of those cut or turned round in
+/// place of their own, and the objects made for them stored too.
 fn convert_cut(
     map: &Map,
     anchor: &GeographicAnchor,
@@ -319,7 +320,7 @@ fn convert_cut(
     first_id: u64,
     options: &Options,
     extent: Option<[f64; 4]>,
-    cut: &BTreeMap<usize, crate::map::CoordList>,
+    adapted: &Adapted,
 ) -> Result<Converted, String> {
     let placement = Placement::new(map, anchor)?;
     let georef = placement.georef;
@@ -415,9 +416,20 @@ fn convert_cut(
     // node. Inside a tile objects are sorted by (symbol, id), so this keeps
     // both the ids and the first nodes of neighbours in the file close, and
     // so cheap to code as differences.
+    // The map's objects, then those made for them (by position past the map's).
+    let object_at = |position: usize| -> (&crate::map::Object, Option<u16>) {
+        match position.checked_sub(map.objects.len()) {
+            None => (&map.objects[position], None),
+            Some(extra) => {
+                let (object, id) = &adapted.extras[extra];
+                (object, Some(*id))
+            }
+        }
+    };
     let mut order: Vec<(u64, usize)> = map
         .objects
         .iter()
+        .chain(adapted.extras.iter().map(|(o, _)| o))
         .enumerate()
         .map(|(i, o)| {
             let key = o.coords.first().map_or(0, |c| {
@@ -430,25 +442,26 @@ fn convert_cut(
     order.sort_unstable();
 
     for &(_, position) in &order {
-        let object = &map.objects[position];
+        let (object, made) = object_at(position);
         let Some(index) = object.symbol_index else {
             converted.dropped += 1;
             continue;
         };
         let symbol = &map.symbols[index];
-        let coords = cut.get(&position).unwrap_or(&object.coords);
+        let coords = adapted.coords.get(&position).unwrap_or(&object.coords);
         if !symbol.is_visible() || coords.is_empty() {
             converted.hidden += 1;
             continue;
         }
-        let Some(id_in_table) = mapped[index] else {
+        let Some(id_in_table) = made.or(mapped[index]) else {
             converted.dropped += 1;
             dropped_symbols[index] += 1;
             continue;
         };
-        if table
-            .get(id_in_table)
-            .is_some_and(|e| e.code != symbol.code())
+        if made.is_none()
+            && table
+                .get(id_in_table)
+                .is_some_and(|e| e.code != symbol.code())
         {
             converted.remapped += 1;
             remapped_symbols[index] += 1;
@@ -982,9 +995,8 @@ pub fn convert_levels(
     options: &Options,
 ) -> Result<Converted, String> {
     let detail = options.zoom;
-    // Once for every level: the areas the standard would draw over what the map
-    // draws over them.
-    let cuts = cut_hidden(map, table);
+    // Once for every level: the objects adapted to the standard's symbols.
+    let adapted = adapt(map, table);
     let extent = paper_extent(map);
     let mut result = convert_cut(
         map,
@@ -996,9 +1008,9 @@ pub fn convert_levels(
             ..*options
         },
         extent,
-        &cuts.coords,
+        &adapted,
     )?;
-    result.warnings.extend(cuts.warnings);
+    result.warnings.extend(adapted.warnings.iter().cloned());
     result.levels.push(LevelSummary {
         zoom: detail,
         objects: result.objects,
@@ -1017,7 +1029,7 @@ pub fn convert_levels(
                 ..*options
             },
             extent,
-            &cuts.coords,
+            &adapted,
         )?;
         result.levels.push(LevelSummary {
             zoom,

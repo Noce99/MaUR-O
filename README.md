@@ -734,7 +734,16 @@ Mapper writes for every georeferenced map); one without is skipped with a
 warning. A symbol that is not in the table is stored as the closest one
 (same code, the symbol it is a variant of, or the same name) or, where there
 is none, its objects are dropped; both are warnings, with the number of
-objects. Objects of hidden symbols and drawing aids are left out. A
+objects. Objects of hidden symbols and drawing aids are left out. Where the
+map's symbol is not drawn like the standard's it is stored as, its objects are
+adapted, each with a warning: cut where the two colour orders would hide what
+the map shows (a paved area under a planter the map draws over it, a road the
+map hides under a paved area, which then goes on as the area); reversed, for a
+line whose symbol draws on one side of it (a tunnel entrance's triangles, a
+fence's ticks) where the standard's draws on the other; and filled under, for a
+line whose symbol paints its middle in a colour (a stairway in a paved brown)
+where the standard's leaves it empty, with the standard's plain area of the
+closest colour. All of it is worked out from the symbols themselves. A
 projected reference point far outside its UTM zone is warned about too: the
 map is placed where its geographic reference point says, which is then
 probably not where it is. The nodes are stored on a grid of `--grid-cm`

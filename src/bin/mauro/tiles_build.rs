@@ -40,6 +40,12 @@
 //! grid, so a zoomed-out view reads a little of the archive instead of all of
 //! it. The objects have the same ids at every level.
 //!
+//! Where a map's symbol is not drawn like the standard's it is stored as, its
+//! objects are adapted to it (`maur_o::mot_adapt`): cut where the colour orders
+//! disagree, reversed where the symbols draw on opposite sides of the line, and
+//! filled under where the map's symbol paints a middle the standard's leaves
+//! empty. Each is a warning.
+//!
 //! Every level also has the area each map covers (a rectangle in the map's own
 //! frame round the objects it draws), as an area of its own in the tiles, so the
 //! levels too coarse for any symbol (below zoom 11 for ISOM) still say where
