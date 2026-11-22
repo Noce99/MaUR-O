@@ -24,12 +24,14 @@
 //! the standard (at least partly) above it is cut where the area lies over it.
 //! Only a line with nothing laid out along it: a dashed one, or one with dots or
 //! tags, would have them spaced anew on each piece. It is cut where its middle
-//! goes under the area. Where it meets the area's edge aslant, one side of its cut
-//! end would leave a sliver that neither covers, where the map drew the line: the
-//! line's footprint is added to the area round each cut, within twice its
-//! half-width of it (the area is in a colour hiding the line's, so the line goes
-//! on as the area). Only there: along the rest, the line may run by the area's edge
-//! and its footprint over what lies beside the area.
+//! goes under the area. What the map drew of the pieces taken away does not all
+//! lie under the area: a road running along the area's edge, or along a hole of
+//! it, has half its width out of it, and where it meets the edge aslant one side
+//! of its cut end sticks out. So the footprint of the pieces taken away, as wide
+//! as the map draws the line (its borders too), is added to the area (which is
+//! in a colour hiding the line's, so the line goes on as the area): taken away
+//! alone, it would leave a strip or a notch that nothing covers. Less what the
+//! area was cut by itself, which the map draws above both.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -42,7 +44,7 @@ use geo::{
 
 use crate::geometry::flatten;
 use crate::map::{cap_style, coord_flag, symbol_leaves, Coord, CoordList, Map, ObjectKind, Symbol};
-use crate::mot_symbols::{widest_line, SymbolKind, SymbolTable};
+use crate::mot_symbols::{SymbolKind, SymbolTable};
 
 /// The priority of the topmost colour an area of `symbol`, one of `map`'s, is
 /// filled with (lower is drawn on top); `None` for a symbol with no plain fill.
@@ -71,6 +73,26 @@ pub(crate) fn paint_priority(symbol: &Symbol, map: &Map) -> Option<i32> {
             _ => None,
         })
         .min()
+}
+
+/// Half the width `symbol`, one of `map`'s, draws a line: its widest line with
+/// the borders out to their outer edges.
+pub(crate) fn footprint_half(symbol: &Symbol, map: &Map) -> f64 {
+    let mut leaves = Vec::new();
+    symbol_leaves(symbol, map, &mut leaves);
+    leaves
+        .iter()
+        .filter_map(|leaf| match leaf {
+            Symbol::Line(l) => Some(
+                [&l.border, &l.right_border]
+                    .into_iter()
+                    .filter(|b| b.is_visible())
+                    .map(|b| l.line_width / 2.0 + b.shift + b.width / 2.0)
+                    .fold(l.line_width / 2.0, f64::max),
+            ),
+            _ => None,
+        })
+        .fold(0.0, f64::max)
 }
 
 /// Whether `symbol`, one of `map`'s, draws any line.
@@ -152,15 +174,20 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
         }
     }
     let mut cuts = Cuts::default();
+    // The lines first: what an area grows by where a line it hides is taken
+    // away is part of it from then on, and cuts what the area cuts.
+    let added = cut_lines_under_areas(map, table, &fills, &mut cuts);
+    // What each area was cut by, by index in `map.objects`.
+    let mut clips: BTreeMap<usize, MultiPolygon> = BTreeMap::new();
     if under.is_empty() {
-        cut_lines_under_areas(map, table, &fills, &mut cuts);
+        grow(map, added, &clips, &mut cuts);
         return cuts;
     }
     let cutting: BTreeSet<usize> = under.values().flatten().copied().collect();
 
     // The footprint of every object that may cut, with its box.
     let mut footprints: Vec<(usize, geo::Rect, MultiPolygon)> = Vec::new();
-    for object in &map.objects {
+    for (index, object) in map.objects.iter().enumerate() {
         let (Some(s), ObjectKind::Path(_)) = (object.symbol_index, &object.kind) else {
             continue;
         };
@@ -171,9 +198,15 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
             continue;
         };
         let shape = match kind {
-            SymbolKind::Area => area_shape(&object.coords),
+            SymbolKind::Area => added
+                .get(&index)
+                .into_iter()
+                .flatten()
+                .fold(area_shape(&object.coords), |shape, piece| {
+                    shape.union(piece)
+                }),
             _ => {
-                let half = widest_line(&map.symbols[s], map) / 2.0;
+                let half = footprint_half(&map.symbols[s], map);
                 if half <= 0.0 {
                     continue;
                 }
@@ -232,6 +265,7 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
             continue;
         }
         cuts.coords.insert(index, area_coords(&rest));
+        clips.insert(index, clip);
         let entry = cut_by.entry(a).or_default();
         entry.0 += 1;
         entry.1.extend(hits.iter().map(|(s, _, _)| *s));
@@ -250,19 +284,51 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
             table.standard,
         ));
     }
-    cut_lines_under_areas(map, table, &fills, &mut cuts);
+    grow(map, added, &clips, &mut cuts);
     cuts
+}
+
+/// Adds to each area the pieces of lines taken away under it (by index in
+/// `map.objects`), on what it is after its own cuts and less what it was cut by
+/// (`clips`).
+fn grow(
+    map: &Map,
+    added: BTreeMap<usize, Vec<MultiPolygon>>,
+    clips: &BTreeMap<usize, MultiPolygon>,
+    cuts: &mut Cuts,
+) {
+    for (area, pieces) in added {
+        let base = match cuts.coords.get(&area) {
+            Some(coords) => area_shape(coords),
+            None => area_shape(&map.objects[area].coords),
+        };
+        // One by one: `unary_union` fills by the winding of the first ring it is
+        // given, and a buffer's rings may wind the other way from an area's.
+        let mut shape = pieces
+            .iter()
+            .fold(base.clone(), |shape, piece| shape.union(piece));
+        if let Some(clip) = clips.get(&area) {
+            shape = shape.difference(clip);
+        }
+        // A footprint wholly under the area adds nothing but rounding, and the
+        // area keeps its own coordinates (and curves).
+        if shape.unsigned_area() > base.unsigned_area() * (1.0 + 1e-6) + 1e-4 {
+            cuts.coords.insert(area, area_coords(&shape));
+        }
+    }
 }
 
 /// Cuts the lines which the map hides under an area and the standard would draw
 /// over it, where the area lies over them (see the module's documentation).
-/// `fills` is what [`cut_hidden`] found each symbol to fill.
+/// `fills` is what [`cut_hidden`] found each symbol to fill. Returns what each
+/// area (by index in `map.objects`) grows by: the footprints of the pieces taken
+/// away under it.
 fn cut_lines_under_areas(
     map: &Map,
     table: &SymbolTable,
     fills: &[Option<(Order, bool)>],
     cuts: &mut Cuts,
-) {
+) -> BTreeMap<usize, Vec<MultiPolygon>> {
     // For each line symbol, the area symbols that hide it in the map and not in
     // the standard.
     let mut hidden_by: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
@@ -289,7 +355,7 @@ fn cut_lines_under_areas(
         }
     }
     if hidden_by.is_empty() {
-        return;
+        return BTreeMap::new();
     }
     let hiding: BTreeSet<usize> = hidden_by.values().flatten().copied().collect();
     // Each area that hides a line: its symbol, its index and its shape.
@@ -314,12 +380,16 @@ fn cut_lines_under_areas(
         let (Some(l), ObjectKind::Path(_)) = (object.symbol_index, &object.kind) else {
             continue;
         };
-        let Some(by) = hidden_by.get(&l) else { continue };
-        // As wide as the standard draws it, which is what the tiles show.
+        let Some(by) = hidden_by.get(&l) else {
+            continue;
+        };
+        // As wide as the map draws it, or the standard where that is wider: the
+        // pieces left are drawn as the standard draws them.
         let half = table
             .closest(&map.symbols[l], map)
             .and_then(|(id, _)| table.get(id))
             .map_or(0.0, |e| e.width)
+            .max(2.0 * footprint_half(&map.symbols[l], map))
             / 2.0;
         let lines = MultiLineString::new(
             flatten(&object.coords)
@@ -335,7 +405,9 @@ fn cut_lines_under_areas(
                 })
                 .collect(),
         );
-        let Some(rect) = lines.bounding_rect() else { continue };
+        let Some(rect) = lines.bounding_rect() else {
+            continue;
+        };
         let hits: Vec<&(usize, usize, geo::Rect, MultiPolygon)> = areas
             .iter()
             .filter(|(a, _, r, _)| by.contains(a) && overlap(r, &rect))
@@ -358,25 +430,13 @@ fn cut_lines_under_areas(
         cuts.coords.insert(index, line_coords(&rest));
         if half > 0.0 {
             let taken = joined(cover.clip(&lines, false));
-            // The cuts: the ends of the pieces taken away which are not the line's.
-            let ends: Vec<GeoCoord> = lines
-                .0
-                .iter()
-                .flat_map(|l| [l.0[0], l.0[l.0.len() - 1]])
-                .collect();
-            let near = |a: &GeoCoord, b: &GeoCoord| (a.x - b.x).hypot(a.y - b.y) <= 1e-9;
-            let cuts_at: Vec<MultiPolygon> = taken
-                .0
-                .iter()
-                .flat_map(|l| [l.0[0], l.0[l.0.len() - 1]])
-                .filter(|c| !ends.iter().any(|e| near(c, e)))
-                .map(|c| geo::Point::from(c).buffer(2.0 * half))
-                .collect();
             let style = BufferStyle::new(half).line_cap(LineCap::Butt);
-            let pieces: Vec<MultiPolygon> =
-                taken.0.iter().map(|l| l.buffer_with_style(style.clone())).collect();
-            let footprint =
-                unary_union(pieces.iter()).intersection(&unary_union(cuts_at.iter()));
+            let pieces: Vec<MultiPolygon> = taken
+                .0
+                .iter()
+                .map(|l| l.buffer_with_style(style.clone()))
+                .collect();
+            let footprint = unary_union(pieces.iter());
             // Into the area it is most under; one with its own outline would
             // outline it, and is left as it is.
             let into = hits
@@ -394,19 +454,6 @@ fn cut_lines_under_areas(
         entry.0 += 1;
         entry.1.extend(hits.iter().map(|(a, _, _, _)| *a));
     }
-    for (area, pieces) in added {
-        // On what the area is after its own cuts, if any.
-        let base = match cuts.coords.get(&area) {
-            Some(coords) => area_shape(coords),
-            None => area_shape(&map.objects[area].coords),
-        };
-        // One by one: `unary_union` fills by the winding of the first ring it is
-        // given, and a buffer's rings may wind the other way from an area's.
-        let shape = pieces.iter().fold(base.clone(), |shape, piece| shape.union(piece));
-        if shape.unsigned_area() > base.unsigned_area() * (1.0 + 1e-9) + 1e-9 {
-            cuts.coords.insert(area, area_coords(&shape));
-        }
-    }
     for (l, (count, by)) in cut_by {
         let by: Vec<String> = by
             .iter()
@@ -421,6 +468,7 @@ fn cut_lines_under_areas(
             table.standard,
         ));
     }
+    added
 }
 
 /// The pieces of a clipped line joined again where one ends where the next one
@@ -486,7 +534,7 @@ fn overlap(a: &geo::Rect, b: &geo::Rect) -> bool {
 
 /// An area's coordinates as a valid shape: its parts, curves flattened, filled
 /// even-odd as Mapper fills them.
-fn area_shape(coords: &CoordList) -> MultiPolygon {
+pub(crate) fn area_shape(coords: &CoordList) -> MultiPolygon {
     let rings: Vec<Polygon> = flatten(coords)
         .iter()
         .filter(|part| part.points.len() >= 3)
@@ -507,7 +555,7 @@ fn area_shape(coords: &CoordList) -> MultiPolygon {
 
 /// A shape as an area's coordinates: each ring a closed part, the parts after the
 /// first holes (filled even-odd, which a shape's rings are).
-fn area_coords(shape: &MultiPolygon) -> CoordList {
+pub(crate) fn area_coords(shape: &MultiPolygon) -> CoordList {
     let rings: Vec<&LineString> = shape
         .0
         .iter()
@@ -536,14 +584,18 @@ mod tests {
     use super::*;
     use crate::xml_reader::read_xml_map_str;
 
-    /// A map with two colours, `top` drawn above `bottom`, and these symbols
-    /// (code, kind and colour: `top` or `bottom`) and objects (symbol index and
+    /// A map with three colours, `top` drawn above `mid` above `bottom`, and
+    /// these symbols (code, kind and colour) and objects (symbol index and
     /// coordinates in mm, a closed ring for an area).
     fn map(symbols: &[(&str, &str, &str)], objects: &[(usize, &[(f64, f64)])]) -> Map {
-        let colors = r#"<colors count="2"><color priority="0" name="top" c="0.8" m="0" y="1" k="0" opacity="1"/><color priority="1" name="bottom" c="0" m="0.17" y="0.3" k="0.05" opacity="1"/></colors>"#;
+        let colors = r#"<colors count="3"><color priority="0" name="top" c="0.8" m="0" y="1" k="0" opacity="1"/><color priority="1" name="mid" c="0" m="0.5" y="0.5" k="0" opacity="1"/><color priority="2" name="bottom" c="0" m="0.17" y="0.3" k="0.05" opacity="1"/></colors>"#;
         let mut xml = format!("<map>{colors}<symbols count=\"{}\">", symbols.len());
         for (id, (code, kind, color)) in symbols.iter().enumerate() {
-            let c = if *color == "top" { 0 } else { 1 };
+            let c = match *color {
+                "top" => 0,
+                "mid" => 1,
+                _ => 2,
+            };
             xml += &match *kind {
                 "area" => format!(
                     r#"<symbol type="4" id="{id}" code="{code}" name="s{id}"><area_symbol inner_color="{c}" min_area="0" patterns="0"/></symbol>"#
@@ -708,12 +760,19 @@ mod tests {
         let cuts = cut_hidden(&m, &SymbolTable::issprom());
         let cut = &cuts.coords[&1];
         // 30 long, 10 of it under the area: two pieces, 10 each side.
-        assert!((line_length(cut) - 20.0).abs() < 1e-6, "{}", line_length(cut));
+        assert!(
+            (line_length(cut) - 20.0).abs() < 1e-6,
+            "{}",
+            line_length(cut)
+        );
         assert_eq!(flatten(cut).len(), 2);
         // Across the area square to its edges: the piece taken away was all under
         // it, which is left as it is.
         assert_eq!(cuts.coords.len(), 1);
-        assert!(cuts.warnings.iter().any(|w| w.contains("lines of symbol 501.7")));
+        assert!(cuts
+            .warnings
+            .iter()
+            .any(|w| w.contains("lines of symbol 501.7")));
     }
 
     #[test]
@@ -734,13 +793,60 @@ mod tests {
     }
 
     #[test]
+    fn a_road_along_the_edge_of_the_area_hiding_it_goes_on_as_the_area() {
+        // The road's middle runs just inside the area's top edge: it is taken
+        // away, and the half of it out of the area, which the map drew, is added
+        // to the area rather than left uncovered.
+        let road = [(-10.0, 0.1), (20.0, 0.1)];
+        let m = map(
+            &[("501.5", "area", "top"), ("501.7", "line", "bottom")],
+            &[(0, &square(0.0, 0.0, 10.0)), (1, &road)],
+        );
+        let cuts = cut_hidden(&m, &SymbolTable::issprom());
+        assert!(cuts.coords.contains_key(&1));
+        // The map's line is 0.4 wide: 0.1 of its 0.2 above the middle is out of
+        // the area, along the 10 under it (the standard's 501.7 is wider still).
+        let grown = area_of(&cuts.coords[&0]);
+        assert!(grown > 101.0 - 1e-6, "{grown}");
+    }
+
+    #[test]
+    fn what_a_road_goes_on_as_cuts_what_the_area_cuts() {
+        // A white forest under all; the paved area over its left half, and a road
+        // between them, hidden by the paved area along its edge. The forest is cut
+        // where the paved area lies (ISSprOM draws it above), and where the road
+        // lay, which now goes on as the paved area: else the forest would cover
+        // the half of the road out of the paved area.
+        let forest = square(0.0, 0.0, 10.0);
+        let paved = [(0.0, 0.0), (5.0, 0.0), (5.0, 10.0), (0.0, 10.0), (0.0, 0.0)];
+        let road = [(4.9, -5.0), (4.9, 15.0)];
+        let m = map(
+            &[
+                ("405", "area", "bottom"),
+                ("501.5", "area", "top"),
+                ("501.7", "line", "mid"),
+            ],
+            &[(0, &forest), (1, &paved), (2, &road)],
+        );
+        let cuts = cut_hidden(&m, &SymbolTable::issprom());
+        assert!(cuts.coords.contains_key(&2), "the road is cut");
+        let left = area_of(&cuts.coords[&0]);
+        assert!(left < 49.0, "{left}");
+        // And what the forest lost, the paved area has.
+        let paved = area_of(&cuts.coords[&1]);
+        assert!((paved + left - 100.0).abs() < 1e-3, "{paved} + {left}");
+    }
+
+    #[test]
     fn a_road_the_map_draws_over_a_paved_area_is_left_whole() {
         let road = [(-10.0, 5.0), (20.0, 5.0)];
         let m = map(
             &[("501.5", "area", "bottom"), ("501.7", "line", "top")],
             &[(0, &square(0.0, 0.0, 10.0)), (1, &road)],
         );
-        assert!(!cut_hidden(&m, &SymbolTable::issprom()).coords.contains_key(&1));
+        assert!(!cut_hidden(&m, &SymbolTable::issprom())
+            .coords
+            .contains_key(&1));
     }
 
     #[test]
@@ -762,7 +868,11 @@ mod tests {
         // The hole, as a second closed part of the same area.
         let mut coords = m.objects[0].coords.clone();
         let last = coords.len() - 1;
-        coords[last] = Coord::new(coords[last].x, coords[last].y, coord_flag::CLOSE_POINT | coord_flag::HOLE_POINT);
+        coords[last] = Coord::new(
+            coords[last].x,
+            coords[last].y,
+            coord_flag::CLOSE_POINT | coord_flag::HOLE_POINT,
+        );
         for (x, y) in square(14.0, 14.0, 4.0) {
             coords.push(Coord::new(x, y, 0));
         }
