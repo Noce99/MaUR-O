@@ -214,7 +214,8 @@ of them a map is drawn to), the
 closest-symbol rule and each symbol's zoom rule (when it appears, how small it
 may be, how much its line may be thinned); `mot_adapt.rs` adapts a map's objects to the
 standard's symbols before they are stored (with `mot_cut.rs`: areas and lines cut where the
-colour orders disagree; lines reversed where the symbols draw on opposite sides; an area
+colour orders disagree; lines reversed where the symbols draw on opposite sides, and a line drawing nothing
+along its middle moved aside where the standard's symbols stand elsewhere; an area
 of the closest plain colour under a line whose middle the standard's symbol leaves empty),
 all worked out from the symbols; `mot_convert.rs` places a `Map` on the earth and stores each
 object in the tiles it touches, cut to each tile's box plus a buffer, and the

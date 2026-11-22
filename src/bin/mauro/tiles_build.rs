@@ -42,7 +42,8 @@
 //!
 //! Where a map's symbol is not drawn like the standard's it is stored as, its
 //! objects are adapted to it (`maur_o::mot_adapt`): cut where the colour orders
-//! disagree, reversed where the symbols draw on opposite sides of the line, and
+//! disagree, reversed where the symbols draw on opposite sides of the line (and
+//! moved aside where they stand at another distance from a line not drawn), and
 //! filled under where the map's symbol paints a middle the standard's leaves
 //! empty. Each is a warning.
 //!

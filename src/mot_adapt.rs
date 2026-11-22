@@ -14,6 +14,12 @@
 //!   line is reversed: the standard then draws it on the side the map did.
 //!   Which side a symbol draws on is worked out from the symbol itself
 //!   ([`line_side`]), so no table has to say it.
+//! - **Moved aside**: a line which draws nothing along its middle, only symbols
+//!   beside it (a tunnel entrance's triangles), where the standard's symbols
+//!   stand further from the line or nearer to it than the map's (the club's
+//!   triangles straddle the line, ISSprOM's stand on it): the line is moved
+//!   sideways by the difference, so that the standard's symbols stand where the
+//!   map's did. A line which draws its middle stays where it was drawn.
 //! - **Filled under**: a line symbol of the map which paints its middle in a
 //!   colour (a stairway in a paved area's brown, with its steps on it), stored
 //!   as a standard symbol which leaves the middle empty (ISSprOM's stairways,
@@ -81,31 +87,51 @@ fn line_target(symbol: &Symbol, map: &Map, table: &SymbolTable) -> Option<u16> {
 /// standard's.
 fn turn_round(map: &Map, table: &SymbolTable, adapted: &mut Adapted) {
     let mut turned = vec![0usize; map.symbols.len()];
-    let reverse: Vec<bool> = map
+    // For each symbol: whether its lines are reversed, and how far they are
+    // moved to the right of their (new) direction, in mm.
+    let moves: Vec<(bool, f64)> = map
         .symbols
         .iter()
         .map(|symbol| {
-            line_target(symbol, map, table)
-                .and_then(|id| table.get(id))
-                .is_some_and(|entry| {
-                    let own = line_side(symbol, map);
-                    own.abs() >= SIDED && entry.side.abs() >= SIDED && own * entry.side < 0.0
-                })
+            let Some(entry) = line_target(symbol, map, table).and_then(|id| table.get(id)) else {
+                return (false, 0.0);
+            };
+            let own = line_side(symbol, map);
+            if own.abs() < SIDED || entry.side.abs() < SIDED {
+                return (false, 0.0);
+            }
+            let reverse = own * entry.side < 0.0;
+            // Where the map's symbols stand, seen along the line as stored.
+            let own = if reverse { -own } else { own };
+            let aside = if entry.body || body(symbol, map).is_some() {
+                0.0
+            } else {
+                own - entry.side
+            };
+            (reverse, if aside.abs() >= SIDED { aside } else { 0.0 })
         })
         .collect();
     for (index, object) in map.objects.iter().enumerate() {
         let (Some(s), ObjectKind::Path(_)) = (object.symbol_index, &object.kind) else {
             continue;
         };
-        if !reverse[s] {
+        let (reverse, aside) = moves[s];
+        if !reverse && aside == 0.0 {
             continue;
         }
         let coords = adapted.coords.get(&index).unwrap_or(&object.coords);
         if coords.len() < 2 {
             continue;
         }
-        let back = reversed(coords);
-        adapted.coords.insert(index, back);
+        let mut moved = if reverse {
+            reversed(coords)
+        } else {
+            coords.clone()
+        };
+        if aside != 0.0 {
+            moved = moved_aside(&moved, aside);
+        }
+        adapted.coords.insert(index, moved);
         turned[s] += 1;
     }
     for (s, n) in turned.into_iter().enumerate() {
@@ -116,15 +142,95 @@ fn turn_round(map: &Map, table: &SymbolTable, adapted: &mut Adapted) {
         let target = line_target(symbol, map, table)
             .and_then(|id| table.get(id))
             .expect("a symbol turned round has a target");
+        let (reverse, aside) = moves[s];
+        let what = match (reverse, aside != 0.0) {
+            (true, true) => format!(
+                "reversed and moved {:.2} mm aside: {} \"{}\" draws on the other side of the \
+                 line, {:.2} mm from where the map's symbol does",
+                aside.abs(),
+                target.code,
+                target.name,
+                aside.abs()
+            ),
+            (true, false) => format!(
+                "reversed: {} \"{}\" draws on the other side of the line",
+                target.code, target.name
+            ),
+            _ => format!(
+                "moved {:.2} mm aside: {} \"{}\" draws {:.2} mm from where the map's symbol does",
+                aside.abs(),
+                target.code,
+                target.name,
+                aside.abs()
+            ),
+        };
         adapted.warnings.push(format!(
-            "lines of symbol {} \"{}\" reversed: {} \"{}\" draws on the other side of the line: \
-             {n} objects",
+            "lines of symbol {} \"{}\" {what}: {n} objects",
             symbol.code(),
             symbol.name(),
-            target.code,
-            target.name,
         ));
     }
+}
+
+/// `coords` moved `by` mm to the right of the line's direction (to its left
+/// where negative): each point, curves' control points too, along the normal
+/// there, as far again at a corner as keeps the sides `by` apart (up to twice).
+pub fn moved_aside(coords: &CoordList, by: f64) -> CoordList {
+    let mut out = coords.clone();
+    let mut begin = 0;
+    for i in 0..coords.len() {
+        if !(coords[i].is_hole_point() || i + 1 == coords.len()) {
+            continue;
+        }
+        let part = &coords[begin..=i];
+        let n = part.len();
+        let closed = n > 2 && part[n - 1].is_close_point();
+        // The unit direction from `a` to `b`, if they are apart.
+        let unit = |a: &Coord, b: &Coord| {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let len = dx.hypot(dy);
+            (len > 1e-9).then(|| (dx / len, dy / len))
+        };
+        for j in 0..n {
+            // The nearest neighbour apart from it on either side.
+            let before = (0..j)
+                .rev()
+                .find_map(|k| unit(&part[k], &part[j]))
+                .or_else(|| {
+                    closed
+                        .then(|| (0..n - 1).rev().find_map(|k| unit(&part[k], &part[n - 1])))
+                        .flatten()
+                });
+            let after = (j + 1..n)
+                .find_map(|k| unit(&part[j], &part[k]))
+                .or_else(|| {
+                    closed
+                        .then(|| (1..n).find_map(|k| unit(&part[0], &part[k])))
+                        .flatten()
+                });
+            let (tx, ty, stretch) = match (before, after) {
+                (Some(a), Some(b)) => {
+                    let (sx, sy) = (a.0 + b.0, a.1 + b.1);
+                    let len = sx.hypot(sy);
+                    if len < 1e-9 {
+                        (b.0, b.1, 1.0)
+                    } else {
+                        // cos of half the turn: the sides of a corner are `by`
+                        // apart when its point moves by / cos.
+                        let cos = (len / 2.0).max(0.5);
+                        (sx / len, sy / len, 1.0 / cos)
+                    }
+                }
+                (Some(t), None) | (None, Some(t)) => (t.0, t.1, 1.0),
+                (None, None) => continue,
+            };
+            // Paper `y` grows down: the right of (tx, ty) is (-ty, tx).
+            out[begin + j].x += -ty * by * stretch;
+            out[begin + j].y += tx * by * stretch;
+        }
+        begin = i + 1;
+    }
+    out
 }
 
 /// Puts an area under the lines whose symbol paints its middle where the
@@ -415,13 +521,54 @@ mod tests {
         );
         let adapted = adapt(&m, &SymbolTable::issprom());
         let back = &adapted.coords[&0];
+        // The other way round (and moved a little aside, see below).
         let xs: Vec<f64> = back.iter().map(|c| c.x).collect();
-        assert_eq!(xs, vec![10.0, 5.0, 0.0]);
+        assert!(
+            (xs[0] - 10.0).abs() < 0.3 && (xs[1] - 5.0).abs() < 0.3 && (xs[2] - 0.0).abs() < 0.3,
+            "{xs:?}"
+        );
         assert!(
             adapted.warnings.iter().any(|w| w.contains("reversed")),
             "{:?}",
             adapted.warnings
         );
+    }
+
+    #[test]
+    fn triangles_straddling_the_line_are_moved_to_stand_where_they_were() {
+        // The map's triangles reach from 0.2 right of the line to 0.4 left of
+        // it (their middle 0.1 left), ISSprOM's from the line to 0.606 right of
+        // it (0.303 right). Reversed, the map's middle is 0.1 right of the new
+        // direction: the line moves 0.1 - 0.303 = -0.203 to its right, which is
+        // 0.203 to its left.
+        let m = map(
+            &[&triangles("512.1", "350 200;0 -400;-350 200;")],
+            &[(0, &[(0.0, 0.0), (10.0, 0.0)])],
+        );
+        let adapted = adapt(&m, &SymbolTable::issprom());
+        let moved = &adapted.coords[&0];
+        assert_eq!(moved[0].x, 10.0);
+        // Going towards -x, the left is +y.
+        assert!((moved[0].y - 0.203).abs() < 1e-3, "{}", moved[0].y);
+        assert!((moved[1].y - 0.203).abs() < 1e-3, "{}", moved[1].y);
+        assert!(
+            adapted.warnings.iter().any(|w| w.contains("moved 0.20 mm")),
+            "{:?}",
+            adapted.warnings
+        );
+    }
+
+    #[test]
+    fn a_line_moved_aside_keeps_its_corners_apart() {
+        let c = |x: f64, y: f64| Coord::new(x, y, 0);
+        // Right along x, then down along y: the right is +y, then -x.
+        let moved = moved_aside(&vec![c(0.0, 0.0), c(10.0, 0.0), c(10.0, 10.0)], 1.0);
+        let got: Vec<(f64, f64)> = moved.iter().map(|c| (c.x, c.y)).collect();
+        let near =
+            |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9;
+        assert!(near(got[0], (0.0, 1.0)), "{got:?}");
+        assert!(near(got[1], (9.0, 1.0)), "{got:?}");
+        assert!(near(got[2], (9.0, 10.0)), "{got:?}");
     }
 
     #[test]
