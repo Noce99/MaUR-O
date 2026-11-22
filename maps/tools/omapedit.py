@@ -55,6 +55,23 @@ class Omap:
     def id_of(self, code):
         return re.match(r'<symbol type="\d+" id="(\d+)"', self.get(code)).group(1)
 
+    def renumber(self):
+        """Makes each top-level symbol's id its position, as Mapper writes them,
+        with the parts of the combined symbols following: Mapper reads a part's
+        `symbol` as a position in the list, so a symbol inserted with a new id
+        anywhere but at the end would shift the parts onto other symbols (a
+        combined symbol made a part of itself crashes Mapper)."""
+        tops = self._top_symbols()
+        new = {}
+        for k, (s, e, _) in enumerate(tops):
+            old = re.match(r'<symbol type="\d+" id="(\d+)"', self.t[s:e]).group(1)
+            new[old] = str(k)
+        a = self.t.index('<symbols '); b = self.t.index('</symbols>')
+        body = self.t[a:b]
+        body = re.sub(r'(\n<symbol type="\d+" id=")(\d+)"', lambda m: m.group(1) + new[m.group(2)] + '"', body)
+        body = re.sub(r'<part symbol="(\d+)"', lambda m: f'<part symbol="{new[m.group(1)]}"', body)
+        self.t = self.t[:a] + body + self.t[b:]
+
     def fix_counts(self):
         n = len(self._top_symbols())
         self.t = re.sub(r'<symbols count="\d+"', f'<symbols count="{n}"', self.t)
