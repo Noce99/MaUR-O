@@ -23,9 +23,15 @@
 //! which nothing labels); `areas`, which stops after the ground — the cells
 //! are filled and nothing is drawn over them, which leaves a map of area
 //! fills alone, the one map whose every pixel has an answer, so the one
-//! which is labelled; or `areas-and-lines`, the ground and the lines along
-//! the cell sides, labelled as two layers. `--just-opaque-areas` (`-j`) and
-//! `--line-labels` (`-L`) are the older names of the last two.
+//! which is labelled; `areas-and-lines`, the ground and the lines along
+//! the cell sides, labelled as two layers; or `areas-lines-points`, those and
+//! the point symbols, labelled as a third layer — a heatmap per point
+//! symbol, peaking where each point is (see [`maur_o::point_truth`]). A point
+//! symbol is never put on a line or on another point, which would leave a
+//! pixel with two answers, and half of them are put just beside a line,
+//! where a surveyor puts a great many. `--just-opaque-areas` (`-j`) and
+//! `--line-labels` (`-L`) are the older names of `areas` and
+//! `areas-and-lines`.
 //!
 //! A dataset is three folders and a file naming what the labels mean:
 //!
@@ -77,6 +83,9 @@ pub enum Content {
     /// layers; no see-through areas or point symbols, which nothing would
     /// label.
     AreasAndLines,
+    /// The ground, the lines and the point symbols, labelled as three
+    /// layers; no see-through areas, which nothing would label.
+    AreasLinesPoints,
 }
 
 #[derive(Parser)]
@@ -139,7 +148,10 @@ pub struct Args {
     /// the ground, which keeps its label under them -- yes-or-no per line
     /// symbol, rebuilt from maps/ where wanted; no see-through areas or point
     /// symbols, whatever --transparent-areas and --point-symbols say, since
-    /// they would go unlabelled.
+    /// they would go unlabelled. areas-lines-points: those and the point
+    /// symbols, labelled as a third layer, a heatmap per point symbol
+    /// peaking where each point is, rebuilt from maps/ like the lines; no
+    /// see-through areas, whatever --transparent-areas says.
     #[arg(long, value_enum, value_name = "WHAT")]
     content: Content,
 
@@ -269,8 +281,10 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
     } else {
         args.content
     };
-    // Nothing would label a see-through area or a point over the lines.
+    // Nothing would label a see-through area, nor a point but where the
+    // points are labelled.
     let overlays = content == Content::All;
+    let points = overlays || content == Content::AreasLinesPoints;
     let settings = Settings {
         layout_size: args.layout_size,
         cell_size: args.background_cell_size,
@@ -283,9 +297,10 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         } else {
             0.0
         },
-        point_symbols: if overlays { args.point_symbols } else { 0.0 },
+        point_symbols: if points { args.point_symbols } else { 0.0 },
         just_opaque_areas: content == Content::Areas,
-        line_labels: content == Content::AreasAndLines,
+        line_labels: matches!(content, Content::AreasAndLines | Content::AreasLinesPoints),
+        point_labels: content == Content::AreasLinesPoints,
         images: !args.no_images,
         ground_truth: !args.no_gt,
         resolution: args.resolution,
@@ -354,6 +369,13 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             ""
         },
     );
+    if summary.drawn.crowded > 0 {
+        println!(
+            "  {} more point symbols found no room in their cell, clear of the lines and of the \
+             other points, and were left out",
+            summary.drawn.crowded,
+        );
+    }
 
     // The three folders, and what a training set made of them holds.
     let count = |files: fn(&Generated) -> bool| summary.written.iter().filter(|g| files(g)).count();
@@ -399,8 +421,8 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
                 "--no-gt was asked for".to_string()
             } else {
                 "a pixel's label is the one piece of ground cover under it, so only the images \
-                 of --content areas maps are labelled, and of --content areas-and-lines maps, \
-                 whose lines are a layer of their own"
+                 of --content areas maps are labelled, and of --content areas-and-lines and \
+                 areas-lines-points maps, whose lines and points are layers of their own"
                     .to_string()
             }
         );

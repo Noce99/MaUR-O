@@ -35,7 +35,7 @@ use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Stroke, Transform};
 
 use crate::geometry::to_painter_path;
 use crate::ground_truth::page_transform_for;
-use crate::map::{CoordList, ObjectKind, Symbol};
+use crate::map::{CoordList, Map, ObjectKind, Symbol};
 use crate::renderer::to_skia_path;
 use crate::symbol_kinds::Catalogue;
 use crate::xml_reader::read_xml_map;
@@ -147,7 +147,18 @@ impl LineTruth {
     ) -> Result<LineTruth, String> {
         let (mut map, _) = read_xml_map(path)?;
         map.resolve_references();
-        let catalogue = Catalogue::of(&map);
+        LineTruth::of_map(&map, width, height, resolution)
+    }
+
+    /// [`LineTruth::from_map`] of a map already read, with its references
+    /// resolved — for a caller which wants more than the lines out of it.
+    pub fn of_map(
+        map: &Map,
+        width: u32,
+        height: u32,
+        resolution: f64,
+    ) -> Result<LineTruth, String> {
+        let catalogue = Catalogue::of(map);
 
         let strokes: Vec<LineStroke> = map
             .objects

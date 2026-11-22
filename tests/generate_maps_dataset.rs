@@ -307,6 +307,34 @@ fn areas_and_lines_leave_out_the_overlays_nothing_would_label() {
         ));
 }
 
+/// `--content areas-lines-points` draws the lines and the point symbols, and
+/// no see-through area whatever `--transparent-areas` says; its
+/// `classes.json` names the point symbols as a layer of their own.
+#[test]
+fn areas_lines_and_points_label_the_points_and_leave_out_the_transparent_areas() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("dataset");
+    generate()
+        .arg(SYMBOL_SET)
+        .arg(&folder)
+        .args(["--maps=2", "--layout-size=2", "--resolution=0.5"])
+        .args(["--min-resolution=0.5", "--max-resolution=0.5"])
+        .args(["--content", "areas-lines-points"])
+        .args(["--transparent-areas=1", "--point-symbols=1"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("0 transparent areas"));
+    let classes = std::fs::read_to_string(folder.join("classes.json")).unwrap();
+    assert!(classes.contains("\"points\": 1,"), "{classes}");
+    assert!(classes.contains("\"point_symbols\""), "{classes}");
+    let maps = std::fs::read_to_string(map_at(&folder, 1)).unwrap()
+        + &std::fs::read_to_string(map_at(&folder, 2)).unwrap();
+    assert!(
+        maps.contains("<object type=\"0\""),
+        "no point object was drawn"
+    );
+}
+
 /// Nothing is drawn where it would not be seen. The overlays of this set
 /// draw in a colour above one ground and below the other, so a cell filled
 /// with the second is left bare however much is asked for.

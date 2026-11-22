@@ -429,7 +429,7 @@ fn bounds(polygon: &[Point]) -> (f64, f64, f64, f64) {
 
 /// Whether the point is inside the polygon, by the crossing rule: a ray from
 /// the point crosses the outline an odd number of times.
-fn is_inside(polygon: &[Point], point: Point) -> bool {
+pub(crate) fn is_inside(polygon: &[Point], point: Point) -> bool {
     let mut inside = false;
     for at in 0..polygon.len() {
         let (from, to) = (polygon[at], polygon[(at + 1) % polygon.len()]);

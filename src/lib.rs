@@ -127,7 +127,10 @@
 //! A generated map is also the one map whose answer is known, which makes a
 //! folder of them a training set: [`ground_truth`] writes down what each
 //! pixel of a generated map's image is, as the tensor a model is scored
-//! against, out of the very decisions the map was drawn from.
+//! against, out of the very decisions the map was drawn from;
+//! [`line_truth`] and [`point_truth`] are the layers over it — the lines as a
+//! yes-or-no per line symbol, the point symbols as a heatmap per symbol
+//! peaking where each point is — rebuilt from the map file itself.
 //!
 //! # Reading an answer back
 //!
@@ -190,6 +193,7 @@ pub mod osm_download;
 pub mod osm_orienteering;
 pub mod osm_style;
 pub mod path_builder;
+pub mod point_truth;
 pub mod progress;
 pub mod qbezier;
 pub mod random;

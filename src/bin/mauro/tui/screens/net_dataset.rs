@@ -30,6 +30,7 @@ const RESOLUTION: usize = 16;
 const ALL: &str = "all";
 const AREAS: &str = "areas";
 const AREAS_AND_LINES: &str = "areas-and-lines";
+const AREAS_LINES_POINTS: &str = "areas-lines-points";
 
 pub struct NetDataset {
     form: Form,
@@ -51,7 +52,11 @@ impl NetDataset {
                 Field::text("Cell size")
                     .arg("background_cell_size")
                     .unit("m"),
-                Field::choice("Content", &[ALL, AREAS, AREAS_AND_LINES]).arg("content"),
+                Field::choice(
+                    "Content",
+                    &[ALL, AREAS, AREAS_AND_LINES, AREAS_LINES_POINTS],
+                )
+                .arg("content"),
                 Field::text("Empty sides").arg("empty_sides"),
                 Field::text("Transparent").arg("transparent_areas"),
                 Field::text("Point symbols").arg("point_symbols"),
@@ -122,13 +127,14 @@ impl NetDataset {
 
     /// Shows what the content picked draws, and hides what it does not: the
     /// sides left empty are for lines, which the ground alone has none of,
-    /// and the see-through areas and the point symbols are drawn only by
-    /// `all`. A range upside down is drawn red.
+    /// the see-through areas are drawn only by `all`, and the point symbols
+    /// by `all` and `areas-lines-points`. A range upside down is drawn red.
     fn update(&mut self) {
         let content = self.content().to_string();
         self.form.show(EMPTY_SIDES, content != AREAS);
         self.form.show(TRANSPARENT, content == ALL);
-        self.form.show(POINTS, content == ALL);
+        self.form
+            .show(POINTS, content == ALL || content == AREAS_LINES_POINTS);
         let problem = self.range().err();
         self.form.set_problem(MIN_RESOLUTION, problem.clone());
         self.form.set_problem(MAX_RESOLUTION, problem);
@@ -283,6 +289,23 @@ mod tests {
             ["--content", "areas-and-lines", "--empty-sides", "0.7"]
         );
         assert!(!screen.form.shown(TRANSPARENT) && !screen.form.shown(POINTS));
+    }
+
+    #[test]
+    fn areas_lines_and_points_has_the_sides_and_the_points_and_no_transparent_areas() {
+        let mut screen = NetDataset::new();
+        type_into(&mut screen.form, SYMBOL_SET, "a.omap");
+        for _ in 0..3 {
+            next_content(&mut screen);
+        }
+        assert_eq!(screen.form.choice_value(CONTENT), AREAS_LINES_POINTS);
+        type_into(&mut screen.form, POINTS, "0.8");
+        assert_eq!(
+            command(&screen).unwrap()[3..],
+            ["--content", "areas-lines-points", "--point-symbols", "0.8"]
+        );
+        assert!(screen.form.shown(EMPTY_SIDES) && screen.form.shown(POINTS));
+        assert!(!screen.form.shown(TRANSPARENT));
     }
 
     #[test]

@@ -124,12 +124,14 @@ use std::collections::HashMap;
 use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
 
-use crate::geometry::Rect;
+use crate::geometry::{flatten, Rect};
 use crate::ground_truth::{Ground, GroundTruth};
-use crate::layout::Layout;
-use crate::map::{CoordList, Object, ObjectKind, PathObject};
+use crate::layout::{is_inside, Layout};
+use crate::map::{Coord, CoordList, Map, Object, ObjectKind, PathObject, Point};
+use crate::path_builder::coord_at;
 use crate::random::Random;
 use crate::render::{render_map_over, save_pixmap, Extent, DEFAULT_FRAME, DEFAULT_RESOLUTION};
+use crate::renderer::Renderer;
 use crate::symbol_kinds::{Catalogue, Entry, Overlays};
 use crate::xml_reader;
 use crate::xml_writer::MapFile;
@@ -223,6 +225,15 @@ pub struct Settings {
     /// the labels of the lines are rebuilt from `maps/` where they are
     /// wanted rather than kept in a folder of their own.
     pub line_labels: bool,
+    /// Whether the point symbols are labelled too, as a third layer: see
+    /// [`crate::point_truth`].
+    ///
+    /// Like the lines' layer, it is rebuilt from `maps/` rather than written
+    /// down, and it needs [`Settings::line_labels`] on — the lines are drawn
+    /// whether or not they are labelled — and [`Settings::transparent_areas`]
+    /// at nought, which nothing labels yet. With it on, `classes.json` also
+    /// names the point symbols.
+    pub point_labels: bool,
     /// Whether to draw each map to an image, and to label that image.
     ///
     /// Drawing is most of the work of generating a dataset — a default map is
@@ -281,6 +292,7 @@ impl Default for Settings {
             point_symbols: DEFAULT_POINT_SYMBOLS,
             just_opaque_areas: false,
             line_labels: false,
+            point_labels: false,
             images: true,
             ground_truth: true,
             resolution: DEFAULT_RESOLUTION,
@@ -379,6 +391,9 @@ pub struct Drawn {
     pub transparent_areas: usize,
     /// The point symbols dropped into a cell.
     pub points: usize,
+    /// The point symbols a cell was dealt and had no room for: every place
+    /// tried was on a line or on another point — see [`LINE_GAP`].
+    pub crowded: usize,
 }
 
 /// The files one generated map came to.
@@ -487,7 +502,24 @@ pub fn create_dataset(
         }
     }
 
+    if settings.point_labels && !settings.just_opaque_areas {
+        if !settings.line_labels {
+            return Err(
+                "point labels need the line labels too: the lines are drawn either way, and \
+                 would be left unlabelled"
+                    .to_string(),
+            );
+        }
+        if settings.transparent_areas > 0.0 {
+            return Err(
+                "point labels need the transparent areas at nought: they would be drawn over \
+                 the ground and left unlabelled"
+                    .to_string(),
+            );
+        }
+    }
     if settings.line_labels
+        && !settings.point_labels
         && !settings.just_opaque_areas
         && (settings.transparent_areas > 0.0 || settings.point_symbols > 0.0)
     {
@@ -518,7 +550,8 @@ pub fn create_dataset(
     // goes out regardless of ground_truth: it is what lets training compute
     // a map's labels from maps/ itself, the one thing a folder without gt/
     // still needs from the dataset.
-    let answerable = settings.images && (settings.just_opaque_areas || settings.line_labels);
+    let answerable = settings.images
+        && (settings.just_opaque_areas || settings.line_labels || settings.point_labels);
     let labelled = answerable && settings.ground_truth;
 
     let (maps_folder, images_folder, gt_folder) = (
@@ -553,6 +586,16 @@ pub fn create_dataset(
         // Map coordinates are in mm on the paper; a layout is in meters on
         // the ground.
         mm_per_meter: 1000.0 / map.scale_denominator as f64,
+        point_radii: catalogue
+            .points
+            .iter()
+            .map(|point| point_radius(&map, point))
+            .collect(),
+        line_half_widths: catalogue
+            .lines
+            .iter()
+            .map(|line| line_half_width(&map, line))
+            .collect(),
     };
 
     let mut written = Vec::with_capacity(settings.maps);
@@ -703,6 +746,12 @@ struct Generator<'a> {
     settings: &'a Settings,
     /// How many mm on the paper one meter on the ground is.
     mm_per_meter: f64,
+    /// How far each point symbol reaches from its coordinate, in mm on the
+    /// paper, in the order of [`Catalogue::points`] — see [`point_radius`].
+    point_radii: Vec<f64>,
+    /// How far each line symbol reaches from the middle of its path, in mm,
+    /// in the order of [`Catalogue::lines`] — see [`line_half_width`].
+    line_half_widths: Vec<f64>,
 }
 
 impl Generator<'_> {
@@ -755,12 +804,17 @@ impl Generator<'_> {
         // A line along some of the cell sides. A side belongs to two cells
         // at once and is drawn once, so what runs along it is the boundary
         // itself rather than one cell's idea of it.
+        // What the point symbols are kept off, which the lines are the
+        // first of.
+        let mut taken = Taken::default();
         if !self.catalogue.lines.is_empty() {
             for side in layout.side_paths(self.mm_per_meter) {
                 if random.chance(self.settings.empty_sides) {
                     continue;
                 }
-                let line = random.pick(&self.catalogue.lines).expect("not empty");
+                let at = random.below(self.catalogue.lines.len());
+                let line = &self.catalogue.lines[at];
+                taken.add_line(&side, self.line_half_widths[at]);
                 let mut object = Object::new(ObjectKind::Path(PathObject::default()));
                 object.coords = side;
                 drawn_with(&mut object, line);
@@ -787,17 +841,27 @@ impl Generator<'_> {
         // Point symbols dropped into the cells, however many the halving
         // count gives each of them. One near a boundary draws over it, which
         // is a thing a renderer has to get right and a surveyor draws every
-        // day.
+        // day; one on a line or on another point symbol is not, and leaves a
+        // pixel with two answers, so those are kept apart -- see `place`.
         for (cell, at) in ground.iter().map(|cell| cell.class).enumerate() {
-            let (column, row) = (cell % layout.size(), cell / layout.size());
+            let polygon: Vec<Point> = flatten(&outlines[cell])
+                .into_iter()
+                .next()
+                .map(|part| part.points)
+                .unwrap_or_default();
             for _ in 0..random.halving_count(self.settings.point_symbols) {
                 let Some(&over) = random.pick(&self.overlays.points[at]) else {
                     break;
                 };
                 let point = &self.catalogue.points[over];
+                let radius = self.point_radii[over];
+                let Some(coord) = place(&polygon, radius, &taken, random) else {
+                    drawn.crowded += 1;
+                    continue;
+                };
+                taken.points.push((Point::new(coord.x, coord.y), radius));
                 let mut object = Object::new(ObjectKind::Point);
-                object.coords =
-                    vec![layout.random_point_in_cell(column, row, self.mm_per_meter, random)];
+                object.coords = vec![coord];
                 if point.turns {
                     object.rotation = random.between(0.0, TAU);
                 }
@@ -839,6 +903,167 @@ impl Generator<'_> {
 fn drawn_with(object: &mut Object, symbol: &Entry) {
     object.symbol_index = Some(symbol.index);
     object.symbol_id = symbol.id;
+}
+
+/// The least gap between a point symbol and a line, in mm on the paper,
+/// between the edge of the one and the edge of the other.
+///
+/// A point symbol on a line is a pixel with two answers, and a picture a
+/// surveyor would not draw; one a hair beside a line is both a thing they
+/// draw every day and the hardest thing for a network to tell apart from it.
+/// So a point is kept off the lines by this much and no more, and
+/// [`NEAR_LINE`] of them are put right there.
+pub const LINE_GAP: f64 = 0.1;
+
+/// The least gap between two point symbols, edge to edge, in mm.
+pub const POINT_GAP: f64 = 0.15;
+
+/// The share of the point symbols put just beside a line, where the cell has
+/// one near it: within [`NEAR_BAND`] of the closest they may come.
+pub const NEAR_LINE: f64 = 0.5;
+
+/// How far past the closest it may come a point put beside a line is, at the
+/// most, in mm.
+pub const NEAR_BAND: f64 = 0.6;
+
+/// How many places are tried for a point symbol before the cell is taken to
+/// have no room for it.
+const PLACEMENT_TRIES: usize = 64;
+
+/// What the point symbols of a map are kept clear of: the lines drawn so far
+/// and the points placed so far, in mm on the paper.
+#[derive(Default)]
+struct Taken {
+    /// Each line, flattened, with how far it reaches from its middle.
+    lines: Vec<(Vec<Point>, f64)>,
+    /// Each point, with how far its symbol reaches.
+    points: Vec<(Point, f64)>,
+}
+
+impl Taken {
+    fn add_line(&mut self, coords: &CoordList, half_width: f64) {
+        for part in flatten(coords) {
+            if part.points.len() >= 2 {
+                self.lines.push((part.points, half_width));
+            }
+        }
+    }
+
+    /// Whether a point symbol reaching `radius` from `at` touches nothing.
+    fn clear(&self, at: Point, radius: f64) -> bool {
+        self.lines
+            .iter()
+            .all(|(line, half)| distance_to_polyline(at, line) >= half + radius + LINE_GAP)
+            && self
+                .points
+                .iter()
+                .all(|&(other, reach)| (at - other).length() >= reach + radius + POINT_GAP)
+    }
+}
+
+/// Somewhere in the cell `polygon` for a point symbol reaching `radius`,
+/// clear of everything `taken` holds — or `None` where
+/// [`PLACEMENT_TRIES`] places all touched something.
+///
+/// [`NEAR_LINE`] of the time, and where a line runs near the cell, the
+/// places tried are just beside a line: on either side of it, as close as
+/// [`LINE_GAP`] lets them and up to [`NEAR_BAND`] further. A point drawn
+/// anywhere in the cell would come that close to a line once in a great
+/// while, and next to a path or a fence is where a surveyor puts a great
+/// many of them.
+fn place(polygon: &[Point], radius: f64, taken: &Taken, random: &mut Random) -> Option<Coord> {
+    if polygon.len() < 3 {
+        return None;
+    }
+    let (left, top, right, bottom) = polygon.iter().fold(
+        (f64::MAX, f64::MAX, f64::MIN, f64::MIN),
+        |(l, t, r, b), p| (l.min(p.x), t.min(p.y), r.max(p.x), b.max(p.y)),
+    );
+    let reach = NEAR_BAND + taken.lines.iter().map(|(_, h)| *h).fold(0.0, f64::max) + radius;
+    let near: Vec<usize> = (0..taken.lines.len())
+        .filter(|&at| {
+            taken.lines[at].0.iter().any(|p| {
+                p.x >= left - reach
+                    && p.x <= right + reach
+                    && p.y >= top - reach
+                    && p.y <= bottom + reach
+            })
+        })
+        .collect();
+    let beside = !near.is_empty() && random.chance(NEAR_LINE);
+
+    for _ in 0..PLACEMENT_TRIES {
+        let candidate = if beside {
+            let (line, half) = &taken.lines[near[random.below(near.len())]];
+            let segment = random.below(line.len() - 1);
+            let (from, to) = (line[segment], line[segment + 1]);
+            let along = to - from;
+            if along.length() <= 0.0 {
+                continue;
+            }
+            let side = if random.chance(0.5) { 1.0 } else { -1.0 };
+            let off = half + radius + LINE_GAP + random.between(0.0, NEAR_BAND);
+            from + along * random.unit() + along.perp_right_unit() * (side * off)
+        } else {
+            Point::new(random.between(left, right), random.between(top, bottom))
+        };
+        if is_inside(polygon, candidate) && taken.clear(candidate, radius) {
+            return Some(coord_at(candidate));
+        }
+    }
+    None
+}
+
+/// The distance from `at` to the nearest point of `line`.
+fn distance_to_polyline(at: Point, line: &[Point]) -> f64 {
+    line.windows(2)
+        .map(|pair| {
+            let (from, to) = (pair[0], pair[1]);
+            let along = to - from;
+            let length = along.dot(along);
+            let t = if length > 0.0 {
+                ((at - from).dot(along) / length).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (at - (from + along * t)).length()
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// How far a point symbol reaches from its coordinate, in mm on the paper,
+/// whichever way it is turned: the farthest corner of what it draws.
+fn point_radius(map: &Map, point: &Entry) -> f64 {
+    let mut object = Object::new(ObjectKind::Point);
+    object.coords = vec![Coord::new(0.0, 0.0, 0)];
+    drawn_with(&mut object, point);
+    let extent = Renderer::object_extent(map, &object);
+    if extent.width() <= 0.0 && extent.height() <= 0.0 {
+        return 0.0;
+    }
+    [
+        (extent.left(), extent.top()),
+        (extent.right(), extent.top()),
+        (extent.left(), extent.bottom()),
+        (extent.right(), extent.bottom()),
+    ]
+    .into_iter()
+    .map(|(x, y)| x.hypot(y))
+    .fold(0.0, f64::max)
+}
+
+/// How far a line symbol reaches from the middle of its path, in mm on the
+/// paper: half of what a long straight line of it is wide, its mid symbols
+/// and its border included.
+fn line_half_width(map: &Map, line: &Entry) -> f64 {
+    let mut object = Object::new(ObjectKind::Path(PathObject::default()));
+    object.coords = vec![Coord::new(0.0, 0.0, 0), Coord::new(50.0, 0.0, 0)];
+    drawn_with(&mut object, line);
+    let extent = Renderer::object_extent(map, &object);
+    if extent.width() <= 0.0 && extent.height() <= 0.0 {
+        return 0.0;
+    }
+    extent.top().abs().max(extent.bottom().abs())
 }
 
 /// What the n-th map of a dataset of `total` is called, without a suffix:
@@ -892,6 +1117,14 @@ fn write_classes(
         0
     };
     json.push_str(&format!("  \"lines\": {lines},\n"));
+    // The point symbols are a third layer, a heatmap per symbol, and only a
+    // dataset generated with their labels has one.
+    let points = if settings.point_labels {
+        catalogue.points.len()
+    } else {
+        0
+    };
+    json.push_str(&format!("  \"points\": {points},\n"));
     json.push_str(&format!("  \"image_size\": {},\n", settings.image_size()));
     json.push_str(&format!("  \"resolution\": {},\n", settings.resolution));
     // The range the maps' own densities were drawn from, only where they
@@ -931,6 +1164,21 @@ fn write_classes(
         }
         json.push_str("  ]");
     }
+    if points > 0 {
+        json.push_str(",\n  \"point_symbols\": [\n");
+        for (channel, entry) in catalogue.points.iter().enumerate() {
+            json.push_str(&format!(
+                "    {{\"channel\": {}, \"id\": {}, \"code\": {}, \"name\": {}, \"turns\": {}}}",
+                channel,
+                entry.id,
+                quoted(&entry.code),
+                quoted(&entry.name),
+                entry.turns,
+            ));
+            json.push_str(if channel + 1 == points { "\n" } else { ",\n" });
+        }
+        json.push_str("  ]");
+    }
     json.push_str("\n}\n");
     std::fs::write(path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
@@ -951,6 +1199,10 @@ pub struct Classes {
     /// How many line symbols the lines layer has a channel for, or nought for
     /// a dataset with no labels for its lines — see [`crate::line_truth`].
     pub lines: usize,
+    /// How many point symbols the points layer has a heatmap for, or nought
+    /// for a dataset with no labels for its points — see
+    /// [`crate::point_truth`].
+    pub points: usize,
     /// How many pixels across the images of the dataset were drawn.
     pub image_size: u32,
     /// How many pixels of image one meter of ground came to: every map's, or
@@ -1001,6 +1253,8 @@ impl Classes {
             classes: number("classes")? as usize,
             // A file written before the lines had labels does not say.
             lines: number("lines").unwrap_or(0.0) as usize,
+            // Nor one written before the points had them.
+            points: number("points").unwrap_or(0.0) as usize,
             image_size: number("image_size")? as u32,
             resolution: number("resolution")?,
             // A dataset at one density, or written before they could differ.
@@ -1217,6 +1471,20 @@ mod tests {
         write_classes(file.path(), &catalogue, &Settings::default(), "set.omap")
             .expect("cannot write");
         assert_eq!(Classes::read(file.path()).expect("read").lines, 0);
+        assert_eq!(Classes::read(file.path()).expect("read").points, 0);
+
+        let catalogue = Catalogue {
+            points: vec![line(3), line(4), line(5)],
+            ..catalogue
+        };
+        let labelled = Settings {
+            line_labels: true,
+            point_labels: true,
+            ..Settings::default()
+        };
+        write_classes(file.path(), &catalogue, &labelled, "set.omap").expect("cannot write");
+        let read = Classes::read(file.path()).expect("read");
+        assert_eq!((read.lines, read.points), (2, 3));
     }
 
     /// Line labels over a map with point symbols would leave them unlabelled.
@@ -1231,6 +1499,96 @@ mod tests {
         let result = create_dataset(source, dir.path(), &settings, |_, _| {});
         let message = result.err().expect("refused");
         assert!(message.contains("line labels"), "{message}");
+    }
+
+    /// Point labels need the lines labelled too, and nothing see-through
+    /// drawn, which nothing would label.
+    #[test]
+    fn point_labels_are_refused_beside_what_they_cannot_label() {
+        let dir = tempfile::tempdir().expect("a folder");
+        let source = std::path::Path::new("tests/data/shapes.xmap");
+        for (line_labels, transparent_areas, said) in [
+            (false, 0.0, "line labels too"),
+            (true, 0.5, "transparent areas"),
+        ] {
+            let settings = Settings {
+                line_labels,
+                point_labels: true,
+                transparent_areas,
+                ..Settings::default()
+            };
+            let result = create_dataset(source, dir.path(), &settings, |_, _| {});
+            let message = result.err().expect("refused");
+            assert!(message.contains(said), "{message}");
+        }
+    }
+
+    /// A point symbol is never put on a line nor on another point symbol,
+    /// and a good share of them are put right beside a line.
+    #[test]
+    fn a_point_symbol_keeps_off_the_lines_and_the_other_points() {
+        let source = std::path::Path::new("symbols_sets/simple_ISSprOM_points.omap");
+        let dir = tempfile::tempdir().expect("a folder");
+        let settings = Settings {
+            maps: 6,
+            empty_sides: 0.2,
+            transparent_areas: 0.0,
+            point_symbols: 0.9,
+            line_labels: true,
+            point_labels: true,
+            images: false,
+            ..Settings::default()
+        };
+        let summary = create_dataset(source, dir.path(), &settings, |_, _| {})
+            .expect("the dataset is generated");
+        assert!(summary.drawn.points > 20, "{} points", summary.drawn.points);
+
+        let (mut set, _) = xml_reader::read_xml_map(source).expect("the set");
+        set.resolve_references();
+        let catalogue = Catalogue::of(&set);
+        let (mut beside, mut points) = (0, 0);
+        for generated in &summary.written {
+            let (mut map, _) = xml_reader::read_xml_map(&generated.map).expect("a map");
+            map.resolve_references();
+            let mut taken = Taken::default();
+            let mut placed = Vec::new();
+            for object in &map.objects {
+                let Some(index) = object.symbol_index else {
+                    continue;
+                };
+                if let Some(line) = catalogue.lines.iter().find(|e| e.index == index) {
+                    taken.add_line(&object.coords, line_half_width(&map, line));
+                } else if let Some(point) = catalogue.points.iter().find(|e| e.index == index) {
+                    let at = Point::new(object.coords[0].x, object.coords[0].y);
+                    placed.push((at, point_radius(&map, point)));
+                }
+            }
+            for (at, radius) in &placed {
+                points += 1;
+                // A thousandth of a millimetre for the coordinates' rounding.
+                let nearest = taken
+                    .lines
+                    .iter()
+                    .map(|(line, half)| distance_to_polyline(*at, line) - half - radius)
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    nearest >= LINE_GAP - 1e-3,
+                    "a point {nearest} mm from a line"
+                );
+                if nearest <= LINE_GAP + NEAR_BAND + 1e-3 {
+                    beside += 1;
+                }
+                for (other, reach) in &placed {
+                    if other != at {
+                        assert!((*at - *other).length() >= radius + reach + POINT_GAP - 1e-3);
+                    }
+                }
+            }
+        }
+        assert!(
+            beside * 4 >= points,
+            "{beside} of {points} points beside a line"
+        );
     }
 
     /// A dataset generated before the set was copied in says nothing about
