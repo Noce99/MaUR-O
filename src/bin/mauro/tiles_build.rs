@@ -45,7 +45,9 @@
 //! disagree, reversed where the symbols draw on opposite sides of the line (and
 //! moved aside where they stand at another distance from a line not drawn),
 //! stored as an area where the map's symbol paints a middle with no outline
-//! and the standard's outlines it, and
+//! and the standard's outlines it, made the smallest square of an area where
+//! the standard has a point's symbol (a single dot of stony ground) as an area
+//! only, and
 //! filled under where the map's symbol paints a middle the standard's leaves
 //! empty. Each is a warning.
 //!

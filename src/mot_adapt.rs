@@ -26,6 +26,12 @@
 //!   footprints of heavy traffic, with black borders), would gain an outline
 //!   the map does not have. Such a line is stored as the area of its footprint
 //!   instead, of the standard's plain area of the closest colour.
+//! - **Made a small area**: a point symbol of the map which the standard has
+//!   no point for, only an area of the same thing (Mapper's sets carry a
+//!   single dot of broken ground or of stony ground; ISSprOM has the areas
+//!   only, of three dots at least), is stored as the smallest square of that
+//!   area the standard allows, round the point
+//!   ([`SymbolEntry::least_side`](crate::mot_symbols::SymbolEntry::least_side)).
 //! - **Filled under**: a line symbol of the map which paints its middle in a
 //!   colour (a stairway in a paved area's brown, with its steps on it), stored
 //!   as a standard symbol which leaves the middle empty (ISSprOM's stairways,
@@ -76,6 +82,7 @@ pub fn adapt(map: &Map, table: &SymbolTable) -> Adapted {
     };
     turn_round(map, table, &mut adapted);
     make_areas(map, table, &mut adapted);
+    points_to_areas(map, table, &mut adapted);
     fill_under(map, table, &mut adapted);
     adapted
 }
@@ -363,6 +370,108 @@ fn make_areas(map: &Map, table: &SymbolTable, adapted: &mut Adapted) {
             area.name,
             target.code,
             target.name,
+        ));
+    }
+}
+
+/// Stores the points whose symbol the standard has as an area only as the
+/// smallest square of that area, round each point. Squares of the same area
+/// which overlap (single dots drawn close together, as a map draws an area of
+/// them) are one area: as dense as the standard draws it, not three dots for
+/// each of the map's.
+fn points_to_areas(map: &Map, table: &SymbolTable, adapted: &mut Adapted) {
+    let areas: Vec<Option<(u16, f64)>> = map
+        .symbols
+        .iter()
+        .map(|symbol| {
+            let (id, _) = table.area_for_point(symbol, map)?;
+            Some((id, table.get(id)?.least_side?))
+        })
+        .collect();
+    // By the area they become: the points (index of the object, where).
+    let mut points: BTreeMap<u16, Vec<(usize, Coord)>> = BTreeMap::new();
+    let mut made = vec![0usize; map.symbols.len()];
+    for (index, object) in map.objects.iter().enumerate() {
+        let (Some(s), ObjectKind::Point) = (object.symbol_index, &object.kind) else {
+            continue;
+        };
+        let (Some((area, _)), Some(&at)) = (areas[s], object.coords.first()) else {
+            continue;
+        };
+        points.entry(area).or_default().push((index, at));
+        adapted.coords.insert(index, CoordList::new());
+        made[s] += 1;
+    }
+    for (area, points) in points {
+        let side = table
+            .get(area)
+            .and_then(|e| e.least_side)
+            .expect("an area points are made into has a side");
+        let h = side / 2.0;
+        // Which group each point is in: those whose squares overlap, and so on.
+        let mut group: Vec<usize> = (0..points.len()).collect();
+        fn root(group: &mut [usize], mut i: usize) -> usize {
+            while group[i] != i {
+                group[i] = group[group[i]];
+                i = group[i];
+            }
+            i
+        }
+        for i in 0..points.len() {
+            for j in i + 1..points.len() {
+                let (a, b) = (points[i].1, points[j].1);
+                if (a.x - b.x).abs() < side && (a.y - b.y).abs() < side {
+                    let (ri, rj) = (root(&mut group, i), root(&mut group, j));
+                    group[rj] = ri;
+                }
+            }
+        }
+        let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for i in 0..points.len() {
+            let r = root(&mut group, i);
+            groups.entry(r).or_default().push(i);
+        }
+        for members in groups.values() {
+            let squares: Vec<geo::Polygon> = members
+                .iter()
+                .map(|&i| {
+                    let at = points[i].1;
+                    geo::Rect::new(
+                        GeoCoord { x: at.x - h, y: at.y - h },
+                        GeoCoord { x: at.x + h, y: at.y + h },
+                    )
+                    .to_polygon()
+                })
+                .collect();
+            let (index, first) = points[members[0]];
+            let object = &map.objects[index];
+            let mut extra = Object::new(ObjectKind::Path(PathObject {
+                pattern_rotation: 0.0,
+                // The patterns laid out from a point, as the side was worked
+                // out: its square shows the fewest dots at least.
+                pattern_origin: crate::map::Point::new(first.x, first.y),
+            }));
+            extra.symbol_id = object.symbol_id;
+            extra.symbol_index = object.symbol_index;
+            extra.coords = area_coords(&unary_union(squares.iter()));
+            adapted.extras.push((extra, area));
+        }
+    }
+    for (s, n) in made.into_iter().enumerate() {
+        let Some((area, side)) = areas[s].filter(|_| n > 0) else {
+            continue;
+        };
+        let symbol = &map.symbols[s];
+        let area = table.get(area).expect("an id of the table");
+        adapted.warnings.push(format!(
+            "points of symbol {} \"{}\" stored as areas of {} \"{}\", {side:.2} mm squares, \
+             those which overlap as one: {} has no point symbol for them, only the area: {n} \
+             objects",
+            symbol.code(),
+            symbol.name(),
+            area.code,
+            area.name,
+            table.standard,
         ));
     }
 }
@@ -797,5 +906,56 @@ mod tests {
             &[(0, &[(0.0, 0.0), (10.0, 0.0)])],
         );
         assert!(adapt(&m, &SymbolTable::issprom()).extras.is_empty());
+    }
+
+    #[test]
+    fn a_single_dot_the_standard_has_as_an_area_only_is_the_smallest_area() {
+        let dot = r#"<symbol type="1" id="{id}" code="113.1" name="Broken ground, single dot"><point_symbol inner_radius="150" inner_color="0" outer_width="0" outer_color="-1" elements="0"/></symbol>"#;
+        let mut m = map(&[dot], &[]);
+        let mut point = Object::new(ObjectKind::Point);
+        point.symbol_index = Some(0);
+        point.coords = vec![Coord::new(5.0, 7.0, 0)];
+        m.objects.push(point);
+        let table = SymbolTable::issprom();
+        assert!(table.closest(&m.symbols[0], &m).is_none());
+        let adapted = adapt(&m, &table);
+        assert!(adapted.coords[&0].is_empty(), "the point is not stored");
+        assert_eq!(adapted.extras.len(), 1, "{:?}", adapted.warnings);
+        let (area, id) = &adapted.extras[0];
+        let entry = table.get(*id).unwrap();
+        assert_eq!(entry.code, "113");
+        let side = entry.least_side.unwrap();
+        assert!(side > 0.3 && side < 1.5, "{side}");
+        let xs: Vec<f64> = area.coords.iter().map(|c| c.x).collect();
+        assert!((xs.iter().cloned().fold(f64::MIN, f64::max) - (5.0 + side / 2.0)).abs() < 1e-9);
+        assert!(adapted
+            .warnings
+            .iter()
+            .any(|w| w.contains("stored as areas of 113")));
+    }
+
+    #[test]
+    fn single_dots_drawn_close_together_are_one_area() {
+        let dot = r#"<symbol type="1" id="{id}" code="210.1" name="Stony ground, single dot"><point_symbol inner_radius="125" inner_color="0" outer_width="0" outer_color="-1" elements="0"/></symbol>"#;
+        let mut m = map(&[dot], &[]);
+        for (x, y) in [(0.0, 0.0), (0.3, 0.1), (5.0, 5.0)] {
+            let mut point = Object::new(ObjectKind::Point);
+            point.symbol_index = Some(0);
+            point.coords = vec![Coord::new(x, y, 0)];
+            m.objects.push(point);
+        }
+        let adapted = adapt(&m, &SymbolTable::issprom());
+        assert_eq!(adapted.extras.len(), 2, "{:?}", adapted.warnings);
+        assert!((0..3).all(|i| adapted.coords[&i].is_empty()));
+    }
+
+    #[test]
+    fn the_dotted_areas_have_a_smallest_square() {
+        let table = SymbolTable::issprom();
+        for code in ["113", "210"] {
+            let side = table.get(table.id_of(code).unwrap()).unwrap().least_side;
+            eprintln!("{code}: {side:?}");
+            assert!(side.is_some_and(|s| s < 1.5), "{code}: {side:?}");
+        }
     }
 }

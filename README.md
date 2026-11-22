@@ -454,7 +454,18 @@ Mapper), as the data's licence, the
 With `issprom` or `isom` the map holds the standard's whole symbol set,
 as `maps/ISSprOM_4k.omap` and `maps/ISOM_10k.omap` have it (Mapper's own sets;
 the sprint one brought to ISSprOM 2019-2 by `maps/tools/issprom_2019_2.py`),
-and every feature it can place drawn with it:
+and every feature it can place drawn with it.
+
+The sprint set also carries, after the standard's own symbols, a few which are
+**not ISSprOM 2019-2's but accepted by it**: what the standard allows without
+defining it, as clubs draw it (520.1.90, a boundary line of an area that shall
+not be entered 0.14 mm wide where 520 asks for at least 0.1 mm; 532.6.90, a
+narrow stairway closed at its start). Their codes end in 90 or more, their
+names say `NOT STANDARD`, and a map's symbol becomes one of them only where a
+symbol map says so (`mot_symbols::accepted`); they are kept as few as can be.
+Anything that shows the symbols has to show them apart from the standard's.
+
+The features:
 
 - buildings (521) — houses wall to wall, or mapped less than 0.5 m apart,
   joined into one block with no outline between them — roofs and carports as
@@ -744,7 +755,10 @@ fence's ticks) where the standard's draws on the other; moved aside, for a line
 which draws nothing along its middle, where the standard's symbols stand further
 from it than the map's (triangles on the line against triangles across it);
 stored as an area, for a line whose symbol paints only its middle (a dark brown
-band) where the standard's of that colour outlines it; and filled under, for a
+band) where the standard's of that colour outlines it; made a small area, for a
+point the standard has only as an area (a single dot of broken or stony ground:
+ISSprOM has the areas only, of three dots at least), as the smallest square of
+that area showing them, squares which overlap as one area; and filled under, for a
 line whose symbol paints its middle in a colour (a stairway in a paved brown)
 where the standard's leaves it empty, with the standard's plain area of the
 closest colour. All of it is worked out from the symbols themselves. A

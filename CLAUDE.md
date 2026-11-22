@@ -212,11 +212,14 @@ Web Mercator tile addressing, the integer grid, and the tile payload codec.
 `mot_symbols.rs` is a layer's symbol table (ISOM 2017-2 or ISSprOM 2019-2, and which
 of them a map is drawn to), the
 closest-symbol rule and each symbol's zoom rule (when it appears, how small it
-may be, how much its line may be thinned); `mot_adapt.rs` adapts a map's objects to the
+may be, how much its line may be thinned); the symbols a set carries beside the
+standard's, accepted by it but not in it (codes `x.y.90`+, `accepted()`), are matched
+only by a symbol map and must always be shown apart as not standard; `mot_adapt.rs` adapts a map's objects to the
 standard's symbols before they are stored (with `mot_cut.rs`: areas and lines cut where the
 colour orders disagree; lines reversed where the symbols draw on opposite sides, and a line drawing nothing
 along its middle moved aside where the standard's symbols stand elsewhere; a line with
-no outline stored as the area of its footprint where the standard's outlines it; an area
+no outline stored as the area of its footprint where the standard's outlines it; a point the
+standard has as an area only stored as the area's smallest square, overlapping squares as one; an area
 of the closest plain colour under a line whose middle the standard's symbol leaves empty),
 all worked out from the symbols; `mot_convert.rs` places a `Map` on the earth and stores each
 object in the tiles it touches, cut to each tile's box plus a buffer, and the

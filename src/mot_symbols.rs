@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use crate::map::{symbol_leaves, Map, Symbol};
+use crate::map::{fill_pattern_type, symbol_leaves, Map, Symbol};
 use crate::osm_orienteering::Standard;
 use crate::xml_reader::read_xml_map_str;
 
@@ -204,6 +204,78 @@ pub struct SymbolEntry {
     /// Whether it draws a line as well as what it fills: an area with its own
     /// outline (a building, a paved area with its border).
     pub outlined: bool,
+    /// For an area, the side in mm of the smallest square it may be drawn as,
+    /// its patterns laid out from the square's middle: as large as its
+    /// minimum area, and showing at least [`FEWEST_DOTS`] of the symbols its
+    /// patterns repeat. What a point the standard has only as an area becomes
+    /// ([`crate::mot_adapt`]).
+    pub least_side: Option<f64>,
+    /// Whether it is not a symbol of the standard but one the standard
+    /// accepts without defining it ([`accepted`]): matched only where a
+    /// [`SymbolMap`] says so, and to be shown as not standard wherever the
+    /// symbols are.
+    pub accepted: bool,
+}
+
+/// Whether a code is one of the symbols a set ships beside the standard's,
+/// which the standard accepts without defining them (a boundary line wider
+/// than its minimum, a club's drawing of a stairway): a code of three parts,
+/// the last 90 or more (`520.1.90`), which no standard uses. They are at the
+/// end of the set, their names say they are not standard, and they are kept
+/// as few as can be (`maps/tools/issprom_2019_2.py`).
+pub fn accepted(code: &str) -> bool {
+    let parts: Vec<&str> = code.split('.').collect();
+    parts.len() == 3 && parts[2].parse::<u32>().is_ok_and(|n| n >= 90)
+}
+
+/// The fewest dots an area of dots shows: ISSprOM's broken ground (113) and
+/// stony ground (210) have three at least.
+pub const FEWEST_DOTS: usize = 3;
+
+/// [`SymbolEntry::least_side`] of `symbol`, one of `map`'s.
+fn least_side(symbol: &Symbol) -> Option<f64> {
+    let Symbol::Area(area) = symbol else {
+        return None;
+    };
+    // The middles of what the point patterns draw round the origin: an element
+    // whose middle is inside is drawn whole by the patterns the standards use.
+    let mut dots: Vec<f64> = Vec::new();
+    for pattern in &area.patterns {
+        let Some(point) = pattern.point.as_deref() else {
+            continue;
+        };
+        if pattern.pattern_type != fill_pattern_type::POINT
+            || pattern.line_spacing <= 0.0
+            || pattern.point_distance <= 0.0
+        {
+            continue;
+        }
+        let mut middles: Vec<(f64, f64)> = point
+            .elements
+            .iter()
+            .filter_map(|e| e.object.coords.first().map(|c| (c.x, c.y)))
+            .collect();
+        if point.inner_radius > 0.0 && point.inner_color >= 0 {
+            middles.push((0.0, 0.0));
+        }
+        let (sin, cos) = pattern.angle.sin_cos();
+        for i in -3..=3 {
+            for j in -3..=3 {
+                // Along the lines and across them, turned by the angle (y down).
+                let along = pattern.offset_along_line + f64::from(i) * pattern.point_distance;
+                let across = pattern.line_offset + f64::from(j) * pattern.line_spacing;
+                let (lx, ly) = (along * cos + across * sin, -along * sin + across * cos);
+                for &(x, y) in &middles {
+                    dots.push((lx + x).abs().max((ly + y).abs()));
+                }
+            }
+        }
+    }
+    dots.sort_by(f64::total_cmp);
+    // Just past the farthest of the fewest dots, so that its middle is inside.
+    let dotted = dots.get(FEWEST_DOTS - 1).map_or(0.0, |&d| 2.0 * d + 0.02);
+    let least = (f64::from(area.minimum_area) / 1000.0).sqrt();
+    Some(dotted.max(least)).filter(|&s| s > 0.0)
 }
 
 /// The widest line `symbol`, one of `map`'s, draws, in millimetres.
@@ -425,6 +497,8 @@ impl SymbolTable {
                     _ => None,
                 },
                 outlined: kind == SymbolKind::Area && crate::mot_cut::draws_a_line(symbol, &map),
+                least_side: least_side(symbol),
+                accepted: accepted(code),
             });
         }
         SymbolTable {
@@ -505,7 +579,7 @@ impl SymbolTable {
         self.entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.kind == SymbolKind::Area)
+            .filter(|(_, e)| e.kind == SymbolKind::Area && !e.accepted)
             .filter_map(|(id, e)| Some((id, distance(e.fill_rgb?))))
             .filter(|&(_, d)| d <= CLOSE)
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -630,8 +704,33 @@ impl SymbolTable {
     /// nothing is close, or the symbol map leaves it out, and the object has to
     /// be dropped.
     pub fn closest(&self, symbol: &Symbol, map: &Map) -> Option<(u16, Match)> {
-        let kind = SymbolKind::of(symbol, map);
+        self.closest_of_kind(symbol, map, SymbolKind::of(symbol, map))
+    }
+
+    /// For a point symbol of `map`'s which the standard has no point for, the
+    /// area the standard draws the same thing with (a single dot of broken
+    /// ground is broken ground, 113), found as [`closest`](Self::closest) finds
+    /// a symbol, but among the areas; `None` for any other symbol.
+    pub fn area_for_point(&self, symbol: &Symbol, map: &Map) -> Option<(u16, Match)> {
+        if SymbolKind::of(symbol, map) != SymbolKind::Point || self.closest(symbol, map).is_some() {
+            return None;
+        }
+        if self.left_out(symbol, map) {
+            return None;
+        }
+        self.closest_of_kind(symbol, map, SymbolKind::Area)
+    }
+
+    /// [`closest`](Self::closest), among the symbols of `kind`.
+    fn closest_of_kind(
+        &self,
+        symbol: &Symbol,
+        map: &Map,
+        kind: SymbolKind,
+    ) -> Option<(u16, Match)> {
         let fits = |id: u16| self.get(id).is_some_and(|e| e.kind == kind);
+        // A symbol the standard only accepts, by a symbol map's line alone.
+        let standard = |id: u16| self.get(id).is_some_and(|e| !e.accepted);
 
         if let Some(rule) = self.crossref_for(symbol, map) {
             if rule.targets.is_empty() {
@@ -653,12 +752,12 @@ impl SymbolTable {
         }
 
         let mut code = symbol.code();
-        if let Some(id) = self.id_of(code).filter(|&id| fits(id)) {
+        if let Some(id) = self.id_of(code).filter(|&id| fits(id) && standard(id)) {
             return Some((id, Match::Code));
         }
         while let Some(dot) = code.rfind('.') {
             code = &code[..dot];
-            if let Some(id) = self.id_of(code).filter(|&id| fits(id)) {
+            if let Some(id) = self.id_of(code).filter(|&id| fits(id) && standard(id)) {
                 return Some((id, Match::Parent));
             }
         }
@@ -667,7 +766,7 @@ impl SymbolTable {
             let found = self
                 .entries
                 .iter()
-                .position(|e| e.kind == kind && e.name.eq_ignore_ascii_case(name));
+                .position(|e| e.kind == kind && !e.accepted && e.name.eq_ignore_ascii_case(name));
             if let Some(i) = found {
                 return Some((i as u16, Match::Name));
             }
@@ -950,6 +1049,38 @@ mod tests {
         assert_eq!(
             code_of(&table, &line("708", "Uncrossable boundary", 1.0), &map),
             Some(("708".to_string(), Match::Code))
+        );
+    }
+
+    #[test]
+    fn a_symbol_the_standard_only_accepts_is_matched_by_a_symbol_map_alone() {
+        let table = SymbolTable::issprom();
+        let accepted: Vec<&str> = table
+            .entries
+            .iter()
+            .filter(|e| e.accepted)
+            .map(|e| e.code.as_str())
+            .collect();
+        assert_eq!(accepted, ["520.1.90", "532.6.90"]);
+        // Its own code and its own name are not enough.
+        let line_of = |code: &str| {
+            let e = table.get(table.id_of(code).unwrap()).unwrap();
+            line(code, &e.name, e.width)
+        };
+        let map = Map::default();
+        assert_eq!(
+            code_of(&table, &line_of("520.1.90"), &map),
+            Some(("520.1".to_string(), Match::Parent))
+        );
+        let named = line("999.9", &table.get(table.id_of("532.6.90").unwrap()).unwrap().name, 0.4);
+        assert_eq!(code_of(&table, &named, &map), None);
+        // A symbol map's line is.
+        let mapped = SymbolTable::issprom()
+            .with_symbol_map(&SymbolMap::parse("[ISSprOM 2019-2]\n520.1 \"Bordo\" 520.1.90\n").unwrap())
+            .unwrap();
+        assert_eq!(
+            code_of(&mapped, &line("520.1", "Bordo privato", 0.14), &map),
+            Some(("520.1.90".to_string(), Match::Table))
         );
     }
 

@@ -242,7 +242,6 @@ rename('107', 'Erosion gully')
 # 113 Broken ground: dots 0.2-0.3 -> 0.3 (errata 01.02.2024).
 for code in ['113']:
     o.sub(code, r'inner_radius="100"', 'inner_radius="150"', count=len(re.findall('inner_radius="100"', o.get(code))))
-o.sub('113.1', r'inner_radius="100"', 'inner_radius="150"')
 
 # --------------------------------------------------------- rock, boulders ---
 
@@ -263,7 +262,6 @@ o.sub('206', r'min_area="800"', 'min_area="750"')
 
 # 210 Stony ground: dots 0.2-0.25 -> 0.25 (errata 01.02.2024).
 o.sub('210', r'inner_radius="100"', 'inner_radius="125"', count=len(re.findall('inner_radius="100"', o.get('210'))))
-o.sub('210.1', r'inner_radius="100"', 'inner_radius="125"')
 
 # ------------------------------------------------------------ water, marsh ---
 
@@ -539,11 +537,70 @@ o.put('509.1', strip_icon(re.sub(r'<combined_symbol parts="2">.*</combined_symbo
 # Symbols which are not ISSprOM 2019-2's: Mapper's set carries them over from
 # ISOM 2017-2 (dense broken ground, dense boulder field, enlarged stony ground)
 # and from ISSOM 2007 (the hidden "from ISSOM" ones), or as variants of its own
-# (an enlarged single dot no larger than the single one, north lines with an
-# arrow).
-for code in ['113.2', '113.6', '201.8', '201.9', '202.8', '202.9', '203.9', '208.5',
-             '210.2', '210.3', '601.4', '601.9']:
+# (single dots of broken and stony ground, an enlarged single dot no larger
+# than the single one, one side of a bridge as before 512.1, north lines with
+# an arrow). A map's single dot is stored as the smallest area of its symbol
+# (MaUR-O's mot_adapt).
+for code in ['113.1', '113.2', '113.6', '201.8', '201.9', '202.8', '202.9', '203.9', '208.5',
+             '210.1', '210.2', '210.3', '512', '601.4', '601.9']:
     o.remove(code)
+
+# ------------------------------------- accepted by the standard, not in it ---
+#
+# Symbols the standard allows without defining them: a boundary line wider
+# than its minimum, a club's own drawing of a feature the standard leaves to
+# the mapper. Kept apart from the standard's own, as small as can be, and
+# always marked as not standard:
+#
+# - at the end of the set, after every symbol of the standard;
+# - with a code whose last part is 90 or more (520.1.90), never one of the
+#   standard's: MaUR-O's table never matches a map's symbol to one of them by
+#   code or by name, only where a symbol map says so (mot_symbols::ACCEPTED);
+# - with a name ending in ACCEPTED_NAME, and a description which starts with
+#   ACCEPTED_DESC and says what of the standard allows it.
+ACCEPTED_NAME = ' [NOT STANDARD: accepted by ISSprOM 2019-2]'
+ACCEPTED_DESC = ('NOT A SYMBOL OF ISSprOM 2019-2: accepted by the standard, not defined by '
+                 'it. ')
+accepted = []
+
+# 520.1.90: "The area shall always be delineated by a boundary line (at least
+# 0.1 mm in width)" (520). The club's maps draw it 0.14 mm wide.
+accepted.append(symbol(2, '520.1.90',
+    'Area that shall not be entered, boundary line 0.14 mm' + ACCEPTED_NAME,
+    line_symbol(C('Black 100% for road outline'), 140),
+    ACCEPTED_DESC + 'Symbol 520 asks for a boundary line at least 0.1 mm wide; this one '
+    'is 0.14 mm wide, as the club\'s maps draw it.'))
+
+# 532.6.90: a narrow stairway closed at its start, as the club's maps draw it
+# ("Scalette chiusine"): 532.6's footprint (0.4 mm), with borders 0.2 mm wide
+# and a bar 0.2 mm wide across the start; steps 0.1 mm wide, 0.44 mm long,
+# 0.5 mm apart. Its middle is left empty, as 532's: a paved area under it
+# shows through.
+def line_inner(color, width):
+    return f'<symbol type="2" code="">{line_symbol(color, width)}</symbol>'
+
+STEP = line_inner(BLACK, 100)
+accepted.append(symbol(2, '532.6.90',
+    'Stairway, footprint: 1.6 m, closed at its start' + ACCEPTED_NAME,
+    line_symbol(-1, 400,
+        '<start_symbol><symbol type="1" code="" name="Start symbol">'
+        + point_xml([point_element(line_inner(BLACK, 200), ['0 -400', '0 400'])])
+        + '</symbol></start_symbol>'
+        '<mid_symbol><symbol type="1" code="" name="Mid symbol">'
+        + point_xml([point_element(STEP, ['0 220', '0 -220'])])
+        + '</symbol></mid_symbol>'
+        f'<borders><border color="{BLACK}" width="200" shift="100"/></borders>',
+        segment_length=500, end_length=50),
+    ACCEPTED_DESC + 'Symbol 532 leaves how a stairway is drawn in a generalized manner to '
+    'the mapper; this is a narrow one (532.6\'s footprint) closed at its start, with '
+    'borders 0.2 mm wide, as the club\'s maps draw it.'))
+
+last = o._top_symbols()[-1][2]
+for s in accepted:
+    code = re.match(r'<symbol [^>]*code="([^"]*)"', s).group(1)
+    assert int(code.split('.')[-1]) >= 90 and code.count('.') == 2, code
+    o.insert_after(last, s)
+    last = code
 
 # The set names itself as the standard it is.
 o.t = re.sub(r'(<symbols count="\d+") id="ISSprOM 2019"', r'\1 id="ISSprOM 2019-2"', o.t)
