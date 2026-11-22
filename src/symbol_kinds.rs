@@ -266,16 +266,34 @@ impl Overlays {
 /// colour hides every colour after it in the table. What a piece of ground
 /// hides is decided by the one colour which covers it completely — the
 /// opaque fill which makes it an opaque area in the first place — and an
-/// overlay is seen when it draws any colour above that one. An overlay whose
-/// every colour is below it is drawn into the file and covered up by the
-/// ground it was drawn on.
+/// overlay is seen when it draws any colour above that one which looks
+/// different from it. An overlay whose every colour is below it is drawn into
+/// the file and covered up by the ground it was drawn on; one whose colours
+/// above it are all the same ink — two entries of the table with one colour,
+/// as ISSprOM's "Blue 100%" and "Blue 100% for area features" are — is drawn
+/// on top and still cannot be seen, a blue well on a blue lake.
 pub fn shows_over(map: &Map, overlay: &Symbol, ground: &Symbol) -> bool {
     let colors = colors_of(map, overlay);
     match covering_color(map, ground, 0) {
         // Nothing about the ground covers anything, so whatever the overlay
         // draws is there to be seen.
         None => !colors.is_empty(),
-        Some(covering) => colors.iter().any(|&color| color < covering),
+        Some(covering) => colors
+            .iter()
+            .any(|&color| color < covering && !looks_the_same(map, color, covering)),
+    }
+}
+
+/// Whether colour `over`, drawn on colour `under`, comes out as `under`
+/// again: the same red, green and blue, to a thousandth. Opacity does not
+/// matter, as the same colour blended with itself is itself.
+fn looks_the_same(map: &Map, over: i32, under: i32) -> bool {
+    match (map.color(over), map.color(under)) {
+        (Some(a), Some(b)) => {
+            let close = |x: f32, y: f32| (x - y).abs() < 1e-3;
+            close(a.rgb.0, b.rgb.0) && close(a.rgb.1, b.rgb.1) && close(a.rgb.2, b.rgb.2)
+        }
+        _ => false,
     }
 }
 
@@ -982,6 +1000,20 @@ mod tests {
         }
         // The same colour over itself is not something you can see either.
         assert!(!shows_over(&map, &dot(2), low_ground));
+    }
+
+    #[test]
+    fn an_overlay_in_the_grounds_own_ink_does_not_show_up_above_it() {
+        // Colour 3 is above the ground's colour 4 and the very same yellow:
+        // drawn on top, and lost in it.
+        let mut map = map_with(vec![area(4), dot(3), dot(1)]);
+        let yellow = map.colors[2].clone();
+        map.colors.push(yellow.clone());
+        map.colors.push(yellow);
+        let ground = &map.symbols[0];
+        assert!(!shows_over(&map, &map.symbols[1], ground));
+        // A black dot above it is still seen, half transparent or not.
+        assert!(shows_over(&map, &map.symbols[2], ground));
     }
 
     #[test]
