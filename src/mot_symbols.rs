@@ -1002,7 +1002,7 @@ mod tests {
         // Or a short passable wall is a plain line, a cliff its top line, an
         // uncrossable fence a wall.
         let (map, _) = read_xml_map_str(Standard::Issprom.reference()).unwrap();
-        for code in ["104", "104.1", "201", "202.1", "513.1", "518", "799"] {
+        for code in ["104", "104.1", "201", "202.1", "513.1", "518"] {
             let symbol = map.symbols.iter().find(|s| s.code() == code).unwrap();
             let Symbol::Line(line) = symbol else {
                 panic!("{code} is a line")

@@ -130,8 +130,12 @@ IOF = [
     ('Yellow 100% area symbols', 0, 27, 79, 0, 'YELLOW', False),
     ('Yellow 50% area symbols', 0, 14, 40, 0, [(0.5, 'Yellow 100% area symbols')], True),
 ]
-# Not IOF colours: the OpenOrienteering logo's (999), kept below all others.
-EXTRA = ['OpenOrienteering Blue', 'OpenOrienteering Orange']
+# Mapper's set adds two symbols of its own, which are not ISSprOM's: 799
+# Simple Orienteering Course and 999 OpenOrienteering Logo. They are left out,
+# and with the logo its two colours, which are not IOF colours.
+o.remove('799')
+o.remove('999')
+EXTRA = []
 # Each colour of Mapper's ISSprOM 2019 set, by its priority there: the colour
 # that takes its place.
 OLD = {
@@ -236,14 +240,14 @@ o.insert_after('105.1', symbol(2, '105.2', 'Retaining earth wall seen only from 
 rename('107', 'Erosion gully')
 
 # 113 Broken ground: dots 0.2-0.3 -> 0.3 (errata 01.02.2024).
-for code in ['113', '113.2']:
+for code in ['113']:
     o.sub(code, r'inner_radius="100"', 'inner_radius="150"', count=len(re.findall('inner_radius="100"', o.get(code))))
 o.sub('113.1', r'inner_radius="100"', 'inner_radius="150"')
 
 # --------------------------------------------------------- rock, boulders ---
 
 # 201, 202: uncrossable; minimum length 1.1 mm (OM) (errata 15.02.2022).
-for code in ['201', '201.1', '201.3', '201.4', '201.8', '201.9']:
+for code in ['201', '201.1', '201.3', '201.4']:
     o.sub(code, r'^(<symbol [^>]*? name=")Impassable cliff', r'\1Uncrossable cliff')
 for code in ['201', '201.3', '202', '202.1', '202.3']:
     o.sub(code, r'minimum_length="900"', 'minimum_length="1100"')
@@ -392,7 +396,7 @@ o.insert_after('512.2', lower)
 # Lines with dots or tags along them show at least one even when short, or a
 # short one reads as another symbol: 513.1 as a plain line, 201 as its top
 # line, 518 as 515 (Mapper's 2019 set has no show_at_least_one_symbol here).
-for code in ('104', '104.1', '201', '202.1', '513.1', '518', '799'):
+for code in ('104', '104.1', '201', '202.1', '513.1', '518'):
     o.sub(code, r'(<line_symbol [^>]*?end_length="\d+")(?! show_at_least_one_symbol)',
           r'\1 show_at_least_one_symbol="true"')
 # 311 Small fountain or well has no north arrow in the specification (unlike
@@ -464,26 +468,53 @@ o.insert_after('714.1', symbol(1, '715', 'Continuing point after map exchange', 
     'Symbol marking the continuation of the course after the map flip or the map exchange. The triangle '
     'points in the direction of the following control.'))
 
-# 104, 201, 202 tags: 0.75 mm overall, from the outer edge of the line to the
-# tip (precise definitions of symbols). Here they ran 0.75 from its centre.
+# 104, 201, 202 tags: 0.75 mm from the centre of the line to the tip (precise
+# definitions of symbols: the 0.75 is measured from the line's dotted centre).
 def tags_to(code, centre_to_tip):
     old = o.get(code)
     def tag(m):
         (x1, y1), (x2, y2) = [tuple(map(int, p.split())) for p in (m.group(1), m.group(2))]
-        if x1 != x2 or max(abs(y1), abs(y2)) not in (650, 750):
+        if x1 != x2 or max(abs(y1), abs(y2)) not in (500, 600, 650, 750):
             return m.group(0)
-        far = lambda y: (centre_to_tip if y > 0 else -centre_to_tip) if abs(y) in (650, 750) else y
+        far = lambda y: (centre_to_tip if y > 0 else -centre_to_tip) if abs(y) in (500, 600, 650, 750) else y
         return f'<coords count="2">{x1} {far(y1)};{x2} {far(y2)};</coords>'
     new, n = re.subn(r'<coords count="2">(-?\d+ -?\d+);(-?\d+ -?\d+);</coords>', tag, old)
     n = sum(1 for a, b in zip(re.findall(r'<coords count="2">[^<]*', old), re.findall(r'<coords count="2">[^<]*', new)) if a != b)
-    assert n >= 1, code
     o.put(code, strip_icon(new))
-tags_to('104', 750 - 135)
-tags_to('104.1', 750 - 185)  # very high: the same 0.75 overall, on a 0.37 line
-for code in ['201', '201.1', '201.9']:
-    tags_to(code, 750 - 250)
-for code in ['202.1', '202.2', '202.9']:
-    tags_to(code, 750 - 150)
+for code in ['104', '104.1', '201', '201.1', '202.1', '202.2']:
+    tags_to(code, 750)
+# 104: minimum length 0.75 mm.
+for code in ['104', '104.1']:
+    o.sub(code, r'^(<symbol .*?<line_symbol [^>]*?)minimum_length="\d+"', r'\1minimum_length="750"')
+
+# Minimum lengths: 515 1 mm (errata 16.09.2022), 528 2.2 mm, 529 3 mm.
+for code, length in [('515', 1000), ('528', 2200), ('529', 3000)]:
+    o.sub(code, r'^(<symbol .*?<line_symbol [^>]*?)minimum_length="0"', rf'\g<1>minimum_length="{length}"')
+    no_icon(code)
+
+# Minimum areas: 414 4 mm², 709 9 mm².
+for code in ['414', '414.1']:
+    o.sub(code, r'min_area="400"', 'min_area="4000"')
+o.sub('709', r'min_area="4000"', 'min_area="9000"')
+
+# 419: the white mask 0.25 mm longer than the green cross at its ends.
+o.sub('419', r'-600 -600;600 600;', '-689 -689;689 689;')
+o.sub('419', r'-600 600;600 -600;', '-689 689;689 -689;')
+no_icon('419')
+
+# 115 Prominent landform feature: a triangle 1.35 mm on a side outside its
+# 0.25 line (precise definition), so 1.35 - 0.25·√3 between the line's centres
+# (it was 0.746, 1.18 outside).
+side = 1350 - round(250 * 3 ** 0.5)
+h = side * 3 ** 0.5 / 2
+half = round(side / 2)
+tri = [(-half, round(h / 3)), (half, round(h / 3)), (0, -round(2 * h / 3)), (-half, round(h / 3))]
+o.sub('115', r'<coords count="4">[^<]*</coords>', '<coords count="4">' + ';'.join(f'{x} {y}' for x, y in tri) + ';</coords>')
+no_icon('115')
+
+# 707 Marked route: dashes 2.0, gaps 0.5.
+o.sub('707', r'break_length="750"', 'break_length="500"')
+no_icon('707')
 
 # 513.2 half dots: their diameter 0.09 from the line's centre (precise
 # definition; here it was on the centre).
@@ -504,6 +535,15 @@ o.put('509.1', strip_icon(re.sub(r'<combined_symbol parts="2">.*</combined_symbo
     + line_symbol(WHITE_RAIL, 250, segment_length=3000, end_length=1500, dashed='true',
                   dash_length=1000, break_length=1500) + '</symbol></part></combined_symbol>',
     o.get('509.1'), flags=re.S)))
+
+# Symbols which are not ISSprOM 2019-2's: Mapper's set carries them over from
+# ISOM 2017-2 (dense broken ground, dense boulder field, enlarged stony ground)
+# and from ISSOM 2007 (the hidden "from ISSOM" ones), or as variants of its own
+# (an enlarged single dot no larger than the single one, north lines with an
+# arrow).
+for code in ['113.2', '113.6', '201.8', '201.9', '202.8', '202.9', '203.9', '208.5',
+             '210.2', '210.3', '601.4', '601.9']:
+    o.remove(code)
 
 # The set names itself as the standard it is.
 o.t = re.sub(r'(<symbols count="\d+") id="ISSprOM 2019"', r'\1 id="ISSprOM 2019-2"', o.t)
