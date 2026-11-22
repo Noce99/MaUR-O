@@ -98,6 +98,7 @@ temperature_end = 0.012
 same_angle = 0.05
 line_threshold = 0.5
 min_line = 6
+point_threshold = 0.3
 
 [net.show-batches]
 into = "batches"

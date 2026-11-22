@@ -17,6 +17,7 @@ const DPI: usize = 10;
 const SCALE: usize = 11;
 const LINE_THRESHOLD: usize = 12;
 const MIN_LINE: usize = 13;
+const POINT_THRESHOLD: usize = 14;
 
 pub struct NetImageToMap {
     form: Form,
@@ -46,6 +47,7 @@ impl NetImageToMap {
                 Field::text("Scale").arg("scale").unit("1:"),
                 Field::text("Line threshold").arg("line_threshold"),
                 Field::text("Min line").arg("min_line").unit("px"),
+                Field::text("Point threshold").arg("point_threshold"),
             ],
         );
         form.open_picker(RUN);
@@ -93,6 +95,7 @@ impl Tool for NetImageToMap {
         form.push_option(&mut args, SCALE, "--scale");
         form.push_option(&mut args, LINE_THRESHOLD, "--line-threshold");
         form.push_option(&mut args, MIN_LINE, "--min-line");
+        form.push_option(&mut args, POINT_THRESHOLD, "--point-threshold");
         Ok(args)
     }
 }

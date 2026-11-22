@@ -107,10 +107,11 @@ use crate::differences::{difference_mask, Comparison, DEFAULT_TOLERANCE};
 use crate::geometry::Rect;
 use crate::ground_truth::{BACKGROUND, NO_ROTATION};
 use crate::line_vector::{LineGrid, LineSettings};
+use crate::point_vector::{peaks, Peak, PointGrid, DEFAULT_POINT_THRESHOLD};
 use crate::render::{render_map_over, to_rgb_image, Extent};
 use crate::symbol_kinds::Entry;
 use crate::vectorize::{
-    objects_of_regions, write_map_with_lines, write_objects, Placement, Simplify, SymbolGrid,
+    objects_of_regions, write_map_with_layers, write_objects, Placement, Simplify, SymbolGrid,
     Written,
 };
 
@@ -172,6 +173,7 @@ pub fn load(
     let model = UNetConfig::new(config.classes)
         .with_base_channels(config.base_channels)
         .with_lines(config.lines)
+        .with_points(config.points)
         .with_scale_head(config.scale_head)
         .init(device);
     let model = load_weights(model, weights)?;
@@ -275,6 +277,32 @@ pub fn predict_image_with_lines(
     line_threshold: f32,
     device: &Device,
 ) -> (SymbolGrid, Option<LineGrid>) {
+    let layers = predict_image_layers(model, image, tile, overlap, line_threshold, device);
+    (layers.grid, layers.lines)
+}
+
+/// Everything the network says about a picture, layer by layer.
+pub struct Layers {
+    /// The ground: a symbol and an angle for every pixel.
+    pub grid: SymbolGrid,
+    /// Where each line symbol runs, for a network with a lines layer.
+    pub lines: Option<LineGrid>,
+    /// How sure the network is of a point of each symbol at every pixel, for
+    /// a network with a points layer — see [`crate::point_vector`].
+    pub points: Option<PointGrid>,
+}
+
+/// [`predict_image_with_lines`], and the points layer's heatmaps where the
+/// network has one: joined from the tiles the way the ground is, the pixel
+/// taking the answer of the tile which saw it furthest from its own edge.
+pub fn predict_image_layers(
+    model: &UNet,
+    image: &RgbImage,
+    tile: usize,
+    overlap: usize,
+    line_threshold: f32,
+    device: &Device,
+) -> Layers {
     let step = 1 << DEPTH;
     let (width, height) = (image.width() as usize, image.height() as usize);
 
@@ -294,6 +322,8 @@ pub fn predict_image_with_lines(
     let mut grid = SymbolGrid::new(width, height);
     let lines = model.lines();
     let mut line_grid = (lines > 0).then(|| LineGrid::new(width, height, lines));
+    let points = model.points();
+    let mut point_grid = (points > 0).then(|| PointGrid::new(width, height, points));
     // A probability over the threshold is a logit over this, and comparing
     // the logit spares a sigmoid for every pixel of every channel.
     let line_logit = {
@@ -369,11 +399,21 @@ pub fn predict_image_with_lines(
                                 (of(classes + 3 + line) > line_logit) as u8;
                         }
                     }
+                    if let Some(found) = &mut point_grid {
+                        for point in 0..points {
+                            let logit = of(classes + 3 + lines + point);
+                            found.channel_mut(point)[at] = 1.0 / (1.0 + (-logit).exp());
+                        }
+                    }
                 }
             }
         }
     }
-    (grid, line_grid)
+    Layers {
+        grid,
+        lines: line_grid,
+        points: point_grid,
+    }
 }
 
 /// What one picture came to, on the way through the network and back out as
@@ -388,6 +428,11 @@ pub struct ReadBack {
     pub lines: usize,
     /// How many different line symbols the lines are drawn with.
     pub line_symbols: usize,
+    /// How many point objects the map came to: nought for a network with
+    /// no points layer.
+    pub points: usize,
+    /// How many different point symbols those are drawn with.
+    pub point_symbols: usize,
     /// How many coordinates those objects hold, control points included.
     pub coords: usize,
     /// The map drawn again, over the very ground the picture covers, so that
@@ -466,7 +511,11 @@ pub fn read_back(
     // network is shown of it.
     let ground = ground_of(picture, settings);
     let resampled = resample(picture, settings.resolution, settings.reading_resolution());
-    let (mut grid, lines) = predict_image_with_lines(
+    let Layers {
+        mut grid,
+        lines,
+        points,
+    } = predict_image_layers(
         model,
         resampled.as_ref().unwrap_or(picture),
         settings.tile,
@@ -478,7 +527,13 @@ pub fn read_back(
     // channels said: left in, that noise is read as a difference of angle and
     // splits the region into fragments.
     resolve_angles(&mut grid, symbols);
-    read_back_grid_over(grid, lines, picture, ground, symbol_set, into, settings)
+    let found = points
+        .as_ref()
+        .map(|heat| peaks(heat, settings.point_threshold))
+        .unwrap_or_default();
+    read_back_grid_over(
+        grid, lines, &found, picture, ground, symbol_set, into, settings,
+    )
 }
 
 /// How far apart two densities may be before a picture is resampled from
@@ -803,24 +858,36 @@ pub fn read_back_grid_with_lines(
     settings: &ReadBackSettings,
 ) -> Result<ReadBack, String> {
     let ground = ground_of(picture, settings);
-    read_back_grid_over(grid, lines, picture, ground, symbol_set, into, settings)
+    read_back_grid_over(
+        grid,
+        lines,
+        &[],
+        picture,
+        ground,
+        symbol_set,
+        into,
+        settings,
+    )
 }
 
 /// [`read_back_grid_with_lines`] with the ground the grid covers given
 /// rather than worked out from the picture: the grid may be of a resampled
 /// copy of it, and the ground is the original's either way.
+#[allow(clippy::too_many_arguments)]
 fn read_back_grid_over(
     grid: SymbolGrid,
     lines: Option<LineGrid>,
+    points: &[Peak],
     picture: &RgbImage,
     ground: Rect,
     symbol_set: &Path,
     into: &Path,
     settings: &ReadBackSettings,
 ) -> Result<ReadBack, String> {
-    let written = write_map_with_lines(
+    let written = write_map_with_layers(
         &grid,
         lines.as_ref().map(|found| (found, &settings.lines)),
+        points,
         symbol_set,
         into,
         &Placement {
@@ -830,8 +897,12 @@ fn read_back_grid_over(
         &settings.simplify,
     )?;
     let line_symbols = lines.as_ref().map_or(0, LineGrid::symbols_used);
+    let mut point_symbols: Vec<usize> = points.iter().map(|peak| peak.class).collect();
+    point_symbols.sort_unstable();
+    point_symbols.dedup();
     let mut done = finish(grid, written, picture, into, settings, ground)?;
     done.line_symbols = line_symbols;
+    done.point_symbols = point_symbols.len();
     Ok(done)
 }
 
@@ -872,6 +943,8 @@ fn finish(
         objects: written.objects,
         lines: written.lines,
         line_symbols: 0,
+        points: written.points,
+        point_symbols: 0,
         coords: written.coords,
         drawn,
         comparison,
@@ -906,6 +979,9 @@ pub struct ReadBackSettings {
     /// What to keep of the lines found: how long one has to be, and how far
     /// it may be moved to be rid of a node.
     pub lines: LineSettings,
+    /// How high a point heatmap has to peak for a point to be written there,
+    /// where the network has a points layer — see [`crate::point_vector`].
+    pub point_threshold: f32,
 }
 
 impl ReadBackSettings {
@@ -932,6 +1008,7 @@ impl ReadBackSettings {
             },
             line_threshold: DEFAULT_LINE_THRESHOLD,
             lines: LineSettings::default(),
+            point_threshold: DEFAULT_POINT_THRESHOLD,
         }
     }
 

@@ -33,6 +33,13 @@
 //! has to be of a pixel, and `--min-line` how long a path has to be; the
 //! lines are simplified by `--tolerance`, like the areas' boundaries.
 //!
+//! A run whose network has a points layer (trained on a dataset made with
+//! `mauro net dataset --content areas-lines-points`) gives the point symbols
+//! too: every peak of a symbol's heatmap at least `--point-threshold` high,
+//! and no lower than its neighbours, is one point object of that symbol, at
+//! the peak refined to a fraction of a pixel — see
+//! [`maur_o::point_vector`].
+//!
 //! # How dense the picture is
 //!
 //! The map is only the right size if it is known how many pixels of the
@@ -94,6 +101,7 @@ use maur_o::symbol_kinds::Catalogue;
 use maur_o::xml_reader::read_xml_map;
 
 use maur_o::line_vector::LineSettings;
+use maur_o::point_vector::DEFAULT_POINT_THRESHOLD;
 use maur_o::vectorize::Simplify;
 
 use maur_o::net::predict::{
@@ -167,6 +175,13 @@ pub struct Args {
     /// speck, or the spur a thinning leaves at the end of a band.
     #[arg(long, value_name = "PIXELS")]
     min_line: f64,
+
+    /// How high a point symbol's heatmap has to peak for a point to be
+    /// written there, for a run whose network has a points layer (a dataset
+    /// made with --content areas-lines-points). Lower finds more of the
+    /// points and more that are not.
+    #[arg(long, value_name = "PROBABILITY")]
+    point_threshold: f32,
 
     /// Draw the map which was written, over the very ground the picture
     /// covers, and keep it. It is drawn either way, to score the result.
@@ -334,6 +349,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             simplify,
             line_threshold: DEFAULT_LINE_THRESHOLD,
             lines: LineSettings::default(),
+            point_threshold: DEFAULT_POINT_THRESHOLD,
         };
         let done = read_back_tree(
             &model,
@@ -365,6 +381,16 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
                 model.lines(),
                 symbol_set.display(),
                 catalogue.lines.len(),
+            )));
+        }
+
+        if model.points() != catalogue.points.len() && model.points() > 0 {
+            return Err(failed(format!(
+                "the network answers for {} point symbols and {} holds {}: the symbol set beside \
+                 a run is not the one it trained on",
+                model.points(),
+                symbol_set.display(),
+                catalogue.points.len(),
             )));
         }
 
@@ -435,6 +461,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
                 tolerance,
                 min_length: args.min_line,
             },
+            point_threshold: args.point_threshold,
         };
         let reading = settings.reading_resolution();
         let factor = reading / resolution;
@@ -485,6 +512,14 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             done.lines,
             done.line_symbols,
             catalogue.lines.len(),
+        );
+    }
+    if done.point_symbols > 0 || done.points > 0 {
+        println!(
+            "  it found {} point symbols, of {} of the set's {} point symbols",
+            done.points,
+            done.point_symbols,
+            catalogue.points.len(),
         );
     }
     println!(

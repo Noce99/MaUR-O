@@ -111,6 +111,7 @@ use crate::ground_truth::{GroundTruth, BACKGROUND, NO_ROTATION};
 use crate::line_vector::{objects_of_lines, LineGrid, LineSettings};
 use crate::map::{Object, ObjectKind, PathObject, Point};
 use crate::path_builder::PathBuilder;
+use crate::point_vector::{objects_of_points, Peak};
 use crate::symbol_kinds::{Catalogue, Entry};
 use crate::xml_reader;
 use crate::xml_writer::MapFile;
@@ -277,6 +278,9 @@ pub struct Written {
     /// How many of the objects are lines. Nought where there is no lines
     /// layer, which is [`write_map`].
     pub lines: usize,
+    /// How many of the objects are points. Nought where there is no points
+    /// layer.
+    pub points: usize,
     /// Complaints from reading the source map's symbol set.
     pub warnings: Vec<String>,
 }
@@ -411,6 +415,22 @@ pub fn write_map_with_lines(
     placement: &Placement,
     simplify: &Simplify,
 ) -> Result<Written, String> {
+    write_map_with_layers(grid, lines, &[], source, into, placement, simplify)
+}
+
+/// [`write_map_with_lines`], and the point objects of `points` — peaks found
+/// on a picture of the grid's own size, see [`crate::point_vector`] — each
+/// drawn with the point symbol of its channel, in the order of
+/// [`Catalogue::points`].
+pub fn write_map_with_layers(
+    grid: &SymbolGrid,
+    lines: Option<(&LineGrid, &LineSettings)>,
+    points: &[Peak],
+    source: &Path,
+    into: &Path,
+    placement: &Placement,
+    simplify: &Simplify,
+) -> Result<Written, String> {
     let (mut map, warnings) = xml_reader::read_xml_map(source)?;
     map.resolve_references();
     let catalogue = Catalogue::of(&map);
@@ -428,6 +448,15 @@ pub fn write_map_with_lines(
         line_count = drawn.len();
         objects.extend(drawn);
     }
+    let drawn = objects_of_points(
+        points,
+        &catalogue.points,
+        grid.width,
+        grid.height,
+        placement,
+    )?;
+    let point_count = drawn.len();
+    objects.extend(drawn);
     let mut written = write_objects(
         &objects,
         source,
@@ -436,6 +465,7 @@ pub fn write_map_with_lines(
         warnings,
     )?;
     written.lines = line_count;
+    written.points = point_count;
     Ok(written)
 }
 
@@ -530,6 +560,7 @@ pub fn write_objects(
         objects: objects.len(),
         coords,
         lines: 0,
+        points: 0,
         warnings,
     })
 }

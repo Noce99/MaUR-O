@@ -109,6 +109,7 @@ dataset = "dataset/map_to_omap_datasets/area_and_lines_v2_10000"
 same_angle = 0.05
 line_threshold = 0.5
 min_line = 6
+point_threshold = 0.3
 
 [net.show-batches]
 into = "batches"
