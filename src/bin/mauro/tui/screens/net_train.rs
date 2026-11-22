@@ -227,14 +227,21 @@ impl NetTrain {
         let gpu = self.gpus.gpus.iter().find(|g| g.index == index)?;
         let total = gpu.memory_total? << 20;
         let free = total.saturating_sub(gpu.memory_used.unwrap_or(0) << 20);
-        let (classes, lines, points, scale) = match &self.classes {
-            Some(c) => (c.classes, c.lines, c.points, c.resolution_range.is_some()),
-            None => (GUESSED_CLASSES, 0, 0, false),
+        let (classes, lines, points, angles, scale) = match &self.classes {
+            Some(c) => (
+                c.classes,
+                c.lines,
+                c.points,
+                c.point_angles,
+                c.resolution_range.is_some(),
+            ),
+            None => (GUESSED_CLASSES, 0, 0, false, false),
         };
         let config = UNetConfig::new(classes)
             .with_base_channels(base)
             .with_lines(lines)
             .with_points(points)
+            .with_point_angles(angles)
             .with_scale_head(scale);
         let needed = config.training_bytes(batch, crop)? + PROCESS_OVERHEAD;
         Some(Fit {

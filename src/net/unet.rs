@@ -31,9 +31,12 @@
 //!   which it can, and which a unit-normalized output could not.
 //!
 //! After them come the layers drawn over the ground, where the network has
-//! them: a logit per line symbol (see [`crate::line_truth`]), then a logit
-//! per point symbol, a heatmap which peaks where a point of that symbol is
-//! (see [`crate::point_truth`]). Both are a sigmoid each, not a softmax.
+//! them: a logit per line class (see [`crate::line_truth`]), then a logit
+//! per point class, a heatmap which peaks where a point of that class is
+//! (see [`crate::point_truth`]). Both are a sigmoid each, not a softmax. A
+//! network built with [`UNetConfig::point_angles`] has two channels more
+//! after those, the sine and the cosine of the angle each point is turned to,
+//! straight out with no activation, as the ground's two are.
 //!
 //! [`UNet::forward`] is those `on + 3` raw channels and the layers' after
 //! them, which is what the loss wants. [`UNet::predict`] is the answer in the dataset's own shape: the
@@ -151,6 +154,13 @@ pub struct UNetConfig {
     /// What the points term counts for beside the ground's.
     #[config(default = 1.0)]
     pub point_weight: f64,
+    /// Whether the points layer also says which way each point is turned:
+    /// two more channels after the heatmaps, the sine and the cosine of the
+    /// angle, straight out as the ground's two are, and shared by every point
+    /// symbol — see [`crate::point_truth::PointTruth::angles`]. Off is the
+    /// network it was before there were such channels.
+    #[config(default = false)]
+    pub point_angles: bool,
     /// Whether the network also says how dense the picture is: a head on
     /// the bottom of the encoder answering `ln(density / normal)` for the
     /// whole picture — see the module documentation. Off is the network it
@@ -187,16 +197,29 @@ impl UNetConfig {
         let (b, c) = (i64::try_from(batch).ok()?, i64::try_from(crop).ok()?);
         let descriptor = self.describe();
         let activations = descriptor.activation_count(&[("B", b), ("H", c), ("W", c)])?;
-        let labels = (batch * (self.classes + 2 + self.lines + self.points) * crop * crop) as u64;
+        let labels = (batch
+            * (self.classes + 2 + self.lines + self.points + self.point_angle_channels())
+            * crop
+            * crop) as u64;
         let floats =
             activations * ACTIVATION_FACTOR + labels + descriptor.total_params() * WEIGHT_COPIES;
         floats.checked_mul(4)
     }
 
     /// How many channels the head emits: the ground's, then the lines', then
-    /// the points'.
+    /// the points' and their angle.
     pub fn head_channels(&self) -> usize {
-        self.classes + 3 + self.lines + self.points
+        self.classes + 3 + self.lines + self.points + self.point_angle_channels()
+    }
+
+    /// The two channels of the points' angle, where there are points and
+    /// they have one.
+    fn point_angle_channels(&self) -> usize {
+        if self.points > 0 && self.point_angles {
+            2
+        } else {
+            0
+        }
     }
 
     /// Builds the network on `device`, with its weights initialized.
@@ -241,6 +264,7 @@ impl UNetConfig {
             line_weight: self.line_weight,
             points: self.points,
             point_weight: self.point_weight,
+            point_angles: self.points > 0 && self.point_angles,
             // Built once here rather than per step: the weights are a tensor,
             // and a tensor built inside a training step is a tensor built
             // tens of thousands of times an epoch.
@@ -279,8 +303,10 @@ impl UNetConfig {
                     .into_data()
                     .try_to_vec()
                     .expect("a bias is floats");
+                // The heatmaps alone: the angle after them starts at nought,
+                // which is no angle, as the ground's does.
                 let first = self.classes + 3 + self.lines;
-                for value in &mut values[first..] {
+                for value in &mut values[first..first + self.points] {
                     *value = POINT_PRIOR_LOGIT;
                 }
                 let channels = values.len();
@@ -326,6 +352,9 @@ pub struct UNet {
     points: usize,
     /// What the points term counts for — see [`UNetConfig::point_weight`].
     point_weight: f64,
+    /// Whether the head says which way each point is turned — see
+    /// [`UNetConfig::point_angles`].
+    point_angles: bool,
     /// The cross-entropy the class logits are scored with, its per-class
     /// weights already in it — see [`UNetConfig::class_weights`].
     class_loss: CrossEntropyLoss,
@@ -489,8 +518,15 @@ impl UNet {
         if self.points > 0 {
             // A heatmap per point symbol, each on its own.
             let first = self.classes + 3 + self.lines;
-            let points = raw.slice([0..batch, first..first + self.points, 0..height, 0..width]);
+            let points =
+                raw.clone()
+                    .slice([0..batch, first..first + self.points, 0..height, 0..width]);
             answer.push(sigmoid(points));
+            if self.point_angles {
+                // The angle as it is, as the ground's is.
+                let first = first + self.points;
+                answer.push(raw.slice([0..batch, first..first + 2, 0..height, 0..width]));
+            }
         }
         Tensor::cat(answer, 1)
     }
@@ -516,7 +552,13 @@ impl UNet {
     /// opaque area, two for the angle, one per line symbol and one per point
     /// symbol.
     pub fn channels(&self) -> usize {
-        self.classes + 2 + self.lines + self.points
+        self.classes + 2 + self.lines + self.points + if self.point_angles { 2 } else { 0 }
+    }
+
+    /// Whether it says which way each point is turned, in two channels after
+    /// the heatmaps — see [`UNetConfig::point_angles`].
+    pub fn point_angles(&self) -> bool {
+        self.point_angles
     }
 
     /// How many point symbols it answers for, nought for a network with no
@@ -943,10 +985,13 @@ impl UNetConfig {
                 } else {
                     String::new()
                 },
-                if self.points > 0 {
-                    format!(", then {} point heatmap logits", self.points)
-                } else {
-                    String::new()
+                match (self.points, self.point_angle_channels()) {
+                    (0, _) => String::new(),
+                    (points, 0) => format!(", then {points} point heatmap logits"),
+                    (points, _) => format!(
+                        ", then {points} point heatmap logits and the sine and cosine of the \
+                         points' angle"
+                    ),
                 }
             ));
 
@@ -1131,6 +1176,48 @@ mod tests {
             &[("B", 2), ("H", 32), ("W", 48)],
         );
         assert_eq!(descriptor.total_params(), net.num_params() as u64);
+    }
+
+    /// A network which says which way its points are turned has two more
+    /// channels after the heatmaps, which start at nought rather than at the
+    /// heatmaps' low prior, and its descriptor holds to its forward pass.
+    #[test]
+    fn the_points_angle_is_two_channels_after_the_heatmaps() {
+        let device = Device::flex();
+        let config = UNetConfig::new(5)
+            .with_base_channels(4)
+            .with_lines(3)
+            .with_points(2)
+            .with_point_angles(true);
+        let net = config.init(&device);
+        let answer = net.predict(Tensor::zeros([1, 3, 16, 16], &device));
+        assert_eq!(answer.dims(), [1, 5 + 2 + 3 + 2 + 2, 16, 16]);
+        assert_eq!(net.channels(), 14);
+        assert!(net.point_angles());
+        let angle = answer.slice([0..1, 12..14, 0..16, 0..16]);
+        let values = angle.into_data().try_to_vec::<f32>().expect("floats");
+        let mean = values.iter().map(|v| v.abs()).sum::<f32>() / values.len() as f32;
+        assert!(mean < 1.0, "the angle starts out near no angle: {mean}");
+
+        let descriptor = config.describe();
+        let mut reported = Vec::new();
+        net.forward_tapped(
+            Tensor::<4>::zeros([2, 3, 32, 48], &device),
+            &mut |key, dims| {
+                reported.push((key.to_string(), dims.to_vec()));
+            },
+        );
+        crate::net::describe::assert_matches_forward(
+            &descriptor,
+            &reported,
+            &[("B", 2), ("H", 32), ("W", 48)],
+        );
+        assert_eq!(descriptor.total_params(), net.num_params() as u64);
+        // With no points, there is no angle of them to give.
+        assert_eq!(
+            UNetConfig::new(5).with_point_angles(true).head_channels(),
+            UNetConfig::new(5).head_channels()
+        );
     }
 
     /// The descriptor of a network with lines holds to its forward pass too.

@@ -53,6 +53,17 @@
 //! symbols are the only thing which shows the density. Each map's is written
 //! to `dataset/resolutions.csv`, and the range to `classes.json`.
 //!
+//! A symbol set with a table of labels beside it — `almost_ISSprOM.omap`
+//! and `almost_ISSprOM.labels.json` — is labelled by the table rather than
+//! a class per symbol: the maps are drawn with the set's own symbols, and
+//! what the labels say is the fewer things those draw, a building as its
+//! fill and its outline, a road as a strip of paved area and its borders,
+//! two symbols which look alike as one (see [`maur_o::label_set`]). The
+//! table is copied into the dataset beside the set, and `classes.json`
+//! names it. A symbol the table keeps for parts of others is not drawn on
+//! its own, and a line is only drawn along a side where it shows up over
+//! the ground on both sides of it.
+//!
 //! The whole dataset follows from the seed: the same options give the same
 //! maps, down to the coordinate, and the n-th map is the same map whatever
 //! number of maps was asked for.
@@ -329,6 +340,17 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         println!("  {:<17} {:>4}", kind.name(), entries.len());
     }
 
+    // What the labels are in, where a table says rather than the symbols.
+    if let Some(table) = &summary.labels.table {
+        println!(
+            "  labelled by {}: {} classes of ground, {} of lines, {} of points",
+            table.display(),
+            summary.labels.areas.len(),
+            summary.labels.lines.len(),
+            summary.labels.points.len(),
+        );
+    }
+
     // What may go over what: the pairs which show up, of the pairs there are.
     let (shown, tried) = summary.overlays.transparent_pairs(&summary.catalogue);
     println!("  {shown} of {tried} transparent areas over a fill show up");
@@ -393,6 +415,12 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             .unwrap_or(summary.symbol_set.as_os_str())
             .to_string_lossy(),
     );
+    if let Some(name) = summary.labels.table.as_ref().and_then(|t| t.file_name()) {
+        println!(
+            "  {} the table the labels' classes come out of, copied in",
+            name.to_string_lossy()
+        );
+    }
     let images = count(|g| g.image.is_some());
     if images == 0 {
         println!("  {IMAGES_FOLDER}/ nothing: --no-images was asked for");
@@ -433,8 +461,8 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
              which",
             summary.image_size,
             summary.image_size,
-            fills + 2,
-            fills,
+            summary.labels.areas.len() + 2,
+            summary.labels.areas.len(),
         );
     }
 

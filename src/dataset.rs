@@ -28,7 +28,8 @@
 //!
 //! What the last three draw is picked out of what step one allows: an
 //! overlay is only ever put on ground it shows up against, so a generated
-//! map has nothing on it which the drawing order buries. The lettering of a
+//! map has nothing on it which the drawing order buries, nor anything drawn
+//! in the very ink of the ground under it. The lettering of a
 //! symbol set is the one kind nothing draws with yet.
 //!
 //! [`Settings::just_opaque_areas`] stops after step three, which leaves a map
@@ -125,14 +126,15 @@ use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
 
 use crate::geometry::{flatten, Rect};
-use crate::ground_truth::{Ground, GroundTruth};
+use crate::ground_truth::GroundTruth;
+use crate::label_set::LabelSet;
 use crate::layout::{is_inside, Layout};
 use crate::map::{Coord, CoordList, Map, Object, ObjectKind, PathObject, Point};
 use crate::path_builder::coord_at;
 use crate::random::Random;
 use crate::render::{render_map_over, save_pixmap, Extent, DEFAULT_FRAME, DEFAULT_RESOLUTION};
 use crate::renderer::Renderer;
-use crate::symbol_kinds::{Catalogue, Entry, Overlays};
+use crate::symbol_kinds::{shows_over, Catalogue, Entry, Overlays};
 use crate::xml_reader;
 use crate::xml_writer::MapFile;
 
@@ -413,8 +415,13 @@ pub struct Generated {
 pub struct Summary {
     /// The maps written, in the order they were generated.
     pub written: Vec<Generated>,
-    /// The symbol set the maps were built from, sorted into kinds.
+    /// The symbols the maps were built from, sorted into kinds: the set's,
+    /// less those its table of labels says are only ever drawn as parts of
+    /// others.
     pub catalogue: Catalogue,
+    /// What a network is told about the maps: the classes their labels are
+    /// in, and how each symbol is labelled with them.
+    pub labels: LabelSet,
     /// What of that set may be drawn over what, which is what the generator
     /// picked its overlays out of.
     pub overlays: Overlays,
@@ -533,7 +540,13 @@ pub fn create_dataset(
     map.resolve_references();
     let fragments = xml_reader::read_fragments(source)?;
 
-    let catalogue = Catalogue::of(&map);
+    // What a network is told about these maps: a class per symbol, or what
+    // the table beside the set says -- and, where there is a table, the
+    // symbols it gives no parts to are only ever parts of others, and are
+    // not drawn on their own.
+    let labels = LabelSet::beside(&map, source)?;
+    let mut catalogue = Catalogue::of(&map);
+    catalogue.retain(|entry| labels.drawn(entry.index));
     if catalogue.opaque_areas.is_empty() {
         return Err(format!(
             "{} holds no opaque area symbol, so there is nothing to fill a cell with",
@@ -575,13 +588,34 @@ pub fn create_dataset(
     // folder is for, a label in it means nothing without the list of symbols
     // its classes are places in.
     let symbol_set = copy_symbol_set(source, into)?;
+    // And the table its classes come out of, under its own name beside it,
+    // where there is one: the classes of a label are places in that.
+    let table = match &labels.table {
+        Some(table) => Some(copy_symbol_set(table, into)?),
+        None => None,
+    };
     if answerable {
-        write_classes(&into.join(CLASSES_FILE), &catalogue, settings, &symbol_set)?;
+        let classes = Catalogue {
+            opaque_areas: labels.areas.clone(),
+            lines: labels.lines.clone(),
+            points: labels.points.clone(),
+            ..Catalogue::default()
+        };
+        write_classes(
+            &into.join(CLASSES_FILE),
+            &classes,
+            table.as_deref(),
+            settings,
+            &symbol_set,
+        )?;
     }
 
     let generator = Generator {
+        map: &map,
         catalogue: &catalogue,
         overlays: &overlays,
+        labels: &labels,
+        lines_over: lines_over(&map, &catalogue),
         settings,
         // Map coordinates are in mm on the paper; a layout is in meters on
         // the ground.
@@ -615,7 +649,7 @@ pub fn create_dataset(
             settings.cell_size as f64 * sheet.stretch,
             &mut random,
         );
-        let (objects, ground) = generator.draw(&layout, &mut random, &mut drawn);
+        let objects = generator.draw(&layout, &mut random, &mut drawn);
 
         let stem = map_stem(index, settings.maps);
         // `{}` of an f64 is the shortest text which reads back as the same
@@ -661,8 +695,8 @@ pub fn create_dataset(
                 // the pixel it labels are the same pixel.
                 let path = gt_folder.join(format!("{stem}.bin"));
                 GroundTruth::rasterize(
-                    &ground,
-                    catalogue.opaque_areas.len(),
+                    &labels.grounds(&map, &objects),
+                    labels.areas.len(),
                     drawing.pixmap.width(),
                     drawing.pixmap.height(),
                     drawing.page_transform,
@@ -696,6 +730,7 @@ pub fn create_dataset(
     Ok(Summary {
         written,
         catalogue,
+        labels,
         overlays,
         drawn,
         scale_denominator: map.scale_denominator,
@@ -741,8 +776,14 @@ pub fn copy_symbol_set(source: &Path, into: &Path) -> Result<String, String> {
 
 /// The symbol set as the generator uses it, and how much of it to use.
 struct Generator<'a> {
+    /// The set itself, which the symbols are looked up in.
+    map: &'a Map,
     catalogue: &'a Catalogue,
     overlays: &'a Overlays,
+    labels: &'a LabelSet,
+    /// For each opaque area, the lines which show up over it, as places in
+    /// [`Catalogue::lines`] — see [`lines_over`].
+    lines_over: Vec<Vec<usize>>,
     settings: &'a Settings,
     /// How many mm on the paper one meter on the ground is.
     mm_per_meter: f64,
@@ -760,59 +801,72 @@ impl Generator<'_> {
     /// areas over the ground, and the point symbols scattered on it. Only the
     /// first of them where [`Settings::just_opaque_areas`] is on.
     ///
-    /// The ground comes back a second time beside the objects, as the shapes
-    /// and the symbols they were filled with rather than as things to draw:
-    /// that is the answer a label records, and it is known here, where the
-    /// dice were rolled, rather than anywhere downstream of the file.
-    fn draw(
-        &self,
-        layout: &Layout,
-        random: &mut Random,
-        drawn: &mut Drawn,
-    ) -> (Vec<Object>, Vec<Ground>) {
+    /// The labels are not decided here: they are what the objects come to
+    /// under the [`LabelSet`], worked out from the objects wherever they are
+    /// wanted, so that a label rebuilt from the map file and one written at
+    /// generation time are the same label.
+    fn draw(&self, layout: &Layout, random: &mut Random, drawn: &mut Drawn) -> Vec<Object> {
         let outlines = layout.cell_outlines(self.mm_per_meter);
         let mut objects = Vec::with_capacity(outlines.len());
 
         // The ground. The draws are independent, so two cells side by side
         // are sometimes the same ground cover; the shape of the layout is
-        // still there, in the boundaries which do show.
-        let ground: Vec<Ground> = outlines
+        // still there, in the boundaries which do show. Each cell's fill is
+        // kept as its place in the catalogue, which is what the overlays are
+        // listed by.
+        let fills: Vec<usize> = outlines
             .iter()
             .map(|outline| {
                 let at = random.below(self.catalogue.opaque_areas.len());
                 let fill = &self.catalogue.opaque_areas[at];
-                let object = self.area_object(fill, outline.clone(), random);
-                let cell = Ground {
-                    class: at,
-                    // A symbol with no pattern to turn was given no angle,
-                    // which is not the same as having been given nought.
-                    turn: fill.turns.then_some(object.rotation),
-                    outline: outline.clone(),
-                };
-                objects.push(object);
+                objects.push(self.area_object(fill, outline.clone(), random));
                 drawn.fills += 1;
-                cell
+                at
             })
             .collect();
 
         // The ground on its own, where that is all which was asked for: a
         // patchwork of the set's opaque areas, with nothing drawn over it.
         if self.settings.just_opaque_areas {
-            return (objects, ground);
+            return objects;
+        }
+
+        // What the point symbols are kept off: the lines, and the outline a
+        // cell is labelled with where its symbol draws one round it -- a
+        // building's, a lake's.
+        let mut taken = Taken::default();
+        for (cell, &at) in fills.iter().enumerate() {
+            let half = self
+                .labels
+                .outline_half_width(self.map, self.catalogue.opaque_areas[at].index);
+            if half > 0.0 {
+                taken.add_line(&outlines[cell], half);
+            }
         }
 
         // A line along some of the cell sides. A side belongs to two cells
         // at once and is drawn once, so what runs along it is the boundary
-        // itself rather than one cell's idea of it.
-        // What the point symbols are kept off, which the lines are the
-        // first of.
-        let mut taken = Taken::default();
+        // itself rather than one cell's idea of it -- and what runs along it
+        // is picked out of the lines which show up over both of them, since
+        // a line drawn in the ink of the ground beside it is a line nobody
+        // can see, and a label of one is a label of nothing.
         if !self.catalogue.lines.is_empty() {
-            for side in layout.side_paths(self.mm_per_meter) {
+            let sides = layout.side_paths(self.mm_per_meter);
+            for (side, cells) in sides.into_iter().zip(layout.side_cells()) {
                 if random.chance(self.settings.empty_sides) {
                     continue;
                 }
-                let at = random.below(self.catalogue.lines.len());
+                let visible: Vec<usize> = (0..self.catalogue.lines.len())
+                    .filter(|line| {
+                        cells
+                            .iter()
+                            .flatten()
+                            .all(|&cell| self.lines_over[fills[cell]].contains(line))
+                    })
+                    .collect();
+                let Some(&at) = random.pick(&visible) else {
+                    continue;
+                };
                 let line = &self.catalogue.lines[at];
                 taken.add_line(&side, self.line_half_widths[at]);
                 let mut object = Object::new(ObjectKind::Path(PathObject::default()));
@@ -826,7 +880,7 @@ impl Generator<'_> {
         // A see-through area over some of the cells, picked out of the ones
         // which show up over that cell's ground rather than out of all of
         // them.
-        for (cell, at) in ground.iter().map(|cell| cell.class).enumerate() {
+        for (cell, &at) in fills.iter().enumerate() {
             if !random.chance(self.settings.transparent_areas) {
                 continue;
             }
@@ -843,7 +897,7 @@ impl Generator<'_> {
         // is a thing a renderer has to get right and a surveyor draws every
         // day; one on a line or on another point symbol is not, and leaves a
         // pixel with two answers, so those are kept apart -- see `place`.
-        for (cell, at) in ground.iter().map(|cell| cell.class).enumerate() {
+        for (cell, &at) in fills.iter().enumerate() {
             let polygon: Vec<Point> = flatten(&outlines[cell])
                 .into_iter()
                 .next()
@@ -871,7 +925,7 @@ impl Generator<'_> {
             }
         }
 
-        (objects, ground)
+        objects
     }
 
     /// A path object drawn with an area symbol, turned to an angle of its own
@@ -903,6 +957,29 @@ impl Generator<'_> {
 fn drawn_with(object: &mut Object, symbol: &Entry) {
     object.symbol_index = Some(symbol.index);
     object.symbol_id = symbol.id;
+}
+
+/// For each opaque area of `catalogue`, the lines of it which show up drawn
+/// over that ground, as places in [`Catalogue::lines`] — the same question
+/// [`Overlays`] answers for the see-through areas and the point symbols, see
+/// [`shows_over`]. A strip of green vegetation is drawn under the white of a
+/// forest, and a black line over a black boulder is not there to see.
+fn lines_over(map: &Map, catalogue: &Catalogue) -> Vec<Vec<usize>> {
+    catalogue
+        .opaque_areas
+        .iter()
+        .map(|ground| {
+            catalogue
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| {
+                    shows_over(map, &map.symbols[line.index], &map.symbols[ground.index])
+                })
+                .map(|(at, _)| at)
+                .collect()
+        })
+        .collect()
 }
 
 /// The least gap between a point symbol and a line, in mm on the paper,
@@ -1087,10 +1164,15 @@ pub fn map_name(index: usize, total: usize) -> String {
 /// it is the symbol set which decides it rather than any one map.
 ///
 /// `symbol_set` is the name that set was copied in under, so that anything
-/// reading this file can find the symbols themselves beside it.
+/// reading this file can find the symbols themselves beside it, and `table`
+/// the name its table of labels was copied in under, where the classes are
+/// that table's rather than one per symbol — see [`crate::label_set`]. The
+/// entries of `catalogue` are the classes, each under the symbol it is
+/// written back with.
 fn write_classes(
     path: &Path,
     catalogue: &Catalogue,
+    table: Option<&str>,
     settings: &Settings,
     symbol_set: &str,
 ) -> Result<(), String> {
@@ -1098,6 +1180,10 @@ fn write_classes(
     let mut json = String::from("{\n");
     json.push_str("  \"format\": \"MAUROGT2\",\n");
     json.push_str(&format!("  \"symbol_set\": {},\n", quoted(symbol_set)));
+    // The table the classes come out of, where they are not one per symbol.
+    if let Some(table) = table {
+        json.push_str(&format!("  \"labels\": {},\n", quoted(table)));
+    }
     json.push_str(&format!("  \"classes\": {classes},\n"));
     json.push_str(&format!("  \"channels\": {},\n", classes + 2));
     // The angle is the last two channels, its sine and then its cosine: an
@@ -1125,6 +1211,11 @@ fn write_classes(
         0
     };
     json.push_str(&format!("  \"points\": {points},\n"));
+    // Which way each point is turned, as two more channels after the
+    // heatmaps: see `crate::point_truth::PointTruth::angles`.
+    if points > 0 {
+        json.push_str("  \"point_angles\": true,\n");
+    }
     json.push_str(&format!("  \"image_size\": {},\n", settings.image_size()));
     json.push_str(&format!("  \"resolution\": {},\n", settings.resolution));
     // The range the maps' own densities were drawn from, only where they
@@ -1225,6 +1316,14 @@ pub struct Classes {
     /// one. `None` for a dataset generated before it was copied there, which
     /// is a dataset nothing can turn back into a map.
     pub symbol_set: Option<String>,
+    /// The table of labels the classes come out of, as a file name beside
+    /// this one — see [`crate::label_set`]. `None` for a dataset with a class
+    /// per symbol.
+    pub labels: Option<String>,
+    /// Whether the points layer says which way each point is turned, in two
+    /// channels after the heatmaps — see [`crate::point_truth`]. Off for a
+    /// dataset written before it did.
+    pub point_angles: bool,
 }
 
 impl Classes {
@@ -1271,6 +1370,11 @@ impl Classes {
                 .and_then(|value| value.strip_prefix('"'))
                 .and_then(|value| value.split('"').next())
                 .map(str::to_string),
+            labels: value_of(&text, "labels")
+                .and_then(|value| value.strip_prefix('"'))
+                .and_then(|value| value.split('"').next())
+                .map(str::to_string),
+            point_angles: value_of(&text, "point_angles").is_some_and(|v| v.starts_with("true")),
         })
     }
 }
@@ -1427,7 +1531,7 @@ mod tests {
             ..Settings::default()
         };
         let file = tempfile::NamedTempFile::new().expect("a temporary file");
-        write_classes(file.path(), &catalogue, &settings, "ISOM_10k.omap")
+        write_classes(file.path(), &catalogue, None, &settings, "ISOM_10k.omap")
             .expect("cannot write the classes");
 
         let read = Classes::read(file.path()).expect("cannot read them back");
@@ -1465,11 +1569,17 @@ mod tests {
             line_labels: true,
             ..Settings::default()
         };
-        write_classes(file.path(), &catalogue, &labelled, "set.omap").expect("cannot write");
+        write_classes(file.path(), &catalogue, None, &labelled, "set.omap").expect("cannot write");
         assert_eq!(Classes::read(file.path()).expect("read").lines, 2);
 
-        write_classes(file.path(), &catalogue, &Settings::default(), "set.omap")
-            .expect("cannot write");
+        write_classes(
+            file.path(),
+            &catalogue,
+            None,
+            &Settings::default(),
+            "set.omap",
+        )
+        .expect("cannot write");
         assert_eq!(Classes::read(file.path()).expect("read").lines, 0);
         assert_eq!(Classes::read(file.path()).expect("read").points, 0);
 
@@ -1482,7 +1592,7 @@ mod tests {
             point_labels: true,
             ..Settings::default()
         };
-        write_classes(file.path(), &catalogue, &labelled, "set.omap").expect("cannot write");
+        write_classes(file.path(), &catalogue, None, &labelled, "set.omap").expect("cannot write");
         let read = Classes::read(file.path()).expect("read");
         assert_eq!((read.lines, read.points), (2, 3));
     }
@@ -1591,6 +1701,72 @@ mod tests {
         );
     }
 
+    /// A set with a table of labels beside it is labelled by the table: the
+    /// table goes into the dataset beside the set, `classes.json` names it
+    /// and lists its classes, and the symbols it keeps for parts of others
+    /// are never drawn on their own.
+    #[test]
+    fn a_set_with_a_table_is_labelled_by_the_table() {
+        let source = std::path::Path::new("symbols_sets/almost_ISSprOM.omap");
+        let dir = tempfile::tempdir().expect("a folder");
+        let settings = Settings {
+            layout_size: 3,
+            cell_size: 30,
+            maps: 2,
+            transparent_areas: 0.0,
+            line_labels: true,
+            point_labels: true,
+            ..Settings::default()
+        };
+        let summary = create_dataset(source, dir.path(), &settings, |_, _| {})
+            .expect("the dataset is generated");
+        let read = Classes::read(&dir.path().join(CLASSES_FILE)).expect("classes.json");
+        assert_eq!((read.classes, read.lines, read.points), (33, 41, 29));
+        assert_eq!(read.labels.as_deref(), Some("almost_ISSprOM.labels.json"));
+        assert!(read.point_angles);
+        assert!(dir.path().join("almost_ISSprOM.labels.json").is_file());
+
+        let fill = summary.labels.parts(
+            summary
+                .catalogue
+                .opaque_areas
+                .iter()
+                .find(|e| e.code == "521")
+                .expect("a building is drawn")
+                .index,
+        );
+        assert_eq!(fill.len(), 2);
+        for generated in &summary.written {
+            let (mut map, _) = xml_reader::read_xml_map(&generated.map).expect("a map");
+            map.resolve_references();
+            for object in &map.objects {
+                let index = object.symbol_index.expect("a symbol");
+                assert!(summary.labels.drawn(index), "{}", map.symbols[index].code());
+            }
+        }
+    }
+
+    /// A line is only ever drawn where it can be seen: a strip of green
+    /// vegetation goes under the white of a forest, and is not drawn beside
+    /// one.
+    #[test]
+    fn a_line_shows_up_over_the_ground_it_may_be_drawn_on() {
+        let (mut map, _) =
+            xml_reader::read_xml_map(std::path::Path::new("symbols_sets/almost_ISSprOM.omap"))
+                .expect("the set");
+        map.resolve_references();
+        let catalogue = Catalogue::of(&map);
+        let over = lines_over(&map, &catalogue);
+        let at = |list: &[Entry], code: &str| list.iter().position(|e| e.code == code).unwrap();
+        let forest = at(&catalogue.opaque_areas, "405");
+        let open_land = at(&catalogue.opaque_areas, "401");
+        let narrow = at(&catalogue.lines, "406.2");
+        let path = at(&catalogue.lines, "506");
+        assert!(!over[forest].contains(&narrow));
+        assert!(over[open_land].contains(&narrow));
+        assert!(over[forest].contains(&path));
+    }
+
     /// A dataset generated before the set was copied in says nothing about
     /// one, which is an answer rather than a file which cannot be read.
     #[test]
@@ -1657,6 +1833,7 @@ mod tests {
             write_classes(
                 &dir.path().join(CLASSES_FILE),
                 &catalogue,
+                None,
                 &settings,
                 "symbols.ocd",
             )

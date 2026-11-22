@@ -1,0 +1,1157 @@
+{
+ "symbol_set": "almost_ISSprOM.omap",
+ "areas": [
+  {
+   "name": "Open land",
+   "symbol": "401"
+  },
+  {
+   "name": "Open land with scattered trees",
+   "symbol": "402"
+  },
+  {
+   "name": "Open land with scattered bushes",
+   "symbol": "402.1"
+  },
+  {
+   "name": "Rough open land",
+   "symbol": "403"
+  },
+  {
+   "name": "Rough open land with scattered trees",
+   "symbol": "404"
+  },
+  {
+   "name": "Rough open land with scattered bushes",
+   "symbol": "404.1"
+  },
+  {
+   "name": "Forest",
+   "symbol": "405"
+  },
+  {
+   "name": "Vegetation: slow running",
+   "symbol": "406"
+  },
+  {
+   "name": "Vegetation: slow running, normal running in one direction",
+   "symbol": "406.1"
+  },
+  {
+   "name": "Vegetation: walk",
+   "symbol": "408"
+  },
+  {
+   "name": "Vegetation: walk, normal running in one direction",
+   "symbol": "408.1"
+  },
+  {
+   "name": "Vegetation: walk, slow running in one direction",
+   "symbol": "408.2"
+  },
+  {
+   "name": "Vegetation: fight",
+   "symbol": "410"
+  },
+  {
+   "name": "Vegetation: fight, normal running in one direction",
+   "symbol": "410.2"
+  },
+  {
+   "name": "Vegetation: fight, slow running in one direction",
+   "symbol": "410.3"
+  },
+  {
+   "name": "Vegetation: fight, walk in one direction",
+   "symbol": "410.4"
+  },
+  {
+   "name": "Uncrossable vegetation",
+   "symbol": "411"
+  },
+  {
+   "name": "Orchard",
+   "symbol": "413"
+  },
+  {
+   "name": "Orchard, rough open land",
+   "symbol": "413.1"
+  },
+  {
+   "name": "Vineyard or similar",
+   "symbol": "414"
+  },
+  {
+   "name": "Vineyard or similar, rough open land",
+   "symbol": "414.1"
+  },
+  {
+   "name": "Open sandy ground",
+   "symbol": "213"
+  },
+  {
+   "name": "Bare rock",
+   "symbol": "214"
+  },
+  {
+   "name": "Gigantic boulder or rock pillar",
+   "symbol": "206"
+  },
+  {
+   "name": "Uncrossable body of water (full colour)",
+   "symbol": "301.1"
+  },
+  {
+   "name": "Uncrossable body of water (dominant)",
+   "symbol": "301.3"
+  },
+  {
+   "name": "Shallow body of water",
+   "symbol": "302.1"
+  },
+  {
+   "name": "Paved area, light traffic",
+   "symbol": "501.5"
+  },
+  {
+   "name": "Paved area with scattered trees",
+   "symbol": "501.3"
+  },
+  {
+   "name": "Paved area, heavy traffic",
+   "symbol": "501.11"
+  },
+  {
+   "name": "Area that shall not be entered",
+   "symbol": "520"
+  },
+  {
+   "name": "Building",
+   "symbol": "521.3"
+  },
+  {
+   "name": "Canopy",
+   "symbol": "522.3"
+  }
+ ],
+ "lines": [
+  {
+   "name": "Contour",
+   "symbol": "101"
+  },
+  {
+   "name": "Index contour",
+   "symbol": "102"
+  },
+  {
+   "name": "Form line",
+   "symbol": "103"
+  },
+  {
+   "name": "Earth bank",
+   "symbol": "104"
+  },
+  {
+   "name": "Earth bank, very high",
+   "symbol": "104.1"
+  },
+  {
+   "name": "Small earth wall",
+   "symbol": "105.1"
+  },
+  {
+   "name": "Retaining earth wall",
+   "symbol": "105.2"
+  },
+  {
+   "name": "Erosion gully",
+   "symbol": "107"
+  },
+  {
+   "name": "Small erosion gully",
+   "symbol": "108"
+  },
+  {
+   "name": "Uncrossable cliff",
+   "symbol": "201"
+  },
+  {
+   "name": "Black line 0.50 mm",
+   "symbol": "201.3"
+  },
+  {
+   "name": "Passable rock face",
+   "symbol": "202.1"
+  },
+  {
+   "name": "Black line 0.30 mm",
+   "symbol": "202.3"
+  },
+  {
+   "name": "Black line 0.18 mm",
+   "symbol": "301.6"
+  },
+  {
+   "name": "Black line 0.14 mm",
+   "symbol": "415"
+  },
+  {
+   "name": "Black line 0.10 mm",
+   "symbol": "501.1"
+  },
+  {
+   "name": "Black dashed line 0.10 mm",
+   "symbol": "501.2"
+  },
+  {
+   "name": "Black dashed line 0.12 mm",
+   "symbol": "505.6"
+  },
+  {
+   "name": "Distinct vegetation boundary",
+   "symbol": "416"
+  },
+  {
+   "name": "Small unpaved footpath or track",
+   "symbol": "506"
+  },
+  {
+   "name": "Less distinct small path",
+   "symbol": "507"
+  },
+  {
+   "name": "Narrow ride",
+   "symbol": "508"
+  },
+  {
+   "name": "Railway",
+   "symbol": "509.1"
+  },
+  {
+   "name": "Tramway",
+   "symbol": "509.2"
+  },
+  {
+   "name": "Power line, cableway or skilift",
+   "symbol": "510"
+  },
+  {
+   "name": "Major power line",
+   "symbol": "511"
+  },
+  {
+   "name": "Major power line with pylons",
+   "symbol": "511.1"
+  },
+  {
+   "name": "Bridge or tunnel entrance",
+   "symbol": "512.1"
+  },
+  {
+   "name": "Underpass or tunnel",
+   "symbol": "512.2"
+  },
+  {
+   "name": "Passable wall",
+   "symbol": "513.1"
+  },
+  {
+   "name": "Passable retaining wall",
+   "symbol": "513.2"
+  },
+  {
+   "name": "Uncrossable wall",
+   "symbol": "515"
+  },
+  {
+   "name": "Passable fence or railing",
+   "symbol": "516"
+  },
+  {
+   "name": "Uncrossable fence or railing",
+   "symbol": "518"
+  },
+  {
+   "name": "Prominent line feature",
+   "symbol": "528"
+  },
+  {
+   "name": "Prominent uncrossable line feature",
+   "symbol": "529"
+  },
+  {
+   "name": "Stairway",
+   "symbol": "532.7"
+  },
+  {
+   "name": "Blue line 0.18 mm",
+   "symbol": "302.6"
+  },
+  {
+   "name": "Small crossable watercourse",
+   "symbol": "305"
+  },
+  {
+   "name": "Minor / seasonal watercourse",
+   "symbol": "306"
+  },
+  {
+   "name": "Narrow marsh",
+   "symbol": "309"
+  }
+ ],
+ "points": [
+  {
+   "name": "Slope line",
+   "symbol": "101.1"
+  },
+  {
+   "name": "Small knoll",
+   "symbol": "109"
+  },
+  {
+   "name": "Small elongated knoll",
+   "symbol": "110",
+   "symmetry": 2
+  },
+  {
+   "name": "Small depression",
+   "symbol": "111"
+  },
+  {
+   "name": "Pit or hole",
+   "symbol": "112"
+  },
+  {
+   "name": "Prominent landform feature",
+   "symbol": "115"
+  },
+  {
+   "name": "Rocky pit or cave",
+   "symbol": "203"
+  },
+  {
+   "name": "Cave",
+   "symbol": "203.1"
+  },
+  {
+   "name": "Boulder",
+   "symbol": "204"
+  },
+  {
+   "name": "Large boulder",
+   "symbol": "205"
+  },
+  {
+   "name": "Boulder cluster",
+   "symbol": "207"
+  },
+  {
+   "name": "Boulder cluster, large",
+   "symbol": "207.1"
+  },
+  {
+   "name": "Boulder field, single triangle",
+   "symbol": "208.1"
+  },
+  {
+   "name": "Boulder field, single triangle, enlarged",
+   "symbol": "208.2"
+  },
+  {
+   "name": "Waterhole",
+   "symbol": "303"
+  },
+  {
+   "name": "Small fountain or well",
+   "symbol": "311",
+   "symmetry": 4
+  },
+  {
+   "name": "Spring",
+   "symbol": "312"
+  },
+  {
+   "name": "Prominent water feature",
+   "symbol": "313"
+  },
+  {
+   "name": "Prominent large tree",
+   "symbol": "417"
+  },
+  {
+   "name": "Prominent bush or small tree",
+   "symbol": "418"
+  },
+  {
+   "name": "Prominent vegetation feature",
+   "symbol": "419"
+  },
+  {
+   "name": "Crossing point",
+   "symbol": "519",
+   "symmetry": 2
+  },
+  {
+   "name": "Pillar",
+   "symbol": "522.1",
+   "symmetry": 4
+  },
+  {
+   "name": "High tower",
+   "symbol": "524"
+  },
+  {
+   "name": "Small tower",
+   "symbol": "525"
+  },
+  {
+   "name": "Cairn, memorial or boundary stone",
+   "symbol": "526"
+  },
+  {
+   "name": "Fodder rack",
+   "symbol": "527"
+  },
+  {
+   "name": "Prominent man-made feature – ring",
+   "symbol": "530"
+  },
+  {
+   "name": "Prominent man-made feature – x",
+   "symbol": "531"
+  }
+ ],
+ "symbols": {
+  "101": [
+   {
+    "line": "Contour"
+   }
+  ],
+  "101.1": [
+   {
+    "point": "Slope line"
+   }
+  ],
+  "102": [
+   {
+    "line": "Index contour"
+   }
+  ],
+  "102.1": [
+   {
+    "point": "Slope line"
+   }
+  ],
+  "103": [
+   {
+    "line": "Form line"
+   }
+  ],
+  "103.1": [
+   {
+    "point": "Slope line"
+   }
+  ],
+  "104": [
+   {
+    "line": "Earth bank"
+   }
+  ],
+  "104.1": [
+   {
+    "line": "Earth bank, very high"
+   }
+  ],
+  "104.2": [
+   {
+    "line": "Contour"
+   }
+  ],
+  "105.1": [
+   {
+    "line": "Small earth wall"
+   }
+  ],
+  "105.2": [
+   {
+    "line": "Retaining earth wall"
+   }
+  ],
+  "107": [
+   {
+    "line": "Erosion gully"
+   }
+  ],
+  "108": [
+   {
+    "line": "Small erosion gully"
+   }
+  ],
+  "109": [
+   {
+    "point": "Small knoll"
+   }
+  ],
+  "110": [
+   {
+    "point": "Small elongated knoll"
+   }
+  ],
+  "111": [
+   {
+    "point": "Small depression"
+   }
+  ],
+  "112": [
+   {
+    "point": "Pit or hole"
+   }
+  ],
+  "115": [
+   {
+    "point": "Prominent landform feature"
+   }
+  ],
+  "201": [
+   {
+    "line": "Uncrossable cliff"
+   }
+  ],
+  "201.3": [
+   {
+    "line": "Black line 0.50 mm"
+   }
+  ],
+  "201.4": [
+   {
+    "line": "Black line 0.18 mm"
+   }
+  ],
+  "202": [
+   {
+    "line": "Black line 0.30 mm"
+   }
+  ],
+  "202.1": [
+   {
+    "line": "Passable rock face"
+   }
+  ],
+  "202.3": [
+   {
+    "line": "Black line 0.30 mm"
+   }
+  ],
+  "202.4": [
+   {
+    "line": "Black line 0.18 mm"
+   }
+  ],
+  "203": [
+   {
+    "point": "Rocky pit or cave"
+   }
+  ],
+  "203.1": [
+   {
+    "point": "Cave"
+   }
+  ],
+  "204": [
+   {
+    "point": "Boulder"
+   }
+  ],
+  "205": [
+   {
+    "point": "Large boulder"
+   }
+  ],
+  "206": [
+   {
+    "area": "Gigantic boulder or rock pillar"
+   }
+  ],
+  "207": [
+   {
+    "point": "Boulder cluster"
+   }
+  ],
+  "207.1": [
+   {
+    "point": "Boulder cluster, large"
+   }
+  ],
+  "208.1": [
+   {
+    "point": "Boulder field, single triangle"
+   }
+  ],
+  "208.2": [
+   {
+    "point": "Boulder field, single triangle, enlarged"
+   }
+  ],
+  "213": [
+   {
+    "area": "Open sandy ground"
+   }
+  ],
+  "214": [
+   {
+    "area": "Bare rock"
+   }
+  ],
+  "301": [
+   {
+    "area": "Uncrossable body of water (full colour)"
+   },
+   {
+    "outline": "Black line 0.18 mm"
+   }
+  ],
+  "301.1": [],
+  "301.2": [
+   {
+    "area": "Uncrossable body of water (dominant)"
+   },
+   {
+    "outline": "Black line 0.18 mm"
+   }
+  ],
+  "301.3": [],
+  "301.6": [
+   {
+    "line": "Black line 0.18 mm"
+   }
+  ],
+  "302": [
+   {
+    "area": "Shallow body of water"
+   },
+   {
+    "outline": "Blue line 0.18 mm"
+   }
+  ],
+  "302.1": [],
+  "302.6": [
+   {
+    "line": "Blue line 0.18 mm"
+   }
+  ],
+  "303": [
+   {
+    "point": "Waterhole"
+   }
+  ],
+  "305": [
+   {
+    "line": "Small crossable watercourse"
+   }
+  ],
+  "306": [
+   {
+    "line": "Minor / seasonal watercourse"
+   }
+  ],
+  "307.2": [
+   {
+    "line": "Black line 0.18 mm"
+   }
+  ],
+  "309": [
+   {
+    "line": "Narrow marsh"
+   }
+  ],
+  "311": [
+   {
+    "point": "Small fountain or well"
+   }
+  ],
+  "312": [
+   {
+    "point": "Spring"
+   }
+  ],
+  "313": [
+   {
+    "point": "Prominent water feature"
+   }
+  ],
+  "401": [
+   {
+    "area": "Open land"
+   }
+  ],
+  "402": [
+   {
+    "area": "Open land with scattered trees"
+   }
+  ],
+  "402.1": [
+   {
+    "area": "Open land with scattered bushes"
+   }
+  ],
+  "403": [
+   {
+    "area": "Rough open land"
+   }
+  ],
+  "404": [
+   {
+    "area": "Rough open land with scattered trees"
+   }
+  ],
+  "404.1": [
+   {
+    "area": "Rough open land with scattered bushes"
+   }
+  ],
+  "405": [
+   {
+    "area": "Forest"
+   }
+  ],
+  "406": [
+   {
+    "area": "Vegetation: slow running"
+   }
+  ],
+  "406.1": [
+   {
+    "area": "Vegetation: slow running, normal running in one direction"
+   }
+  ],
+  "406.2": [
+   {
+    "area": "Vegetation: slow running"
+   }
+  ],
+  "408": [
+   {
+    "area": "Vegetation: walk"
+   }
+  ],
+  "408.1": [
+   {
+    "area": "Vegetation: walk, normal running in one direction"
+   }
+  ],
+  "408.2": [
+   {
+    "area": "Vegetation: walk, slow running in one direction"
+   }
+  ],
+  "408.3": [
+   {
+    "area": "Vegetation: walk"
+   }
+  ],
+  "410": [
+   {
+    "area": "Vegetation: fight"
+   }
+  ],
+  "410.1": [
+   {
+    "area": "Vegetation: fight"
+   }
+  ],
+  "410.2": [
+   {
+    "area": "Vegetation: fight, normal running in one direction"
+   }
+  ],
+  "410.3": [
+   {
+    "area": "Vegetation: fight, slow running in one direction"
+   }
+  ],
+  "410.4": [
+   {
+    "area": "Vegetation: fight, walk in one direction"
+   }
+  ],
+  "411": [
+   {
+    "area": "Uncrossable vegetation"
+   }
+  ],
+  "411.1": [
+   {
+    "area": "Uncrossable vegetation"
+   }
+  ],
+  "413": [
+   {
+    "area": "Orchard"
+   }
+  ],
+  "413.1": [
+   {
+    "area": "Orchard, rough open land"
+   }
+  ],
+  "414": [
+   {
+    "area": "Vineyard or similar"
+   }
+  ],
+  "414.1": [
+   {
+    "area": "Vineyard or similar, rough open land"
+   }
+  ],
+  "415": [
+   {
+    "line": "Black line 0.14 mm"
+   }
+  ],
+  "416": [
+   {
+    "line": "Distinct vegetation boundary"
+   }
+  ],
+  "417": [
+   {
+    "point": "Prominent large tree"
+   }
+  ],
+  "418": [
+   {
+    "point": "Prominent bush or small tree"
+   }
+  ],
+  "419": [
+   {
+    "point": "Prominent vegetation feature"
+   }
+  ],
+  "501": [
+   {
+    "area": "Paved area, light traffic"
+   },
+   {
+    "outline": "Black line 0.10 mm"
+   }
+  ],
+  "501.5": [
+   {
+    "area": "Paved area, light traffic"
+   }
+  ],
+  "501.3": [
+   {
+    "area": "Paved area with scattered trees"
+   }
+  ],
+  "501.1": [
+   {
+    "line": "Black line 0.10 mm"
+   }
+  ],
+  "501.2": [
+   {
+    "line": "Black dashed line 0.10 mm"
+   }
+  ],
+  "501.6": [
+   {
+    "area": "Paved area, light traffic"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "501.7": [
+   {
+    "area": "Paved area, light traffic"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "501.8": [
+   {
+    "area": "Paved area, light traffic"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "501.9": [
+   {
+    "area": "Paved area, light traffic"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "501.10": [
+   {
+    "area": "Paved area, heavy traffic"
+   },
+   {
+    "outline": "Black line 0.10 mm"
+   }
+  ],
+  "501.11": [
+   {
+    "area": "Paved area, heavy traffic"
+   }
+  ],
+  "501.16": [
+   {
+    "area": "Paved area, heavy traffic"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "501.17": [
+   {
+    "area": "Paved area, heavy traffic"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "501.18": [
+   {
+    "area": "Paved area, heavy traffic"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "501.19": [
+   {
+    "area": "Paved area, heavy traffic"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "505.1": [
+   {
+    "area": "Paved area, light traffic"
+   },
+   {
+    "borders": "Black dashed line 0.12 mm"
+   }
+  ],
+  "505.2": [
+   {
+    "area": "Paved area, light traffic"
+   },
+   {
+    "borders": "Black dashed line 0.12 mm"
+   }
+  ],
+  "505.6": [
+   {
+    "line": "Black dashed line 0.12 mm"
+   }
+  ],
+  "506": [
+   {
+    "line": "Small unpaved footpath or track"
+   }
+  ],
+  "507": [
+   {
+    "line": "Less distinct small path"
+   }
+  ],
+  "508": [
+   {
+    "line": "Narrow ride"
+   }
+  ],
+  "509.1": [
+   {
+    "line": "Railway"
+   }
+  ],
+  "509.2": [
+   {
+    "line": "Tramway"
+   }
+  ],
+  "510": [
+   {
+    "line": "Power line, cableway or skilift"
+   }
+  ],
+  "511": [
+   {
+    "line": "Major power line"
+   }
+  ],
+  "511.1": [
+   {
+    "line": "Major power line with pylons"
+   }
+  ],
+  "512.1": [
+   {
+    "line": "Bridge or tunnel entrance"
+   }
+  ],
+  "512.2": [
+   {
+    "line": "Underpass or tunnel"
+   }
+  ],
+  "513.1": [
+   {
+    "line": "Passable wall"
+   }
+  ],
+  "513.2": [
+   {
+    "line": "Passable retaining wall"
+   }
+  ],
+  "515": [
+   {
+    "line": "Uncrossable wall"
+   }
+  ],
+  "516": [
+   {
+    "line": "Passable fence or railing"
+   }
+  ],
+  "518": [
+   {
+    "line": "Uncrossable fence or railing"
+   }
+  ],
+  "519": [
+   {
+    "point": "Crossing point"
+   }
+  ],
+  "520": [
+   {
+    "area": "Area that shall not be entered"
+   }
+  ],
+  "520.1": [
+   {
+    "line": "Black line 0.10 mm"
+   }
+  ],
+  "521": [
+   {
+    "area": "Building"
+   },
+   {
+    "outline": "Black line 0.14 mm"
+   }
+  ],
+  "521.3": [],
+  "521.4": [],
+  "522": [
+   {
+    "area": "Canopy"
+   },
+   {
+    "outline": "Black line 0.10 mm"
+   }
+  ],
+  "522.3": [],
+  "522.4": [],
+  "522.1": [
+   {
+    "point": "Pillar"
+   }
+  ],
+  "524": [
+   {
+    "point": "High tower"
+   }
+  ],
+  "525": [
+   {
+    "point": "Small tower"
+   }
+  ],
+  "526": [
+   {
+    "point": "Cairn, memorial or boundary stone"
+   }
+  ],
+  "527": [
+   {
+    "point": "Fodder rack"
+   }
+  ],
+  "528": [
+   {
+    "line": "Prominent line feature"
+   }
+  ],
+  "529": [
+   {
+    "line": "Prominent uncrossable line feature"
+   }
+  ],
+  "530": [
+   {
+    "point": "Prominent man-made feature – ring"
+   }
+  ],
+  "531": [
+   {
+    "point": "Prominent man-made feature – x"
+   }
+  ],
+  "532.6": [
+   {
+    "line": "Stairway"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "532.7": [
+   {
+    "line": "Stairway"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "532.8": [
+   {
+    "line": "Stairway"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "532.9": [
+   {
+    "line": "Stairway"
+   },
+   {
+    "borders": "Black line 0.10 mm"
+   }
+  ],
+  "601": [
+   {
+    "line": "Black line 0.14 mm"
+   }
+  ],
+  "601.5": [
+   {
+    "line": "Blue line 0.18 mm"
+   }
+  ]
+ }
+}

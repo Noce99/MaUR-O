@@ -367,6 +367,33 @@ impl Layout {
             .collect()
     }
 
+    /// The cells either side of each side, in the order of
+    /// [`Layout::side_paths`], as places in [`Layout::cell_outlines`]: above
+    /// and below a side running left to right, left and right of one running
+    /// top to bottom. A side along the edge of the square has one cell, and
+    /// `None` where the other would be.
+    pub fn side_cells(&self) -> Vec<[Option<usize>; 2]> {
+        let size = self.size;
+        let mut cells = Vec::with_capacity(self.horizontal.len() + self.vertical.len());
+        for row in 0..=size {
+            for column in 0..size {
+                cells.push([
+                    (row > 0).then(|| (row - 1) * size + column),
+                    (row < size).then(|| row * size + column),
+                ]);
+            }
+        }
+        for row in 0..size {
+            for column in 0..=size {
+                cells.push([
+                    (column > 0).then(|| row * size + column - 1),
+                    (column < size).then(|| row * size + column),
+                ]);
+            }
+        }
+        cells
+    }
+
     /// The middle of cell `(column, row)`'s grid square, in meters on the
     /// ground.
     ///
@@ -608,6 +635,29 @@ mod tests {
         let (start, end) = (first[0], *first.last().unwrap());
         assert_eq!((start.x, start.y), (-4.5, -4.5));
         assert_eq!((end.x, end.y), (-1.5, -4.5));
+    }
+
+    /// A side lies between the two cells whose outlines it is part of: each
+    /// cell named beside it has the side's middle on its own boundary.
+    #[test]
+    fn a_side_lies_between_the_cells_it_names() {
+        let layout = layout(3, 8);
+        let (sides, cells) = (layout.side_paths(MM_PER_METER), layout.side_cells());
+        let outlines = layout.cell_outlines(MM_PER_METER);
+        assert_eq!(cells.len(), sides.len());
+        // The edge of the square has one cell, a side within it two.
+        assert_eq!(cells.iter().filter(|c| c.contains(&None)).count(), 4 * 3);
+        for (side, pair) in sides.iter().zip(&cells) {
+            let middle = side[side.len() / 2];
+            for cell in pair.iter().flatten() {
+                assert!(
+                    outlines[*cell]
+                        .iter()
+                        .any(|c| (c.x - middle.x).abs() < 1e-9 && (c.y - middle.y).abs() < 1e-9),
+                    "cell {cell} does not run along the side"
+                );
+            }
+        }
     }
 
     #[test]

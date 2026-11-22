@@ -17,8 +17,11 @@
 //! 3. **Placed** on the ground the picture covers, as the areas and the
 //!    lines are, and written as a point object of the channel's symbol.
 //!
-//! A point object is given no angle: the symbols the network has learned so
-//! far are the ones which do not turn.
+//! A point object of a symbol which turns is turned to the angle the
+//! network gives at its peak, where the network gives one — see
+//! [`crate::point_truth`] for the two channels that comes out of.
+
+use std::f64::consts::TAU;
 
 use crate::map::{Object, ObjectKind, Point};
 use crate::path_builder::coord_at;
@@ -47,6 +50,12 @@ pub struct PointGrid {
     /// The heatmaps, symbol after symbol and each of them row by row, from
     /// nought to one.
     pub heat: Vec<f32>,
+    /// Which way the point at each pixel is turned, where the network says:
+    /// the sine and then the cosine, row by row each, as the head gave them
+    /// — folded by how many turns of the point's class look alike, see
+    /// [`crate::point_truth::PointTruth::angles`]. `None` for a network which
+    /// does not say.
+    pub angle: Option<Vec<f32>>,
 }
 
 impl PointGrid {
@@ -57,6 +66,7 @@ impl PointGrid {
             height,
             classes,
             heat: vec![0.0; width * height * classes],
+            angle: None,
         }
     }
 
@@ -76,8 +86,7 @@ impl PointGrid {
 /// One point found in a heatmap.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Peak {
-    /// The point symbol: a place in
-    /// [`crate::symbol_kinds::Catalogue::points`].
+    /// The point class: a place in [`crate::label_set::LabelSet::points`].
     pub class: usize,
     /// Where it is, in pixels rightwards from the picture's left edge: the
     /// middle of pixel `i` is `i + 0.5`.
@@ -86,6 +95,11 @@ pub struct Peak {
     pub y: f64,
     /// How high the heatmap was at the peak.
     pub score: f32,
+    /// The angle the network gave at the peak, in radians and still folded
+    /// by the symmetry of the class — `atan2(sin, cos)` of the two angle
+    /// channels — and `None` where it gave none, the zero vector, or has no
+    /// such channels.
+    pub turn: Option<f64>,
 }
 
 /// Every point of a grid: the peaks of each heatmap at least `threshold`
@@ -140,6 +154,13 @@ pub fn peaks(grid: &PointGrid, threshold: f32) -> Vec<Peak> {
                     x,
                     y,
                     score: value,
+                    turn: grid.angle.as_ref().and_then(|angle| {
+                        let at = row as usize * width + column as usize;
+                        let (sin, cos) = (angle[at], angle[width * height + at]);
+                        // Under half a unit is the zero vector a point which
+                        // does not turn is trained towards, not an angle.
+                        (sin.hypot(cos) > 0.5).then(|| (sin as f64).atan2(cos as f64))
+                    }),
                 });
             }
         }
@@ -165,8 +186,11 @@ fn vertex(before: f32, middle: f32, after: f32) -> f64 {
 /// channel, on a picture of `width` by `height` pixels laid over the ground
 /// as `placement` says.
 ///
-/// `symbols` is [`crate::symbol_kinds::Catalogue::points`] of the symbol set
-/// the network was trained against, in the order `classes.json` recorded.
+/// `symbols` is [`crate::label_set::LabelSet::points`] of the symbol set the
+/// network was trained against, in the order `classes.json` recorded. A
+/// point of a symbol which turns is turned to the angle the network gave,
+/// unfolded by how many turns of its class look alike: of the angles which
+/// draw that picture, the one nearest nought.
 pub fn objects_of_points(
     found: &[Peak],
     symbols: &[Entry],
@@ -197,6 +221,9 @@ pub fn objects_of_points(
             object.coords = vec![coord_at(on_ground * mm_per_meter)];
             object.symbol_index = Some(entry.index);
             object.symbol_id = entry.id;
+            if let (true, Some(turn)) = (entry.turns, peak.turn) {
+                object.rotation = turn.rem_euclid(TAU) / entry.symmetry.max(1) as f64;
+            }
             Ok(object)
         })
         .collect()
@@ -214,9 +241,15 @@ mod tests {
             height: size as u32,
             width: size as u32,
             classes: 1,
+            symmetry: vec![1],
             points: points
                 .iter()
-                .map(|&(x, y)| PointMark { class: 0, x, y })
+                .map(|&(x, y)| PointMark {
+                    class: 0,
+                    x,
+                    y,
+                    turn: None,
+                })
                 .collect(),
         };
         PointGrid {
@@ -224,6 +257,7 @@ mod tests {
             height: size,
             classes: 1,
             heat: truth.heatmap(0, 0, size),
+            angle: None,
         }
     }
 
@@ -275,6 +309,7 @@ mod tests {
             x: 60.0,
             y: 25.0,
             score: 1.0,
+            turn: None,
         }];
         let objects = objects_of_points(&found, &[entry], 100, 100, &placement).unwrap();
         assert_eq!(objects.len(), 1);
@@ -292,5 +327,72 @@ mod tests {
             &placement
         )
         .is_err());
+    }
+
+    /// A turned point comes back at its angle: read at its peak, and
+    /// unfolded by how many turns of its class look alike.
+    #[test]
+    fn a_turned_point_comes_back_turned() {
+        use crate::geometry::Rect;
+        let mut truth = PointTruth {
+            height: 32,
+            width: 32,
+            classes: 1,
+            symmetry: vec![2],
+            points: vec![PointMark {
+                class: 0,
+                x: 10.5,
+                y: 12.5,
+                turn: Some(1.0),
+            }],
+        };
+        let grid = PointGrid {
+            width: 32,
+            height: 32,
+            classes: 1,
+            heat: truth.heatmap(0, 0, 32),
+            angle: Some(truth.angles(0, 0, 32)),
+        };
+        let found = peaks(&grid, DEFAULT_POINT_THRESHOLD);
+        assert_eq!(found.len(), 1);
+        let entry = Entry {
+            index: 0,
+            id: 0,
+            code: "110".to_string(),
+            name: "Elongated knoll".to_string(),
+            turns: true,
+            symmetry: 2,
+        };
+        let placement = Placement {
+            ground: Rect::from_ltrb(-16.0, -16.0, 16.0, 16.0),
+            scale_denominator: 1000,
+        };
+        let objects = objects_of_points(&found, &[entry], 32, 32, &placement).unwrap();
+        assert!(
+            (objects[0].rotation - 1.0).abs() < 1e-4,
+            "{}",
+            objects[0].rotation
+        );
+        // Half a turn on is the same ellipse, and comes back as the same one.
+        truth.points[0].turn = Some(1.0 + std::f64::consts::PI);
+        let grid = PointGrid {
+            angle: Some(truth.angles(0, 0, 32)),
+            ..grid
+        };
+        let found = peaks(&grid, DEFAULT_POINT_THRESHOLD);
+        let entry = Entry {
+            index: 0,
+            id: 0,
+            code: "110".to_string(),
+            name: "Elongated knoll".to_string(),
+            turns: true,
+            symmetry: 2,
+        };
+        let objects = objects_of_points(&found, &[entry], 32, 32, &placement).unwrap();
+        assert!(
+            (objects[0].rotation - 1.0).abs() < 1e-4,
+            "{}",
+            objects[0].rotation
+        );
     }
 }

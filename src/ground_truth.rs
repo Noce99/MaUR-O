@@ -93,18 +93,17 @@
 //! [`GroundTruth::sin_cos`] on its own, over the pixels whose target is not
 //! the zero vector.
 
-use std::collections::HashMap;
 use std::f64::consts::TAU;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use tiny_skia::{FillRule, Mask, Transform};
+use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Stroke, Transform};
 
 use crate::geometry::to_painter_path;
-use crate::map::{CoordList, ObjectKind};
+use crate::label_set::LabelSet;
+use crate::map::{CoordList, Map};
 use crate::renderer::to_skia_path;
-use crate::symbol_kinds::Catalogue;
 use crate::xml_reader::read_xml_map;
 
 /// The eight bytes a ground truth file opens with. The digit is the version:
@@ -130,17 +129,24 @@ pub const NO_ROTATION: f32 = -1.0;
 
 /// One piece of ground as it was drawn, which is one region of the answer.
 pub struct Ground {
-    /// Which of the symbol set's opaque areas it was filled with: a place in
-    /// [`crate::symbol_kinds::Catalogue::opaque_areas`], and the one-hot
-    /// channel that symbol owns.
+    /// Which class of the ground it is: a place in
+    /// [`crate::label_set::LabelSet::areas`] — for a set with no table of
+    /// labels, the opaque area it was filled with — and the one-hot channel
+    /// that class owns.
     pub class: usize,
     /// The angle the fill pattern was turned to, in radians, as the map file
     /// carries it — and `None` for a symbol with no pattern to turn, which
     /// has no angle rather than an angle of nothing.
     pub turn: Option<f64>,
     /// The shape it covers, in the coordinates a map file holds — mm on the
-    /// paper.
+    /// paper: the outline of an area, or the path of a line whose strip of
+    /// ground this is.
     pub outline: CoordList,
+    /// How wide a strip of ground along `outline` this is, in mm, where it is
+    /// one: the ground a road of a fixed footprint covers, which looks the
+    /// same as a paved area that wide — see [`crate::label_set`]. `None` for
+    /// the inside of an outline.
+    pub strip: Option<f64>,
 }
 
 /// The answer for one image, in the compact form a file holds.
@@ -209,10 +215,25 @@ impl GroundTruth {
                 continue;
             };
             mask.clear();
-            // Even-odd, as `QPainterPath` fills by default and as the
-            // renderer fills a path object: an inner loop of the same shape
-            // punches a hole rather than filling it twice over.
-            mask.fill_path(&path, FillRule::EvenOdd, false, page_transform);
+            match ground.strip {
+                // Even-odd, as `QPainterPath` fills by default and as the
+                // renderer fills a path object: an inner loop of the same
+                // shape punches a hole rather than filling it twice over.
+                None => mask.fill_path(&path, FillRule::EvenOdd, false, page_transform),
+                // Flat at the ends, as the strokes which draw a footprint are.
+                Some(width) => {
+                    let stroke = Stroke {
+                        width: width as f32,
+                        line_cap: LineCap::Butt,
+                        line_join: LineJoin::Round,
+                        ..Stroke::default()
+                    };
+                    let Some(strip) = path.stroke(&stroke, page_transform.sx) else {
+                        continue;
+                    };
+                    mask.fill_path(&strip, FillRule::Winding, false, page_transform);
+                }
+            }
 
             let class = ground.class as u16;
             // A whole turn is no turn, and a file may carry either; the
@@ -232,14 +253,15 @@ impl GroundTruth {
         Ok(truth)
     }
 
-    /// Rebuilds the labels for a map [`crate::dataset::create_dataset`] wrote
-    /// with [`crate::dataset::Settings::just_opaque_areas`] on, straight out
-    /// of the map file itself rather than out of a `.bin`
-    /// [`GroundTruth::write`] wrote beside it.
+    /// Rebuilds the labels for a map [`crate::dataset::create_dataset`]
+    /// wrote, straight out of the map file itself rather than out of a `.bin`
+    /// [`GroundTruth::write`] wrote beside it, with the classes `labels`
+    /// gives the set it was drawn with.
     ///
-    /// A map like that *is* its own answer: every object on it is one cell,
+    /// A generated map *is* its own answer: every cell on it is one object,
     /// filled with one opaque area of the symbol set and turned to the angle
-    /// its pattern was drawn at, and nothing else was drawn over it. So the
+    /// its pattern was drawn at, and what is drawn over the cells either has
+    /// a ground of its own — a road's strip — or none. So the
     /// grounds [`GroundTruth::rasterize`] wants are read straight back out of
     /// the objects rather than kept from when they were drawn — which is what
     /// lets a `gt/` folder be left out of a dataset and made up again on
@@ -252,11 +274,10 @@ impl GroundTruth {
     /// `resolution`: it is one of the settings a dataset's `classes.json`
     /// exists to remember.
     ///
-    /// An object drawn with a symbol the catalogue does not carry as an
-    /// opaque area — a line, a point, anything left over from a map not
-    /// generated with `just_opaque_areas` — is skipped rather than
-    /// complained about: it draws nothing a label can say, so it is treated
-    /// as nothing having been drawn there, same as the frame around the map.
+    /// An object `labels` gives no ground — a line which is only a line, a
+    /// point — is skipped rather than complained about: it draws nothing the
+    /// ground's label can say, so it is treated as nothing having been drawn
+    /// there, same as the frame around the map.
     ///
     /// Not bit for bit with a `.bin` [`GroundTruth::rasterize`] wrote at
     /// generation time: a map file keeps a rotation to six significant
@@ -265,59 +286,43 @@ impl GroundTruth {
     /// enough for `==`.
     pub fn from_map(
         path: &Path,
+        labels: &LabelSet,
         width: u32,
         height: u32,
         resolution: f64,
     ) -> Result<GroundTruth, String> {
         let (mut map, _) = read_xml_map(path)?;
         map.resolve_references();
-        let catalogue = Catalogue::of(&map);
-        if catalogue.opaque_areas.is_empty() {
-            return Err(format!(
-                "{} holds no opaque area symbol, so there is no ground cover to label",
-                path.display()
-            ));
+        GroundTruth::of_map(&map, labels, width, height, resolution)
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// [`GroundTruth::from_map`] of a map already read, with its references
+    /// resolved: the grounds `labels` gives its objects — the areas' shapes
+    /// and the strips of the lines labelled with one — laid down in the
+    /// order the objects are drawn.
+    pub fn of_map(
+        map: &Map,
+        labels: &LabelSet,
+        width: u32,
+        height: u32,
+        resolution: f64,
+    ) -> Result<GroundTruth, String> {
+        if labels.areas.is_empty() {
+            return Err(
+                "the symbol set holds no opaque area symbol, so there is no ground cover to label"
+                    .to_string(),
+            );
         }
-
-        // Where a symbol's place in `Map::symbols` lands among the opaque
-        // areas — an object names the first, and rasterizing wants the
-        // second — and whether it turns, which is what tells a rotation
-        // worth keeping from an angle nobody asked the symbol for.
-        let channel_of: HashMap<usize, (usize, bool)> = catalogue
-            .opaque_areas
-            .iter()
-            .enumerate()
-            .map(|(channel, entry)| (entry.index, (channel, entry.turns)))
-            .collect();
-
-        let grounds: Vec<Ground> = map
-            .objects
-            .iter()
-            .filter(|object| matches!(object.kind, ObjectKind::Path(_)))
-            .filter_map(|object| {
-                let &(class, turns) = channel_of.get(&object.symbol_index?)?;
-                Some(Ground {
-                    class,
-                    turn: turns.then_some(object.rotation),
-                    outline: object.coords.clone(),
-                })
-            })
-            .collect();
+        let grounds = labels.grounds(map, &map.objects);
         if grounds.is_empty() {
-            return Err(format!(
-                "{} draws no opaque area: there is no ground for a label to describe",
-                path.display()
-            ));
+            return Err(
+                "the map draws no opaque area: there is no ground for a label to describe"
+                    .to_string(),
+            );
         }
-
         let page_transform = page_transform_for(map.scale_denominator, resolution, width, height);
-        GroundTruth::rasterize(
-            &grounds,
-            catalogue.opaque_areas.len(),
-            width,
-            height,
-            page_transform,
-        )
+        GroundTruth::rasterize(&grounds, labels.areas.len(), width, height, page_transform)
     }
 
     /// How many channels the tensor has: one per opaque area of the symbol
@@ -552,11 +557,13 @@ mod tests {
                 class: 0,
                 turn: Some(TAU / 4.0),
                 outline: square(0.0, 0.0, 2.0, 4.0),
+                strip: None,
             },
             Ground {
                 class: 1,
                 turn: None,
                 outline: square(2.0, 0.0, 4.0, 4.0),
+                strip: None,
             },
         ];
         GroundTruth::rasterize(&grounds, 3, 4, 4, Transform::identity())
@@ -626,12 +633,41 @@ mod tests {
         assert_eq!(truth.class_of[12..], [0, 0, 1, 1]);
     }
 
+    /// A strip is laid over the ground before it, as wide as it says and
+    /// flat at its ends.
+    #[test]
+    fn a_strip_covers_the_ground_it_runs_over_as_wide_as_it_is() {
+        let grounds = [
+            Ground {
+                class: 0,
+                turn: None,
+                outline: square(0.0, 0.0, 8.0, 8.0),
+                strip: None,
+            },
+            Ground {
+                class: 1,
+                turn: None,
+                outline: vec![Coord::new(2.0, 4.0, 0), Coord::new(6.0, 4.0, 0)],
+                strip: Some(2.0),
+            },
+        ];
+        let truth = GroundTruth::rasterize(&grounds, 2, 8, 8, Transform::identity())
+            .expect("the shapes are inside the image");
+        let row = |r: usize| truth.class_of[r * 8..(r + 1) * 8].to_vec();
+        // Rows 3 and 4 are the strip from x = 2 to 6; rows 2 and 5 are not.
+        assert_eq!(row(3), [0, 0, 1, 1, 1, 1, 0, 0]);
+        assert_eq!(row(4), [0, 0, 1, 1, 1, 1, 0, 0]);
+        assert_eq!(row(2), [0; 8]);
+        assert_eq!(row(5), [0; 8]);
+    }
+
     #[test]
     fn a_pixel_no_ground_reaches_is_background() {
         let grounds = [Ground {
             class: 2,
             turn: None,
             outline: square(0.0, 0.0, 2.0, 2.0),
+            strip: None,
         }];
         let truth = GroundTruth::rasterize(&grounds, 3, 4, 4, Transform::identity())
             .expect("the shape is inside the image");
@@ -669,6 +705,7 @@ mod tests {
                 class: 0,
                 turn: Some(turn * TAU),
                 outline: square(0.0, 0.0, 4.0, 4.0),
+                strip: None,
             }];
             let truth = GroundTruth::rasterize(&grounds, 1, 4, 4, Transform::identity())
                 .expect("the shape is inside the image");
@@ -713,11 +750,16 @@ mod tests {
         )
         .expect("the dataset generates");
 
+        let (mut set, _) =
+            read_xml_map(&summary.symbol_set).expect("the set copied into the dataset");
+        set.resolve_references();
+        let labels = LabelSet::of(&set);
         for generated in &summary.written {
             let on_disk = GroundTruth::read(generated.ground_truth.as_deref().expect("labelled"))
                 .expect("the labels this generated");
             let rebuilt = GroundTruth::from_map(
                 &generated.map,
+                &labels,
                 on_disk.width,
                 on_disk.height,
                 settings.resolution,

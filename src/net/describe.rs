@@ -577,6 +577,12 @@ pub const REFERENCE_LINES: usize = 6;
 /// drawn from.
 pub const REFERENCE_POINTS: usize = 10;
 
+/// Whether the registered U-Net says which way its points are turned: it
+/// does, being the one `mauro net train` builds on a point dataset, every one
+/// of which now labels the angle of its points too (see
+/// [`crate::point_truth::PointTruth::angles`]).
+pub const REFERENCE_POINT_ANGLES: bool = true;
+
 /// Whether the registered U-Net has a scale head: it does, being the one
 /// `mauro net train` builds on a dataset drawn over a range of densities
 /// (`mauro net dataset --min-resolution/--max-resolution`), which is what
@@ -597,6 +603,7 @@ pub fn blessed(name: &str) -> Option<NetDescriptor> {
             UNetConfig::new(REFERENCE_CLASSES)
                 .with_lines(REFERENCE_LINES)
                 .with_points(REFERENCE_POINTS)
+                .with_point_angles(REFERENCE_POINT_ANGLES)
                 .with_scale_head(REFERENCE_SCALE_HEAD)
                 .describe(),
         ),

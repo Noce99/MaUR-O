@@ -797,15 +797,19 @@ a logo standing in a field is not a map anyone could survey.
 
 A map is drawn from the last colour of its table up to the first, so a
 symbol whose every colour sits below the colour a piece of ground is filled
-with is a symbol which is in the file and nowhere in the picture. Step one
+with is a symbol which is in the file and nowhere in the picture. So is one
+drawn above it in the very same ink: a set's table often holds one colour
+twice — ISSprOM's "Blue 100%" for the lines and points and "Blue 100% for
+area features" for the water — and a blue well on a blue lake is drawn on
+top and still not there to be seen. Step one
 works that out once, for every see-through area and point symbol against
 every ground, and steps five and six pick out of what it allows — so a
 generated map has nothing on it which the drawing order buries. The tool
 reports how much of the set that leaves:
 
 ```
-  538 of 663 transparent areas over a fill show up
-  1673 of 1716 point symbols over a fill show up
+  527 of 663 transparent areas over a fill show up
+  1628 of 1716 point symbols over a fill show up
 ```
 
 Anything which *can* take an angle of its own is given one, drawn uniformly
@@ -919,6 +923,47 @@ there were, a peak counting as a point of its symbol within three pixels.
 `simple_ISSprOM.omap` and ten point symbols of ISSprOM which do not turn —
 the large tree, the bush, the green and the black X, the ring, the knoll, the
 boulder, the two towers and the well.
+
+A point whose symbol turns — a slope line, a cave, a spring, a crossing
+point — is labelled with its angle too: two more channels after the
+heatmaps, shared by every point symbol, the sine and the cosine of the
+angle round each turned point and the zero vector everywhere else
+(`point_angles` in `classes.json`). The angle is folded by how many turns of
+the symbol look alike, as a pattern's is: an elongated knoll half a turn
+round is the same knoll. It is scored like the ground's angle (counting
+`--angle-weight`), and `mauro net image-to-map` turns each point it finds to
+the angle read at its peak.
+
+**Fewer classes than symbols: a table of labels.** A class per symbol asks
+two things of a network a picture cannot always give it: to tell apart
+symbols which look the same (ISSprOM's bank line of a lake, border line of a
+marsh and tag lines of a cliff are all a black line 0.18 mm wide), and to
+learn as one thing what is plainly two (a building is a grey fill and a
+black outline; a road 2 m wide is a strip of paved area with a black border
+either side, pixel for pixel what a 2 m wide paved area with its border line
+is). A symbol set can come with a table beside it, `<set>.labels.json`,
+which names the classes and says which of them each symbol is labelled with
+— an area's shape, its outline as a line, a line's path, the strip a line
+covers as an area, a line's borders, a point
+([`maur_o::label_set`](src/label_set.rs)). The maps are still drawn with the
+set's own symbols; only what the network is told about them changes.
+[`symbols_sets/almost_ISSprOM.omap`](symbols_sets/almost_ISSprOM.omap) is
+the whole of ISSprOM 2019-2 less what cannot be labelled yet — the
+see-through areas, the course overprint, the lettering and the minimum-size
+copies of other symbols — and its table
+[`almost_ISSprOM.labels.json`](symbols_sets/almost_ISSprOM.labels.json)
+brings its 132 symbols drawn on their own down to 33 classes of ground, 41
+of lines and 29 of points. Both are written by
+[`symbols_sets/make_almost_issprom.py`](symbols_sets/make_almost_issprom.py)
+out of [`ISSprOM.omap`](symbols_sets/ISSprOM.omap), which checks every merge
+against the symbols themselves. A symbol the table keeps for parts of others
+(a building's fill alone) is not drawn on its own, and a line is drawn along
+a side only where it shows up over the ground on both sides of it:
+
+```bash
+./target/release/mauro net dataset --content areas-lines-points \
+    symbols_sets/almost_ISSprOM.omap dataset
+```
 
 **Maps at more than one density.** A picture of a map says nothing about how many pixels a meter of ground is,
 and a network trained on maps all drawn at one density learns that density

@@ -105,7 +105,7 @@ use burn::train::{
 };
 
 use crate::dataset::{Classes, CLASSES_FILE};
-use crate::symbol_kinds::Catalogue;
+use crate::label_set::LabelSet;
 use crate::xml_reader::read_xml_map;
 
 use crate::net::data::{MapBatch, MapBatcher, MapDataset, Pass, CROP, DEFAULT_CROPS_PER_MAP};
@@ -1222,6 +1222,25 @@ fn points_loss(
     (loss, predicted, predicted_hits, labelled, labelled_hits)
 }
 
+/// The loss of the points' angle: the squared error of the sine and the
+/// cosine the network gives, `[batch, 2, height, width]`, against the
+/// label's, over the pixels where the label has an angle — the disc round
+/// each turned point, see [`crate::point_truth::PointTruth::angles`] — and
+/// a mean per such pixel, so that a batch with few points does not count for
+/// less. Everywhere else the label is the zero vector and says nothing, as
+/// for the ground's angle.
+fn point_angle_loss(said: Tensor<4>, wanted: Tensor<4>) -> Tensor<1> {
+    let has_angle = wanted
+        .clone()
+        .powi_scalar(2)
+        .sum_dim(1)
+        .sqrt()
+        .greater_elem(0.5)
+        .float();
+    let squared = said.sub(wanted).powi_scalar(2).sum_dim(1);
+    (squared * has_angle.clone()).sum() / has_angle.sum().clamp_min(1.0)
+}
+
 impl UNet {
     /// One forward pass scored against the labels: the loss to descend, and
     /// the counts the metrics divide.
@@ -1275,6 +1294,24 @@ impl UNet {
             (points, None) => panic!(
                 "the network answers for {points} point symbols and the batch labels none: it \
                      was trained on a dataset made without --content areas-lines-points"
+            ),
+        };
+
+        // Which way the points are turned, after their heatmaps, where the
+        // network says so: scored where a turned point is, as the ground's
+        // angle is scored where a turned pattern is.
+        let point_angle_loss = match (self.point_angles(), batch.point_angles) {
+            (false, _) => zero(),
+            (true, Some(wanted)) => {
+                let first = classes + 3 + self.lines() + self.points();
+                let said = raw
+                    .clone()
+                    .slice([0..size, first..first + 2, 0..height, 0..width]);
+                point_angle_loss(said, wanted)
+            }
+            (true, None) => panic!(
+                "the network says which way its points are turned and the batch labels no \
+                 angle: it was trained on a dataset made before the points carried one"
             ),
         };
 
@@ -1341,6 +1378,7 @@ impl UNet {
                 + angle_loss.mul_scalar(self.angle_weight())
                 + lines_loss.mul_scalar(self.line_weight())
                 + points_loss.mul_scalar(self.point_weight())
+                + point_angle_loss.mul_scalar(self.angle_weight())
                 + scale_loss.mul_scalar(self.scale_weight()),
             correct,
             pixels: Tensor::from_data([pixels as f32], &device),
@@ -1472,6 +1510,12 @@ pub struct TrainingConfig {
     /// What the points term counts for beside the ground's.
     #[config(default = 1.0)]
     pub point_weight: f64,
+    /// Whether the points layer also says which way each point is turned,
+    /// which the run takes from the dataset's `classes.json` — see
+    /// [`crate::net::unet::UNetConfig::point_angles`]. Its loss counts for
+    /// what the ground's angle does, [`TrainingConfig::angle_weight`].
+    #[config(default = false)]
+    pub point_angles: bool,
     /// Whether the network has a scale head, which the run takes from the
     /// dataset rather than being told: one drawn over a range of densities
     /// has something for it to learn, and [`train`] fills this in before it
@@ -1721,7 +1765,7 @@ fn image_validation(
     let (mut map, _) = read_xml_map(&symbol_set)
         .map_err(|e| format!("cannot read the symbol set {}: {e}", symbol_set.display()))?;
     map.resolve_references();
-    let catalogue = Catalogue::of(&map);
+    let labels = LabelSet::beside(&map, &symbol_set)?;
 
     // Over the range the dataset was drawn at, where it was drawn over one:
     // a validation picture is read at its own density, as the tool reads one.
@@ -1732,7 +1776,7 @@ fn image_validation(
         run,
         pictures,
         &symbol_set,
-        catalogue.opaque_areas,
+        labels.areas,
         ReadBackSettings::of(config.crop, notes.resolution, map.scale_denominator)
             .trained_over(low, high),
         device.clone(),
@@ -1740,7 +1784,8 @@ fn image_validation(
 }
 
 /// Copies what the dataset says about its own answers into the run folder:
-/// `classes.json`, and the symbol set it names.
+/// `classes.json`, the symbol set it names, and the table of labels it
+/// names where its classes are a table's (see [`crate::label_set`]).
 ///
 /// What comes out of a trained network is a class index per pixel, and an
 /// index means nothing on its own — which symbol it is, and how much ground
@@ -1767,7 +1812,13 @@ pub fn copy_dataset_notes(dataset: &Path, run: &Path) -> Result<(), String> {
             classes_file.display(),
         )
     })?;
-    copy(&dataset.join(&symbol_set), &symbol_set)
+    copy(&dataset.join(&symbol_set), &symbol_set)?;
+    // And the table the classes are a table's, where they are: without it
+    // the classes of the run are a list nobody kept.
+    match classes.labels {
+        Some(table) => copy(&dataset.join(&table), &table),
+        None => Ok(()),
+    }
 }
 
 /// Makes the folder this run writes into: `<Model>_YYYY_MM_DD__hh_mm_ss`
@@ -2067,6 +2118,7 @@ pub fn train(
         .with_overhang(config.overhang.unwrap_or(config.crop / 2));
     config.lines = all.lines();
     config.points = all.points();
+    config.point_angles = all.point_angles();
     config.scale_head = all.varies();
 
     // Also before the run's folder is made: weights which cannot be found, or
@@ -2158,6 +2210,7 @@ pub fn train(
         .with_line_weight(config.line_weight)
         .with_points(config.points)
         .with_point_weight(config.point_weight)
+        .with_point_angles(config.point_angles)
         .with_scale_head(config.scale_head)
         .with_scale_weight(config.scale_weight)
         .with_class_weights(Some(weights))
@@ -2685,6 +2738,7 @@ mod tests {
             angle: Tensor::zeros([1, 2, 16, 16], &device),
             lines: None,
             points: None,
+            point_angles: None,
             scale: Tensor::zeros([1, 1], &device),
         };
         let without = net.forward_step(none);
@@ -2712,6 +2766,7 @@ mod tests {
             angle: Tensor::ones([1, 2, 16, 16], &device),
             lines: None,
             points: None,
+            point_angles: None,
             scale: Tensor::zeros([1, 1], &device),
         };
         let with = net.forward_step(some);
@@ -2877,6 +2932,7 @@ mod tests {
             angle: Tensor::zeros([1, 2, 16, 16], &device),
             lines: None,
             points: None,
+            point_angles: None,
             scale: Tensor::zeros([1, 1], &device),
         };
         let gradients = loaded.forward_step(batch).loss.backward();
@@ -2925,6 +2981,7 @@ mod tests {
             angle: Tensor::zeros([2, 2, 16, 16], &device),
             lines: None,
             points: None,
+            point_angles: None,
             scale: Tensor::full([2, 1], scale, &device),
         };
         let loss =
@@ -2985,6 +3042,27 @@ mod tests {
         assert_eq!(value(found_union), 8.0);
     }
 
+    /// The points' angle is scored where a turned point is and nowhere else:
+    /// nought for the right angle, more for a wrong one, and nothing at all
+    /// for whatever is said where the label has no angle.
+    #[test]
+    fn a_points_angle_is_scored_only_round_a_turned_point() {
+        let device = Device::flex();
+        let tensor = |values: Vec<f32>| {
+            Tensor::<4>::from_data(burn::tensor::TensorData::new(values, [1, 2, 1, 2]), &device)
+        };
+        // Pixel 0 is a point turned a quarter turn, pixel 1 no angle at all.
+        let wanted = || tensor(vec![1.0, 0.0, 0.0, 0.0]);
+        let loss = |said: Vec<f32>| -> f32 {
+            point_angle_loss(tensor(said), wanted())
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap()[0]
+        };
+        assert!(loss(vec![1.0, 5.0, 0.0, -3.0]).abs() < 1e-6);
+        assert!(loss(vec![0.0, 0.0, 1.0, 0.0]) > 1.0);
+    }
+
     /// The focal loss is lowest for a heatmap which peaks where the point is,
     /// a peak a couple of pixels out still counts as found, and a heatmap
     /// with no peak finds nothing.
@@ -2997,7 +3075,13 @@ mod tests {
                 height: 16,
                 width: 16,
                 classes: 1,
-                points: vec![PointMark { class: 0, x, y }],
+                symmetry: vec![1],
+                points: vec![PointMark {
+                    class: 0,
+                    x,
+                    y,
+                    turn: None,
+                }],
             }
             .heatmap(0, 0, 16)
         };

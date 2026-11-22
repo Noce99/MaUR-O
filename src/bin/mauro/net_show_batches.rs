@@ -63,12 +63,13 @@ use maur_o::dataset::{Classes, CLASSES_FILE};
 use maur_o::differences::compose;
 use maur_o::geometry::Rect;
 use maur_o::ground_truth::{BACKGROUND, NO_ROTATION};
+use maur_o::label_set::LabelSet;
 use maur_o::net::data::{MapBatcher, MapCrop, MapDataset};
 use maur_o::net::predict::{load, resolve_angles, ReadBackSettings, ANGLE_LENGTH};
 use maur_o::net::unet::UNet;
 use maur_o::random::Random;
 use maur_o::render::{render_map_over, to_rgb_image, Extent};
-use maur_o::symbol_kinds::{Catalogue, Entry};
+use maur_o::symbol_kinds::Entry;
 use maur_o::vectorize::{write_map, Placement, SymbolGrid};
 use maur_o::xml_reader::read_xml_map;
 
@@ -224,9 +225,15 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
     for warning in &warnings {
         eprintln!("Warning: {warning}");
     }
-    let catalogue = Catalogue::of(&map);
-    let point_codes: Vec<String> = catalogue.points.iter().map(|e| e.code.clone()).collect();
-    let symbols = catalogue.opaque_areas;
+    // The classes the labels are in: the table's, where the dataset names
+    // one, and a symbol each where it does not.
+    let classes = match &notes.labels {
+        Some(table) => LabelSet::read(&map, &args.dataset.join(table)),
+        None => Ok(LabelSet::of(&map)),
+    }
+    .map_err(&failed)?;
+    let point_codes: Vec<String> = classes.points.iter().map(|e| e.code.clone()).collect();
+    let symbols = classes.areas;
     let settings = ReadBackSettings::of(args.crop, notes.resolution, map.scale_denominator);
 
     // Which symbols turn, and how much of a turn each of them can actually
@@ -489,6 +496,7 @@ fn unbatch(
                 .get(item * channels * pixels..(item + 1) * channels * pixels)
                 .map(<[f32]>::to_vec)
                 .unwrap_or_default(),
+            point_angles: Vec::new(),
             size,
             map: String::new(),
             left: 0,

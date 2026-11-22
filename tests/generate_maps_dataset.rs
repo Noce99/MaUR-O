@@ -927,6 +927,7 @@ fn a_label_rebuilt_at_a_maps_own_density_is_the_label_written() {
     let read = maur_o::dataset::resolutions_of(&folder)
         .unwrap()
         .expect("the file is there");
+    let (labels, _) = maur_o::label_set::of_folder(&folder).expect("the dataset's labels");
     for n in 1..=3 {
         let name = format!("map_{n:03}");
         let written =
@@ -934,6 +935,7 @@ fn a_label_rebuilt_at_a_maps_own_density_is_the_label_written() {
                 .expect("the label");
         let rebuilt = GroundTruth::from_map(
             &map_at(&folder, n),
+            &labels,
             written.width,
             written.height,
             read[&name],

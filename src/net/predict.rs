@@ -174,6 +174,7 @@ pub fn load(
         .with_base_channels(config.base_channels)
         .with_lines(config.lines)
         .with_points(config.points)
+        .with_point_angles(config.point_angles)
         .with_scale_head(config.scale_head)
         .init(device);
     let model = load_weights(model, weights)?;
@@ -323,7 +324,13 @@ pub fn predict_image_layers(
     let lines = model.lines();
     let mut line_grid = (lines > 0).then(|| LineGrid::new(width, height, lines));
     let points = model.points();
-    let mut point_grid = (points > 0).then(|| PointGrid::new(width, height, points));
+    let mut point_grid = (points > 0).then(|| {
+        let mut grid = PointGrid::new(width, height, points);
+        if model.point_angles() {
+            grid.angle = Some(vec![0.0; 2 * width * height]);
+        }
+        grid
+    });
     // A probability over the threshold is a logit over this, and comparing
     // the logit spares a sigmoid for every pixel of every channel.
     let line_logit = {
@@ -403,6 +410,11 @@ pub fn predict_image_layers(
                         for point in 0..points {
                             let logit = of(classes + 3 + lines + point);
                             found.channel_mut(point)[at] = 1.0 / (1.0 + (-logit).exp());
+                        }
+                        if let Some(angle) = &mut found.angle {
+                            let first = classes + 3 + lines + points;
+                            angle[at] = of(first);
+                            angle[width * height + at] = of(first + 1);
                         }
                     }
                 }

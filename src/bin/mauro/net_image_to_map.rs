@@ -97,6 +97,7 @@ use clap::Parser;
 
 use maur_o::dataset::{Classes, CLASSES_FILE};
 use maur_o::differences::open_image;
+use maur_o::label_set::LabelSet;
 use maur_o::symbol_kinds::Catalogue;
 use maur_o::xml_reader::read_xml_map;
 
@@ -261,11 +262,19 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
     for warning in &warnings {
         eprintln!("Warning: {warning}");
     }
-    let catalogue = Catalogue::of(&map);
+    // The classes the run's answers are in: the table beside the set where
+    // one came with it, a symbol each where none did.
+    let classes = LabelSet::beside(&map, &symbol_set).map_err(failed)?;
+    let catalogue = Catalogue {
+        opaque_areas: classes.areas,
+        lines: classes.lines,
+        points: classes.points,
+        ..Catalogue::default()
+    };
     if catalogue.opaque_areas.len() != notes.classes {
         return Err(failed(format!(
-            "{} holds {} opaque areas and {} was written for {}: the symbol set beside a run is \
-             not the one it trained on",
+            "{} has {} classes of ground and {} was written for {}: the symbol set beside a run \
+             is not the one it trained on",
             symbol_set.display(),
             catalogue.opaque_areas.len(),
             notes_file.display(),

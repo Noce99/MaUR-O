@@ -86,6 +86,7 @@
 //! drawn at, which a map file says nothing about and which
 //! [`crate::dataset::resolution_of`] reads from `classes.json` instead.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -99,7 +100,9 @@ use crate::dataset::{
     MAPS_FOLDER, RESOLUTIONS_FILE,
 };
 use crate::ground_truth::{GroundTruth, BACKGROUND};
+use crate::label_set::{of_folder, LabelSet};
 use crate::line_truth::LineTruth;
+use crate::map::Map;
 use crate::point_truth::PointTruth;
 use crate::random::Random;
 use crate::symbol_kinds::Catalogue;
@@ -141,6 +144,12 @@ pub struct MapCrop {
     /// one at the pixel it is in — see [`crate::point_truth`]. Empty for a
     /// dataset whose points are not labelled.
     pub points: Vec<f32>,
+    /// Which way the points are turned, `[2, CROP, CROP]`: the sine and the
+    /// cosine of each turned point's angle round its peak, folded by how many
+    /// turns of its class look alike, and `(0, 0)` everywhere else — see
+    /// [`crate::point_truth::PointTruth::angles`]. Empty for a dataset whose
+    /// points carry no angle.
+    pub point_angles: Vec<f32>,
     /// How many pixels square this crop is.
     pub size: usize,
     /// The name of the map it was cut out of, without its suffix.
@@ -252,6 +261,14 @@ pub struct MapDataset {
     /// How many point symbols the points layer has a heatmap for: nought
     /// for a dataset whose points are not labelled.
     points: usize,
+    /// Whether the points also carry their angle — see
+    /// [`MapCrop::point_angles`].
+    point_angles: bool,
+    /// The classes of the labels and how each symbol is labelled with them,
+    /// out of the symbol set and the table `classes.json` names — see
+    /// [`crate::label_set`]. `None` for a dataset with nothing to read them
+    /// from, whose maps are labelled a class per symbol of their own set.
+    labels: Option<Arc<LabelSet>>,
     /// The folder of map files, which the lines and points layers are
     /// rebuilt from.
     maps_folder: PathBuf,
@@ -360,6 +377,17 @@ impl MapDataset {
         // file, at its resolution, whatever the ground's labels are.
         let lines = notes.as_ref().map(|read| read.lines).unwrap_or(0);
         let points = notes.as_ref().map(|read| read.points).unwrap_or(0);
+        let point_angles = points > 0 && notes.as_ref().is_some_and(|read| read.point_angles);
+        // The set and its table, read once here rather than per map. A
+        // dataset whose classes are a table's cannot be labelled without it;
+        // one with a class per symbol can, out of each map's own set.
+        let labels = match &notes {
+            Some(read) if read.labels.is_some() => Some(Arc::new(of_folder(folder)?.0)),
+            Some(read) if read.symbol_set.is_some() => {
+                of_folder(folder).ok().map(|(l, _)| Arc::new(l))
+            }
+            _ => None,
+        };
         let needed =
             lines > 0 || points > 0 || maps.iter().any(|(_, l)| matches!(l, Labels::FromMap(_)));
         let normal = match &notes {
@@ -440,9 +468,14 @@ impl MapDataset {
                     (width as usize, height as usize, holds)
                 }
                 Labels::FromMap(map) => {
-                    let (mut parsed, _) = read_xml_map(map)?;
-                    parsed.resolve_references();
-                    let holds = Catalogue::of(&parsed).opaque_areas.len();
+                    let holds = match &labels {
+                        Some(labels) => labels.areas.len(),
+                        None => {
+                            let (mut parsed, _) = read_xml_map(map)?;
+                            parsed.resolve_references();
+                            Catalogue::of(&parsed).opaque_areas.len()
+                        }
+                    };
                     let (width, height) = image_size(image)?;
                     (width, height, holds)
                 }
@@ -488,13 +521,20 @@ impl MapDataset {
             classes,
             lines,
             points,
+            point_angles,
+            symmetry: match &labels {
+                Some(labels) if labels.areas.len() == classes => {
+                    labels.areas.iter().map(|area| area.symmetry).collect()
+                }
+                _ => symmetry_of(folder, classes),
+            },
+            labels,
             maps_folder,
             normal,
             varies,
             crops_per_map: DEFAULT_CROPS_PER_MAP,
             crop: CROP,
             overhang: 0,
-            symmetry: symmetry_of(folder, classes),
             seed,
             pass: Pass::default(),
         })
@@ -582,6 +622,12 @@ impl MapDataset {
     /// where the dataset's points are not labelled.
     pub fn points(&self) -> usize {
         self.points
+    }
+
+    /// Whether the points also carry which way they are turned, in two more
+    /// channels — see [`MapCrop::point_angles`].
+    pub fn point_angles(&self) -> bool {
+        self.point_angles
     }
 
     /// How many pixels square this dataset's crops are.
@@ -713,8 +759,22 @@ impl MapDataset {
                 let resolution = entry
                     .resolution
                     .expect("set in load whenever a map's labels are computed from it");
-                GroundTruth::from_map(path, width as u32, height as u32, resolution)
+                let (mut map, _) = read_xml_map(path)?;
+                map.resolve_references();
+                let labels = self.label_set(&map);
+                GroundTruth::of_map(&map, &labels, width as u32, height as u32, resolution)
+                    .map_err(|e| format!("{}: {e}", path.display()))
             }
+        }
+    }
+
+    /// The labels a map of this dataset is labelled with: the dataset's own,
+    /// or — for a dataset with none to read — a class per symbol of the set
+    /// the map carries.
+    fn label_set(&self, map: &Map) -> Cow<'_, LabelSet> {
+        match &self.labels {
+            Some(labels) => Cow::Borrowed(labels.as_ref()),
+            None => Cow::Owned(LabelSet::of(map)),
         }
     }
 
@@ -736,6 +796,8 @@ impl MapDataset {
             classes: self.classes,
             lines: self.lines,
             points: self.points,
+            point_angles: self.point_angles,
+            labels: self.labels.clone(),
             maps_folder: self.maps_folder.clone(),
             normal: self.normal,
             varies: self.varies,
@@ -872,6 +934,7 @@ impl Dataset<MapCrop> for MapDataset {
         let mut angle = vec![0.0; 2 * pixels];
         let mut lines = vec![0u8; self.lines * pixels];
         let mut points = Vec::new();
+        let mut point_angles = Vec::new();
         // The frame is the last class rather than the file's 0xFFFF: a
         // cross-entropy counts classes from nothing upwards and has no room
         // for a sentinel.
@@ -935,8 +998,10 @@ impl Dataset<MapCrop> for MapDataset {
             let (mut map, _) = read_xml_map(&path)
                 .unwrap_or_else(|e| panic!("cannot read {} mid-run: {e}", path.display()));
             map.resolve_references();
+            let labels = self.label_set(&map);
             if self.points > 0 {
-                let truth = PointTruth::of_map(&map, width as u32, height as u32, resolution);
+                let truth =
+                    PointTruth::of_map(&map, &labels, width as u32, height as u32, resolution);
                 assert_eq!(
                     truth.classes,
                     self.points,
@@ -944,9 +1009,12 @@ impl Dataset<MapCrop> for MapDataset {
                     path.display(),
                 );
                 points = truth.heatmap(left, top, self.crop);
+                if self.point_angles {
+                    point_angles = truth.angles(left, top, self.crop);
+                }
             }
             let truth = if self.lines > 0 {
-                LineTruth::of_map(&map, width as u32, height as u32, resolution)
+                LineTruth::of_map(&map, &labels, width as u32, height as u32, resolution)
                     .unwrap_or_else(|e| panic!("cannot read the lines mid-run: {e}"))
                     .layers
             } else {
@@ -971,6 +1039,7 @@ impl Dataset<MapCrop> for MapDataset {
             angle,
             lines,
             points,
+            point_angles,
             size: self.crop,
             map: image_path
                 .file_stem()
@@ -1012,6 +1081,10 @@ pub struct MapBatch {
     /// The point heatmaps of every pixel, `[batch, points, crop, crop]`, and
     /// `None` for a dataset whose points are not labelled.
     pub points: Option<Tensor<4>>,
+    /// Which way the points are turned, `[batch, 2, crop, crop]` — see
+    /// [`MapCrop::point_angles`] — and `None` for a dataset whose points carry
+    /// no angle.
+    pub point_angles: Option<Tensor<4>>,
     /// How much denser than the dataset's normal density each crop's map was
     /// drawn, as a natural logarithm, `[batch, 1]` — see [`MapCrop::scale`].
     pub scale: Tensor<2>,
@@ -1042,9 +1115,14 @@ impl Batcher<MapCrop, MapBatch> for MapBatcher {
             .map(|item| item.points.len() / (size * size))
             .unwrap_or(0);
         let mut points = Vec::with_capacity(batch * point_channels * size * size);
+        let turned = items
+            .first()
+            .is_some_and(|item| !item.point_angles.is_empty());
+        let mut point_angles = Vec::with_capacity(if turned { batch * 2 * size * size } else { 0 });
         let mut scale = Vec::with_capacity(batch);
         for item in items {
             scale.push(item.scale);
+            point_angles.extend_from_slice(&item.point_angles);
             lines.extend(item.lines.iter().map(|&on| on as f32));
             points.extend_from_slice(&item.points);
             image.extend_from_slice(&item.image);
@@ -1068,6 +1146,12 @@ impl Batcher<MapCrop, MapBatch> for MapBatcher {
                     device,
                 )
             }),
+            point_angles: turned.then(|| {
+                Tensor::from_data(
+                    TensorData::new(point_angles, [batch, 2, size, size]),
+                    device,
+                )
+            }),
             scale: Tensor::from_data(TensorData::new(scale, [batch, 1]), device),
         }
     }
@@ -1084,6 +1168,7 @@ mod tests {
             angle: vec![value; 2 * size * size],
             lines: Vec::new(),
             points: Vec::new(),
+            point_angles: Vec::new(),
             size,
             map: "map".to_string(),
             left: 0,

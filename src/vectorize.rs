@@ -108,11 +108,12 @@ use std::path::Path;
 
 use crate::geometry::Rect;
 use crate::ground_truth::{GroundTruth, BACKGROUND, NO_ROTATION};
+use crate::label_set::LabelSet;
 use crate::line_vector::{objects_of_lines, LineGrid, LineSettings};
 use crate::map::{Object, ObjectKind, PathObject, Point};
 use crate::path_builder::PathBuilder;
 use crate::point_vector::{objects_of_points, Peak};
-use crate::symbol_kinds::{Catalogue, Entry};
+use crate::symbol_kinds::Entry;
 use crate::xml_reader;
 use crate::xml_writer::MapFile;
 
@@ -166,7 +167,7 @@ impl Default for Simplify {
 /// One opaque area symbol per cell: a map as a grid, which is what a model
 /// says about one and what [`crate::ground_truth`] writes down about one.
 ///
-/// The classes are places in a symbol list — [`Catalogue::opaque_areas`], in
+/// The classes are places in a symbol list — [`LabelSet::areas`], in
 /// the order `classes.json` records — and [`BACKGROUND`] where no ground
 /// cover reaches, which is the white frame around a generated map. Both
 /// vectors run row by row, `width` of them to a row.
@@ -288,7 +289,7 @@ pub struct Written {
 /// The path objects a grid's regions come to, in the order the grid holds
 /// them.
 ///
-/// `symbols` is the list the classes index: [`Catalogue::opaque_areas`], in
+/// `symbols` is the list the classes index: [`LabelSet::areas`], in
 /// the very order the dataset's `classes.json` recorded, since a class is a
 /// place in it and nothing else says which place.
 ///
@@ -406,7 +407,7 @@ pub fn write_map(
 
 /// [`write_map`], and the lines of a [`LineGrid`] drawn over the areas: each
 /// path of their skeletons an object drawn with the line symbol of its
-/// channel, in the order of [`Catalogue::lines`].
+/// channel, in the order of [`LabelSet::lines`].
 pub fn write_map_with_lines(
     grid: &SymbolGrid,
     lines: Option<(&LineGrid, &LineSettings)>,
@@ -421,7 +422,7 @@ pub fn write_map_with_lines(
 /// [`write_map_with_lines`], and the point objects of `points` — peaks found
 /// on a picture of the grid's own size, see [`crate::point_vector`] — each
 /// drawn with the point symbol of its channel, in the order of
-/// [`Catalogue::points`].
+/// [`LabelSet::points`].
 pub fn write_map_with_layers(
     grid: &SymbolGrid,
     lines: Option<(&LineGrid, &LineSettings)>,
@@ -433,28 +434,24 @@ pub fn write_map_with_layers(
 ) -> Result<Written, String> {
     let (mut map, warnings) = xml_reader::read_xml_map(source)?;
     map.resolve_references();
-    let catalogue = Catalogue::of(&map);
-    if catalogue.opaque_areas.is_empty() {
+    // The classes are the table's where one comes with the set, and a
+    // symbol each where none does; each is written back with its symbol.
+    let classes = LabelSet::beside(&map, source)?;
+    if classes.areas.is_empty() {
         return Err(format!(
             "{} holds no opaque area symbol, so a class of a grid names nothing",
             source.display()
         ));
     }
 
-    let mut objects = to_objects(grid, &catalogue.opaque_areas, placement, simplify)?;
+    let mut objects = to_objects(grid, &classes.areas, placement, simplify)?;
     let mut line_count = 0;
     if let Some((found, settings)) = lines {
-        let drawn = objects_of_lines(found, &catalogue.lines, placement, settings)?;
+        let drawn = objects_of_lines(found, &classes.lines, placement, settings)?;
         line_count = drawn.len();
         objects.extend(drawn);
     }
-    let drawn = objects_of_points(
-        points,
-        &catalogue.points,
-        grid.width,
-        grid.height,
-        placement,
-    )?;
+    let drawn = objects_of_points(points, &classes.points, grid.width, grid.height, placement)?;
     let point_count = drawn.len();
     objects.extend(drawn);
     let mut written = write_objects(
@@ -1557,6 +1554,7 @@ mod tests {
                 class: object.symbol_id as usize,
                 turn: None,
                 outline: object.coords.clone(),
+                strip: None,
             })
             .collect();
         let truth =

@@ -131,6 +131,10 @@
 //! [`line_truth`] and [`point_truth`] are the layers over it — the lines as a
 //! yes-or-no per line symbol, the point symbols as a heatmap per symbol
 //! peaking where each point is — rebuilt from the map file itself.
+//! [`label_set`] says what the classes of those answers are: a class per
+//! symbol, or — where a table comes with the set — the fewer things a
+//! picture shows, a building as its fill and its outline, a road as a strip
+//! of paved area and its borders, two symbols which look alike as one.
 //!
 //! # Reading an answer back
 //!
@@ -179,6 +183,7 @@ pub mod geotiff;
 pub mod gravity_model;
 pub mod ground_truth;
 pub mod image_template;
+pub mod label_set;
 pub mod layout;
 pub mod line_truth;
 pub mod line_vector;

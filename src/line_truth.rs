@@ -10,8 +10,11 @@
 //!   the network has to learn to see through the line;
 //! * a pixel can be on several lines at once — two paths crossing, a fence
 //!   along a stream — so the layer is not a class per pixel but a yes-or-no
-//!   per pixel *per line symbol*: a multi-label answer, scored with a sigmoid
-//!   per channel and not a softmax across them.
+//!   per pixel *per line class*: a multi-label answer, scored with a sigmoid
+//!   per channel and not a softmax across them. A class is a line symbol of
+//!   the set, or — where the set comes with a table of labels — one of the
+//!   fewer lines the table names, which a road's borders and a building's
+//!   outline are labelled as too: see [`crate::label_set`].
 //!
 //! # Where the labels come from
 //!
@@ -35,9 +38,9 @@ use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Stroke, Transform};
 
 use crate::geometry::to_painter_path;
 use crate::ground_truth::page_transform_for;
-use crate::map::{CoordList, Map, ObjectKind, Symbol};
+use crate::label_set::LabelSet;
+use crate::map::{CoordList, Map};
 use crate::renderer::to_skia_path;
-use crate::symbol_kinds::Catalogue;
 use crate::xml_reader::read_xml_map;
 
 /// The least a line is labelled wide, in pixels.
@@ -45,8 +48,9 @@ pub const MIN_WIDTH_PIXELS: f32 = 3.0;
 
 /// One line as it was drawn, which is one stroke of the answer.
 pub struct LineStroke {
-    /// Which of the symbol set's lines it was drawn with: a place in
-    /// [`crate::symbol_kinds::Catalogue::lines`], and the channel it owns.
+    /// Which line class it is: a place in
+    /// [`crate::label_set::LabelSet::lines`] — for a set with no table of
+    /// labels, the line symbol it was drawn with — and the channel it owns.
     pub class: usize,
     /// The width of the symbol's own stroke, in mm on the paper.
     pub width: f64,
@@ -60,7 +64,7 @@ pub struct LineTruth {
     pub height: u32,
     /// Its width, in pixels.
     pub width: u32,
-    /// How many channels there are: the line symbols of the set.
+    /// How many channels there are: the line classes of the set.
     pub classes: usize,
     /// The channels which have any pixel on, as `(class, mask)` with a mask of
     /// `height * width` bytes, one where a line of that class runs and zero
@@ -134,61 +138,39 @@ impl LineTruth {
 
     /// Rebuilds the labels of the lines on a generated map, out of the map
     /// file itself — see [`crate::ground_truth::GroundTruth::from_map`], whose
-    /// `width`, `height` and `resolution` these are too.
+    /// `labels`, `width`, `height` and `resolution` these are too.
     ///
     /// A map with no line on it gives labels with no channel on, which is an
-    /// answer and not an error. An object which is not a path drawn with a
-    /// line symbol is skipped.
+    /// answer and not an error. An object `labels` gives no stroke is
+    /// skipped.
     pub fn from_map(
         path: &Path,
+        labels: &LabelSet,
         width: u32,
         height: u32,
         resolution: f64,
     ) -> Result<LineTruth, String> {
         let (mut map, _) = read_xml_map(path)?;
         map.resolve_references();
-        LineTruth::of_map(&map, width, height, resolution)
+        LineTruth::of_map(&map, labels, width, height, resolution)
     }
 
     /// [`LineTruth::from_map`] of a map already read, with its references
     /// resolved — for a caller which wants more than the lines out of it.
+    ///
+    /// The strokes are what `labels` gives the objects: a line's own path,
+    /// the borders of a road beside its strip, the outline of a building —
+    /// see [`LabelSet::strokes`].
     pub fn of_map(
         map: &Map,
+        labels: &LabelSet,
         width: u32,
         height: u32,
         resolution: f64,
     ) -> Result<LineTruth, String> {
-        let catalogue = Catalogue::of(map);
-
-        let strokes: Vec<LineStroke> = map
-            .objects
-            .iter()
-            .filter(|object| matches!(object.kind, ObjectKind::Path(_)))
-            .filter_map(|object| {
-                let index = object.symbol_index?;
-                let class = catalogue.lines.iter().position(|e| e.index == index)?;
-                let Some(Symbol::Line(line)) = map.symbols.get(index) else {
-                    return None;
-                };
-                Some(LineStroke {
-                    class,
-                    // A symbol with no colour draws no stroke at all: its
-                    // width is the room its mid symbols take up, which is
-                    // not where the line is.
-                    width: if line.color < 0 { 0.0 } else { line.line_width },
-                    path: object.coords.clone(),
-                })
-            })
-            .collect();
-
+        let strokes = labels.strokes(map, &map.objects);
         let page_transform = page_transform_for(map.scale_denominator, resolution, width, height);
-        LineTruth::rasterize(
-            &strokes,
-            catalogue.lines.len(),
-            width,
-            height,
-            page_transform,
-        )
+        LineTruth::rasterize(&strokes, labels.lines.len(), width, height, page_transform)
     }
 
     /// The mask of one channel, or `None` where nothing of that class is on

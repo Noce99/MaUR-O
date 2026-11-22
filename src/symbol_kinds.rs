@@ -165,6 +165,22 @@ impl Catalogue {
         catalogue
     }
 
+    /// Keeps the symbols `keep` says yes to, of every kind, in the order
+    /// they were in: what a generator draws with, out of a set some of whose
+    /// symbols it is not to draw on their own — see
+    /// [`crate::label_set::LabelSet::drawn`].
+    pub fn retain(&mut self, keep: impl Fn(&Entry) -> bool) {
+        for list in [
+            &mut self.opaque_areas,
+            &mut self.transparent_areas,
+            &mut self.lines,
+            &mut self.points,
+            &mut self.texts,
+        ] {
+            list.retain(&keep);
+        }
+    }
+
     /// Every kind with the symbols sorted into it, in a fixed order, for
     /// counting and reporting.
     pub fn by_kind(&self) -> [(SymbolKind, &[Entry]); 5] {
