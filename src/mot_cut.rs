@@ -22,8 +22,9 @@
 //! roads' outlines stop where they meet. Stored as is, the outlines come back
 //! across the junction. So a line which the map draws wholly under an area and
 //! the standard (at least partly) above it is cut where the area lies over it.
-//! Only a line with nothing laid out along it: a dashed one, or one with dots or
-//! tags, would have them spaced anew on each piece. It is cut where its middle
+//! Only a line with nothing laid out along its middle: a dashed one, or one with
+//! dots or tags, would have them spaced anew on each piece (a road's dashed
+//! borders start anew at the cut, which is still the road). It is cut where its middle
 //! goes under the area. What the map drew of the pieces taken away does not all
 //! lie under the area: a road running along the area's edge, or along a hole of
 //! it, has half its width out of it, and where it meets the edge aslant one side
@@ -339,7 +340,7 @@ fn cut_lines_under_areas(
             .flatten()
             .and_then(|(id, _)| table.get(id));
         let Some(entry) = entry else { continue };
-        if entry.kind != SymbolKind::Line || entry.whole {
+        if entry.kind != SymbolKind::Line || entry.spaced {
             continue;
         }
         let (Some(own), Some(standard)) = (paint_priority(symbol, map), entry.paint) else {
@@ -835,6 +836,19 @@ mod tests {
         // And what the forest lost, the paved area has.
         let paved = area_of(&cuts.coords[&1]);
         assert!((paved + left - 100.0).abs() < 1e-3, "{paved} + {left}");
+    }
+
+    #[test]
+    fn a_path_with_dashed_borders_the_map_hides_is_cut_too() {
+        // ISSprOM's 505.1 has dashed borders, nothing laid out along its
+        // middle: a piece of it is still the path.
+        let path = [(-10.0, 5.0), (20.0, 5.0)];
+        let m = map(
+            &[("501.5", "area", "top"), ("505.1", "line", "bottom")],
+            &[(0, &square(0.0, 0.0, 10.0)), (1, &path)],
+        );
+        let cuts = cut_hidden(&m, &SymbolTable::issprom());
+        assert!((line_length(&cuts.coords[&1]) - 20.0).abs() < 1e-6);
     }
 
     #[test]

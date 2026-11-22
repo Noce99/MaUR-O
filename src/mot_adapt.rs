@@ -20,6 +20,12 @@
 //!   triangles straddle the line, ISSprOM's stand on it): the line is moved
 //!   sideways by the difference, so that the standard's symbols stand where the
 //!   map's did. A line which draws its middle stays where it was drawn.
+//! - **Made an area**: a line symbol of the map which paints only its middle,
+//!   with no outline (the club's "Traffico", a dark brown band), stored as a
+//!   standard symbol of the same colour which outlines it (ISSprOM's
+//!   footprints of heavy traffic, with black borders), would gain an outline
+//!   the map does not have. Such a line is stored as the area of its footprint
+//!   instead, of the standard's plain area of the closest colour.
 //! - **Filled under**: a line symbol of the map which paints its middle in a
 //!   colour (a stairway in a paved area's brown, with its steps on it), stored
 //!   as a standard symbol which leaves the middle empty (ISSprOM's stairways,
@@ -69,6 +75,7 @@ pub fn adapt(map: &Map, table: &SymbolTable) -> Adapted {
         warnings: cuts.warnings,
     };
     turn_round(map, table, &mut adapted);
+    make_areas(map, table, &mut adapted);
     fill_under(map, table, &mut adapted);
     adapted
 }
@@ -266,32 +273,9 @@ fn fill_under(map: &Map, table: &SymbolTable, adapted: &mut Adapted) {
             continue;
         };
         let coords = adapted.coords.get(&index).unwrap_or(&object.coords);
-        let style = match cap {
-            cap_style::ROUND => BufferStyle::new(width / 2.0),
-            cap_style::SQUARE => BufferStyle::new(width / 2.0).line_cap(LineCap::Square),
-            _ => BufferStyle::new(width / 2.0).line_cap(LineCap::Butt),
-        };
-        let pieces: Vec<MultiPolygon> = flatten(coords)
-            .iter()
-            .filter(|part| part.points.len() >= 2)
-            .map(|part| {
-                LineString::from(
-                    part.points
-                        .iter()
-                        .map(|p| GeoCoord { x: p.x, y: p.y })
-                        .collect::<Vec<_>>(),
-                )
-                .buffer_with_style(style.clone())
-            })
-            .collect();
-        let footprint = area_coords(&unary_union(pieces.iter()));
-        if footprint.is_empty() {
+        let Some(extra) = footprint_object(object, s, coords, width, cap) else {
             continue;
-        }
-        let mut extra = Object::new(ObjectKind::Path(PathObject::default()));
-        extra.symbol_id = object.symbol_id;
-        extra.symbol_index = Some(s);
-        extra.coords = footprint;
+        };
         adapted.extras.push((extra, area));
         filled[s] += 1;
     }
@@ -315,6 +299,127 @@ fn fill_under(map: &Map, table: &SymbolTable, adapted: &mut Adapted) {
             target.name,
         ));
     }
+}
+
+/// Stores as the area of their footprint the lines whose symbol paints only its
+/// middle where the standard's, of the same colour, outlines it.
+fn make_areas(map: &Map, table: &SymbolTable, adapted: &mut Adapted) {
+    // Out of 1 in each of red, green and blue, as for the plain areas.
+    const SAME: f32 = 0.1;
+    let distance = |a: (f32, f32, f32), b: (f32, f32, f32)| {
+        ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
+    };
+    // For each symbol: the area its lines become, and how wide and how ended
+    // they are.
+    let areas: Vec<Option<(u16, f64, i32)>> = map
+        .symbols
+        .iter()
+        .map(|symbol| {
+            let entry = table.get(line_target(symbol, map, table)?)?;
+            if !entry.edged || edged(symbol, map) || spaced(symbol, map) {
+                return None;
+            }
+            let (color, width, cap) = body(symbol, map)?;
+            let rgb = map.color(color)?.rgb;
+            // The same thing, outlined: a middle of the same colour.
+            if distance(entry.body_rgb?, rgb) > SAME {
+                return None;
+            }
+            Some((table.closest_plain_area(rgb)?, width, cap))
+        })
+        .collect();
+    let mut made = vec![0usize; map.symbols.len()];
+    for (index, object) in map.objects.iter().enumerate() {
+        let (Some(s), ObjectKind::Path(_)) = (object.symbol_index, &object.kind) else {
+            continue;
+        };
+        let Some((area, width, cap)) = areas[s] else {
+            continue;
+        };
+        let coords = adapted.coords.get(&index).unwrap_or(&object.coords);
+        let extra = footprint_object(object, s, coords, width, cap);
+        // The line itself is not stored: the area is what the map drew.
+        adapted.coords.insert(index, CoordList::new());
+        if let Some(extra) = extra {
+            adapted.extras.push((extra, area));
+        }
+        made[s] += 1;
+    }
+    for (s, n) in made.into_iter().enumerate() {
+        let Some((area, _, _)) = areas[s].filter(|_| n > 0) else {
+            continue;
+        };
+        let symbol = &map.symbols[s];
+        let target = line_target(symbol, map, table)
+            .and_then(|id| table.get(id))
+            .expect("a symbol made an area has a target");
+        let area = table.get(area).expect("an id of the table");
+        adapted.warnings.push(format!(
+            "lines of symbol {} \"{}\" stored as areas of {} \"{}\": {} \"{}\" outlines the \
+             line, which the map's symbol does not: {n} objects",
+            symbol.code(),
+            symbol.name(),
+            area.code,
+            area.name,
+            target.code,
+            target.name,
+        ));
+    }
+}
+
+/// An area of the footprint of the line `coords` (of `object`, of the map's
+/// symbol `symbol`), `width` wide and ended by `cap`: `None` for no area.
+fn footprint_object(
+    object: &Object,
+    symbol: usize,
+    coords: &CoordList,
+    width: f64,
+    cap: i32,
+) -> Option<Object> {
+    let style = match cap {
+        cap_style::ROUND => BufferStyle::new(width / 2.0),
+        cap_style::SQUARE => BufferStyle::new(width / 2.0).line_cap(LineCap::Square),
+        _ => BufferStyle::new(width / 2.0).line_cap(LineCap::Butt),
+    };
+    let pieces: Vec<MultiPolygon> = flatten(coords)
+        .iter()
+        .filter(|part| part.points.len() >= 2)
+        .map(|part| {
+            LineString::from(
+                part.points
+                    .iter()
+                    .map(|p| GeoCoord { x: p.x, y: p.y })
+                    .collect::<Vec<_>>(),
+            )
+            .buffer_with_style(style.clone())
+        })
+        .collect();
+    let footprint = area_coords(&unary_union(pieces.iter()));
+    if footprint.is_empty() {
+        return None;
+    }
+    let mut extra = Object::new(ObjectKind::Path(PathObject::default()));
+    extra.symbol_id = object.symbol_id;
+    extra.symbol_index = Some(symbol);
+    extra.coords = footprint;
+    Some(extra)
+}
+
+/// Whether a line `symbol`, one of `map`'s, draws an outline: a border on
+/// either side.
+pub(crate) fn edged(symbol: &Symbol, map: &Map) -> bool {
+    let mut leaves = Vec::new();
+    symbol_leaves(symbol, map, &mut leaves);
+    leaves.iter().any(|leaf| match leaf {
+        Symbol::Line(l) => l.border.is_visible() || l.right_border.is_visible(),
+        _ => false,
+    })
+}
+
+/// Whether a line `symbol`, one of `map`'s, lays anything out along it: dashes,
+/// or symbols at its ends or along it.
+fn spaced(symbol: &Symbol, map: &Map) -> bool {
+    crate::mot_symbols::spaces_out(symbol, map, true)
 }
 
 /// The middle of a line `symbol`, one of `map`'s, paints: the colour, width and
@@ -631,6 +736,58 @@ mod tests {
             "{}",
             shape.unsigned_area()
         );
+    }
+
+    /// A plain line of `color`, 0.35 wide, with a border of `border` (-1 for
+    /// none).
+    fn road(code: &str, color: i32, border: i32) -> String {
+        let borders = if border >= 0 {
+            format!(r#"<borders><border color="{border}" width="100" shift="50"/></borders>"#)
+        } else {
+            String::new()
+        };
+        format!(
+            r#"<symbol type="2" id="{{id}}" code="{code}" name="s{{id}}"><line_symbol color="{color}" line_width="350" minimum_length="0" join_style="1" cap_style="0" start_offset="0" end_offset="0" segment_length="4000" end_length="0" dash_length="4000" break_length="1000" dashes_in_group="1" in_group_break_length="500" mid_symbols_per_spot="1" mid_symbol_distance="0">{borders}</line_symbol></symbol>"#
+        )
+    }
+
+    #[test]
+    fn a_road_the_map_draws_without_an_outline_is_stored_as_an_area() {
+        // ISSprOM's 501.6 is a brown footprint with black borders; the map's
+        // is the brown alone.
+        let m = map(&[&road("501.6", 1, -1)], &[(0, &[(0.0, 0.0), (10.0, 0.0)])]);
+        let table = SymbolTable::issprom();
+        let adapted = adapt(&m, &table);
+        assert!(adapted.coords[&0].is_empty(), "the line is not stored");
+        assert_eq!(adapted.extras.len(), 1, "{:?}", adapted.warnings);
+        let (area, id) = &adapted.extras[0];
+        assert_eq!(table.get(*id).unwrap().code, "501.5");
+        let shape = crate::mot_cut::area_shape(&area.coords);
+        use geo::Area;
+        assert!(
+            (shape.unsigned_area() - 3.5).abs() < 1e-6,
+            "{}",
+            shape.unsigned_area()
+        );
+        assert!(adapted
+            .warnings
+            .iter()
+            .any(|w| w.contains("stored as areas")));
+    }
+
+    #[test]
+    fn a_road_the_map_outlines_too_stays_a_line() {
+        let m = map(&[&road("501.6", 1, 0)], &[(0, &[(0.0, 0.0), (10.0, 0.0)])]);
+        let adapted = adapt(&m, &SymbolTable::issprom());
+        assert!(adapted.coords.is_empty() && adapted.extras.is_empty());
+    }
+
+    #[test]
+    fn a_line_of_another_colour_than_the_standards_stays_a_line() {
+        // Black, where 501.6's middle is brown: not the same thing outlined.
+        let m = map(&[&road("501.6", 0, -1)], &[(0, &[(0.0, 0.0), (10.0, 0.0)])]);
+        let adapted = adapt(&m, &SymbolTable::issprom());
+        assert!(adapted.coords.is_empty() && adapted.extras.is_empty());
     }
 
     #[test]

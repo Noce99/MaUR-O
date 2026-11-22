@@ -742,8 +742,9 @@ map hides under a paved area, which then goes on as the area); reversed, for a
 line whose symbol draws on one side of it (a tunnel entrance's triangles, a
 fence's ticks) where the standard's draws on the other; moved aside, for a line
 which draws nothing along its middle, where the standard's symbols stand further
-from it than the map's (triangles on the line against triangles across it); and
-filled under, for a
+from it than the map's (triangles on the line against triangles across it);
+stored as an area, for a line whose symbol paints only its middle (a dark brown
+band) where the standard's of that colour outlines it; and filled under, for a
 line whose symbol paints its middle in a colour (a stairway in a paved brown)
 where the standard's leaves it empty, with the standard's plain area of the
 closest colour. All of it is worked out from the symbols themselves. A

@@ -130,6 +130,11 @@ fn zoom_rule(code: &str, kind: SymbolKind) -> ZoomRule {
 /// Whether a symbol lays things out along the whole of a line: dashes, a
 /// dashed border, or point symbols at its start, along it or at its end.
 fn lays_out_along(symbol: &Symbol, map: &Map) -> bool {
+    spaces_out(symbol, map, true)
+}
+
+/// [`lays_out_along`], with dashed borders counted or not.
+pub(crate) fn spaces_out(symbol: &Symbol, map: &Map, borders: bool) -> bool {
     let mut leaves = Vec::new();
     symbol_leaves(symbol, map, &mut leaves);
     leaves.iter().any(|leaf| match leaf {
@@ -140,8 +145,7 @@ fn lays_out_along(symbol: &Symbol, map: &Map) -> bool {
             // `dash_length` and `break_length` are set on a solid line too, and mean
             // nothing there: it is `dashed` which says it is dashed.
             s.dashed
-                || s.border.dashed
-                || s.right_border.dashed
+                || (borders && (s.border.dashed || s.right_border.dashed))
                 || drawn(&s.start_symbol)
                 || drawn(&s.mid_symbol)
                 || drawn(&s.end_symbol)
@@ -167,6 +171,11 @@ pub struct SymbolEntry {
     /// spaces them depends on that length, so a piece of the line would not
     /// meet its neighbour's.
     pub whole: bool,
+    /// Whether it lays dashes or symbols out along the middle of the line: as
+    /// [`whole`](Self::whole), dashed borders left out. A piece of such a
+    /// line would have them anew; a piece of a road with dashed borders only
+    /// is still the road.
+    pub spaced: bool,
     /// The width of the widest line it draws, in millimetres; 0 for none. What
     /// tells a [`SymbolMap`] which of a road's or a stairway's footprints a
     /// symbol is.
@@ -183,6 +192,10 @@ pub struct SymbolEntry {
     /// For a line, whether it paints its middle in a colour (a road's infill),
     /// not only borders or symbols along it (a stairway's outline and steps).
     pub body: bool,
+    /// For a line, the colour its middle is painted in.
+    pub body_rgb: Option<(f32, f32, f32)>,
+    /// For a line, whether it draws an outline: a border on either side.
+    pub edged: bool,
     /// For a plain area (one colour, no patterns), that colour.
     pub fill_rgb: Option<(f32, f32, f32)>,
     /// Whether it draws a line as well as what it fills: an area with its own
@@ -387,6 +400,7 @@ impl SymbolTable {
                 kind,
                 rule: zoom_rule(code, kind),
                 whole: lays_out_along(symbol, &map),
+                spaced: spaces_out(symbol, &map, false),
                 width: widest_line(symbol, &map),
                 fill: crate::mot_cut::fill_priority(symbol, &map),
                 paint: crate::mot_cut::paint_priority(symbol, &map),
@@ -396,6 +410,10 @@ impl SymbolTable {
                     0.0
                 },
                 body: crate::mot_adapt::body(symbol, &map).is_some(),
+                body_rgb: crate::mot_adapt::body(symbol, &map)
+                    .and_then(|(color, _, _)| map.color(color))
+                    .map(|c| c.rgb),
+                edged: crate::mot_adapt::edged(symbol, &map),
                 fill_rgb: match symbol {
                     Symbol::Area(a) if a.color >= 0 && a.patterns.is_empty() => {
                         map.color(a.color).map(|c| c.rgb)
