@@ -9,7 +9,10 @@
 //! paved area round it, so that is what is done here: an area is cut by the
 //! footprint of every object that the map draws above it and the standard draws
 //! below it. An area's footprint is the area; a line's, the line at its width.
-//! Points cut nothing, and nor do objects of fills that are only patterns.
+//! Points cut nothing, and nor do objects of fills that are only patterns. What
+//! an area shows is its fill and its patterns: open land with scattered trees,
+//! of the same yellow as the open land over it, is cut for its trees' green,
+//! which the standard draws above that yellow.
 //!
 //! Two kinds of area are left whole. A course symbol (700s), which the standard
 //! means to cover the map. And, by a line, an area that draws its own outline (a
@@ -59,6 +62,52 @@ pub(crate) fn fill_priority(symbol: &Symbol, map: &Map) -> Option<i32> {
             _ => None,
         })
         .min()
+}
+
+/// The priority of the topmost colour an area of `symbol`, one of `map`'s, shows:
+/// its plain fill or a colour of its patterns (the dots of open land with
+/// scattered trees, which may be above the fill of the area over it where the
+/// fills are not). `None` for a symbol with no plain fill.
+pub(crate) fn top_priority(symbol: &Symbol, map: &Map) -> Option<i32> {
+    fn point(p: &crate::map::PointSymbol, out: &mut Vec<i32>) {
+        if p.inner_radius > 0.0 && p.inner_color >= 0 {
+            out.push(p.inner_color);
+        }
+        if p.outer_width > 0.0 && p.outer_color >= 0 {
+            out.push(p.outer_color);
+        }
+        for element in &p.elements {
+            leaf(&element.symbol, out);
+        }
+    }
+    fn leaf(symbol: &Symbol, out: &mut Vec<i32>) {
+        match symbol {
+            Symbol::Area(a) => {
+                out.extend((a.color >= 0).then_some(a.color));
+                for pattern in &a.patterns {
+                    if pattern.line_color >= 0 && pattern.line_width > 0.0 {
+                        out.push(pattern.line_color);
+                    }
+                    if let Some(p) = &pattern.point {
+                        point(p, out);
+                    }
+                }
+            }
+            Symbol::Line(l) if l.color >= 0 && l.line_width > 0.0 => out.push(l.color),
+            Symbol::Point(p) => point(p, out),
+            _ => {}
+        }
+    }
+    fill_priority(symbol, map)?;
+    let mut leaves = Vec::new();
+    symbol_leaves(symbol, map, &mut leaves);
+    let mut colors = Vec::new();
+    // The areas' parts only: an outline (a building's) is the line's, which
+    // goes round what lies on the area rather than under it.
+    for symbol in leaves.into_iter().filter(|s| matches!(s, Symbol::Area(_))) {
+        leaf(symbol, &mut colors);
+    }
+    colors.into_iter().min()
 }
 
 /// The priority of the topmost colour `symbol`, one of `map`'s, paints solid: an
@@ -129,6 +178,9 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
     // What each symbol fills (as an area to cut, and whether it is outlined) and
     // paints (as what cuts).
     let mut fills: Vec<Option<(Order, bool)>> = Vec::with_capacity(map.symbols.len());
+    // What each area shows at the top, patterns too: what must not come out
+    // above what the map draws over it.
+    let mut tops: Vec<Option<Order>> = Vec::with_capacity(map.symbols.len());
     let mut paints: Vec<Option<(Order, SymbolKind)>> = Vec::with_capacity(map.symbols.len());
     for symbol in &map.symbols {
         let entry = symbol
@@ -138,6 +190,7 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
             .and_then(|(id, _)| table.get(id));
         let Some(entry) = entry else {
             fills.push(None);
+            tops.push(None);
             paints.push(None);
             continue;
         };
@@ -145,6 +198,12 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
         fills.push(match (entry.kind, fill_priority(symbol, map), entry.fill) {
             (SymbolKind::Area, Some(own), Some(standard)) if !course => {
                 Some((Order { own, standard }, entry.outlined))
+            }
+            _ => None,
+        });
+        tops.push(match (entry.kind, top_priority(symbol, map), entry.top) {
+            (SymbolKind::Area, Some(own), Some(standard)) if !course => {
+                Some(Order { own, standard })
             }
             _ => None,
         });
@@ -161,7 +220,7 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
     // standard draws below it.
     let mut under: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     for (a, fill) in fills.iter().enumerate() {
-        let Some((fill, outlined)) = fill else {
+        let (Some((_, outlined)), Some(top)) = (fill, &tops[a]) else {
             continue;
         };
         for (b, paint) in paints.iter().enumerate() {
@@ -169,7 +228,7 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
             if *outlined && *kind == SymbolKind::Line {
                 continue;
             }
-            if a != b && fill.standard < paint.standard && fill.own > paint.own {
+            if a != b && top.standard < paint.standard && top.own > paint.own {
                 under.entry(a).or_default().insert(b);
             }
         }
@@ -587,7 +646,8 @@ mod tests {
 
     /// A map with three colours, `top` drawn above `mid` above `bottom`, and
     /// these symbols (code, kind and colour) and objects (symbol index and
-    /// coordinates in mm, a closed ring for an area).
+    /// coordinates in mm, a closed ring for an area). A "dotted" area is filled
+    /// with its colour and dotted with `mid`.
     fn map(symbols: &[(&str, &str, &str)], objects: &[(usize, &[(f64, f64)])]) -> Map {
         let colors = r#"<colors count="3"><color priority="0" name="top" c="0.8" m="0" y="1" k="0" opacity="1"/><color priority="1" name="mid" c="0" m="0.5" y="0.5" k="0" opacity="1"/><color priority="2" name="bottom" c="0" m="0.17" y="0.3" k="0.05" opacity="1"/></colors>"#;
         let mut xml = format!("<map>{colors}<symbols count=\"{}\">", symbols.len());
@@ -600,6 +660,9 @@ mod tests {
             xml += &match *kind {
                 "area" => format!(
                     r#"<symbol type="4" id="{id}" code="{code}" name="s{id}"><area_symbol inner_color="{c}" min_area="0" patterns="0"/></symbol>"#
+                ),
+                "dotted" => format!(
+                    r#"<symbol type="4" id="{id}" code="{code}" name="s{id}"><area_symbol inner_color="{c}" min_area="0" patterns="1"><pattern type="2" angle="0" line_spacing="750" line_offset="0" offset_along_line="0" point_distance="750"><symbol type="1" code="" name="dot"><point_symbol inner_radius="300" inner_color="1" outer_width="0" outer_color="-1" elements="0"/></symbol></pattern></area_symbol></symbol>"#
                 ),
                 _ => format!(
                     r#"<symbol type="2" id="{id}" code="{code}" name="s{id}"><line_symbol color="{c}" line_width="400" minimum_length="0" join_style="1" cap_style="0" start_offset="0" end_offset="0" segment_length="4000" end_length="0" dash_length="4000" break_length="1000" dashes_in_group="1" in_group_break_length="500" mid_symbols_per_spot="1" mid_symbol_distance="0"/></symbol>"#
@@ -617,7 +680,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, (x, y))| {
                     let (x, y) = ((x * 1000.0) as i64, (y * 1000.0) as i64);
-                    let closed = symbols[*symbol].1 == "area" && i + 1 == n;
+                    let closed = symbols[*symbol].1 != "line" && i + 1 == n;
                     if closed {
                         format!("{x} {y} 18")
                     } else {
@@ -646,6 +709,21 @@ mod tests {
 
     fn area_of(coords: &CoordList) -> f64 {
         area_shape(coords).unsigned_area()
+    }
+
+    #[test]
+    fn an_area_whose_dots_the_standard_draws_above_the_area_over_it_is_cut() {
+        // ISSprOM's open land and open land with scattered trees are of one
+        // yellow, its trees' green above it: the map hides the trees under the
+        // open land, which the standard would not.
+        let open = square(0.0, 0.0, 10.0);
+        let trees = square(5.0, 0.0, 10.0);
+        let m = map(
+            &[("401", "area", "top"), ("402.1", "dotted", "bottom")],
+            &[(0, &open), (1, &trees)],
+        );
+        let cuts = cut_hidden(&m, &SymbolTable::issprom());
+        assert!((area_of(&cuts.coords[&1]) - 50.0).abs() < 1e-6);
     }
 
     #[test]

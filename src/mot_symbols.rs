@@ -183,6 +183,9 @@ pub struct SymbolEntry {
     /// The priority, in the standard's colour order, of the topmost colour its
     /// areas are filled with (lower is drawn on top); `None` for no plain fill.
     pub fill: Option<i32>,
+    /// The priority of the topmost colour an area of it shows, its patterns'
+    /// too (the dots of open land with scattered trees).
+    pub top: Option<i32>,
     /// The priority of the topmost colour it paints solid, fill or line.
     pub paint: Option<i32>,
     /// For a line, which side of it the symbol draws on, in mm: positive to the
@@ -403,6 +406,7 @@ impl SymbolTable {
                 spaced: spaces_out(symbol, &map, false),
                 width: widest_line(symbol, &map),
                 fill: crate::mot_cut::fill_priority(symbol, &map),
+                top: crate::mot_cut::top_priority(symbol, &map),
                 paint: crate::mot_cut::paint_priority(symbol, &map),
                 side: if kind == SymbolKind::Line {
                     crate::mot_adapt::line_side(symbol, &map)
