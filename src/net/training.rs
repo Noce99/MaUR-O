@@ -83,8 +83,10 @@ use burn::data::dataset::Dataset;
 use burn::grad_clipping::GradientClippingConfig;
 use burn::lr_scheduler::{LrScheduler, LrSchedulerRecord};
 use burn::module::extract_type_name;
+use burn::nn::pool::MaxPool2dConfig;
+use burn::nn::PaddingConfig2d;
 use burn::optim::{AdamWConfig, LearningRate};
-use burn::tensor::activation::{relu, sigmoid};
+use burn::tensor::activation::{log_sigmoid, relu, sigmoid};
 use burn::tensor::{Device, ExecutionError, Tensor, TensorReadError};
 use burn::train::checkpoint::{
     ComposedCheckpointingStrategy, KeepLastNCheckpoints, MetricCheckpointingStrategy,
@@ -403,6 +405,17 @@ pub struct MapOutput {
     /// through: their union, which is what the intersection is divided by to
     /// give the IoU.
     pub line_union: Tensor<1>,
+    /// How many peaks the network's point heatmaps have — see
+    /// `points_loss`. Nought where the network has no points layer.
+    pub point_predicted: Tensor<1>,
+    /// How many of those have a labelled point of their symbol within
+    /// [`POINT_MATCH_RADIUS`].
+    pub point_predicted_hits: Tensor<1>,
+    /// How many points the labels hold.
+    pub point_labelled: Tensor<1>,
+    /// How many of those have a peak of their symbol within
+    /// [`POINT_MATCH_RADIUS`].
+    pub point_labelled_hits: Tensor<1>,
     /// How far out the scale head was, summed over the crops: the absolute
     /// difference between its logarithm and the label's. Nought where the
     /// network has no scale head.
@@ -427,6 +440,10 @@ impl ItemLazy for MapOutput {
             angled: self.angled.without_autodiff(),
             line_intersection: self.line_intersection.without_autodiff(),
             line_union: self.line_union.without_autodiff(),
+            point_predicted: self.point_predicted.without_autodiff(),
+            point_predicted_hits: self.point_predicted_hits.without_autodiff(),
+            point_labelled: self.point_labelled.without_autodiff(),
+            point_labelled_hits: self.point_labelled_hits.without_autodiff(),
             scale_error: self.scale_error.without_autodiff(),
             scaled: self.scaled.without_autodiff(),
         })
@@ -453,6 +470,17 @@ impl Adaptor<LineInput> for MapOutput {
         LineInput {
             intersection: self.line_intersection.clone(),
             union: self.line_union.clone(),
+        }
+    }
+}
+
+impl Adaptor<PointInput> for MapOutput {
+    fn adapt(&self) -> PointInput {
+        PointInput {
+            predicted: self.point_predicted.clone(),
+            predicted_hits: self.point_predicted_hits.clone(),
+            labelled: self.point_labelled.clone(),
+            labelled_hits: self.point_labelled_hits.clone(),
         }
     }
 }
@@ -658,6 +686,129 @@ impl Metric for LineIouMetric {
 }
 
 impl Numeric for LineIouMetric {
+    fn value(&self) -> Option<NumericEntry> {
+        Some(self.state.current_value())
+    }
+
+    fn running_value(&self) -> Option<NumericEntry> {
+        Some(self.state.running_value())
+    }
+
+    fn final_value(&self) -> NumericEntry {
+        self.state.final_value()
+    }
+}
+
+/// What [`PointF1Metric`] is fed.
+pub struct PointInput {
+    predicted: Tensor<1>,
+    predicted_hits: Tensor<1>,
+    labelled: Tensor<1>,
+    labelled_hits: Tensor<1>,
+}
+
+/// How well the network finds the point symbols, as an F1 score: the
+/// harmonic mean of the share of its peaks which are a labelled point of
+/// their symbol within [`POINT_MATCH_RADIUS`] (precision) and the share of
+/// the labelled points it has such a peak for (recall).
+///
+/// Not the loss, and not a pixel count: a point is one pixel, and a network
+/// which says "no point anywhere" is right about all the others. This counts
+/// points, and scores that network nought.
+#[derive(Clone)]
+pub struct PointF1Metric {
+    name: MetricName,
+    state: NumericMetricState,
+}
+
+impl Default for PointF1Metric {
+    fn default() -> Self {
+        PointF1Metric {
+            name: std::sync::Arc::new("Point F1".to_string()),
+            state: NumericMetricState::default(),
+        }
+    }
+}
+
+impl PointF1Metric {
+    /// Creates the metric.
+    pub fn new() -> PointF1Metric {
+        PointF1Metric::default()
+    }
+
+    fn format(&self) -> FormatOptions {
+        FormatOptions::new(self.name.clone()).unit("%").precision(2)
+    }
+}
+
+/// The F1 score of `predicted` peaks, `predicted_hits` of them right, against
+/// `labelled` points, `labelled_hits` of them found, in per cent: a hundred
+/// where there was nothing to find and nothing was found.
+pub fn point_f1(predicted: f64, predicted_hits: f64, labelled: f64, labelled_hits: f64) -> f64 {
+    if predicted + labelled <= 0.0 {
+        return 100.0;
+    }
+    let precision = if predicted > 0.0 {
+        predicted_hits / predicted
+    } else {
+        0.0
+    };
+    let recall = if labelled > 0.0 {
+        labelled_hits / labelled
+    } else {
+        0.0
+    };
+    if precision + recall <= 0.0 {
+        0.0
+    } else {
+        100.0 * 2.0 * precision * recall / (precision + recall)
+    }
+}
+
+impl Metric for PointF1Metric {
+    type Input = PointInput;
+
+    fn name(&self) -> MetricName {
+        self.name.clone()
+    }
+
+    fn attributes(&self) -> MetricAttributes {
+        NumericAttributes {
+            unit: Some("%".to_string()),
+            higher_is_better: true,
+        }
+        .into()
+    }
+
+    fn update(
+        &mut self,
+        input: &PointInput,
+        _metadata: &MetricMetadata,
+    ) -> Result<SerializedEntry, TensorReadError> {
+        let (predicted, labelled) = (scalar(&input.predicted)?, scalar(&input.labelled)?);
+        let score = point_f1(
+            predicted,
+            scalar(&input.predicted_hits)?,
+            labelled,
+            scalar(&input.labelled_hits)?,
+        );
+        // Weighted by the points it was measured over, so a batch with none
+        // in it moves the epoch's figure by as little as can be.
+        self.state
+            .update(score, (predicted + labelled).max(1.0) as usize);
+        Ok(self.state.compute_update(self.format()))
+    }
+
+    fn compute(&mut self) -> Result<SerializedEntry, TensorReadError> {
+        Ok(self.state.compute_final(self.format()))
+    }
+
+    fn clear(&mut self) {
+        self.state.reset()
+    }
+}
+
+impl Numeric for PointF1Metric {
     fn value(&self) -> Option<NumericEntry> {
         Some(self.state.current_value())
     }
@@ -1001,6 +1152,76 @@ fn lines_loss(logits: Tensor<4>, wanted: Tensor<4>) -> (Tensor<1>, Tensor<1>, Te
     (bce + dice_loss, intersection, union)
 }
 
+/// How far a peak may be from a labelled point of its symbol, in pixels
+/// across or down, and still be that point, for [`PointF1Metric`]. Three:
+/// a peak is found to a pixel or so, and two points of one symbol are kept
+/// further apart than this by the generator.
+pub const POINT_MATCH_RADIUS: usize = 3;
+
+/// How sure the network has to be of a peak for the metric to count it: the
+/// threshold `mauro net image-to-map` reads points at by default.
+const POINT_METRIC_THRESHOLD: f32 = crate::point_vector::DEFAULT_POINT_THRESHOLD;
+
+/// The loss of the points layer, and what the F1 score is made of.
+///
+/// `logits` and `wanted` are `[batch, points, height, width]`, the second a
+/// heatmap per point symbol which is exactly one at a point's own pixel and
+/// a Gaussian falling away from it — see [`crate::point_truth`]. The loss is
+/// the focal loss keypoint detectors train their heatmaps with:
+///
+/// * at a peak, `-(1 - p)^2 ln p`: a missed point costs a great deal, a
+///   found one next to nothing;
+/// * everywhere else, `-(1 - y)^4 p^2 ln (1 - p)`: a confident point where
+///   there is none costs, a doubtful one costs little, and one on the
+///   shoulder of a real point — where `y` is near one — costs almost nothing,
+///   since a peak a pixel out is nearly right;
+///
+/// summed, and divided by how many points there were, so that a batch's loss
+/// does not grow with how much empty ground it held.
+///
+/// Returns the loss, then the peaks the network gave (at least
+/// `POINT_METRIC_THRESHOLD` and the highest of their three by three), how
+/// many of them are near a labelled point of their symbol, the labelled
+/// points, and how many of those are near a peak.
+fn points_loss(
+    logits: Tensor<4>,
+    wanted: Tensor<4>,
+) -> (Tensor<1>, Tensor<1>, Tensor<1>, Tensor<1>, Tensor<1>) {
+    let probability = sigmoid(logits.clone());
+    let peak = wanted.clone().greater_equal_elem(1.0).float();
+    let elsewhere = peak.clone().neg().add_scalar(1.0);
+
+    let found = probability.clone().neg().add_scalar(1.0).powi_scalar(2)
+        * log_sigmoid(logits.clone())
+        * peak.clone();
+    let false_alarm = wanted.neg().add_scalar(1.0).powi_scalar(4)
+        * probability.powi_scalar(2)
+        * log_sigmoid(logits.clone().neg())
+        * elsewhere;
+    let labelled = peak.clone().sum();
+    let loss = (found.sum() + false_alarm.sum()).neg() / labelled.clone().clamp_min(1.0);
+
+    // The peaks, as `mauro net image-to-map` finds them: over the threshold
+    // and no lower than any neighbour. On the logits, which a max pool copies
+    // exactly, so "equal to the highest around it" is exact.
+    let threshold = (POINT_METRIC_THRESHOLD / (1.0 - POINT_METRIC_THRESHOLD)).ln();
+    let around = |x: Tensor<4>, radius: usize| {
+        let side = 2 * radius + 1;
+        MaxPool2dConfig::new([side, side])
+            .with_strides([1, 1])
+            .with_padding(PaddingConfig2d::Explicit(radius, radius, radius, radius))
+            .init()
+            .forward(x)
+    };
+    let said = logits.clone().equal(around(logits.clone(), 1)).float()
+        * logits.greater_equal_elem(threshold).float();
+    let predicted = said.clone().sum();
+    let predicted_hits = (said.clone() * around(peak.clone(), POINT_MATCH_RADIUS)).sum();
+    let labelled_hits = (peak * around(said, POINT_MATCH_RADIUS)).sum();
+
+    (loss, predicted, predicted_hits, labelled, labelled_hits)
+}
+
 impl UNet {
     /// One forward pass scored against the labels: the loss to descend, and
     /// the counts the metrics divide.
@@ -1031,6 +1252,29 @@ impl UNet {
             (lines, None) => panic!(
                 "the network answers for {lines} line symbols and the batch labels none: it was \
                  trained on a dataset made without --line-labels"
+            ),
+        };
+
+        // The points layer, after the lines': a heatmap per point symbol.
+        let zero = || Tensor::from_data([0.0f32], &device);
+        let (
+            points_loss,
+            point_predicted,
+            point_predicted_hits,
+            point_labelled,
+            point_labelled_hits,
+        ) = match (self.points(), batch.points) {
+            (0, _) => (zero(), zero(), zero(), zero(), zero()),
+            (points, Some(wanted)) => {
+                let first = classes + 3 + self.lines();
+                let logits =
+                    raw.clone()
+                        .slice([0..size, first..first + points, 0..height, 0..width]);
+                points_loss(logits, wanted)
+            }
+            (points, None) => panic!(
+                "the network answers for {points} point symbols and the batch labels none: it \
+                     was trained on a dataset made without --content areas-lines-points"
             ),
         };
 
@@ -1096,6 +1340,7 @@ impl UNet {
             loss: class_loss
                 + angle_loss.mul_scalar(self.angle_weight())
                 + lines_loss.mul_scalar(self.line_weight())
+                + points_loss.mul_scalar(self.point_weight())
                 + scale_loss.mul_scalar(self.scale_weight()),
             correct,
             pixels: Tensor::from_data([pixels as f32], &device),
@@ -1103,6 +1348,10 @@ impl UNet {
             angled,
             line_intersection,
             line_union,
+            point_predicted,
+            point_predicted_hits,
+            point_labelled,
+            point_labelled_hits,
             scale_error,
             scaled,
         }
@@ -1215,6 +1464,14 @@ pub struct TrainingConfig {
     /// What the lines term counts for beside the ground's.
     #[config(default = 1.0)]
     pub line_weight: f64,
+    /// How many point symbols the dataset's points layer has, which the run
+    /// takes from the dataset's `classes.json` as it does the lines'. Nought
+    /// is a network with no points layer.
+    #[config(default = 0)]
+    pub points: usize,
+    /// What the points term counts for beside the ground's.
+    #[config(default = 1.0)]
+    pub point_weight: f64,
     /// Whether the network has a scale head, which the run takes from the
     /// dataset rather than being told: one drawn over a range of densities
     /// has something for it to learn, and [`train`] fills this in before it
@@ -1721,7 +1978,8 @@ fn latest_checkpoint(checkpoints: &Path) -> Option<(usize, PathBuf)> {
 }
 
 /// Whether weights written for the network `old` describes fit the one
-/// `new` describes: the same classes, widths, lines layer and scale head.
+/// `new` describes: the same classes, widths, lines and points layers and
+/// scale head.
 /// Everything else (the loss weights, the crops, the rates) may differ
 /// between the two, since none of it changes a tensor's shape.
 fn same_network(old: &TrainingConfig, new: &TrainingConfig) -> Result<(), String> {
@@ -1729,6 +1987,7 @@ fn same_network(old: &TrainingConfig, new: &TrainingConfig) -> Result<(), String
         ("classes", old.classes, new.classes),
         ("base channels", old.base_channels, new.base_channels),
         ("line symbols", old.lines, new.lines),
+        ("point symbols", old.points, new.points),
         (
             "scale head",
             usize::from(old.scale_head),
@@ -1807,6 +2066,7 @@ pub fn train(
         .with_crops_per_map(config.crops_per_map)
         .with_overhang(config.overhang.unwrap_or(config.crop / 2));
     config.lines = all.lines();
+    config.points = all.points();
     config.scale_head = all.varies();
 
     // Also before the run's folder is made: weights which cannot be found, or
@@ -1896,6 +2156,8 @@ pub fn train(
         .with_angle_weight(config.angle_weight)
         .with_lines(config.lines)
         .with_line_weight(config.line_weight)
+        .with_points(config.points)
+        .with_point_weight(config.point_weight)
         .with_scale_head(config.scale_head)
         .with_scale_weight(config.scale_weight)
         .with_class_weights(Some(weights))
@@ -1991,6 +2253,11 @@ pub fn train(
         training = training
             .metric_train_numeric(LineIouMetric::new())
             .metric_valid_numeric(LineIouMetric::new());
+    }
+    if config.points > 0 {
+        training = training
+            .metric_train_numeric(PointF1Metric::new())
+            .metric_valid_numeric(PointF1Metric::new());
     }
     if config.scale_head {
         training = training
@@ -2417,6 +2684,7 @@ mod tests {
             class: class.clone(),
             angle: Tensor::zeros([1, 2, 16, 16], &device),
             lines: None,
+            points: None,
             scale: Tensor::zeros([1, 1], &device),
         };
         let without = net.forward_step(none);
@@ -2443,6 +2711,7 @@ mod tests {
             class,
             angle: Tensor::ones([1, 2, 16, 16], &device),
             lines: None,
+            points: None,
             scale: Tensor::zeros([1, 1], &device),
         };
         let with = net.forward_step(some);
@@ -2607,6 +2876,7 @@ mod tests {
             class: Tensor::<3, burn::tensor::Int>::zeros([1, 16, 16], &device),
             angle: Tensor::zeros([1, 2, 16, 16], &device),
             lines: None,
+            points: None,
             scale: Tensor::zeros([1, 1], &device),
         };
         let gradients = loaded.forward_step(batch).loss.backward();
@@ -2654,6 +2924,7 @@ mod tests {
             class: Tensor::zeros([2, 16, 16], &device),
             angle: Tensor::zeros([2, 2, 16, 16], &device),
             lines: None,
+            points: None,
             scale: Tensor::full([2, 1], scale, &device),
         };
         let loss =
@@ -2712,5 +2983,75 @@ mod tests {
         assert_eq!(value(none_union), 8.0);
         assert_eq!(value(found_inter), 8.0);
         assert_eq!(value(found_union), 8.0);
+    }
+
+    /// The focal loss is lowest for a heatmap which peaks where the point is,
+    /// a peak a couple of pixels out still counts as found, and a heatmap
+    /// with no peak finds nothing.
+    #[test]
+    fn saying_no_point_anywhere_is_not_a_good_answer() {
+        use crate::point_truth::{PointMark, PointTruth};
+        let device = Device::flex();
+        let heat = |x: f64, y: f64| {
+            PointTruth {
+                height: 16,
+                width: 16,
+                classes: 1,
+                points: vec![PointMark { class: 0, x, y }],
+            }
+            .heatmap(0, 0, 16)
+        };
+        let tensor = |values: Vec<f32>| {
+            Tensor::<4>::from_data(
+                burn::tensor::TensorData::new(values, [1, 1, 16, 16]),
+                &device,
+            )
+        };
+        // The heatmap as logits: what a network which learned it would say.
+        let logits = |values: Vec<f32>| {
+            tensor(
+                values
+                    .iter()
+                    .map(|&p| {
+                        let p = p.clamp(1e-3, 1.0 - 1e-3);
+                        (p / (1.0 - p)).ln()
+                    })
+                    .collect(),
+            )
+        };
+        let target = tensor(heat(8.5, 8.5));
+        let value = |t: Tensor<1>| t.into_data().try_to_vec::<f32>().expect("floats")[0];
+
+        let (none_loss, none_said, _, none_labelled, none_found) =
+            points_loss(Tensor::full([1, 1, 16, 16], -6.0, &device), target.clone());
+        let (right_loss, right_said, right_hits, _, right_found) =
+            points_loss(logits(heat(8.5, 8.5)), target.clone());
+        let (near_loss, near_said, near_hits, _, near_found) =
+            points_loss(logits(heat(10.5, 8.5)), target);
+
+        assert!(value(none_loss.clone()) > value(right_loss.clone()) + 1.0);
+        assert!(value(near_loss) > value(right_loss));
+        assert_eq!(
+            (value(none_said), value(none_labelled), value(none_found)),
+            (0.0, 1.0, 0.0)
+        );
+        assert_eq!(
+            (value(right_said), value(right_hits), value(right_found)),
+            (1.0, 1.0, 1.0)
+        );
+        assert_eq!(
+            (value(near_said), value(near_hits), value(near_found)),
+            (1.0, 1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn the_point_f1_is_the_harmonic_mean_of_precision_and_recall() {
+        assert_eq!(point_f1(0.0, 0.0, 0.0, 0.0), 100.0);
+        assert_eq!(point_f1(0.0, 0.0, 4.0, 0.0), 0.0);
+        assert_eq!(point_f1(4.0, 0.0, 0.0, 0.0), 0.0);
+        assert_eq!(point_f1(4.0, 4.0, 4.0, 4.0), 100.0);
+        // Half the peaks right, all the points found: 2/3.
+        assert!((point_f1(4.0, 2.0, 2.0, 2.0) - 200.0 / 3.0).abs() < 1e-9);
     }
 }

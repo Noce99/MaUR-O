@@ -5,7 +5,8 @@
 //! on whole pictures reduced to `--size`, and reads with `--depth`,
 //! `--control-points`, `--samples`, `--temperature-start` and
 //! `--temperature-end`; the U-Net's `--crop`, `--crops-per-map`,
-//! `--angle-weight`, `--line-weight`, `--scale-weight`, `--weight-decay`,
+//! `--angle-weight`, `--line-weight`, `--point-weight`, `--scale-weight`,
+//! `--weight-decay`,
 //! `--patience`, `--overhang`, `--workers` and `--image-valid` do not apply
 //! to it.
 //!
@@ -132,7 +133,7 @@ pub struct Args {
     /// cut the picture into its areas and a symbol for each, and is trained on
     /// the whole pictures reduced to --size. The options of the other model
     /// are ignored: --crop, --crops-per-map, --angle-weight, --line-weight,
-    /// --scale-weight, --weight-decay, --patience,
+    /// --point-weight, --scale-weight, --weight-decay, --patience,
     /// --overhang, --workers and --image-valid are the U-Net's; --size,
     /// --depth, --control-points, --samples and the two temperatures the
     /// tree's.
@@ -181,6 +182,13 @@ pub struct Args {
     /// reports how much of them it found as the Line IoU.
     #[arg(long, value_name = "WEIGHT")]
     line_weight: f64,
+
+    /// What the points term counts for beside the ground's. Only a dataset
+    /// made with --content areas-lines-points has one: the network then also
+    /// answers, for every point symbol, a heatmap peaking where a point of it
+    /// is, and reports how well it found them as the Point F1.
+    #[arg(long, value_name = "WEIGHT")]
+    point_weight: f64,
 
     /// What the scale term counts for beside the ground's. Only a dataset
     /// drawn over a range of densities (--min-resolution/--max-resolution)
@@ -306,7 +314,7 @@ fn notes_of(dataset: &std::path::Path) -> Result<Classes, String> {
     let classes = Classes::read(&path).map_err(|e| {
         format!(
             "{e}\nA dataset to train on is what mauro net dataset writes with \
-             --content areas or --content areas-and-lines; the default, --content all, \
+             --content areas, areas-and-lines or areas-lines-points; the default, --content all, \
              draws what nothing could label, and writes no {CLASSES_FILE}.",
         )
     })?;
@@ -474,6 +482,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         .with_train_share(args.train_share)
         .with_angle_weight(args.angle_weight)
         .with_line_weight(args.line_weight)
+        .with_point_weight(args.point_weight)
         .with_scale_weight(args.scale_weight)
         .with_weight_decay(args.weight_decay)
         .with_patience(args.patience)

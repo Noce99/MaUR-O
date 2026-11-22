@@ -37,7 +37,8 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use maur_o::net::monitor::{
-    Control, LossPoint, State, Status, ACCURACY_FILE, LINE_IOU_FILE, LOSSES_FILE, SCALE_ERROR_FILE,
+    Control, LossPoint, State, Status, ACCURACY_FILE, LINE_IOU_FILE, LOSSES_FILE, POINT_F1_FILE,
+    SCALE_ERROR_FILE,
 };
 
 use super::form::{CHANGED_COLOR, DEFAULT_COLOR};
@@ -53,6 +54,9 @@ enum View {
     Accuracy,
     /// How much of the lines the network found: only a run with a lines layer.
     LineIou,
+    /// How well the network found the point symbols: only a run with a
+    /// points layer.
+    PointF1,
     /// How far out the network was about the density: only a run with a
     /// scale head.
     ScaleError,
@@ -65,6 +69,7 @@ impl View {
             View::Loss => "Loss",
             View::Accuracy => "Accuracy (% of pixels right)",
             View::LineIou => "Line IoU (% of the lines found)",
+            View::PointF1 => "Point F1 (% of the point symbols found, and found right)",
             View::ScaleError => "Scale error (% out about how dense the picture is)",
         }
     }
@@ -74,6 +79,7 @@ impl View {
             View::Loss => "loss",
             View::Accuracy => "accuracy",
             View::LineIou => "line IoU",
+            View::PointF1 => "point F1",
             View::ScaleError => "scale error",
         }
     }
@@ -98,6 +104,10 @@ pub struct Watch {
     line_points: Vec<LossPoint>,
     line_offset: u64,
     line_partial: String,
+    /// The point F1 file's points, where the run has a points layer.
+    point_f1_points: Vec<LossPoint>,
+    point_f1_offset: u64,
+    point_f1_partial: String,
     /// The scale error file's points, where the run has a scale head.
     scale_points: Vec<LossPoint>,
     scale_offset: u64,
@@ -133,6 +143,9 @@ impl Watch {
             line_points: Vec::new(),
             line_offset: 0,
             line_partial: String::new(),
+            point_f1_points: Vec::new(),
+            point_f1_offset: 0,
+            point_f1_partial: String::new(),
             scale_points: Vec::new(),
             scale_offset: 0,
             scale_partial: String::new(),
@@ -174,6 +187,12 @@ impl Watch {
             &mut self.line_points,
         );
         read_points(
+            &self.job.dir.join(POINT_F1_FILE),
+            &mut self.point_f1_offset,
+            &mut self.point_f1_partial,
+            &mut self.point_f1_points,
+        );
+        read_points(
             &self.job.dir.join(SCALE_ERROR_FILE),
             &mut self.scale_offset,
             &mut self.scale_partial,
@@ -187,6 +206,7 @@ impl Watch {
             View::Loss => &self.points,
             View::Accuracy => &self.accuracy_points,
             View::LineIou => &self.line_points,
+            View::PointF1 => &self.point_f1_points,
             View::ScaleError => &self.scale_points,
         }
     }
@@ -194,10 +214,16 @@ impl Watch {
     /// The views the run has anything for, in the order Tab goes through
     /// them: the loss always, the others once their first number is in.
     fn views(&self) -> Vec<View> {
-        [View::Loss, View::Accuracy, View::LineIou, View::ScaleError]
-            .into_iter()
-            .filter(|&v| v == View::Loss || !self.points_of(v).is_empty())
-            .collect()
+        [
+            View::Loss,
+            View::Accuracy,
+            View::LineIou,
+            View::PointF1,
+            View::ScaleError,
+        ]
+        .into_iter()
+        .filter(|&v| v == View::Loss || !self.points_of(v).is_empty())
+        .collect()
     }
 
     /// The view after the current one.
@@ -427,7 +453,12 @@ impl Watch {
                     .find(|p| p.validation == validation)
                     .map_or("—".to_string(), |p| format!("{:.2}%", p.loss))
             };
-            for view in [View::Accuracy, View::LineIou, View::ScaleError] {
+            for view in [
+                View::Accuracy,
+                View::LineIou,
+                View::PointF1,
+                View::ScaleError,
+            ] {
                 let points = self.points_of(view);
                 if !points.is_empty() {
                     lines.push(Line::from(format!(

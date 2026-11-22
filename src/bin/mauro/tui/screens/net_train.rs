@@ -23,28 +23,30 @@ const BASE_CHANNELS: usize = 8;
 const LEARNING_RATE: usize = 9;
 const ANGLE_WEIGHT: usize = 10;
 const LINE_WEIGHT: usize = 11;
-const SCALE_WEIGHT: usize = 12;
-const WEIGHT_DECAY: usize = 13;
-const PATIENCE: usize = 14;
-const OVERHANG: usize = 15;
-const TRAIN_SHARE: usize = 16;
-const WORKERS: usize = 17;
-const IMAGE_VALID: usize = 18;
-const SEED: usize = 19;
-const SIZE: usize = 20;
-const DEPTH: usize = 21;
-const CONTROL_POINTS: usize = 22;
-const SAMPLES: usize = 23;
-const TEMPERATURE_START: usize = 24;
-const TEMPERATURE_END: usize = 25;
-const FROM: usize = 26;
+const POINT_WEIGHT: usize = 12;
+const SCALE_WEIGHT: usize = 13;
+const WEIGHT_DECAY: usize = 14;
+const PATIENCE: usize = 15;
+const OVERHANG: usize = 16;
+const TRAIN_SHARE: usize = 17;
+const WORKERS: usize = 18;
+const IMAGE_VALID: usize = 19;
+const SEED: usize = 20;
+const SIZE: usize = 21;
+const DEPTH: usize = 22;
+const CONTROL_POINTS: usize = 23;
+const SAMPLES: usize = 24;
+const TEMPERATURE_START: usize = 25;
+const TEMPERATURE_END: usize = 26;
+const FROM: usize = 27;
 
 /// The fields only the U-Net has, and the ones only the tree has.
-const UNET_ONLY: [usize; 11] = [
+const UNET_ONLY: [usize; 12] = [
     CROP,
     CROPS_PER_MAP,
     ANGLE_WEIGHT,
     LINE_WEIGHT,
+    POINT_WEIGHT,
     SCALE_WEIGHT,
     WEIGHT_DECAY,
     PATIENCE,
@@ -129,6 +131,7 @@ impl NetTrain {
                 Field::text("Learning rate").arg("learning_rate"),
                 Field::text("Angle weight").arg("angle_weight"),
                 Field::text("Line weight").arg("line_weight"),
+                Field::text("Point weight").arg("point_weight"),
                 Field::text("Scale weight").arg("scale_weight"),
                 Field::text("Weight decay").arg("weight_decay"),
                 Field::text("Patience").arg("patience").unit("epochs"),
@@ -224,13 +227,14 @@ impl NetTrain {
         let gpu = self.gpus.gpus.iter().find(|g| g.index == index)?;
         let total = gpu.memory_total? << 20;
         let free = total.saturating_sub(gpu.memory_used.unwrap_or(0) << 20);
-        let (classes, lines, scale) = match &self.classes {
-            Some(c) => (c.classes, c.lines, c.resolution_range.is_some()),
-            None => (GUESSED_CLASSES, 0, false),
+        let (classes, lines, points, scale) = match &self.classes {
+            Some(c) => (c.classes, c.lines, c.points, c.resolution_range.is_some()),
+            None => (GUESSED_CLASSES, 0, 0, false),
         };
         let config = UNetConfig::new(classes)
             .with_base_channels(base)
             .with_lines(lines)
+            .with_points(points)
             .with_scale_head(scale);
         let needed = config.training_bytes(batch, crop)? + PROCESS_OVERHEAD;
         Some(Fit {
@@ -360,6 +364,7 @@ impl Tool for NetTrain {
         form.push_option(&mut args, LEARNING_RATE, "--learning-rate");
         form.push_option(&mut args, ANGLE_WEIGHT, "--angle-weight");
         form.push_option(&mut args, LINE_WEIGHT, "--line-weight");
+        form.push_option(&mut args, POINT_WEIGHT, "--point-weight");
         form.push_option(&mut args, SCALE_WEIGHT, "--scale-weight");
         form.push_option(&mut args, WEIGHT_DECAY, "--weight-decay");
         form.push_option(&mut args, PATIENCE, "--patience");

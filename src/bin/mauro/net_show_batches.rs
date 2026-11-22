@@ -30,6 +30,14 @@
 //! the caption names the map and the corner, so a crop which looks wrong can
 //! be found in `images/` and looked at whole.
 //!
+//! # The points
+//!
+//! A dataset whose point symbols are labelled (`mauro net dataset --content
+//! areas-lines-points`) gets a panel of its own after the labels: the
+//! picture, faded, with the heatmaps over it in red and every peak — the
+//! pixel a point is labelled at — ringed in black. A peak which is not on
+//! its symbol is a label in the wrong place.
+//!
 //! # With a run to compare against
 //!
 //! `--run <folder>` puts each crop through that run's network as well, adds a
@@ -216,7 +224,9 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
     for warning in &warnings {
         eprintln!("Warning: {warning}");
     }
-    let symbols = Catalogue::of(&map).opaque_areas;
+    let catalogue = Catalogue::of(&map);
+    let point_codes: Vec<String> = catalogue.points.iter().map(|e| e.code.clone()).collect();
+    let symbols = catalogue.opaque_areas;
     let settings = ReadBackSettings::of(args.crop, notes.resolution, map.scale_denominator);
 
     // Which symbols turn, and how much of a turn each of them can actually
@@ -338,7 +348,12 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         // strides are where a label ends up on the wrong pixel, and they all
         // happen in here.
         let batch = MapBatcher.batch(crops.clone(), &device);
-        let read = unbatch(&batch.image, &batch.class, &batch.angle);
+        let read = unbatch(
+            &batch.image,
+            &batch.class,
+            &batch.angle,
+            batch.points.as_ref(),
+        );
         let said = model
             .as_ref()
             .map(|model| answers(model, batch.image.clone(), classes));
@@ -382,6 +397,11 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
                 },
                 format!("labels: {}", tally(&crop.class, classes, &symbols)),
             ];
+            if !crop.points.is_empty() {
+                let (panel, caption) = points_panel(crop, &point_codes);
+                panels.push(panel);
+                labels.push(caption);
+            }
 
             if let Some(said) = &said {
                 let (class, turn) = &said[index];
@@ -440,11 +460,23 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
 /// The names and the corners do not survive a batch — the batcher stacks
 /// numbers — so what comes back here is the pixels alone, and the caller
 /// pairs each with the [`MapCrop`] it put in.
-fn unbatch(image: &Tensor<4>, class: &Tensor<3, Int>, angle: &Tensor<4>) -> Vec<MapCrop> {
+fn unbatch(
+    image: &Tensor<4>,
+    class: &Tensor<3, Int>,
+    angle: &Tensor<4>,
+    points: Option<&Tensor<4>>,
+) -> Vec<MapCrop> {
     let [batch, _, size, _] = image.dims();
     let images: Vec<f32> = image.clone().into_data().iter::<f32>().collect();
     let classed: Vec<i32> = class.clone().into_data().iter::<i32>().collect();
     let angles: Vec<f32> = angle.clone().into_data().iter::<f32>().collect();
+    let (heat, channels): (Vec<f32>, usize) = match points {
+        Some(points) => (
+            points.clone().into_data().iter::<f32>().collect(),
+            points.dims()[1],
+        ),
+        None => (Vec::new(), 0),
+    };
 
     let pixels = size * size;
     (0..batch)
@@ -453,6 +485,10 @@ fn unbatch(image: &Tensor<4>, class: &Tensor<3, Int>, angle: &Tensor<4>) -> Vec<
             class: classed[item * pixels..(item + 1) * pixels].to_vec(),
             angle: angles[item * 2 * pixels..(item + 1) * 2 * pixels].to_vec(),
             lines: Vec::new(),
+            points: heat
+                .get(item * channels * pixels..(item + 1) * channels * pixels)
+                .map(<[f32]>::to_vec)
+                .unwrap_or_default(),
             size,
             map: String::new(),
             left: 0,
@@ -516,6 +552,59 @@ fn angle_of(sin: f32, cos: f32) -> f32 {
     } else {
         (sin.atan2(cos) / std::f32::consts::TAU).rem_euclid(1.0)
     }
+}
+
+/// The crop's point labels drawn over its picture: the picture faded, the
+/// highest of the heatmaps at each pixel in red, and each peak ringed in
+/// black — with a caption counting the peaks of each symbol by its code.
+fn points_panel(crop: &MapCrop, codes: &[String]) -> (RgbImage, String) {
+    let pixels = crop.size * crop.size;
+    let channels = crop.points.len() / pixels.max(1);
+    let mut image = picture_of(crop);
+    for (at, pixel) in image.pixels_mut().enumerate() {
+        let heat = (0..channels)
+            .map(|c| crop.points[c * pixels + at])
+            .fold(0.0f32, f32::max);
+        let fade = |v: u8| 255.0 - (255.0 - v as f32) * 0.35;
+        let [r, g, b] = pixel.0;
+        let mix = |faded: f32, towards: f32| (faded + (towards - faded) * heat).round() as u8;
+        *pixel = Rgb([mix(fade(r), 255.0), mix(fade(g), 0.0), mix(fade(b), 0.0)]);
+    }
+    let mut counted = vec![0usize; channels];
+    let size = crop.size as i64;
+    for (channel, count) in counted.iter_mut().enumerate() {
+        for at in 0..pixels {
+            if crop.points[channel * pixels + at] < 1.0 {
+                continue;
+            }
+            *count += 1;
+            let (x, y) = ((at % crop.size) as i64, (at / crop.size) as i64);
+            for dy in -3..=3i64 {
+                for dx in -3..=3i64 {
+                    let ring = dx.abs().max(dy.abs()) == 3;
+                    let (px, py) = (x + dx, y + dy);
+                    if ring && (0..size).contains(&px) && (0..size).contains(&py) {
+                        image.put_pixel(px as u32, py as u32, Rgb([0, 0, 0]));
+                    }
+                }
+            }
+        }
+    }
+    let found: Vec<String> = counted
+        .iter()
+        .enumerate()
+        .filter(|(_, &n)| n > 0)
+        .map(|(c, n)| {
+            let code = codes.get(c).map_or("?", String::as_str);
+            format!("{n} x {code}")
+        })
+        .collect();
+    let caption = if found.is_empty() {
+        "points: none".to_string()
+    } else {
+        format!("points: {}", found.join(", "))
+    };
+    (image, caption)
 }
 
 /// The crop's own picture, back out of the `[-1, 1]` planes the network is

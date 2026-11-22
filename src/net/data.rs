@@ -28,6 +28,10 @@
 //!   angles one target instead of four (see
 //!   [`crate::ground_truth::GroundTruth::sin_cos_folded`], and
 //!   `crate::net::predict::resolve_angles` for the way back);
+//! * where the dataset labels them, the lines, `[lines, CROP, CROP]` of
+//!   zeros and ones (see [`crate::line_truth`]), and the point symbols'
+//!   heatmaps, `[points, CROP, CROP]` (see [`crate::point_truth`]) — both
+//!   rebuilt from `maps/<name>.omap`, read once for the two;
 //! * and which map it was cut out of, and where — read by nothing which
 //!   trains, and there for anything which looks at a crop rather than
 //!   learning from it.
@@ -96,6 +100,7 @@ use crate::dataset::{
 };
 use crate::ground_truth::{GroundTruth, BACKGROUND};
 use crate::line_truth::LineTruth;
+use crate::point_truth::PointTruth;
 use crate::random::Random;
 use crate::symbol_kinds::Catalogue;
 use crate::xml_reader::read_xml_map;
@@ -131,6 +136,11 @@ pub struct MapCrop {
     /// line symbol — see [`crate::line_truth`]. Empty for a dataset whose
     /// lines are not labelled.
     pub lines: Vec<u8>,
+    /// How sure a network should be that a point of each symbol sits at each
+    /// pixel, `[points, CROP, CROP]`: a Gaussian around every point, exactly
+    /// one at the pixel it is in — see [`crate::point_truth`]. Empty for a
+    /// dataset whose points are not labelled.
+    pub points: Vec<f32>,
     /// How many pixels square this crop is.
     pub size: usize,
     /// The name of the map it was cut out of, without its suffix.
@@ -239,7 +249,11 @@ pub struct MapDataset {
     /// How many line symbols the lines layer has a channel for: nought for a
     /// dataset whose lines are not labelled.
     lines: usize,
-    /// The folder of map files, which the lines layer is rebuilt from.
+    /// How many point symbols the points layer has a heatmap for: nought
+    /// for a dataset whose points are not labelled.
+    points: usize,
+    /// The folder of map files, which the lines and points layers are
+    /// rebuilt from.
     maps_folder: PathBuf,
     /// The dataset's normal density, in pixels per meter of ground: the one
     /// every map was drawn at, or — where they differ — the one the images
@@ -345,7 +359,9 @@ impl MapDataset {
         // The lines are not on disk at all: they are rebuilt from the map
         // file, at its resolution, whatever the ground's labels are.
         let lines = notes.as_ref().map(|read| read.lines).unwrap_or(0);
-        let needed = lines > 0 || maps.iter().any(|(_, l)| matches!(l, Labels::FromMap(_)));
+        let points = notes.as_ref().map(|read| read.points).unwrap_or(0);
+        let needed =
+            lines > 0 || points > 0 || maps.iter().any(|(_, l)| matches!(l, Labels::FromMap(_)));
         let normal = match &notes {
             Some(notes) => Some(notes.resolution),
             None if needed => Some(resolution_of(folder)?),
@@ -390,7 +406,7 @@ impl MapDataset {
             });
         }
         let maps = entries;
-        if lines > 0 {
+        if lines > 0 || points > 0 {
             if let Some(entry) = maps.iter().find(|entry| {
                 !entry
                     .image
@@ -398,7 +414,8 @@ impl MapDataset {
                     .is_some_and(|stem| maps_folder.join(stem).with_extension("omap").is_file())
             }) {
                 return Err(format!(
-                    "{} has no map file in {}, which the labels of its lines are made from",
+                    "{} has no map file in {}, which the labels of its lines and points are made \
+                     from",
                     entry.image.display(),
                     maps_folder.display(),
                 ));
@@ -470,6 +487,7 @@ impl MapDataset {
             size: size.expect("there is at least one map"),
             classes,
             lines,
+            points,
             maps_folder,
             normal,
             varies,
@@ -558,6 +576,12 @@ impl MapDataset {
     /// the dataset's lines are not labelled.
     pub fn lines(&self) -> usize {
         self.lines
+    }
+
+    /// How many point symbols the points layer has a heatmap for, nought
+    /// where the dataset's points are not labelled.
+    pub fn points(&self) -> usize {
+        self.points
     }
 
     /// How many pixels square this dataset's crops are.
@@ -711,6 +735,7 @@ impl MapDataset {
             size: self.size,
             classes: self.classes,
             lines: self.lines,
+            points: self.points,
             maps_folder: self.maps_folder.clone(),
             normal: self.normal,
             varies: self.varies,
@@ -846,6 +871,7 @@ impl Dataset<MapCrop> for MapDataset {
         let mut class = vec![0; pixels];
         let mut angle = vec![0.0; 2 * pixels];
         let mut lines = vec![0u8; self.lines * pixels];
+        let mut points = Vec::new();
         // The frame is the last class rather than the file's 0xFFFF: a
         // cross-entropy counts classes from nothing upwards and has no room
         // for a sentinel.
@@ -898,13 +924,35 @@ impl Dataset<MapCrop> for MapDataset {
             }
         }
 
-        if self.lines > 0 {
+        if self.lines > 0 || self.points > 0 {
             let stem = image_path.file_stem().expect("an image has a name");
-            let map = self.maps_folder.join(stem).with_extension("omap");
-            let resolution = entry.resolution.expect("read where there are lines");
-            let truth = LineTruth::from_map(&map, width as u32, height as u32, resolution)
-                .unwrap_or_else(|e| panic!("cannot read the lines mid-run: {e}"));
-            for (class, mask) in &truth.layers {
+            let path = self.maps_folder.join(stem).with_extension("omap");
+            let resolution = entry
+                .resolution
+                .expect("read where there are lines or points");
+            // Read once for both layers: parsing the file is most of what
+            // either costs.
+            let (mut map, _) = read_xml_map(&path)
+                .unwrap_or_else(|e| panic!("cannot read {} mid-run: {e}", path.display()));
+            map.resolve_references();
+            if self.points > 0 {
+                let truth = PointTruth::of_map(&map, width as u32, height as u32, resolution);
+                assert_eq!(
+                    truth.classes,
+                    self.points,
+                    "{} has another set of point symbols than classes.json names",
+                    path.display(),
+                );
+                points = truth.heatmap(left, top, self.crop);
+            }
+            let truth = if self.lines > 0 {
+                LineTruth::of_map(&map, width as u32, height as u32, resolution)
+                    .unwrap_or_else(|e| panic!("cannot read the lines mid-run: {e}"))
+                    .layers
+            } else {
+                Vec::new()
+            };
+            for (class, mask) in &truth {
                 let channel = &mut lines[class * pixels..(class + 1) * pixels];
                 for row in 0..self.crop {
                     for column in 0..self.crop {
@@ -922,6 +970,7 @@ impl Dataset<MapCrop> for MapDataset {
             class,
             angle,
             lines,
+            points,
             size: self.crop,
             map: image_path
                 .file_stem()
@@ -960,6 +1009,9 @@ pub struct MapBatch {
     /// Which lines run through every pixel, `[batch, lines, crop, crop]` of
     /// zeros and ones, and `None` for a dataset whose lines are not labelled.
     pub lines: Option<Tensor<4>>,
+    /// The point heatmaps of every pixel, `[batch, points, crop, crop]`, and
+    /// `None` for a dataset whose points are not labelled.
+    pub points: Option<Tensor<4>>,
     /// How much denser than the dataset's normal density each crop's map was
     /// drawn, as a natural logarithm, `[batch, 1]` — see [`MapCrop::scale`].
     pub scale: Tensor<2>,
@@ -985,10 +1037,16 @@ impl Batcher<MapCrop, MapBatch> for MapBatcher {
             .map(|item| item.lines.len() / (size * size))
             .unwrap_or(0);
         let mut lines = Vec::with_capacity(batch * line_channels * size * size);
+        let point_channels = items
+            .first()
+            .map(|item| item.points.len() / (size * size))
+            .unwrap_or(0);
+        let mut points = Vec::with_capacity(batch * point_channels * size * size);
         let mut scale = Vec::with_capacity(batch);
         for item in items {
             scale.push(item.scale);
             lines.extend(item.lines.iter().map(|&on| on as f32));
+            points.extend_from_slice(&item.points);
             image.extend_from_slice(&item.image);
             class.extend_from_slice(&item.class);
             angle.extend_from_slice(&item.angle);
@@ -1001,6 +1059,12 @@ impl Batcher<MapCrop, MapBatch> for MapBatcher {
             lines: (line_channels > 0).then(|| {
                 Tensor::from_data(
                     TensorData::new(lines, [batch, line_channels, size, size]),
+                    device,
+                )
+            }),
+            points: (point_channels > 0).then(|| {
+                Tensor::from_data(
+                    TensorData::new(points, [batch, point_channels, size, size]),
                     device,
                 )
             }),
@@ -1019,6 +1083,7 @@ mod tests {
             class: vec![class; size * size],
             angle: vec![value; 2 * size * size],
             lines: Vec::new(),
+            points: Vec::new(),
             size,
             map: "map".to_string(),
             left: 0,

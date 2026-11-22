@@ -571,6 +571,12 @@ pub const REFERENCE_CLASSES: usize = 11;
 /// with line labels, which is what the sample datasets are.
 pub const REFERENCE_LINES: usize = 6;
 
+/// How many point symbols the registered U-Net's points layer has a heatmap
+/// for: the ten of `symbols_sets/simple_ISSprOM_points.omap`, the set the
+/// point datasets (`mauro net dataset --content areas-lines-points`) are
+/// drawn from.
+pub const REFERENCE_POINTS: usize = 10;
+
 /// Whether the registered U-Net has a scale head: it does, being the one
 /// `mauro net train` builds on a dataset drawn over a range of densities
 /// (`mauro net dataset --min-resolution/--max-resolution`), which is what
@@ -590,6 +596,7 @@ pub fn blessed(name: &str) -> Option<NetDescriptor> {
         "unet" => Some(
             UNetConfig::new(REFERENCE_CLASSES)
                 .with_lines(REFERENCE_LINES)
+                .with_points(REFERENCE_POINTS)
                 .with_scale_head(REFERENCE_SCALE_HEAD)
                 .describe(),
         ),

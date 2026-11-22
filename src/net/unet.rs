@@ -30,8 +30,13 @@
 //!   pattern to turn — so the head has to learn to shrink to nothing there,
 //!   which it can, and which a unit-normalized output could not.
 //!
-//! [`UNet::forward`] is those `on + 3` raw channels, which is what the loss
-//! wants. [`UNet::predict`] is the answer in the dataset's own shape: the
+//! After them come the layers drawn over the ground, where the network has
+//! them: a logit per line symbol (see [`crate::line_truth`]), then a logit
+//! per point symbol, a heatmap which peaks where a point of that symbol is
+//! (see [`crate::point_truth`]). Both are a sigmoid each, not a softmax.
+//!
+//! [`UNet::forward`] is those `on + 3` raw channels and the layers' after
+//! them, which is what the loss wants. [`UNet::predict`] is the answer in the dataset's own shape: the
 //! softmax over the `on + 1`, with the frame channel dropped, and the two
 //! angle channels after it — `on + 2`, matching a `gt/*.bin` expanded by
 //! [`crate::ground_truth::GroundTruth::one_hot`] channel for channel.
@@ -60,12 +65,13 @@ use std::collections::BTreeMap;
 
 use burn::config::Config;
 use burn::module::Module;
+use burn::module::Param;
 use burn::nn::conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig};
 use burn::nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
 use burn::nn::{BatchNorm, BatchNormConfig, Linear, LinearConfig, PaddingConfig2d, Relu};
 use burn::tensor::activation::{sigmoid, softmax};
-use burn::tensor::{Device, Tensor};
+use burn::tensor::{Device, Tensor, TensorData};
 
 use serde_json::Value;
 
@@ -135,6 +141,16 @@ pub struct UNetConfig {
     /// What the lines term counts for beside the ground's.
     #[config(default = 1.0)]
     pub line_weight: f64,
+    /// How many point symbols the points layer has: nought for a network
+    /// with no such layer, which is then exactly the network it was before.
+    /// Each is one more channel of the head after the lines', a logit for
+    /// *a point of this symbol sits at this pixel*, trained against a
+    /// heatmap — see `crate::net::training::points_loss`.
+    #[config(default = 0)]
+    pub points: usize,
+    /// What the points term counts for beside the ground's.
+    #[config(default = 1.0)]
+    pub point_weight: f64,
     /// Whether the network also says how dense the picture is: a head on
     /// the bottom of the encoder answering `ln(density / normal)` for the
     /// whole picture — see the module documentation. Off is the network it
@@ -171,15 +187,16 @@ impl UNetConfig {
         let (b, c) = (i64::try_from(batch).ok()?, i64::try_from(crop).ok()?);
         let descriptor = self.describe();
         let activations = descriptor.activation_count(&[("B", b), ("H", c), ("W", c)])?;
-        let labels = (batch * (self.classes + 2 + self.lines) * crop * crop) as u64;
+        let labels = (batch * (self.classes + 2 + self.lines + self.points) * crop * crop) as u64;
         let floats =
             activations * ACTIVATION_FACTOR + labels + descriptor.total_params() * WEIGHT_COPIES;
         floats.checked_mul(4)
     }
 
-    /// How many channels the head emits: the ground's, then the lines'.
+    /// How many channels the head emits: the ground's, then the lines', then
+    /// the points'.
     pub fn head_channels(&self) -> usize {
-        self.classes + 3 + self.lines
+        self.classes + 3 + self.lines + self.points
     }
 
     /// Builds the network on `device`, with its weights initialized.
@@ -212,8 +229,7 @@ impl UNetConfig {
             // what a pixel is out of what the last block made of it, and
             // looks at nothing around it, since the looking around is what
             // the rest of the network was for.
-            head: Conv2dConfig::new([self.base_channels, self.head_channels()], [1, 1])
-                .init(device),
+            head: self.head(device),
             scale: self.scale_head.then(|| ScaleHead {
                 hidden: LinearConfig::new(width(DEPTH), SCALE_HIDDEN).init(device),
                 relu: Relu::new(),
@@ -223,6 +239,8 @@ impl UNetConfig {
             classes: self.classes,
             lines: self.lines,
             line_weight: self.line_weight,
+            points: self.points,
+            point_weight: self.point_weight,
             // Built once here rather than per step: the weights are a tensor,
             // and a tensor built inside a training step is a tensor built
             // tens of thousands of times an epoch.
@@ -231,6 +249,48 @@ impl UNetConfig {
                 .init(device),
             angle_weight: self.angle_weight,
         }
+    }
+}
+
+/// What a point channel of the head starts out saying, as a logit: that a
+/// point is there one time in a hundred.
+///
+/// A point is one pixel in tens of thousands, and a head which starts at a
+/// logit of nought says a point is as likely as not at every one of them:
+/// the first steps of a run are then spent on nothing but taking that back,
+/// with gradients large enough to unsettle what the ground's channels are
+/// learning. Starting where the answer nearly always is spares it that.
+pub const POINT_PRIOR_LOGIT: f32 = -4.6;
+
+impl UNetConfig {
+    /// The 1x1 convolution which turns features into an answer, its point
+    /// channels' bias set to [`POINT_PRIOR_LOGIT`].
+    fn head(&self, device: &Device) -> Conv2d {
+        // One weight per feature per output channel: the head decides what
+        // a pixel is out of what the last block made of it, and looks at
+        // nothing around it, since the looking around is what the rest of
+        // the network was for.
+        let mut head =
+            Conv2dConfig::new([self.base_channels, self.head_channels()], [1, 1]).init(device);
+        if self.points > 0 {
+            if let Some(bias) = &head.bias {
+                let mut values: Vec<f32> = bias
+                    .val()
+                    .into_data()
+                    .try_to_vec()
+                    .expect("a bias is floats");
+                let first = self.classes + 3 + self.lines;
+                for value in &mut values[first..] {
+                    *value = POINT_PRIOR_LOGIT;
+                }
+                let channels = values.len();
+                head.bias = Some(Param::from_tensor(Tensor::from_data(
+                    TensorData::new(values, [channels]),
+                    device,
+                )));
+            }
+        }
+        head
     }
 }
 
@@ -261,6 +321,11 @@ pub struct UNet {
     lines: usize,
     /// What the lines term counts for — see [`UNetConfig::line_weight`].
     line_weight: f64,
+    /// How many point symbols the head has a channel for — see
+    /// [`UNetConfig::points`].
+    points: usize,
+    /// What the points term counts for — see [`UNetConfig::point_weight`].
+    point_weight: f64,
     /// The cross-entropy the class logits are scored with, its per-class
     /// weights already in it — see [`UNetConfig::class_weights`].
     class_loss: CrossEntropyLoss,
@@ -413,13 +478,19 @@ impl UNet {
         let mut answer = vec![probabilities, angle];
         if self.lines > 0 {
             // Each line symbol on its own: a sigmoid, not a share of one.
-            let lines = raw.slice([
+            let lines = raw.clone().slice([
                 0..batch,
                 self.classes + 3..self.classes + 3 + self.lines,
                 0..height,
                 0..width,
             ]);
             answer.push(sigmoid(lines));
+        }
+        if self.points > 0 {
+            // A heatmap per point symbol, each on its own.
+            let first = self.classes + 3 + self.lines;
+            let points = raw.slice([0..batch, first..first + self.points, 0..height, 0..width]);
+            answer.push(sigmoid(points));
         }
         Tensor::cat(answer, 1)
     }
@@ -442,9 +513,21 @@ impl UNet {
     }
 
     /// How many channels its answer has in the dataset's shape: one per
-    /// opaque area, two for the angle, and one per line symbol.
+    /// opaque area, two for the angle, one per line symbol and one per point
+    /// symbol.
     pub fn channels(&self) -> usize {
-        self.classes + 2 + self.lines
+        self.classes + 2 + self.lines + self.points
+    }
+
+    /// How many point symbols it answers for, nought for a network with no
+    /// points layer.
+    pub fn points(&self) -> usize {
+        self.points
+    }
+
+    /// What the points term counts for beside the ground's.
+    pub fn point_weight(&self) -> f64 {
+        self.point_weight
     }
 
     /// How many line symbols it answers for, nought for a network which reads
@@ -853,10 +936,15 @@ impl UNetConfig {
 
         let head = layer::conv2d("head", self.base_channels, self.head_channels(), 1, true)
             .summary(&format!(
-                "{} class logits (the frame included), sine and cosine of the angle{}",
+                "{} class logits (the frame included), sine and cosine of the angle{}{}",
                 self.classes + 1,
                 if self.lines > 0 {
                     format!(", then {} line logits", self.lines)
+                } else {
+                    String::new()
+                },
+                if self.points > 0 {
+                    format!(", then {} point heatmap logits", self.points)
                 } else {
                     String::new()
                 }
@@ -1006,6 +1094,43 @@ mod tests {
         let lines = answer.slice([0..1, 7..10, 0..16, 0..16]);
         let values = lines.into_data().try_to_vec::<f32>().expect("floats");
         assert!(values.iter().all(|v| (0.0..=1.0).contains(v)));
+    }
+
+    /// A network with a points layer has a heatmap per point symbol after
+    /// the lines', as a probability which starts out low everywhere.
+    #[test]
+    fn the_points_layer_is_a_sigmoid_channel_per_point_symbol_starting_low() {
+        let device = Device::flex();
+        let config = UNetConfig::new(5)
+            .with_base_channels(4)
+            .with_lines(3)
+            .with_points(2);
+        let net = config.init(&device);
+        let answer = net.predict(Tensor::zeros([1, 3, 16, 16], &device));
+        assert_eq!(answer.dims(), [1, 5 + 2 + 3 + 2, 16, 16]);
+        assert_eq!(net.channels(), 12);
+        assert_eq!(net.points(), 2);
+
+        let points = answer.slice([0..1, 10..12, 0..16, 0..16]);
+        let values = points.into_data().try_to_vec::<f32>().expect("floats");
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        assert!(mean < 0.1, "a point is unlikely to start with: {mean}");
+
+        // And the descriptor holds to the forward pass.
+        let descriptor = config.describe();
+        let mut reported = Vec::new();
+        net.forward_tapped(
+            Tensor::<4>::zeros([2, 3, 32, 48], &device),
+            &mut |key, dims| {
+                reported.push((key.to_string(), dims.to_vec()));
+            },
+        );
+        crate::net::describe::assert_matches_forward(
+            &descriptor,
+            &reported,
+            &[("B", 2), ("H", 32), ("W", 48)],
+        );
+        assert_eq!(descriptor.total_params(), net.num_params() as u64);
     }
 
     /// The descriptor of a network with lines holds to its forward pass too.

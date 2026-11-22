@@ -79,6 +79,7 @@ base_channels = 16
 learning_rate = 0.0003
 angle_weight = 0.2
 line_weight = 1
+point_weight = 1
 scale_weight = 1
 weight_decay = 0.1
 patience = 10

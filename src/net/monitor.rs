@@ -14,6 +14,8 @@
 //! accuracy    the same, one line per step, for the share of pixels right (in %)
 //! line_iou    the same, for how much of the lines the run found (in %); only
 //!             a run with a lines layer writes it
+//! point_f1    the same, for how well the run found the point symbols (in %);
+//!             only a run with a points layer writes it
 //! scale_error the same, for how far out the network was about how dense its
 //!             crops were (in %); only a run with a scale head writes it
 //! control     what the watcher asks for: `run`, `pause` or `stop`
@@ -62,6 +64,10 @@ pub const ACCURACY_FILE: &str = "accuracy";
 /// The file the run's line IoUs (in %) are appended to, in the losses file's
 /// own line format. Only a run whose network has a lines layer makes it.
 pub const LINE_IOU_FILE: &str = "line_iou";
+/// The file the run's point F1 scores (in %) are appended to, in the losses
+/// file's own line format. Only a run whose network has a points layer makes
+/// it.
+pub const POINT_F1_FILE: &str = "point_f1";
 /// The file the run's scale errors (in %) are appended to, in the losses
 /// file's own line format. Only a run whose network has a scale head makes
 /// it.
@@ -529,6 +535,7 @@ impl Monitor {
                 .open(self.dir.join(ACCURACY_FILE))
                 .ok(),
             line_ious: None,
+            point_f1s: None,
             scale_errors: None,
             dir: self.dir.clone(),
             validating: false,
@@ -536,6 +543,7 @@ impl Monitor {
             loss_id: None,
             accuracy_id: None,
             line_iou_id: None,
+            point_f1_id: None,
             scale_error_id: None,
         }
     }
@@ -611,6 +619,8 @@ pub struct MonitorRenderer {
     /// Opened when the metric is registered, which a run without a lines
     /// layer never does.
     line_ious: Option<fs::File>,
+    /// The same, for a run with a points layer.
+    point_f1s: Option<fs::File>,
     /// The same, for a run with a scale head.
     scale_errors: Option<fs::File>,
     /// Where the job folder is, for opening those files.
@@ -625,6 +635,8 @@ pub struct MonitorRenderer {
     accuracy_id: Option<MetricId>,
     /// Which metric is the line IoU, where there is one.
     line_iou_id: Option<MetricId>,
+    /// Which metric is the point F1, where there is one.
+    point_f1_id: Option<MetricId>,
     /// Which metric is the scale error, where there is one.
     scale_error_id: Option<MetricId>,
 }
@@ -655,6 +667,14 @@ impl MonitorRenderer {
             let kind = if self.validating { 'v' } else { 't' };
             let status = self.status.lock().unwrap();
             if let Some(file) = &mut self.line_ious {
+                writeln!(file, "{kind} {} {} {value}", status.epoch, status.iteration).ok();
+            }
+            return;
+        }
+        if self.point_f1_id.as_ref() == Some(&entry.metric_id) {
+            let kind = if self.validating { 'v' } else { 't' };
+            let status = self.status.lock().unwrap();
+            if let Some(file) = &mut self.point_f1s {
                 writeln!(file, "{kind} {} {} {value}", status.epoch, status.iteration).ok();
             }
             return;
@@ -769,6 +789,13 @@ impl MetricsRenderer for MonitorRenderer {
                 .create(true)
                 .append(true)
                 .open(self.dir.join(LINE_IOU_FILE))
+                .ok();
+        } else if definition.name.as_str() == "Point F1" {
+            self.point_f1_id = Some(definition.metric_id);
+            self.point_f1s = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.dir.join(POINT_F1_FILE))
                 .ok();
         } else if definition.name.as_str() == "Scale error" {
             self.scale_error_id = Some(definition.metric_id);

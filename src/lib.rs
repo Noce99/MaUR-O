@@ -140,6 +140,9 @@
 //! the regions its cells form, as bezier paths with the corners rounded off
 //! the staircase, drawn with an existing symbol set and written out by
 //! [`xml_writer`]. It is what the `mauro net grid-to-map` tool is built on.
+//! [`line_vector`] and [`point_vector`] do the same for the layers over the
+//! ground: a line symbol's band thinned and traced into paths, a point
+//! symbol's heatmap read at its peaks.
 //! [`tree_vector`] is the same step for an answer which is already vector: a
 //! tree of cuts, which it turns into polygons directly, with no grid between.
 //!
@@ -194,6 +197,7 @@ pub mod osm_orienteering;
 pub mod osm_style;
 pub mod path_builder;
 pub mod point_truth;
+pub mod point_vector;
 pub mod progress;
 pub mod qbezier;
 pub mod random;
