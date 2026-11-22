@@ -750,8 +750,8 @@ mauro net dataset [OPTIONS] <symbol-set> [folder]
 | `-n, --maps <COUNT>` | How many maps to generate (default `10`). |
 | `-e, --empty-sides <SHARE>` | The share of cell sides left without a line along them, 0 for a line on every side, 1 for none (default `0.5`). |
 | `-t, --transparent-areas <CHANCE>` | The chance of a cell being covered by a see-through area (default `0.1`). |
-| `-p, --point-symbols <CHANCE>` | The chance of a cell holding a point symbol; two are half as likely as one, three half as likely again (default `0.5`). |
-| `--content <WHAT>` | What the maps hold (default `all`). `all`: everything, unlabelled. `areas`: nothing but the ground — the cells are filled with opaque areas and the lines, see-through areas and point symbols are all skipped, whatever the three options above say; what makes a dataset labelled, see [below](#a-training-set). `areas-and-lines`: the ground and the lines, labelled as two layers; no see-through areas or point symbols, whatever their options say. |
+| `-p, --point-symbols <CHANCE>` | The chance of a cell holding a point symbol; two are half as likely as one, three half as likely again (default `0.5`). A point symbol is never put on a line nor on another point symbol, and half of them are put just beside a line; one with no room left in its cell is left out, and the summary says how many were. |
+| `--content <WHAT>` | What the maps hold (default `all`). `all`: everything, unlabelled. `areas`: nothing but the ground — the cells are filled with opaque areas and the lines, see-through areas and point symbols are all skipped, whatever the three options above say; what makes a dataset labelled, see [below](#a-training-set). `areas-and-lines`: the ground and the lines, labelled as two layers; no see-through areas or point symbols, whatever their options say. `areas-lines-points`: the ground, the lines and the point symbols, labelled as three layers; no see-through areas, whatever `--transparent-areas` says. |
 | `-j, --just-opaque-areas` / `-L, --line-labels` | The older names of `--content areas` and `--content areas-and-lines`. |
 | `-r, --resolution <PX_PER_M>` | How many pixels of image one meter of ground comes to (default `3`). With a range below, the density the images are sized at. |
 | `--min-resolution <PX_PER_M>` / `--max-resolution <PX_PER_M>` | Draw each map at a density of its own, log-uniform between the two (each defaults to `--resolution`, which has to lie between them) — see [Maps at more than one density](#a-training-set). |
@@ -880,9 +880,9 @@ the layout covers plus the frame, known before anything is generated, rather
 than over whatever each map's objects came to — so a folder of them stacks
 into a batch without being cropped first.
 
-Only `--content areas` maps and `--content areas-and-lines` maps are labelled: a
-pixel's answer is the one piece of ground cover under it, and there is no such
-answer for a pixel a see-through area or a point symbol was drawn over.
+Only `--content areas`, `areas-and-lines` and `areas-lines-points` maps are
+labelled: a pixel's answer is the one piece of ground cover under it, and
+there is no such answer for a pixel a see-through area was drawn over.
 
 **Lines are a second layer.** `--content areas-and-lines` draws the lines along the cell
 sides and labels them apart from the ground, which keeps its own label under
@@ -897,6 +897,28 @@ It draws no see-through areas and no point symbols, whatever
 left unlabelled. A network trained on such a dataset answers for
 the lines too, and `mauro net train` reports how much of them it found as the
 *Line IoU*.
+
+**Points are a third layer.** `--content areas-lines-points` draws the point
+symbols as well, and labels them as **keypoints**: a heatmap per point symbol,
+nought nearly everywhere and peaking at exactly one at the pixel the object's
+coordinate falls in, with a Gaussian two pixels wide around it
+([`maur_o::point_truth`](src/point_truth.rs)). The peak is the coordinate the
+file holds, which is what a map object needs, and not the middle of what the
+symbol draws. The ground and the lines keep their labels under a point. The
+generator keeps every point off the lines (by 0.1 mm of paper, edge to edge)
+and off the other points (0.15 mm), so no pixel has two answers, and puts half
+of them within 0.6 mm of a line, where a surveyor puts a great many and where
+they are hardest to tell apart from it. The heatmaps are rebuilt from `maps/`
+like the lines; `classes.json` says how many point symbols there are
+(`points`) and which. A network trained on such a dataset is trained on them
+with the focal loss keypoint detectors use, and `mauro net train` reports how
+well it found them as the *Point F1*: the peaks it gave against the points
+there were, a peak counting as a point of its symbol within three pixels.
+`--point-weight` is what that term counts for. The symbol set made for it is
+[`symbols_sets/simple_ISSprOM_points.omap`](symbols_sets/simple_ISSprOM_points.omap):
+`simple_ISSprOM.omap` and ten point symbols of ISSprOM which do not turn —
+the large tree, the bush, the green and the black X, the ring, the knoll, the
+boulder, the two towers and the well.
 
 **Maps at more than one density.** A picture of a map says nothing about how many pixels a meter of ground is,
 and a network trained on maps all drawn at one density learns that density
@@ -1173,7 +1195,7 @@ cargo run --release --features cuda -- net train --model tree \
 
 It is trained on the **whole picture**, reduced to `--size` pixels (a divisor of
 16), rather than on crops, so an epoch is short — a few dozen of them make a run.
-`--crop`, `--crops-per-map`, `--angle-weight`, `--line-weight`, `--scale-weight`, `--weight-decay`, `--patience`,
+`--crop`, `--crops-per-map`, `--angle-weight`, `--line-weight`, `--point-weight`, `--scale-weight`, `--weight-decay`, `--patience`,
 `--overhang`, `--workers` and `--image-valid` are the U-Net's and are ignored. A run is
 `TreeNet_<date>/` holding `tree.json`, `architecture.txt`, `best.bpk` and
 `valid.png` (*picture | label | answer*). It reports to the terminal interface
@@ -1325,6 +1347,13 @@ lines are simplified by `--tolerance` like the boundaries of the areas. Where
 two lines of one symbol meet they are two objects sharing an end, as a line
 object cannot branch. The output says how many were found and of how many of
 the set's line symbols.
+
+A run whose network has a points layer gives the point symbols too. Every peak
+of a symbol's heatmap at least `--point-threshold` high (0.3) and no lower than
+its eight neighbours is one point object of that symbol, placed at the top of a
+parabola through the peak and its neighbours, a fraction of a pixel from the
+peak's middle ([`maur_o::point_vector`](src/point_vector.rs)). The output says
+how many were found and of how many of the set's point symbols.
 
 ### The angle, and why it is folded
 
@@ -1478,7 +1507,9 @@ are drawn the whole way round — vectorized into a map and rendered again, as
 [`mauro net image-to-map`](#mauro-net-image-to-map) draws what a network says — over the very
 ground the crop was cut from, so the fill patterns land where the picture's
 do; the caption names the map and the corner, so a crop worth a second look
-can be found in `images/`.
+can be found in `images/`. A dataset whose point symbols are labelled gets a
+third panel: the picture faded, the heatmaps over it in red and every peak
+ringed in black, so a point labelled off its symbol shows.
 
 `--run <folder>` puts each crop through that run's network as well, adds a
 panel for what it said, and prints two tables over every crop drawn. The first
