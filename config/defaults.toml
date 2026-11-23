@@ -50,21 +50,21 @@ stop_merge = 3
 margin = 50
 
 [net.dataset]
-folder = "dataset/map_to_omap_datasets/area_and_lines_v2_10000"
-layout_size = 3
-background_cell_size = 50
+folder = "dataset/map_to_omap_datasets/almost_issprom_10000"
+layout_size = 4
+background_cell_size = 40
 maps = 10000
 empty_sides = 0.5
-interior_lines = 0.3
+interior_lines = "1.0"
 transparent_areas = 0.1
-point_symbols = 0.5
-content = "areas-and-lines"
+point_symbols = 0.8
+content = "areas-lines-points"
 resolution = 3
 frame = 5
 seed = 0
 min_resolution = 1
 max_resolution = 4
-symbol_set = "symbols_sets/simple_ISSprOM.omap"
+symbol_set = "symbols_sets/almost_ISSprOM.omap"
 
 [net.describe]
 model = "all"
