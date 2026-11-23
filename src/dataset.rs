@@ -177,6 +177,11 @@ pub const DEFAULT_EMPTY_SIDES: f64 = 0.5;
 /// out the same.
 pub const DEFAULT_INTERIOR_LINES: f64 = 0.0;
 
+/// How many lines through the inside of the cells may go through one cell:
+/// two, one each way across it, as a cell has four sides to cross and no
+/// two lines head for the same one.
+pub const MAX_LINES_PER_CELL: usize = 2;
+
 /// The chance of a line through the inside of the cells stopping in the
 /// cell it has got to, rather than going on into the next.
 const INTERIOR_STOP: f64 = 0.35;
@@ -218,7 +223,8 @@ pub struct Settings {
     /// on its own, so this is what comes out on average rather than a count.
     pub empty_sides: f64,
     /// The chance of a line running through the inside of the cells, rather
-    /// than along their sides, starting in a cell, decided cell by cell.
+    /// than along their sides, starting in a cell: each cell has
+    /// [`MAX_LINES_PER_CELL`] tries at it, each decided on its own.
     ///
     /// A line along a side is always where one piece of ground meets the
     /// next, which a network can learn to read as "a line is where the
@@ -227,10 +233,11 @@ pub struct Settings {
     /// near the middle of a side into the next cell, and on from cell to
     /// cell until it stops (in a cell, or partway to a side it may not
     /// cross) or runs off the map. It only goes through cells it shows up
-    /// over and whose ground draws no border, and only through cells no
-    /// other such line has been through, so two of them never run along
-    /// each other. Nought, the default, draws none and leaves the dice as
-    /// they were.
+    /// over and whose ground draws no border, and through at most
+    /// [`MAX_LINES_PER_CELL`] of them a cell. No two head for the same side
+    /// of a cell, so two in one cell cross or pass each other, and never
+    /// run along each other. Nought, the default, draws none and leaves the
+    /// dice as they were.
     pub interior_lines: f64,
     /// The chance of a cell being covered by a transparent area, decided
     /// cell by cell.
@@ -1013,17 +1020,24 @@ impl Generator<'_> {
     /// The lines through the inside of the cells of `layout`, filled with
     /// `fills`, each as its path and its place in [`Catalogue::lines`].
     ///
-    /// Each cell, in turn, starts one with [`Settings::interior_lines`] of a
-    /// chance, where no other has been through it and its ground draws no
-    /// border. The line's symbol is picked out of the ones which show up
+    /// Each cell, in turn, gets [`MAX_LINES_PER_CELL`] tries at starting
+    /// one, each with [`Settings::interior_lines`] of a chance, where its
+    /// ground draws no border and fewer than that many lines go through it
+    /// already. The line's symbol is picked out of the ones which show up
     /// over that ground, and from near the cell's middle it goes out in one
     /// direction and then the other: through near the middle of a side into
     /// the next cell, and on, until it stops in a cell ([`INTERIOR_STOP`]),
-    /// runs off the edge of the map, or comes to a side it may not cross —
-    /// into a cell it would not show up over, one whose ground has a border,
-    /// or one a line has been through already — which it stops partway to
-    /// instead ([`PARTWAY`]). The first step of the first direction never
-    /// stops, so every line goes somewhere.
+    /// runs off the edge of the map, or comes to a cell it may not go into —
+    /// one it would not show up over, one whose ground has a border, one it
+    /// has been through already or one which has its fill of lines — which
+    /// it stops partway to instead ([`PARTWAY`]). The first step of the
+    /// first direction never stops, so every line goes somewhere.
+    ///
+    /// What keeps two lines from running along each other is the sides: a
+    /// line heads for the middle of a side, to cross it or to stop short of
+    /// it, and no side is headed for by two of them. Two lines in one cell
+    /// leave it by different sides, so they cross near its middle or pass
+    /// each other, and never share a stretch.
     fn interior_lines(
         &self,
         layout: &Layout,
@@ -1033,11 +1047,17 @@ impl Generator<'_> {
         let size = layout.size();
         let neighbours = layout.side_cells();
         let at = |cell: usize| (cell % size, cell / size);
-        let mut used = vec![false; fills.len()];
+        // How many lines go through each cell, and whether a line has headed
+        // for each side yet.
+        let mut through = vec![0; fills.len()];
+        let mut taken_sides = vec![false; neighbours.len()];
+        // The legs drawn in each cell so far, which a leg there may cross
+        // but not run along: two lines through a cell pass near its middle.
+        let mut cell_legs: Vec<Vec<Leg>> = vec![Vec::new(); fills.len()];
         let mut lines = Vec::new();
 
-        for start in 0..fills.len() {
-            if used[start] || self.bordered[fills[start]] {
+        for start in (0..fills.len()).flat_map(|cell| [cell; MAX_LINES_PER_CELL]) {
+            if through[start] >= MAX_LINES_PER_CELL || self.bordered[fills[start]] {
                 continue;
             }
             if !random.chance(self.settings.interior_lines) {
@@ -1046,17 +1066,24 @@ impl Generator<'_> {
             let Some(&line) = random.pick(&self.lines_over[fills[start]]) else {
                 continue;
             };
-            used[start] = true;
             let (column, row) = at(start);
+            // Every side of the cell headed for already: nowhere to go.
+            if layout
+                .cell_sides(column, row)
+                .iter()
+                .all(|&side| taken_sides[side])
+            {
+                continue;
+            }
+            through[start] += 1;
+            let mut visited = vec![start];
             let middle = layout.near_center(column, row, random);
 
             // The legs of the line, out from the start cell's middle, one
             // direction and then the other.
             let mut legs: [Vec<Leg>; 2] = Default::default();
-            let mut first_exit = None;
             for direction in 0..2 {
                 let (mut cell, mut here) = (start, middle);
-                let mut came_through = first_exit;
                 loop {
                     let first_step = direction == 0 && legs[0].is_empty();
                     if !first_step && random.chance(INTERIOR_STOP) {
@@ -1066,49 +1093,58 @@ impl Generator<'_> {
                     let ways: Vec<usize> = layout
                         .cell_sides(column, row)
                         .into_iter()
-                        .filter(|&side| Some(side) != came_through)
+                        .filter(|&side| !taken_sides[side])
                         .collect();
                     let Some(&side) = random.pick(&ways) else {
                         break;
                     };
-                    if first_step {
-                        first_exit = Some(side);
-                    }
+                    // Headed for, whatever comes of it: crossed, or stopped
+                    // short of, it is this line's.
+                    taken_sides[side] = true;
                     let crossing = layout.side_middle(side, random);
                     let next = neighbours[side]
                         .iter()
                         .flatten()
                         .copied()
                         .find(|&c| c != cell);
-                    let out = layout.leg(column, row, here, crossing, random);
+                    let out = layout.leg(column, row, here, crossing, &cell_legs[cell], random);
                     match (next, out) {
                         // Off the edge of the map.
                         (None, Some(out)) => {
+                            cell_legs[cell].push(out.clone());
                             legs[direction].push(out);
                             break;
                         }
                         (Some(next), Some(out))
-                            if !used[next]
+                            if !visited.contains(&next)
+                                && through[next] < MAX_LINES_PER_CELL
                                 && !self.bordered[fills[next]]
                                 && self.lines_over[fills[next]].contains(&line) =>
                         {
                             let (column, row) = at(next);
                             let middle = layout.near_center(column, row, random);
-                            if let Some(into) = layout.leg(column, row, crossing, middle, random) {
-                                used[next] = true;
+                            if let Some(into) =
+                                layout.leg(column, row, crossing, middle, &cell_legs[next], random)
+                            {
+                                through[next] += 1;
+                                visited.push(next);
+                                cell_legs[cell].push(out.clone());
+                                cell_legs[next].push(into.clone());
                                 legs[direction].extend([out, into]);
                                 (cell, here) = (next, middle);
-                                came_through = Some(side);
                                 continue;
                             }
                         }
                         _ => {}
                     }
-                    // A side it may not cross, or no way to it which keeps
-                    // inside the cell: it ends short of the side.
+                    // A cell it may not go into, or no way to the side
+                    // which keeps inside this one: it ends short of it.
                     let share = random.between(PARTWAY.0, PARTWAY.1);
                     let short = here + (crossing - here) * share;
-                    if let Some(leg) = layout.leg(column, row, here, short, random) {
+                    if let Some(leg) =
+                        layout.leg(column, row, here, short, &cell_legs[cell], random)
+                    {
+                        cell_legs[cell].push(leg.clone());
                         legs[direction].push(leg);
                     }
                     break;
@@ -2023,9 +2059,9 @@ mod tests {
         let source = Path::new("symbols_sets/simple_ISSprOM.omap");
         let dir = tempfile::tempdir().expect("a folder");
         let settings = Settings {
-            maps: 8,
+            maps: 30,
             empty_sides: 1.0,
-            interior_lines: 0.5,
+            interior_lines: 1.0,
             transparent_areas: 0.0,
             point_symbols: 0.0,
             line_labels: true,
@@ -2040,6 +2076,42 @@ mod tests {
             "{} lines through the cells",
             summary.drawn.interior_lines
         );
+
+        // Never along each other: two lines may cross, as often as they
+        // meet, and a crossing is a short stretch of one near the other; but
+        // no long stretch of one lies on the other.
+        let (set, catalogue, bordered) = bordered_areas(source);
+        drop(set);
+        for generated in &summary.written {
+            let (mut map, _) = xml_reader::read_xml_map(&generated.map).expect("a map");
+            map.resolve_references();
+            let (lines, _) = lines_and_bordered_outlines(&map, &catalogue, &bordered);
+            for (a, one) in lines.iter().enumerate() {
+                for other in &lines[a + 1..] {
+                    // The longest stretch of one within 0.2 mm of the
+                    // other, walked in steps of a twentieth of a mm.
+                    let (mut run, mut longest) = (0.0, 0.0_f64);
+                    for pair in one.windows(2) {
+                        let length = (pair[1] - pair[0]).length();
+                        let steps = (length / 0.05).ceil().max(1.0);
+                        for step in 0..steps as usize {
+                            let at = pair[0] + (pair[1] - pair[0]) * ((step as f64 + 0.5) / steps);
+                            if distance_to_polyline(at, other) < 0.2 {
+                                run += length / steps;
+                                longest = longest.max(run);
+                            } else {
+                                run = 0.0;
+                            }
+                        }
+                    }
+                    // A crossing at an angle `a` is 0.4 / sin a mm of it:
+                    // 1.5 mm is one at fifteen degrees, flatter than
+                    // `Layout::leg` lets one through, with room for the
+                    // wandering. Running along each other is far more.
+                    assert!(longest < 1.5, "{longest} mm of two lines lie on each other");
+                }
+            }
+        }
 
         let none = Settings {
             interior_lines: 0.0,

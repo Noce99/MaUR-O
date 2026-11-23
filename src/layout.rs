@@ -80,6 +80,21 @@ const INTERIOR_SWAY: f64 = 0.08;
 /// every cell, and little enough to stay well clear of the sides.
 const CENTER_JITTER: f64 = 0.1;
 
+/// How near the outline of a cell, in meters, an end of a leg is taken to
+/// be on it: well over the thousandth a map file's coordinates are rounded
+/// to, and well under anything a line would be seen to stray by.
+const ON_A_SIDE: f64 = 0.005;
+
+/// How near another leg, as a fraction of the cell size, a leg of a line
+/// through the cells is taken to be on it.
+const NEAR_ANOTHER: f64 = 0.015;
+
+/// How much of a leg may lie near another, as a multiple of what "near" is:
+/// four is a crossing at thirty degrees or more, as a crossing at an angle
+/// `a` lies near the other leg for `2 near / sin a`. Anything flatter is
+/// running along it.
+const ALONGSIDE: f64 = 4.0;
+
 /// How many wandering legs [`Layout::leg`] tries before a straight one.
 const LEG_TRIES: usize = 8;
 
@@ -271,6 +286,17 @@ impl Side {
 pub struct Leg(Side);
 
 impl Leg {
+    /// The points it passes through, flattened, in meters on the ground.
+    pub fn points(&self) -> Vec<Point> {
+        let mut builder = PathBuilder::new(1.0);
+        builder.move_to(self.0.start());
+        self.0.append_to(&mut builder);
+        flatten(&builder.coords)
+            .into_iter()
+            .flat_map(|part| part.points)
+            .collect()
+    }
+
     /// The same leg run the other way.
     pub fn reversed(&self) -> Leg {
         Leg(self.0.reversed())
@@ -492,7 +518,8 @@ impl Layout {
     /// One leg of a line through the inside of the cells: a path from
     /// `from` to `to`, both in cell `(column, row)` or on its sides, which
     /// wanders by up to `INTERIOR_SWAY` of a cell and stays inside the
-    /// cell the whole way — or `None` where none of `LEG_TRIES` wandering
+    /// cell the whole way, crossing the legs of `avoid` if it must but never
+    /// running along one — or `None` where none of `LEG_TRIES` wandering
     /// ones nor a straight one does.
     ///
     /// The sides of a cell wander by far more than that, and one can bulge
@@ -506,30 +533,62 @@ impl Layout {
         row: usize,
         from: Point,
         to: Point,
+        avoid: &[Leg],
         random: &mut Random,
     ) -> Option<Leg> {
         let outline: Vec<Point> = flatten(&self.cell_outline(column, row, 1.0))
             .into_iter()
             .next()?
             .points;
-        let slack = CROSSING_SLACK * self.cell_size;
-        let inside = |side: &Side| {
-            let mut builder = PathBuilder::new(1.0);
-            builder.move_to(side.start());
-            side.append_to(&mut builder);
-            flatten(&builder.coords).iter().all(|part| {
-                part.points.iter().all(|&point| {
-                    (point - from).length() <= slack
-                        || (point - to).length() <= slack
-                        || is_inside(&outline, point)
-                })
+        // Only an end on a side, where the leg crosses it, has slack: an end
+        // inside the cell, where the leg stops short, is held to the cell
+        // like the rest of it.
+        let on_a_side = |end: Point| {
+            outline.windows(2).any(|pair| {
+                let (a, b) = (pair[0], pair[1]);
+                let along = b - a;
+                let length = along.dot(along);
+                let t = if length > 0.0 {
+                    ((end - a).dot(along) / length).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                // The outline is in coordinates rounded to a thousandth.
+                (end - (a + along * t)).length() < ON_A_SIDE
             })
         };
+        let slack = CROSSING_SLACK * self.cell_size;
+        let (from_slack, to_slack) = (
+            if on_a_side(from) { slack } else { 0.0 },
+            if on_a_side(to) { slack } else { 0.0 },
+        );
+        let near = NEAR_ANOTHER * self.cell_size;
+        let others: Vec<Vec<Point>> = avoid.iter().map(Leg::points).collect();
+        let fits = |leg: &Leg| {
+            let points = leg.points();
+            let inside = points.iter().all(|&point| {
+                (point - from).length() < from_slack
+                    || (point - to).length() < to_slack
+                    || is_inside(&outline, point)
+            });
+            // As much of it as lies near another leg, in steps of a fraction
+            // of "near" so that a long straight piece crossing one counts
+            // for the crossing alone: a crossing comes to a little, running
+            // along it to a lot.
+            let alongside = length_near(&points, &others, near);
+            inside && alongside <= ALONGSIDE * near
+        };
         (0..LEG_TRIES)
-            .map(|_| Side::wandering_by(from, to, INTERIOR_SWAY * self.cell_size, random))
-            .chain(std::iter::once(Side::straight(from, to)))
-            .find(|side| inside(side))
-            .map(Leg)
+            .map(|_| {
+                Leg(Side::wandering_by(
+                    from,
+                    to,
+                    INTERIOR_SWAY * self.cell_size,
+                    random,
+                ))
+            })
+            .chain(std::iter::once(Leg(Side::straight(from, to))))
+            .find(|leg| fits(leg))
     }
 
     /// The legs of a line, one after another, as an open path in the
@@ -608,6 +667,45 @@ fn bounds(polygon: &[Point]) -> (f64, f64, f64, f64) {
 
 /// Whether the point is inside the polygon, by the crossing rule: a ray from
 /// the point crosses the outline an odd number of times.
+/// How much of the polyline `line` lies within `near` of any of `others`,
+/// measured in steps of a quarter of `near`.
+pub(crate) fn length_near(line: &[Point], others: &[Vec<Point>], near: f64) -> f64 {
+    let step = near / 4.0;
+    let mut total = 0.0;
+    for pair in line.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        let length = (to - from).length();
+        let pieces = (length / step).ceil().max(1.0);
+        for piece in 0..pieces as usize {
+            let middle = from + (to - from) * ((piece as f64 + 0.5) / pieces);
+            if others
+                .iter()
+                .any(|other| distance_to_polyline(middle, other) < near)
+            {
+                total += length / pieces;
+            }
+        }
+    }
+    total
+}
+
+/// The distance from `at` to the nearest point of the polyline `line`.
+fn distance_to_polyline(at: Point, line: &[Point]) -> f64 {
+    line.windows(2)
+        .map(|pair| {
+            let (from, to) = (pair[0], pair[1]);
+            let along = to - from;
+            let length = along.dot(along);
+            let t = if length > 0.0 {
+                ((at - from).dot(along) / length).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (at - (from + along * t)).length()
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
 pub(crate) fn is_inside(polygon: &[Point], point: Point) -> bool {
     let mut inside = false;
     for at in 0..polygon.len() {
@@ -654,7 +752,7 @@ mod tests {
                         let from = layout.near_center(column, row, &mut random);
                         let to = layout.side_middle(side, &mut random);
                         legs += 1;
-                        let Some(leg) = layout.leg(column, row, from, to, &mut random) else {
+                        let Some(leg) = layout.leg(column, row, from, to, &[], &mut random) else {
                             missing += 1;
                             continue;
                         };

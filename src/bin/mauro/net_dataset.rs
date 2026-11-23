@@ -146,12 +146,13 @@ pub struct Args {
     empty_sides: f64,
 
     /// The chance of a line through the inside of the cells starting in a
-    /// cell: from near its middle, through near the middle of a side into
-    /// the next cell and on, until it stops, runs off the map or comes to a
-    /// cell it may not go into. Unlike the lines along the sides, it does
-    /// not follow where the ground changes. It keeps to cells it shows up
-    /// over, whose ground draws no border, and which no other such line has
-    /// been through.
+    /// cell, tried twice per cell: from near its middle, through near the
+    /// middle of a side into the next cell and on, until it stops, runs off
+    /// the map or comes to a cell it may not go into. Unlike the lines along
+    /// the sides, it does not follow where the ground changes. It keeps to
+    /// cells it shows up over and whose ground draws no border, at most two
+    /// lines a cell, and no two cross the same side, so they cross or pass
+    /// each other but never run along each other.
     #[arg(long, value_name = "CHANCE")]
     interior_lines: f64,
 
