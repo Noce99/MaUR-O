@@ -66,6 +66,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 burn = { version = "0.22", default-features = false, features = ["std", "train", "autodiff", "tui"] }
+# What `experiment.log` is written with (`net::training::QuietFileLogger`):
+# burn's own file logger less its line per training step. Already in the
+# build through burn's `train`, at these versions.
+tracing-appender = "0.2.5"
+tracing-core = { version = "0.1.36", default-features = false }
+tracing-subscriber = "0.3.23"
+log = { version = "0.4.34", default-features = false }
 
 # The real fontconfig rather than `fontdb`'s bundled parser: only it resolves a
 # generic family ("Sans Serif") the way Qt and Mapper do. See `crate::text`.

@@ -100,8 +100,8 @@ use burn::train::metric::{
 use burn::train::renderer::tui::TuiMetricsRendererWrapper;
 use burn::train::renderer::CliMetricsRenderer;
 use burn::train::{
-    EarlyStoppingStrategy, InferenceStep, Learner, LearnerSummary, MetricEarlyStoppingStrategy,
-    StoppingCondition, SupervisedTraining, TrainOutput, TrainStep,
+    ApplicationLoggerInstaller, EarlyStoppingStrategy, InferenceStep, Learner, LearnerSummary,
+    MetricEarlyStoppingStrategy, StoppingCondition, SupervisedTraining, TrainOutput, TrainStep,
 };
 
 use crate::dataset::{Classes, CLASSES_FILE};
@@ -2340,6 +2340,7 @@ pub fn train(
         // The one hook burn calls once an epoch, which three things share:
         // see `EpochHook`.
         .early_stopping(EpochHook::new(phase, pass, config.patience, device.clone()))
+        .with_application_logger(Some(Box::new(QuietFileLogger(run.join("experiment.log")))))
         .summary();
     let training = if let Some(monitor) = &monitor {
         monitor.watch(training.interrupter());
@@ -2431,6 +2432,64 @@ pub fn train(
     }
 
     Ok(run)
+}
+
+/// `experiment.log`, written the way burn's own `FileApplicationLoggerInstaller`
+/// writes it, less the two things that made a 20-epoch run's log 1.5 GB
+/// while saying nothing the metrics folders do not: the `info` line burn's
+/// epoch loop writes for every training step, and the whole IR dump `pliron`
+/// (the compiler under the CPU backend's kernels) writes at `info` for every
+/// pass over every kernel it compiles. Warnings and errors from either are
+/// kept, as is everything else (the early-stopping and autotune lines
+/// among them).
+struct QuietFileLogger(PathBuf);
+
+/// Whether `info` and below from `module` stays out of `experiment.log`:
+/// the per-step lines of burn's epoch loops, `pliron`'s IR dumps, and, as
+/// burn already leaves out, `wgpu`'s chatter.
+fn too_chatty(module: &str) -> bool {
+    module.starts_with("pliron")
+        || module.starts_with("wgpu")
+        || (module.starts_with("burn_train") && module.ends_with("::epoch"))
+}
+
+impl ApplicationLoggerInstaller for QuietFileLogger {
+    fn install(&self) -> Result<(), String> {
+        use tracing_core::{Level, LevelFilter};
+        use tracing_subscriber::filter::filter_fn;
+        use tracing_subscriber::prelude::*;
+
+        let directory = self.0.parent().unwrap_or_else(|| Path::new("."));
+        let Some(file) = self.0.file_name() else {
+            return Err(format!("{} does not name a file", self.0.display()));
+        };
+        let layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(tracing_appender::rolling::never(directory, file))
+            .with_filter(LevelFilter::INFO)
+            .with_filter(filter_fn(|meta| {
+                !(too_chatty(meta.module_path().unwrap_or("")) && *meta.level() >= Level::INFO)
+            }));
+        tracing_subscriber::registry()
+            .with(layer)
+            .try_init()
+            .map_err(|_| "Failed to install the file logger.".to_string())?;
+
+        // As burn's does: a panic is written to the log, and the terminal
+        // says where to find it.
+        let hook = std::panic::take_hook();
+        let path = self.0.clone();
+        std::panic::set_hook(Box::new(move |info| {
+            log::error!("PANIC => {info}");
+            eprintln!(
+                "=== PANIC ===\nA fatal error happened, you can check the experiment logs here => \
+                 '{}'\n=============",
+                path.display()
+            );
+            hook(info);
+        }));
+        Ok(())
+    }
 }
 
 #[cfg(test)]

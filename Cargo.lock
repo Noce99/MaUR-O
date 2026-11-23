@@ -4463,6 +4463,7 @@ dependencies = [
  "geo",
  "geo-svg",
  "image",
+ "log",
  "png 0.17.16",
  "predicates",
  "quick-xml",
@@ -4474,6 +4475,9 @@ dependencies = [
  "tiff",
  "tiny-skia",
  "toml_edit",
+ "tracing-appender",
+ "tracing-core",
+ "tracing-subscriber",
  "ureq 3.5.1",
  "zip 2.4.2",
 ]
