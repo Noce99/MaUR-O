@@ -124,18 +124,6 @@ pub fn objects_of_lines(
         ));
     }
 
-    let mm_per_meter = 1000.0 / placement.scale_denominator as f64;
-    let cell = (
-        placement.ground.width() / grid.width as f64,
-        placement.ground.height() / grid.height as f64,
-    );
-    let at = |(x, y): (f64, f64)| {
-        Point::new(
-            placement.ground.left() + x * cell.0,
-            placement.ground.top() + y * cell.1,
-        )
-    };
-
     let mut objects = Vec::new();
     for (class, entry) in symbols.iter().enumerate() {
         let mask = grid.channel(class);
@@ -143,22 +131,54 @@ pub fn objects_of_lines(
             continue;
         }
         for path in polylines(mask, grid.width, grid.height, settings) {
-            let mut builder = PathBuilder::new(mm_per_meter);
-            builder.move_to(at(path.points[0]));
-            for &point in &path.points[1..] {
-                builder.line_to(at(point));
-            }
-            if path.closed {
-                builder.close();
-            }
-            let mut object = Object::new(ObjectKind::Path(PathObject::default()));
-            object.coords = builder.coords;
-            object.symbol_index = Some(entry.index);
-            object.symbol_id = entry.id;
-            objects.push(object);
+            objects.push(line_object(
+                &path.points,
+                path.closed,
+                entry,
+                placement,
+                grid.width,
+                grid.height,
+            ));
         }
     }
     Ok(objects)
+}
+
+/// A line object of `entry` along `points` — in the pixels of a picture of
+/// `width` by `height`, which `placement` lays over the ground — open, or
+/// closed where `closed` says.
+pub(crate) fn line_object(
+    points: &[(f64, f64)],
+    closed: bool,
+    entry: &Entry,
+    placement: &Placement,
+    width: usize,
+    height: usize,
+) -> Object {
+    let mm_per_meter = 1000.0 / placement.scale_denominator as f64;
+    let cell = (
+        placement.ground.width() / width as f64,
+        placement.ground.height() / height as f64,
+    );
+    let at = |(x, y): (f64, f64)| {
+        Point::new(
+            placement.ground.left() + x * cell.0,
+            placement.ground.top() + y * cell.1,
+        )
+    };
+    let mut builder = PathBuilder::new(mm_per_meter);
+    builder.move_to(at(points[0]));
+    for &point in &points[1..] {
+        builder.line_to(at(point));
+    }
+    if closed {
+        builder.close();
+    }
+    let mut object = Object::new(ObjectKind::Path(PathObject::default()));
+    object.coords = builder.coords;
+    object.symbol_index = Some(entry.index);
+    object.symbol_id = entry.id;
+    object
 }
 
 /// One line found in a mask, in pixels: the middle of each pixel it runs

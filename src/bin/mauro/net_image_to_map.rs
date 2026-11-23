@@ -40,6 +40,19 @@
 //! the peak refined to a fraction of a pixel — see
 //! [`maur_o::point_vector`].
 //!
+//! # The parts, put back together
+//!
+//! A run trained on a symbol set with a table of labels (see
+//! [`maur_o::label_set`]) reads parts rather than symbols: a building as a
+//! fill and an outline, a road as a strip of paved area and its borders.
+//! By default they are put back together into the symbols which drew them
+//! before anything is written — a fill with its outline along at least
+//! `--outline-cover` of its boundary as one area, a strip with its borders as
+//! a line of the symbol its width says, a stairway by its borders' spacing, a
+//! point by the line it sits on — see [`maur_o::assemble`]. What none of
+//! that takes is written with its class's own symbol, and counted. `--parts`
+//! writes every class with its own symbol, as the network said it.
+//!
 //! # How dense the picture is
 //!
 //! The map is only the right size if it is known how many pixels of the
@@ -95,6 +108,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+use maur_o::assemble::{Assemble, LeftoverKind, Report};
 use maur_o::dataset::{Classes, CLASSES_FILE};
 use maur_o::differences::open_image;
 use maur_o::label_set::LabelSet;
@@ -209,6 +223,19 @@ pub struct Args {
     /// The scale to write the map at. Defaults to the symbol set's own.
     #[arg(short = 's', long, value_name = "DENOMINATOR")]
     scale: Option<i32>,
+
+    /// Write the parts the network reads, each class with its own symbol,
+    /// rather than putting them back together into the symbols that drew
+    /// them: a building's fill and its outline, a road's strip and its
+    /// borders. Only a symbol set with a table of labels has parts.
+    #[arg(long)]
+    parts: bool,
+
+    /// How much of a fill's boundary its outline has to cover, or of a
+    /// strip's sides its borders, for the two to be put together into one
+    /// symbol, from 0 to 1.
+    #[arg(long, value_name = "SHARE")]
+    outline_cover: f64,
 }
 
 fn run(args: Args) -> Result<(), (ExitCode, String)> {
@@ -226,6 +253,15 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             "Invalid value for --tolerance: it cannot be negative.".to_string(),
         ));
     }
+    if !(0.0..=1.0).contains(&args.outline_cover) {
+        return Err(usage(format!(
+            "Invalid value for --outline-cover: {} is not a share from 0 to 1.",
+            args.outline_cover
+        )));
+    }
+    let assemble = (!args.parts).then_some(Assemble {
+        outline_cover: args.outline_cover,
+    });
     if args.same_angle.is_nan() || args.same_angle < 0.0 {
         return Err(usage(
             "Invalid value for --same-angle: it cannot be negative.".to_string(),
@@ -359,6 +395,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             line_threshold: DEFAULT_LINE_THRESHOLD,
             lines: LineSettings::default(),
             point_threshold: DEFAULT_POINT_THRESHOLD,
+            assemble,
         };
         let done = read_back_tree(
             &model,
@@ -471,6 +508,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
                 min_length: args.min_line,
             },
             point_threshold: args.point_threshold,
+            assemble,
         };
         let reading = settings.reading_resolution();
         let factor = reading / resolution;
@@ -531,6 +569,9 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             catalogue.points.len(),
         );
     }
+    if let Some(report) = &done.assembly {
+        print_assembly(report);
+    }
     println!(
         "{}: {} objects, {} coordinates, over {} by {} meters at 1:{scale}",
         map_path.display(),
@@ -575,6 +616,55 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         );
     }
     Ok(())
+}
+
+/// What was put back together of the parts, and what was left as it was.
+fn print_assembly(report: &Report) {
+    let mut put = Vec::new();
+    let mut say = |count: usize, one: &str, many: &str| {
+        if count > 0 {
+            put.push(format!("{count} {}", if count == 1 { one } else { many }));
+        }
+    };
+    say(
+        report.areas,
+        "area with its outline",
+        "areas with their outlines",
+    );
+    say(
+        report.strips,
+        "strip with its borders",
+        "strips with their borders",
+    );
+    say(
+        report.bordered,
+        "line by its borders",
+        "lines by their borders",
+    );
+    say(
+        report.points,
+        "point by the line it is on",
+        "points by the line they are on",
+    );
+    if !put.is_empty() {
+        println!("  put together: {}", put.join(", "));
+    }
+    let left: Vec<String> = report
+        .left
+        .iter()
+        .map(|left| {
+            let what = match (left.kind, left.count) {
+                (LeftoverKind::Line, 1) => "line",
+                (LeftoverKind::Line, _) => "lines",
+                (LeftoverKind::Strip, 1) => "strip",
+                (LeftoverKind::Strip, _) => "strips",
+            };
+            format!("{} {what} of {} ({})", left.count, left.class, left.symbol)
+        })
+        .collect();
+    if !left.is_empty() {
+        println!("  left as they are: {}", left.join(", "));
+    }
 }
 
 /// What an exit code of this subcommand means, as the module's own

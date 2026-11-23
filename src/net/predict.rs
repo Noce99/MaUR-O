@@ -103,9 +103,11 @@ use burn::store::ModuleRecord;
 use burn::tensor::{Device, Tensor, TensorData};
 use image::RgbImage;
 
+use crate::assemble::{Assemble, Report, Rules};
 use crate::differences::{difference_mask, Comparison, DEFAULT_TOLERANCE};
 use crate::geometry::Rect;
 use crate::ground_truth::{BACKGROUND, NO_ROTATION};
+use crate::label_set::LabelSet;
 use crate::line_vector::{LineGrid, LineSettings};
 use crate::point_vector::{peaks, Peak, PointGrid, DEFAULT_POINT_THRESHOLD};
 use crate::render::{render_map_over, to_rgb_image, Extent};
@@ -114,6 +116,7 @@ use crate::vectorize::{
     objects_of_regions, write_map_with_layers, write_objects, Placement, Simplify, SymbolGrid,
     Written,
 };
+use crate::xml_reader::read_xml_map;
 
 use crate::net::training::TrainingConfig;
 use crate::net::tree::{TreeAnswer, TreeNet};
@@ -454,6 +457,9 @@ pub struct ReadBack {
     pub comparison: Comparison,
     /// Complaints from drawing the map which was written.
     pub warnings: Vec<String>,
+    /// What was put back together of the parts, where the settings asked for
+    /// it — see [`crate::assemble`].
+    pub assembly: Option<Report>,
 }
 
 impl ReadBack {
@@ -836,14 +842,42 @@ pub fn read_back_tree(
         ground,
         scale_denominator: settings.scale_denominator,
     };
-    let objects = objects_of_regions(&regions, symbols, &placement)?;
-    let written = write_objects(
+    // A tree has no lines layer, so the one part of the table it can be
+    // put back together by is a fill which is never drawn alone.
+    let (symbols, report) = match &settings.assemble {
+        Some(_) => {
+            let (mut map, _) = read_xml_map(symbol_set)?;
+            map.resolve_references();
+            let labels = LabelSet::beside(&map, symbol_set)?;
+            let chosen = Rules::of(&map, &labels).area_symbols(&labels);
+            let areas = regions
+                .iter()
+                .filter(|(class, _)| {
+                    chosen
+                        .get(*class)
+                        .zip(labels.areas.get(*class))
+                        .is_some_and(|(chosen, own)| chosen.index != own.index)
+                })
+                .count();
+            (
+                chosen,
+                Some(Report {
+                    areas,
+                    ..Report::default()
+                }),
+            )
+        }
+        None => (symbols.to_vec(), None),
+    };
+    let objects = objects_of_regions(&regions, &symbols, &placement)?;
+    let mut written = write_objects(
         &objects,
         symbol_set,
         into,
         settings.scale_denominator,
         vec![],
     )?;
+    written.assembly = report;
     finish(grid, written, picture, into, settings, ground)
 }
 
@@ -907,6 +941,7 @@ fn read_back_grid_over(
             scale_denominator: settings.scale_denominator,
         },
         &settings.simplify,
+        settings.assemble.as_ref(),
     )?;
     let line_symbols = lines.as_ref().map_or(0, LineGrid::symbols_used);
     let mut point_symbols: Vec<usize> = points.iter().map(|peak| peak.class).collect();
@@ -961,6 +996,7 @@ fn finish(
         drawn,
         comparison,
         warnings: drawing.warnings,
+        assembly: written.assembly,
     })
 }
 
@@ -994,6 +1030,10 @@ pub struct ReadBackSettings {
     /// How high a point heatmap has to peak for a point to be written there,
     /// where the network has a points layer — see [`crate::point_vector`].
     pub point_threshold: f32,
+    /// Whether, and how, the parts a table of labels makes of the symbols
+    /// are put back together into them — see [`crate::assemble`]. `None`
+    /// writes every class with its own symbol, as the network said it.
+    pub assemble: Option<Assemble>,
 }
 
 impl ReadBackSettings {
@@ -1021,6 +1061,7 @@ impl ReadBackSettings {
             line_threshold: DEFAULT_LINE_THRESHOLD,
             lines: LineSettings::default(),
             point_threshold: DEFAULT_POINT_THRESHOLD,
+            assemble: Some(Assemble::default()),
         }
     }
 

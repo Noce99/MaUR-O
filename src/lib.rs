@@ -149,6 +149,10 @@
 //! symbol's heatmap read at its peaks.
 //! [`tree_vector`] is the same step for an answer which is already vector: a
 //! tree of cuts, which it turns into polygons directly, with no grid between.
+//! [`assemble`] comes before them where the classes are a table's parts:
+//! it runs the table backwards on the grids, so a fill and the outline round
+//! it are written as the one symbol that drew them, a strip of paved area
+//! and its borders as a road of its width.
 //!
 //! # Answering for itself
 //!
@@ -165,6 +169,7 @@
 
 pub mod all_symbols;
 pub mod archive_info;
+pub mod assemble;
 pub mod bundle;
 pub mod bus;
 pub mod contour_geometry;

@@ -106,6 +106,7 @@ use std::collections::HashMap;
 use std::f64::consts::TAU;
 use std::path::Path;
 
+use crate::assemble::{Assemble, Assembled, Report, Rules, UNCHOSEN};
 use crate::geometry::Rect;
 use crate::ground_truth::{GroundTruth, BACKGROUND, NO_ROTATION};
 use crate::label_set::LabelSet;
@@ -284,6 +285,9 @@ pub struct Written {
     pub points: usize,
     /// Complaints from reading the source map's symbol set.
     pub warnings: Vec<String>,
+    /// What was put back together, where the parts were — see
+    /// [`crate::assemble`].
+    pub assembly: Option<Report>,
 }
 
 /// The path objects a grid's regions come to, in the order the grid holds
@@ -306,7 +310,31 @@ pub fn to_objects(
     placement: &Placement,
     simplify: &Simplify,
 ) -> Result<Vec<Object>, String> {
+    to_objects_choosing(grid, symbols, None, placement, simplify)
+}
+
+/// [`to_objects`], with some regions written with another symbol than their
+/// class's: where `chosen` is given, a cell names a place in its list, or
+/// [`crate::assemble::UNCHOSEN`] for its class's own symbol, and a region is
+/// written with what its first cell names — see [`crate::assemble`], which
+/// chooses for a whole run of cells of one class at once.
+pub fn to_objects_choosing(
+    grid: &SymbolGrid,
+    symbols: &[Entry],
+    chosen: Option<(&[u16], &[Entry])>,
+    placement: &Placement,
+    simplify: &Simplify,
+) -> Result<Vec<Object>, String> {
     grid.checked()?;
+    if let Some((cells, _)) = chosen {
+        if cells.len() != grid.class.len() {
+            return Err(format!(
+                "{} cells were chosen a symbol for and the grid has {}",
+                cells.len(),
+                grid.class.len()
+            ));
+        }
+    }
     let tolerance = simplify.tolerance;
     if tolerance.is_nan() || tolerance < 0.0 {
         return Err(format!(
@@ -337,7 +365,12 @@ pub fn to_objects(
 
     let mut objects = Vec::with_capacity(regions.regions.len());
     for region in &regions.regions {
-        let entry = &symbols[region.class];
+        let entry = match chosen {
+            Some((cells, list)) if cells[region.cells[0]] != UNCHOSEN => list
+                .get(cells[region.cells[0]] as usize)
+                .ok_or_else(|| "a cell was chosen a symbol past the end of the list".to_string())?,
+            _ => &symbols[region.class],
+        };
         let mut loops = trace_loops(grid, &regions.region_of, region.id, &region.cells);
         if loops.is_empty() {
             continue;
@@ -416,13 +449,18 @@ pub fn write_map_with_lines(
     placement: &Placement,
     simplify: &Simplify,
 ) -> Result<Written, String> {
-    write_map_with_layers(grid, lines, &[], source, into, placement, simplify)
+    write_map_with_layers(grid, lines, &[], source, into, placement, simplify, None)
 }
 
 /// [`write_map_with_lines`], and the point objects of `points` — peaks found
 /// on a picture of the grid's own size, see [`crate::point_vector`] — each
 /// drawn with the point symbol of its channel, in the order of
 /// [`LabelSet::points`].
+///
+/// With `assemble`, the parts the classes are of a table of labels are put
+/// back together into the symbols that drew them first — see
+/// [`crate::assemble`] — and what came of that is [`Written::assembly`].
+#[allow(clippy::too_many_arguments)]
 pub fn write_map_with_layers(
     grid: &SymbolGrid,
     lines: Option<(&LineGrid, &LineSettings)>,
@@ -431,6 +469,7 @@ pub fn write_map_with_layers(
     into: &Path,
     placement: &Placement,
     simplify: &Simplify,
+    assemble: Option<&Assemble>,
 ) -> Result<Written, String> {
     let (mut map, warnings) = xml_reader::read_xml_map(source)?;
     map.resolve_references();
@@ -444,14 +483,71 @@ pub fn write_map_with_layers(
         ));
     }
 
-    let mut objects = to_objects(grid, &classes.areas, placement, simplify)?;
-    let mut line_count = 0;
-    if let Some((found, settings)) = lines {
-        let drawn = objects_of_lines(found, &classes.lines, placement, settings)?;
-        line_count = drawn.len();
+    let Some(settings) = assemble else {
+        let mut objects = to_objects(grid, &classes.areas, placement, simplify)?;
+        let mut line_count = 0;
+        if let Some((found, settings)) = lines {
+            let drawn = objects_of_lines(found, &classes.lines, placement, settings)?;
+            line_count = drawn.len();
+            objects.extend(drawn);
+        }
+        let drawn = objects_of_points(points, &classes.points, grid.width, grid.height, placement)?;
+        let point_count = drawn.len();
+        objects.extend(drawn);
+        let mut written = write_objects(
+            &objects,
+            source,
+            into,
+            placement.scale_denominator,
+            warnings,
+        )?;
+        written.lines = line_count;
+        written.points = point_count;
+        return Ok(written);
+    };
+
+    let rules = Rules::of(&map, &classes);
+    let line_settings = lines.map(|(_, settings)| *settings).unwrap_or_default();
+    let Assembled {
+        grid: ground,
+        lines: rest,
+        areas,
+        chosen,
+        objects: assembled,
+        point_symbols,
+        mut report,
+    } = crate::assemble::assemble(
+        grid,
+        lines.map(|(found, _)| found),
+        points,
+        &classes,
+        &rules,
+        placement,
+        &line_settings,
+        settings,
+    )?;
+    let mut objects = to_objects_choosing(
+        &ground,
+        &classes.areas,
+        Some((&chosen, &areas)),
+        placement,
+        simplify,
+    )?;
+    let mut line_count = assembled.len();
+    objects.extend(assembled);
+    if let Some(rest) = &rest {
+        let drawn = objects_of_lines(rest, &classes.lines, placement, &line_settings)?;
+        report.count_left_lines(&drawn, &classes, &rules);
+        line_count += drawn.len();
         objects.extend(drawn);
     }
-    let drawn = objects_of_points(points, &classes.points, grid.width, grid.height, placement)?;
+    let mut drawn = objects_of_points(points, &classes.points, grid.width, grid.height, placement)?;
+    for (object, symbol) in drawn.iter_mut().zip(&point_symbols) {
+        if let Some(symbol) = symbol {
+            object.symbol_index = Some(symbol.index);
+            object.symbol_id = symbol.id;
+        }
+    }
     let point_count = drawn.len();
     objects.extend(drawn);
     let mut written = write_objects(
@@ -463,6 +559,7 @@ pub fn write_map_with_layers(
     )?;
     written.lines = line_count;
     written.points = point_count;
+    written.assembly = Some(report);
     Ok(written)
 }
 
@@ -558,6 +655,7 @@ pub fn write_objects(
         coords,
         lines: 0,
         points: 0,
+        assembly: None,
         warnings,
     })
 }

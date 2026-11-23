@@ -577,7 +577,7 @@ fn turns_of(map: &Map, catalogue: &Catalogue) -> Vec<bool> {
 /// line's, or for a combined symbol the widest of its parts'. Nought for a
 /// symbol which draws no stroke, only point symbols along it — its width is
 /// the room those take up, which is not where the line is.
-fn stroke_width(map: &Map, index: usize) -> f64 {
+pub(crate) fn stroke_width(map: &Map, index: usize) -> f64 {
     fn of(map: &Map, symbol: &Symbol, depth: usize) -> f64 {
         match symbol {
             Symbol::Line(line) if is_color(line.color) => line.line_width,

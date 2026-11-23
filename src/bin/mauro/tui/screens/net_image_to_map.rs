@@ -18,6 +18,8 @@ const SCALE: usize = 11;
 const LINE_THRESHOLD: usize = 12;
 const MIN_LINE: usize = 13;
 const POINT_THRESHOLD: usize = 14;
+const PARTS: usize = 15;
+const OUTLINE_COVER: usize = 16;
 
 pub struct NetImageToMap {
     form: Form,
@@ -48,6 +50,8 @@ impl NetImageToMap {
                 Field::text("Line threshold").arg("line_threshold"),
                 Field::text("Min line").arg("min_line").unit("px"),
                 Field::text("Point threshold").arg("point_threshold"),
+                Field::toggle("Parts only").arg("parts"),
+                Field::text("Outline cover").arg("outline_cover"),
             ],
         );
         form.open_picker(RUN);
@@ -96,6 +100,8 @@ impl Tool for NetImageToMap {
         form.push_option(&mut args, LINE_THRESHOLD, "--line-threshold");
         form.push_option(&mut args, MIN_LINE, "--min-line");
         form.push_option(&mut args, POINT_THRESHOLD, "--point-threshold");
+        form.push_flag(&mut args, PARTS, "--parts");
+        form.push_option(&mut args, OUTLINE_COVER, "--outline-cover");
         Ok(args)
     }
 }

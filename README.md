@@ -1400,6 +1400,41 @@ parabola through the peak and its neighbours, a fraction of a pixel from the
 peak's middle ([`maur_o::point_vector`](src/point_vector.rs)). The output says
 how many were found and of how many of the set's point symbols.
 
+**The parts are put back together.** A run trained on a symbol set with a
+[table of labels](#a-training-set) reads parts, not symbols: a building is a
+fill and an outline, a road a strip of paved area and two borders. Written
+straight out, that is a `521.3` fill with a loose `415` line round it where the
+picture had a `521` building. So by default the table is run backwards
+([`maur_o::assemble`](src/assemble.rs)), on the grids before anything becomes
+geometry:
+
+- a **strip with borders** (a road, a track) is looked for where its area
+  class is narrow, and, where its border class runs along at least
+  `--outline-cover` (0.6) of its sides, becomes a line object of the symbol
+  whose stroke is nearest its width, with the ground beside it put back under
+  it;
+- a **line with borders** (a stairway) is the symbol whose borders' spacing
+  is nearest what the network drew;
+- a **fill with its outline** along `--outline-cover` of its boundary is one
+  area object (`501` rather than `501.5`); a fill the table says is never
+  drawn alone (a building's, a lake's) becomes its compound whatever the
+  outline says;
+- a **point** of a class which labels several symbols becomes the variant of
+  the line it sits on: a slope line on an index contour is `102.1`.
+
+What none of them takes stays as it was, with its class's own symbol, which is
+always one the standard draws on its own: an outline with no fill beside it is
+a cultivation boundary, borders with no strip are step lines, a strip with no
+borders is a narrow paved area. The output counts both:
+
+```text
+  put together: 149 areas with their outlines, 10 strips with their borders, 1 line by its borders
+  left as they are: 5 strips of Paved area, heavy traffic (501.11), 3 lines of Black line 0.18 mm (301.6)
+```
+
+`--parts` writes the parts as they are, each class with its own symbol. A set
+with no table has no parts, and its map is the same either way.
+
 ### The angle, and why it is folded
 
 A symbol whose fill turns is labelled with the angle it was turned to, and the
