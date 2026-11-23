@@ -74,6 +74,17 @@ const PULL: (f64, f64) = (0.2, 0.45);
 /// sides around it wander.
 const INTERIOR_SWAY: f64 = 0.08;
 
+/// How far a leg of a line through the cells may stray from the straight
+/// line between its ends, as a fraction of its own length, where that is
+/// less than `INTERIOR_SWAY` of a cell: a short leg swaying as far as a long
+/// one curls up.
+const LEG_SWAY: f64 = 0.15;
+
+/// How far apart, as a fraction of the cell size, the points a leg of a line
+/// through the cells wanders through are at the closest: one to five of
+/// them, fewer on a shorter leg.
+const LEG_POINT_SPACING: f64 = 0.12;
+
 /// How far from the middle of its grid square the point a line through a
 /// cell passes it at may be, in each direction, as a fraction of the cell
 /// size: enough that the lines of a dataset do not all meet at one point of
@@ -149,15 +160,22 @@ impl Side {
     /// A side from `from` to `to` which wanders by up to [`MAX_SWAY`] of
     /// `cell_size` on its way.
     fn wandering(from: Point, to: Point, cell_size: f64, random: &mut Random) -> Side {
-        Side::wandering_by(from, to, MAX_SWAY * cell_size, random)
+        Side::wandering_by(from, to, MAX_SWAY * cell_size, WANDERING_POINTS, random)
     }
 
     /// A chain from `from` to `to` which strays up to `limit` meters from
-    /// the straight line between them, tapering to nothing at either end.
-    fn wandering_by(from: Point, to: Point, limit: f64, random: &mut Random) -> Side {
+    /// the straight line between them, tapering to nothing at either end,
+    /// through between `points.0` and `points.1` wandering points.
+    fn wandering_by(
+        from: Point,
+        to: Point,
+        limit: f64,
+        points: (usize, usize),
+        random: &mut Random,
+    ) -> Side {
         let along = to - from;
         let across = along.perp_right_unit();
-        let count = random.in_range(WANDERING_POINTS.0, WANDERING_POINTS.1);
+        let count = random.in_range(points.0, points.1);
         let share = 1.0 / (count + 1) as f64;
 
         let mut points = Vec::with_capacity(count + 2);
@@ -517,7 +535,8 @@ impl Layout {
 
     /// One leg of a line through the inside of the cells: a path from
     /// `from` to `to`, both in cell `(column, row)` or on its sides, which
-    /// wanders by up to `INTERIOR_SWAY` of a cell and stays inside the
+    /// wanders by up to `INTERIOR_SWAY` of a cell (or `LEG_SWAY` of itself,
+    /// where that is less) and stays inside the
     /// cell the whole way, crossing the legs of `avoid` if it must but never
     /// running along one — or `None` where none of `LEG_TRIES` wandering
     /// ones nor a straight one does.
@@ -578,15 +597,14 @@ impl Layout {
             let alongside = length_near(&points, &others, near);
             inside && alongside <= ALONGSIDE * near
         };
+        // A short leg wanders by little and through few points: by as much
+        // as a long one, it would fold over on itself.
+        let length = (to - from).length();
+        let sway = (INTERIOR_SWAY * self.cell_size).min(LEG_SWAY * length);
+        let most = ((length / (LEG_POINT_SPACING * self.cell_size)).round() as usize).clamp(1, 5);
+        let points = (most.div_ceil(2), most);
         (0..LEG_TRIES)
-            .map(|_| {
-                Leg(Side::wandering_by(
-                    from,
-                    to,
-                    INTERIOR_SWAY * self.cell_size,
-                    random,
-                ))
-            })
+            .map(|_| Leg(Side::wandering_by(from, to, sway, points, random)))
             .chain(std::iter::once(Leg(Side::straight(from, to))))
             .find(|leg| fits(leg))
     }

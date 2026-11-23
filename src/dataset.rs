@@ -182,6 +182,11 @@ pub const DEFAULT_INTERIOR_LINES: f64 = 0.0;
 /// two lines head for the same one.
 pub const MAX_LINES_PER_CELL: usize = 2;
 
+/// How long a line through the inside of the cells has to be, as a fraction
+/// of the cell size, not to be left out: shorter, it is a stub which looks
+/// more like a point symbol than a line.
+const MIN_INTERIOR_LENGTH: f64 = 0.5;
+
 /// The chance of a line through the inside of the cells stopping in the
 /// cell it has got to, rather than going on into the next.
 const INTERIOR_STOP: f64 = 0.35;
@@ -1027,11 +1032,14 @@ impl Generator<'_> {
     /// over that ground, and from near the cell's middle it goes out in one
     /// direction and then the other: through near the middle of a side into
     /// the next cell, and on, until it stops in a cell ([`INTERIOR_STOP`]),
+    /// — short of its middle, partway from where it came in ([`PARTWAY`]) —
     /// runs off the edge of the map, or comes to a cell it may not go into —
     /// one it would not show up over, one whose ground has a border, one it
     /// has been through already or one which has its fill of lines — which
     /// it stops partway to instead ([`PARTWAY`]). The first step of the
-    /// first direction never stops, so every line goes somewhere.
+    /// first direction never stops, so every line goes somewhere, and one
+    /// which comes to less than [`MIN_INTERIOR_LENGTH`] of a cell is left
+    /// out.
     ///
     /// What keeps two lines from running along each other is the sides: a
     /// line heads for the middle of a side, to cross it or to stop short of
@@ -1084,9 +1092,36 @@ impl Generator<'_> {
             let mut legs: [Vec<Leg>; 2] = Default::default();
             for direction in 0..2 {
                 let (mut cell, mut here) = (start, middle);
+                // Where the line came into the cell it has got to, unless
+                // that is the one it started in.
+                let mut entered: Option<Point> = None;
                 loop {
                     let first_step = direction == 0 && legs[0].is_empty();
                     if !first_step && random.chance(INTERIOR_STOP) {
+                        // It stops in this cell: short of the middle rather
+                        // than at it, where the lines through the cell meet
+                        // and a dead end would only crowd them.
+                        if let Some(entered) = entered {
+                            let share = random.between(PARTWAY.0, PARTWAY.1);
+                            let short = entered + (here - entered) * share;
+                            let (column, row) = at(cell);
+                            let into = legs[direction].pop();
+                            cell_legs[cell].pop();
+                            match layout.leg(column, row, entered, short, &cell_legs[cell], random)
+                            {
+                                Some(leg) => {
+                                    cell_legs[cell].push(leg.clone());
+                                    legs[direction].push(leg);
+                                }
+                                // No way there: to the middle after all.
+                                None => {
+                                    if let Some(into) = into {
+                                        cell_legs[cell].push(into.clone());
+                                        legs[direction].push(into);
+                                    }
+                                }
+                            }
+                        }
                         break;
                     }
                     let (column, row) = at(cell);
@@ -1132,6 +1167,7 @@ impl Generator<'_> {
                                 cell_legs[next].push(into.clone());
                                 legs[direction].extend([out, into]);
                                 (cell, here) = (next, middle);
+                                entered = Some(crossing);
                                 continue;
                             }
                         }
@@ -1153,7 +1189,18 @@ impl Generator<'_> {
 
             let [out, back] = legs;
             let legs: Vec<Leg> = back.iter().rev().map(Leg::reversed).chain(out).collect();
-            if !legs.is_empty() {
+            // A stub a few millimetres long, of a line which could go
+            // nowhere, is left out: drawn, it looks like a point symbol.
+            let length: f64 = legs
+                .iter()
+                .map(|leg| {
+                    leg.points()
+                        .windows(2)
+                        .map(|pair| (pair[1] - pair[0]).length())
+                        .sum::<f64>()
+                })
+                .sum();
+            if length >= MIN_INTERIOR_LENGTH * layout.cell_size() {
                 lines.push((layout.path_of(&legs, self.mm_per_meter), line));
             }
         }
@@ -2110,6 +2157,46 @@ mod tests {
                     // wandering. Running along each other is far more.
                     assert!(longest < 1.5, "{longest} mm of two lines lie on each other");
                 }
+            }
+        }
+
+        // Nor over itself: a line which wanders too far for its length
+        // curls up into loops, and a loop crosses its own path.
+        let crosses = |a: Point, b: Point, c: Point, d: Point| {
+            let side = |p: Point, q: Point, r: Point| {
+                (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+            };
+            let (d1, d2) = (side(c, d, a), side(c, d, b));
+            let (d3, d4) = (side(a, b, c), side(a, b, d));
+            d1 * d2 < 0.0 && d3 * d4 < 0.0
+        };
+        for generated in &summary.written {
+            let (mut map, _) = xml_reader::read_xml_map(&generated.map).expect("a map");
+            map.resolve_references();
+            let (lines, _) = lines_and_bordered_outlines(&map, &catalogue, &bordered);
+            for line in &lines {
+                let segments: Vec<(Point, Point)> =
+                    line.windows(2).map(|pair| (pair[0], pair[1])).collect();
+                let mut crossings = 0;
+                for i in 0..segments.len() {
+                    for j in i + 2..segments.len() {
+                        let ((a, b), (c, d)) = (segments[i], segments[j]);
+                        if crosses(a, b, c, d) {
+                            crossings += 1;
+                        }
+                    }
+                }
+                assert_eq!(crossings, 0, "a line crosses its own path");
+                // And never a stub: a cell is 150 m, at 1:4000 37.5 mm.
+                let length: f64 = line
+                    .windows(2)
+                    .map(|pair| (pair[1] - pair[0]).length())
+                    .sum();
+                let cell = settings.cell_size as f64 * 1000.0 / map.scale_denominator as f64;
+                assert!(
+                    length >= MIN_INTERIOR_LENGTH * cell - 0.01,
+                    "a line of {length} mm"
+                );
             }
         }
 
