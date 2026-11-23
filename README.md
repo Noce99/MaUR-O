@@ -749,6 +749,7 @@ mauro net dataset [OPTIONS] <symbol-set> [folder]
 | `-c, --background-cell-size <METERS>` | How wide one cell is, in meters on the ground (default `150`). |
 | `-n, --maps <COUNT>` | How many maps to generate (default `10`). |
 | `-e, --empty-sides <SHARE>` | The share of cell sides left without a line along them, 0 for a line on every side, 1 for none (default `0.5`). |
+| `--interior-lines <CHANCE>` | The chance of a line through the inside of the cells starting in a cell (default `0`): from near its middle, through near the middle of a side into the next cell and on, until it stops, runs off the map, or comes to a cell it may not go into, short of which it ends. Unlike the lines along the sides it does not follow where the ground changes. It keeps to cells it shows up over, whose ground draws no border, and which no other such line has been through. No line, along a side or through a cell, is drawn on a cell whose ground draws a border round itself (a building, a lake): it would sit on that border and be labelled as both. |
 | `-t, --transparent-areas <CHANCE>` | The chance of a cell being covered by a see-through area (default `0.1`). |
 | `-p, --point-symbols <CHANCE>` | The chance of a cell holding a point symbol; two are half as likely as one, three half as likely again (default `0.5`). A point symbol is never put on a line nor on another point symbol, and half of them are put just beside a line; one with no room left in its cell is left out, and the summary says how many were. |
 | `--content <WHAT>` | What the maps hold (default `all`). `all`: everything, unlabelled. `areas`: nothing but the ground — the cells are filled with opaque areas and the lines, see-through areas and point symbols are all skipped, whatever the three options above say; what makes a dataset labelled, see [below](#a-training-set). `areas-and-lines`: the ground and the lines, labelled as two layers; no see-through areas or point symbols, whatever their options say. `areas-lines-points`: the ground, the lines and the point symbols, labelled as three layers; no see-through areas, whatever `--transparent-areas` says. |
@@ -774,7 +775,10 @@ A map is built in six steps:
    drawn uniformly at random;
 4. **a line runs along some of the cell sides**, which is what a path, a
    fence or a stream is: something following the edge of one piece of
-   terrain and the next;
+   terrain and the next — and, with `--interior-lines`, some lines run
+   through the inside of the cells instead, a path across a forest, from
+   cell to cell. No line is drawn along, or through, a cell whose ground
+   draws a border round itself (a building, a lake);
 5. **some cells are covered** by a see-through area;
 6. **point symbols are dropped** into the cells.
 

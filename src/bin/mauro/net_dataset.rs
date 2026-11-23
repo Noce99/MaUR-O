@@ -14,7 +14,12 @@
 //! Every cell is filled with one piece of ground cover — an opaque area
 //! symbol of the set, drawn uniformly at random — and then drawn over: a
 //! line along some of the cell sides, a see-through area over some of the
-//! cells, and point symbols scattered into them. Nothing is put where the
+//! cells, and point symbols scattered into them — and, with
+//! `--interior-lines`, lines through the inside of the cells too, which
+//! cross the ground rather than follow where it changes. No line is drawn
+//! along a side of a cell, nor through one, whose ground draws a border
+//! round itself (a building, a lake): it would lie on that border and be
+//! labelled as both. Nothing is put where the
 //! drawing order would bury it: an overlay is picked out of the symbols
 //! which show up against the ground under it. Lettering is the one kind
 //! nothing draws with yet.
@@ -140,6 +145,16 @@ pub struct Args {
     #[arg(short = 'e', long, value_name = "SHARE")]
     empty_sides: f64,
 
+    /// The chance of a line through the inside of the cells starting in a
+    /// cell: from near its middle, through near the middle of a side into
+    /// the next cell and on, until it stops, runs off the map or comes to a
+    /// cell it may not go into. Unlike the lines along the sides, it does
+    /// not follow where the ground changes. It keeps to cells it shows up
+    /// over, whose ground draws no border, and which no other such line has
+    /// been through.
+    #[arg(long, value_name = "CHANCE")]
+    interior_lines: f64,
+
     /// The chance of a cell being covered by a transparent area.
     #[arg(short = 't', long, value_name = "CHANCE")]
     transparent_areas: f64,
@@ -239,6 +254,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
 
     for (share, name) in [
         (args.empty_sides, "--empty-sides"),
+        (args.interior_lines, "--interior-lines"),
         (args.transparent_areas, "--transparent-areas"),
         (args.point_symbols, "--point-symbols"),
     ] {
@@ -303,6 +319,7 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
         iof_rules: args.iof_rules,
         seed: args.seed,
         empty_sides: args.empty_sides,
+        interior_lines: args.interior_lines,
         transparent_areas: if overlays {
             args.transparent_areas
         } else {
@@ -380,9 +397,11 @@ fn run(args: Args) -> Result<(), (ExitCode, String)> {
             .count(),
     );
     println!(
-        "  {} fills, {} lines, {} transparent areas, {} point symbols drawn{}",
+        "  {} fills, {} lines along the sides and {} through the cells, {} transparent areas, \
+         {} point symbols drawn{}",
         summary.drawn.fills,
         summary.drawn.lines,
+        summary.drawn.interior_lines,
         summary.drawn.transparent_areas,
         summary.drawn.points,
         if settings.just_opaque_areas {

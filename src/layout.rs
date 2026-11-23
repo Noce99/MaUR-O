@@ -67,6 +67,31 @@ const PLACEMENT_TRIES: usize = 32;
 /// A third is what draws the arc a circle would; more bulges, less flattens.
 const PULL: (f64, f64) = (0.2, 0.45);
 
+/// How far a line running through the inside of a cell may stray from the
+/// straight line between the points it passes through, as a fraction of the
+/// cell size: well short of [`MAX_SWAY`], so that a line from the middle of a
+/// cell to the middle of one of its sides stays inside the cell however the
+/// sides around it wander.
+const INTERIOR_SWAY: f64 = 0.08;
+
+/// How far from the middle of its grid square the point a line through a
+/// cell passes it at may be, in each direction, as a fraction of the cell
+/// size: enough that the lines of a dataset do not all meet at one point of
+/// every cell, and little enough to stay well clear of the sides.
+const CENTER_JITTER: f64 = 0.1;
+
+/// How many wandering legs [`Layout::leg`] tries before a straight one.
+const LEG_TRIES: usize = 8;
+
+/// How close to where it crosses a side a leg of a line through the cells
+/// may come out of its cell, as a fraction of the cell size: the point it
+/// crosses at is on the side, which is neither inside nor out.
+const CROSSING_SLACK: f64 = 0.05;
+
+/// How far from the middle of a straight side -- an edge of the square -- the
+/// point a line leaves the map by may be, as a fraction of the side.
+const EDGE_SLIDE: f64 = 0.15;
+
 /// One piece of a cell side, from wherever the previous piece ended.
 #[derive(Clone, Copy, Debug)]
 enum Segment {
@@ -109,6 +134,12 @@ impl Side {
     /// A side from `from` to `to` which wanders by up to [`MAX_SWAY`] of
     /// `cell_size` on its way.
     fn wandering(from: Point, to: Point, cell_size: f64, random: &mut Random) -> Side {
+        Side::wandering_by(from, to, MAX_SWAY * cell_size, random)
+    }
+
+    /// A chain from `from` to `to` which strays up to `limit` meters from
+    /// the straight line between them, tapering to nothing at either end.
+    fn wandering_by(from: Point, to: Point, limit: f64, random: &mut Random) -> Side {
         let along = to - from;
         let across = along.perp_right_unit();
         let count = random.in_range(WANDERING_POINTS.0, WANDERING_POINTS.1);
@@ -121,7 +152,7 @@ impl Side {
             // give or take; and how far to one side of it, tapering to
             // nothing at either corner so that the corners stay corners.
             let at = (step as f64 + random.symmetric(MAX_SLIDE)) * share;
-            let sway = random.symmetric(MAX_SWAY * cell_size) * (PI * at).sin();
+            let sway = random.symmetric(limit) * (PI * at).sin();
             points.push(from + along * at + across * sway);
         }
         points.push(to);
@@ -140,7 +171,6 @@ impl Side {
         // further from the straight line between the corners than a wandering
         // point may: a control point which would is pulled back to that, which
         // flattens the curve rather than letting it lean into the next cell.
-        let limit = MAX_SWAY * cell_size;
         let held_back = |point: Point| -> Point {
             let strayed = (point - from).dot(across);
             point - across * (strayed - strayed.clamp(-limit, limit))
@@ -167,6 +197,22 @@ impl Side {
         Side {
             start: from,
             segments,
+        }
+    }
+
+    /// A point the side passes through, near its middle: the middle one of
+    /// the points it wanders through, or, for a straight side, somewhere
+    /// within `EDGE_SLIDE` of its middle.
+    ///
+    /// On the side itself rather than near it, so that a line which crosses
+    /// a side there goes from one cell straight into the next.
+    fn middle(&self, random: &mut Random) -> Point {
+        match self.segments.len() {
+            1 => {
+                let (from, to) = (self.start, self.end());
+                from + (to - from) * (0.5 + random.symmetric(EDGE_SLIDE))
+            }
+            count => self.segments[(count - 1) / 2].end(),
         }
     }
 
@@ -216,6 +262,18 @@ impl Side {
                 Segment::Curve(first, second, end) => builder.curve_to(first, second, end),
             }
         }
+    }
+}
+
+/// One stretch of a line through the inside of the cells, inside one cell:
+/// see [`Layout::leg`].
+#[derive(Clone, Debug)]
+pub struct Leg(Side);
+
+impl Leg {
+    /// The same leg run the other way.
+    pub fn reversed(&self) -> Leg {
+        Leg(self.0.reversed())
     }
 }
 
@@ -394,6 +452,100 @@ impl Layout {
         cells
     }
 
+    /// The four sides of cell `(column, row)`, as places in
+    /// [`Layout::side_paths`] (and [`Layout::side_cells`]): the one above
+    /// it, the one to its right, the one below it and the one to its left.
+    pub fn cell_sides(&self, column: usize, row: usize) -> [usize; 4] {
+        let (size, across) = (self.size, self.horizontal.len());
+        [
+            row * size + column,
+            across + row * (size + 1) + column + 1,
+            (row + 1) * size + column,
+            across + row * (size + 1) + column,
+        ]
+    }
+
+    /// A point on side `side` -- a place in [`Layout::side_paths`] -- near its
+    /// middle, in meters on the ground: where a line running through the
+    /// cells crosses from one into the next. See `Side::middle`.
+    pub fn side_middle(&self, side: usize, random: &mut Random) -> Point {
+        let across = self.horizontal.len();
+        if side < across {
+            self.horizontal[side].middle(random)
+        } else {
+            self.vertical[side - across].middle(random)
+        }
+    }
+
+    /// A point near the middle of cell `(column, row)`, within
+    /// `CENTER_JITTER` of the cell size of it each way, in meters on the
+    /// ground: where a line running through the cell passes it.
+    pub fn near_center(&self, column: usize, row: usize, random: &mut Random) -> Point {
+        let jitter = CENTER_JITTER * self.cell_size;
+        let center = self.cell_center(column, row);
+        Point::new(
+            center.x + random.symmetric(jitter),
+            center.y + random.symmetric(jitter),
+        )
+    }
+
+    /// One leg of a line through the inside of the cells: a path from
+    /// `from` to `to`, both in cell `(column, row)` or on its sides, which
+    /// wanders by up to `INTERIOR_SWAY` of a cell and stays inside the
+    /// cell the whole way — or `None` where none of `LEG_TRIES` wandering
+    /// ones nor a straight one does.
+    ///
+    /// The sides of a cell wander by far more than that, and one can bulge
+    /// into the cell across the way from where it is to be crossed; a leg
+    /// which went round it would cross the ground of the next cell, whose
+    /// colours nobody checked the line against, or a border nobody wanted it
+    /// on.
+    pub fn leg(
+        &self,
+        column: usize,
+        row: usize,
+        from: Point,
+        to: Point,
+        random: &mut Random,
+    ) -> Option<Leg> {
+        let outline: Vec<Point> = flatten(&self.cell_outline(column, row, 1.0))
+            .into_iter()
+            .next()?
+            .points;
+        let slack = CROSSING_SLACK * self.cell_size;
+        let inside = |side: &Side| {
+            let mut builder = PathBuilder::new(1.0);
+            builder.move_to(side.start());
+            side.append_to(&mut builder);
+            flatten(&builder.coords).iter().all(|part| {
+                part.points.iter().all(|&point| {
+                    (point - from).length() <= slack
+                        || (point - to).length() <= slack
+                        || is_inside(&outline, point)
+                })
+            })
+        };
+        (0..LEG_TRIES)
+            .map(|_| Side::wandering_by(from, to, INTERIOR_SWAY * self.cell_size, random))
+            .chain(std::iter::once(Side::straight(from, to)))
+            .find(|side| inside(side))
+            .map(Leg)
+    }
+
+    /// The legs of a line, one after another, as an open path in the
+    /// coordinates a map file holds. Each leg is to start where the one
+    /// before it ended.
+    pub fn path_of(&self, legs: &[Leg], mm_per_meter: f64) -> CoordList {
+        let mut builder = PathBuilder::new(mm_per_meter);
+        if let Some(first) = legs.first() {
+            builder.move_to(first.0.start());
+            for leg in legs {
+                leg.0.append_to(&mut builder);
+            }
+        }
+        builder.coords
+    }
+
     /// The middle of cell `(column, row)`'s grid square, in meters on the
     /// ground.
     ///
@@ -481,6 +633,48 @@ mod tests {
 
     fn layout(size: usize, seed: u64) -> Layout {
         Layout::random(size, 30.0, &mut Random::from_seed(seed))
+    }
+
+    /// A leg of a line through a cell stays inside the cell, and nearly
+    /// always one can be found from near its middle to near the middle of
+    /// each of its sides; the four sides of `cell_sides` are the cell's own.
+    #[test]
+    fn a_leg_through_a_cell_stays_inside_it() {
+        let (mut legs, mut missing) = (0, 0);
+        for seed in 0..40 {
+            let layout = layout(3, seed);
+            let mut random = Random::from_seed(seed + 1000);
+            for row in 0..3 {
+                for column in 0..3 {
+                    let outline: Vec<Point> = flatten(&layout.cell_outline(column, row, 1.0))
+                        .remove(0)
+                        .points;
+                    for side in layout.cell_sides(column, row) {
+                        assert!(layout.side_cells()[side].contains(&Some(row * 3 + column)));
+                        let from = layout.near_center(column, row, &mut random);
+                        let to = layout.side_middle(side, &mut random);
+                        legs += 1;
+                        let Some(leg) = layout.leg(column, row, from, to, &mut random) else {
+                            missing += 1;
+                            continue;
+                        };
+                        let path = layout.path_of(&[leg], 1.0);
+                        let points = flatten(&path).remove(0).points;
+                        assert!((points[0] - from).length() < 1e-3);
+                        assert!((*points.last().unwrap() - to).length() < 1e-3);
+                        for point in points {
+                            if (point - to).length() > CROSSING_SLACK * layout.cell_size() {
+                                assert!(is_inside(&outline, point), "seed {seed}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            missing * 100 <= legs,
+            "{missing} of {legs} legs found no way"
+        );
     }
 
     #[test]

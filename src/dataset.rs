@@ -20,7 +20,11 @@
 //!    ground cover the set holds;
 //! 4. a line symbol is drawn along some of the cell sides, which is what a
 //!    path, a fence or a stream is on a real map: something running along
-//!    the edge of one piece of terrain and the next;
+//!    the edge of one piece of terrain and the next — and, where
+//!    [`Settings::interior_lines`] asks for them, some through the inside of
+//!    the cells, from cell to cell, which is what a path across a forest is.
+//!    None along or through a cell whose ground draws a border round
+//!    itself, where it would lie on that border;
 //! 5. some of the cells are covered by a see-through area — a marsh over
 //!    rough open land, undergrowth over forest;
 //! 6. point symbols are dropped into the cells, however many the halving
@@ -128,8 +132,8 @@ use std::path::{Path, PathBuf};
 use crate::geometry::{flatten, Rect};
 use crate::ground_truth::GroundTruth;
 use crate::label_set::LabelSet;
-use crate::layout::{is_inside, Layout};
-use crate::map::{Coord, CoordList, Map, Object, ObjectKind, PathObject, Point};
+use crate::layout::{is_inside, Layout, Leg};
+use crate::map::{Coord, CoordList, Map, Object, ObjectKind, PathObject, Point, Symbol};
 use crate::path_builder::coord_at;
 use crate::random::Random;
 use crate::render::{render_map_over, save_pixmap, Extent, DEFAULT_FRAME, DEFAULT_RESOLUTION};
@@ -168,6 +172,20 @@ pub const DEFAULT_MAPS: usize = 10;
 /// The default share of cell sides left without a line on them.
 pub const DEFAULT_EMPTY_SIDES: f64 = 0.5;
 
+/// The default chance of a line through the inside of the cells starting in
+/// a cell: none, so that a dataset made before there were such lines comes
+/// out the same.
+pub const DEFAULT_INTERIOR_LINES: f64 = 0.0;
+
+/// The chance of a line through the inside of the cells stopping in the
+/// cell it has got to, rather than going on into the next.
+const INTERIOR_STOP: f64 = 0.35;
+
+/// How far a line through the inside of the cells which stops short of a
+/// side gets towards it from the middle of its cell, at the least and at the
+/// most, as a share of the way.
+const PARTWAY: (f64, f64) = (0.3, 0.7);
+
 /// The default chance of a cell being covered by a transparent area.
 pub const DEFAULT_TRANSPARENT_AREAS: f64 = 0.1;
 
@@ -199,6 +217,21 @@ pub struct Settings {
     /// for a line on every side to 1 for none at all. Each side is decided
     /// on its own, so this is what comes out on average rather than a count.
     pub empty_sides: f64,
+    /// The chance of a line running through the inside of the cells, rather
+    /// than along their sides, starting in a cell, decided cell by cell.
+    ///
+    /// A line along a side is always where one piece of ground meets the
+    /// next, which a network can learn to read as "a line is where the
+    /// ground changes"; a path through a forest or a stream across open land
+    /// is not. Such a line goes from near the middle of its cell through
+    /// near the middle of a side into the next cell, and on from cell to
+    /// cell until it stops (in a cell, or partway to a side it may not
+    /// cross) or runs off the map. It only goes through cells it shows up
+    /// over and whose ground draws no border, and only through cells no
+    /// other such line has been through, so two of them never run along
+    /// each other. Nought, the default, draws none and leaves the dice as
+    /// they were.
+    pub interior_lines: f64,
     /// The chance of a cell being covered by a transparent area, decided
     /// cell by cell.
     pub transparent_areas: f64,
@@ -290,6 +323,7 @@ impl Default for Settings {
             iof_rules: false,
             seed: 0,
             empty_sides: DEFAULT_EMPTY_SIDES,
+            interior_lines: DEFAULT_INTERIOR_LINES,
             transparent_areas: DEFAULT_TRANSPARENT_AREAS,
             point_symbols: DEFAULT_POINT_SYMBOLS,
             just_opaque_areas: false,
@@ -389,6 +423,9 @@ pub struct Drawn {
     pub fills: usize,
     /// The lines along cell sides.
     pub lines: usize,
+    /// The lines through the inside of the cells — see
+    /// [`Settings::interior_lines`].
+    pub interior_lines: usize,
     /// The transparent areas laid over a cell.
     pub transparent_areas: usize,
     /// The point symbols dropped into a cell.
@@ -498,6 +535,10 @@ pub fn create_dataset(
     }
     for (share, name) in [
         (settings.empty_sides, "the share of sides left empty"),
+        (
+            settings.interior_lines,
+            "the chance of a line through the cells",
+        ),
         (
             settings.transparent_areas,
             "the chance of a transparent area",
@@ -616,6 +657,14 @@ pub fn create_dataset(
         overlays: &overlays,
         labels: &labels,
         lines_over: lines_over(&map, &catalogue),
+        bordered: catalogue
+            .opaque_areas
+            .iter()
+            .map(|area| {
+                labels.outline_half_width(&map, area.index) > 0.0
+                    || draws_a_border(&map, &map.symbols[area.index], 0)
+            })
+            .collect(),
         settings,
         // Map coordinates are in mm on the paper; a layout is in meters on
         // the ground.
@@ -784,6 +833,11 @@ struct Generator<'a> {
     /// For each opaque area, the lines which show up over it, as places in
     /// [`Catalogue::lines`] — see [`lines_over`].
     lines_over: Vec<Vec<usize>>,
+    /// For each opaque area, whether it draws a border round itself — a
+    /// building's black outline, a lake's blue one — in the order of
+    /// [`Catalogue::opaque_areas`]: see [`draws_a_border`]. No line is drawn
+    /// along a side of such a cell, nor through it.
+    bordered: Vec<bool>,
     settings: &'a Settings,
     /// How many mm on the paper one meter on the ground is.
     mm_per_meter: f64,
@@ -850,10 +904,22 @@ impl Generator<'_> {
         // is picked out of the lines which show up over both of them, since
         // a line drawn in the ink of the ground beside it is a line nobody
         // can see, and a label of one is a label of nothing.
+        //
+        // Nor is a line drawn along a side of a cell whose ground draws a
+        // border round itself: it would lie on that border, often in the
+        // same ink and as wide, and be labelled as both of them where the
+        // picture shows one stroke.
         if !self.catalogue.lines.is_empty() {
             let sides = layout.side_paths(self.mm_per_meter);
             for (side, cells) in sides.into_iter().zip(layout.side_cells()) {
                 if random.chance(self.settings.empty_sides) {
+                    continue;
+                }
+                if cells
+                    .iter()
+                    .flatten()
+                    .any(|&cell| self.bordered[fills[cell]])
+                {
                     continue;
                 }
                 let visible: Vec<usize> = (0..self.catalogue.lines.len())
@@ -874,6 +940,22 @@ impl Generator<'_> {
                 drawn_with(&mut object, line);
                 objects.push(object);
                 drawn.lines += 1;
+            }
+        }
+
+        // Lines through the inside of the cells, which cross the ground
+        // rather than following where it changes: see
+        // `Settings::interior_lines`. Nothing is drawn from the dice where
+        // there are to be none, so a dataset without them comes out as it
+        // did before there were any.
+        if self.settings.interior_lines > 0.0 && !self.catalogue.lines.is_empty() {
+            for (coords, at) in self.interior_lines(layout, &fills, random) {
+                taken.add_line(&coords, self.line_half_widths[at]);
+                let mut object = Object::new(ObjectKind::Path(PathObject::default()));
+                object.coords = coords;
+                drawn_with(&mut object, &self.catalogue.lines[at]);
+                objects.push(object);
+                drawn.interior_lines += 1;
             }
         }
 
@@ -928,6 +1010,120 @@ impl Generator<'_> {
         objects
     }
 
+    /// The lines through the inside of the cells of `layout`, filled with
+    /// `fills`, each as its path and its place in [`Catalogue::lines`].
+    ///
+    /// Each cell, in turn, starts one with [`Settings::interior_lines`] of a
+    /// chance, where no other has been through it and its ground draws no
+    /// border. The line's symbol is picked out of the ones which show up
+    /// over that ground, and from near the cell's middle it goes out in one
+    /// direction and then the other: through near the middle of a side into
+    /// the next cell, and on, until it stops in a cell ([`INTERIOR_STOP`]),
+    /// runs off the edge of the map, or comes to a side it may not cross —
+    /// into a cell it would not show up over, one whose ground has a border,
+    /// or one a line has been through already — which it stops partway to
+    /// instead ([`PARTWAY`]). The first step of the first direction never
+    /// stops, so every line goes somewhere.
+    fn interior_lines(
+        &self,
+        layout: &Layout,
+        fills: &[usize],
+        random: &mut Random,
+    ) -> Vec<(CoordList, usize)> {
+        let size = layout.size();
+        let neighbours = layout.side_cells();
+        let at = |cell: usize| (cell % size, cell / size);
+        let mut used = vec![false; fills.len()];
+        let mut lines = Vec::new();
+
+        for start in 0..fills.len() {
+            if used[start] || self.bordered[fills[start]] {
+                continue;
+            }
+            if !random.chance(self.settings.interior_lines) {
+                continue;
+            }
+            let Some(&line) = random.pick(&self.lines_over[fills[start]]) else {
+                continue;
+            };
+            used[start] = true;
+            let (column, row) = at(start);
+            let middle = layout.near_center(column, row, random);
+
+            // The legs of the line, out from the start cell's middle, one
+            // direction and then the other.
+            let mut legs: [Vec<Leg>; 2] = Default::default();
+            let mut first_exit = None;
+            for direction in 0..2 {
+                let (mut cell, mut here) = (start, middle);
+                let mut came_through = first_exit;
+                loop {
+                    let first_step = direction == 0 && legs[0].is_empty();
+                    if !first_step && random.chance(INTERIOR_STOP) {
+                        break;
+                    }
+                    let (column, row) = at(cell);
+                    let ways: Vec<usize> = layout
+                        .cell_sides(column, row)
+                        .into_iter()
+                        .filter(|&side| Some(side) != came_through)
+                        .collect();
+                    let Some(&side) = random.pick(&ways) else {
+                        break;
+                    };
+                    if first_step {
+                        first_exit = Some(side);
+                    }
+                    let crossing = layout.side_middle(side, random);
+                    let next = neighbours[side]
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .find(|&c| c != cell);
+                    let out = layout.leg(column, row, here, crossing, random);
+                    match (next, out) {
+                        // Off the edge of the map.
+                        (None, Some(out)) => {
+                            legs[direction].push(out);
+                            break;
+                        }
+                        (Some(next), Some(out))
+                            if !used[next]
+                                && !self.bordered[fills[next]]
+                                && self.lines_over[fills[next]].contains(&line) =>
+                        {
+                            let (column, row) = at(next);
+                            let middle = layout.near_center(column, row, random);
+                            if let Some(into) = layout.leg(column, row, crossing, middle, random) {
+                                used[next] = true;
+                                legs[direction].extend([out, into]);
+                                (cell, here) = (next, middle);
+                                came_through = Some(side);
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                    // A side it may not cross, or no way to it which keeps
+                    // inside the cell: it ends short of the side.
+                    let share = random.between(PARTWAY.0, PARTWAY.1);
+                    let short = here + (crossing - here) * share;
+                    if let Some(leg) = layout.leg(column, row, here, short, random) {
+                        legs[direction].push(leg);
+                    }
+                    break;
+                }
+            }
+
+            let [out, back] = legs;
+            let legs: Vec<Leg> = back.iter().rev().map(Leg::reversed).chain(out).collect();
+            if !legs.is_empty() {
+                lines.push((layout.path_of(&legs, self.mm_per_meter), line));
+            }
+        }
+        lines
+    }
+
     /// A path object drawn with an area symbol, turned to an angle of its own
     /// where the symbol fills with a pattern which turns.
     fn area_object(&self, area: &Entry, coords: CoordList, random: &mut Random) -> Object {
@@ -958,6 +1154,22 @@ fn drawn_with(object: &mut Object, symbol: &Entry) {
     object.symbol_index = Some(symbol.index);
     object.symbol_id = symbol.id;
 }
+
+/// Whether `symbol` draws a line round what it fills: a combined symbol with
+/// a line among its parts, which is how a symbol set gives an area a border.
+fn draws_a_border(map: &Map, symbol: &Symbol, depth: usize) -> bool {
+    match symbol {
+        Symbol::Combined(combined) if depth < MAX_BORDER_DEPTH => map
+            .parts(combined)
+            .into_iter()
+            .any(|part| matches!(part, Symbol::Line(_)) || draws_a_border(map, part, depth + 1)),
+        _ => false,
+    }
+}
+
+/// How deep [`draws_a_border`] looks into combined symbols made of combined
+/// symbols, against a set which makes one a part of itself.
+const MAX_BORDER_DEPTH: usize = 16;
 
 /// For each opaque area of `catalogue`, the lines of it which show up drawn
 /// over that ground, as places in [`Catalogue::lines`] — the same question
@@ -1699,6 +1911,143 @@ mod tests {
             beside * 4 >= points,
             "{beside} of {points} points beside a line"
         );
+    }
+
+    /// The lines of a generated map, each as its points, and the outlines
+    /// of its cells whose ground draws a border, each as its points too.
+    fn lines_and_bordered_outlines(
+        map: &Map,
+        catalogue: &Catalogue,
+        bordered: &[bool],
+    ) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
+        let points = |object: &Object| -> Vec<Point> {
+            flatten(&object.coords)
+                .into_iter()
+                .flat_map(|part| part.points)
+                .collect()
+        };
+        let (mut lines, mut outlines) = (Vec::new(), Vec::new());
+        for object in &map.objects {
+            let Some(index) = object.symbol_index else {
+                continue;
+            };
+            if catalogue.lines.iter().any(|e| e.index == index) {
+                lines.push(points(object));
+            } else if let Some(at) = catalogue.opaque_areas.iter().position(|e| e.index == index) {
+                if bordered[at] {
+                    outlines.push(points(object));
+                }
+            }
+        }
+        (lines, outlines)
+    }
+
+    /// The generator's own answer to which of a set's opaque areas draw a
+    /// border, in the order of its catalogue.
+    fn bordered_areas(source: &Path) -> (Map, Catalogue, Vec<bool>) {
+        let (mut map, _) = xml_reader::read_xml_map(source).expect("the set");
+        map.resolve_references();
+        let labels = LabelSet::beside(&map, source).expect("the labels");
+        let mut catalogue = Catalogue::of(&map);
+        catalogue.retain(|entry| labels.drawn(entry.index));
+        let bordered = catalogue
+            .opaque_areas
+            .iter()
+            .map(|area| {
+                labels.outline_half_width(&map, area.index) > 0.0
+                    || draws_a_border(&map, &map.symbols[area.index], 0)
+            })
+            .collect();
+        (map, catalogue, bordered)
+    }
+
+    /// No line is drawn along the side of a cell whose ground draws a border
+    /// round itself, where it would lie on that border: with a line on
+    /// every side that may have one, not one runs along a bordered cell's
+    /// outline. And no line through the cells goes into such a cell.
+    #[test]
+    fn no_line_lies_on_a_border() {
+        let source = Path::new("symbols_sets/almost_ISSprOM.omap");
+        let (_, catalogue, bordered) = bordered_areas(source);
+        assert!(bordered.iter().any(|&b| b), "the set has bordered areas");
+        assert!(bordered.iter().any(|&b| !b), "and some without");
+
+        let dir = tempfile::tempdir().expect("a folder");
+        let settings = Settings {
+            maps: 12,
+            empty_sides: 0.0,
+            interior_lines: 0.6,
+            transparent_areas: 0.0,
+            point_symbols: 0.0,
+            line_labels: true,
+            images: false,
+            ..Settings::default()
+        };
+        let summary = create_dataset(source, dir.path(), &settings, |_, _| {})
+            .expect("the dataset is generated");
+        assert!(summary.drawn.lines > 0 && summary.drawn.interior_lines > 0);
+
+        for generated in &summary.written {
+            let (mut map, _) = xml_reader::read_xml_map(&generated.map).expect("a map");
+            map.resolve_references();
+            let (lines, outlines) = lines_and_bordered_outlines(&map, &catalogue, &bordered);
+            for line in &lines {
+                for outline in &outlines {
+                    // One point of a line on the outline is a side line
+                    // ending at the bordered cell's corner; two are a line
+                    // along it. And no point of one is inside the cell.
+                    let on = line
+                        .iter()
+                        .filter(|&&p| distance_to_polyline(p, outline) < 1e-3)
+                        .count();
+                    assert!(on <= 1, "a line runs along a bordered cell's outline");
+                    let mut closed = outline.clone();
+                    closed.pop();
+                    assert!(
+                        !line
+                            .iter()
+                            .any(|&p| distance_to_polyline(p, outline) > 1e-3
+                                && is_inside(&closed, p)),
+                        "a line goes into a bordered cell"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Lines through the cells are drawn where they are asked for, and only
+    /// there: with every side left empty, every line of a map is one, and
+    /// none of them runs along a side.
+    #[test]
+    fn lines_through_the_cells_cross_the_ground() {
+        let source = Path::new("symbols_sets/simple_ISSprOM.omap");
+        let dir = tempfile::tempdir().expect("a folder");
+        let settings = Settings {
+            maps: 8,
+            empty_sides: 1.0,
+            interior_lines: 0.5,
+            transparent_areas: 0.0,
+            point_symbols: 0.0,
+            line_labels: true,
+            images: false,
+            ..Settings::default()
+        };
+        let summary = create_dataset(source, dir.path(), &settings, |_, _| {})
+            .expect("the dataset is generated");
+        assert_eq!(summary.drawn.lines, 0);
+        assert!(
+            summary.drawn.interior_lines >= 4,
+            "{} lines through the cells",
+            summary.drawn.interior_lines
+        );
+
+        let none = Settings {
+            interior_lines: 0.0,
+            ..settings
+        };
+        let summary =
+            create_dataset(source, dir.path(), &none, |_, _| {}).expect("the dataset is generated");
+        assert_eq!(summary.drawn.interior_lines, 0);
     }
 
     /// A set with a table of labels beside it is labelled by the table: the

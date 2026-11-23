@@ -118,7 +118,7 @@ fn a_dataset_is_one_map_per_ask_and_one_fill_per_cell() {
         .stdout(predicates::str::contains("600 by 600 meters"))
         .stdout(predicates::str::contains("filled from 1 opaque area"))
         .stdout(predicates::str::contains(
-            "48 fills, 0 lines, 0 transparent areas, 0 point symbols drawn",
+            "48 fills, 0 lines along the sides and 0 through the cells, 0 transparent areas, 0 point symbols drawn",
         ));
 
     for name in ["map_001.omap", "map_002.omap", "map_003.omap"] {
@@ -236,7 +236,7 @@ fn just_the_opaque_areas_skips_everything_drawn_over_them() {
         .assert()
         .success()
         .stdout(predicates::str::contains(
-            "9 fills, 0 lines, 0 transparent areas, 0 point symbols drawn \
+            "9 fills, 0 lines along the sides and 0 through the cells, 0 transparent areas, 0 point symbols drawn \
              (just the opaque areas: nothing was drawn over the ground)",
         ));
 
@@ -266,7 +266,7 @@ fn the_content_option_names_the_ground_alone_too() {
         .assert()
         .success()
         .stdout(predicates::str::contains(
-            "9 fills, 0 lines, 0 transparent areas, 0 point symbols drawn",
+            "9 fills, 0 lines along the sides and 0 through the cells, 0 transparent areas, 0 point symbols drawn",
         ));
 
     generate()
@@ -854,6 +854,7 @@ fn a_share_outside_zero_to_one_is_a_usage_error() {
     for option in [
         "--empty-sides=1.5",
         "--empty-sides=-0.1",
+        "--interior-lines=1.2",
         "--transparent-areas=2",
         "--point-symbols=-1",
     ] {

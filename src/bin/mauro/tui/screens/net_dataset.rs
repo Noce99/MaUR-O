@@ -12,18 +12,19 @@ const LAYOUT_SIZE: usize = 3;
 const CELL_SIZE: usize = 4;
 const CONTENT: usize = 5;
 const EMPTY_SIDES: usize = 6;
-const TRANSPARENT: usize = 7;
-const POINTS: usize = 8;
-const MIN_RESOLUTION: usize = 9;
-const MAX_RESOLUTION: usize = 10;
-const FRAME: usize = 11;
-const NO_IMAGES: usize = 12;
-const NO_GT: usize = 13;
-const IOF_RULES: usize = 14;
-const SEED: usize = 15;
+const INTERIOR_LINES: usize = 7;
+const TRANSPARENT: usize = 8;
+const POINTS: usize = 9;
+const MIN_RESOLUTION: usize = 10;
+const MAX_RESOLUTION: usize = 11;
+const FRAME: usize = 12;
+const NO_IMAGES: usize = 13;
+const NO_GT: usize = 14;
+const IOF_RULES: usize = 15;
+const SEED: usize = 16;
 /// Never shown: the density the images are sized at, which the range the
 /// two fields above give decides (see [`NetDataset::resolution`]).
-const RESOLUTION: usize = 16;
+const RESOLUTION: usize = 17;
 
 /// What the maps are drawn with, and so what their labels say: `--content`'s
 /// values. A step up is the one before it and more.
@@ -58,6 +59,7 @@ impl NetDataset {
                 )
                 .arg("content"),
                 Field::text("Empty sides").arg("empty_sides"),
+                Field::text("Interior lines").arg("interior_lines"),
                 Field::text("Transparent").arg("transparent_areas"),
                 Field::text("Point symbols").arg("point_symbols"),
                 Field::text("Min resolution")
@@ -126,12 +128,14 @@ impl NetDataset {
     }
 
     /// Shows what the content picked draws, and hides what it does not: the
-    /// sides left empty are for lines, which the ground alone has none of,
+    /// sides left empty and the lines through the cells are for lines, which
+    /// the ground alone has none of,
     /// the see-through areas are drawn only by `all`, and the point symbols
     /// by `all` and `areas-lines-points`. A range upside down is drawn red.
     fn update(&mut self) {
         let content = self.content().to_string();
         self.form.show(EMPTY_SIDES, content != AREAS);
+        self.form.show(INTERIOR_LINES, content != AREAS);
         self.form.show(TRANSPARENT, content == ALL);
         self.form
             .show(POINTS, content == ALL || content == AREAS_LINES_POINTS);
@@ -203,6 +207,7 @@ impl Tool for NetDataset {
             args.extend(["--content".to_string(), self.content().to_string()]);
         }
         form.push_option(&mut args, EMPTY_SIDES, "--empty-sides");
+        form.push_option(&mut args, INTERIOR_LINES, "--interior-lines");
         form.push_option(&mut args, TRANSPARENT, "--transparent-areas");
         form.push_option(&mut args, POINTS, "--point-symbols");
         let (low, high) = self.range()?;
@@ -255,7 +260,7 @@ mod tests {
         assert_eq!(screen.form.choice_value(CONTENT), ALL);
         assert_eq!(screen.form.state(CONTENT), State::Default);
         // Everything is drawn: every overlay's option is there to set.
-        for field in [EMPTY_SIDES, TRANSPARENT, POINTS] {
+        for field in [EMPTY_SIDES, INTERIOR_LINES, TRANSPARENT, POINTS] {
             assert!(screen.form.shown(field));
         }
         type_into(&mut screen.form, TRANSPARENT, "0.3");
@@ -271,7 +276,7 @@ mod tests {
         assert_eq!(screen.form.choice_value(CONTENT), AREAS);
         assert_eq!(screen.form.state(CONTENT), State::Changed);
         assert_eq!(command(&screen).unwrap()[3..], ["--content", "areas"]);
-        for field in [EMPTY_SIDES, TRANSPARENT, POINTS] {
+        for field in [EMPTY_SIDES, INTERIOR_LINES, TRANSPARENT, POINTS] {
             assert!(!screen.form.shown(field));
         }
     }
@@ -284,9 +289,17 @@ mod tests {
         next_content(&mut screen);
         assert_eq!(screen.form.choice_value(CONTENT), AREAS_AND_LINES);
         type_into(&mut screen.form, EMPTY_SIDES, "0.7");
+        type_into(&mut screen.form, INTERIOR_LINES, "0.4");
         assert_eq!(
             command(&screen).unwrap()[3..],
-            ["--content", "areas-and-lines", "--empty-sides", "0.7"]
+            [
+                "--content",
+                "areas-and-lines",
+                "--empty-sides",
+                "0.7",
+                "--interior-lines",
+                "0.4"
+            ]
         );
         assert!(!screen.form.shown(TRANSPARENT) && !screen.form.shown(POINTS));
     }

@@ -55,6 +55,7 @@ layout_size = 3
 background_cell_size = 50
 maps = 10000
 empty_sides = 0.5
+interior_lines = 0.3
 transparent_areas = 0.1
 point_symbols = 0.5
 content = "areas-and-lines"
