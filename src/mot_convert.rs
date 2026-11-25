@@ -32,7 +32,8 @@ use crate::map::{
 };
 use crate::mot::node_flag;
 use crate::mot::{
-    ground_angle, Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, COVERAGE_SYMBOL, WORLD_HALF,
+    ground_angle, Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, COVERAGE_SYMBOL,
+    WORLD_HALF,
 };
 use crate::mot_adapt::{adapt, Adapted};
 use crate::mot_clip::{clip_line, clip_ring, flatten, simplify, Rect, Vertex};

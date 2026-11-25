@@ -1072,11 +1072,17 @@ mod tests {
             code_of(&table, &line_of("520.1.90"), &map),
             Some(("520.1".to_string(), Match::Parent))
         );
-        let named = line("999.9", &table.get(table.id_of("532.6.90").unwrap()).unwrap().name, 0.4);
+        let named = line(
+            "999.9",
+            &table.get(table.id_of("532.6.90").unwrap()).unwrap().name,
+            0.4,
+        );
         assert_eq!(code_of(&table, &named, &map), None);
         // A symbol map's line is.
         let mapped = SymbolTable::issprom()
-            .with_symbol_map(&SymbolMap::parse("[ISSprOM 2019-2]\n520.1 \"Bordo\" 520.1.90\n").unwrap())
+            .with_symbol_map(
+                &SymbolMap::parse("[ISSprOM 2019-2]\n520.1 \"Bordo\" 520.1.90\n").unwrap(),
+            )
             .unwrap();
         assert_eq!(
             code_of(&mapped, &line("520.1", "Bordo privato", 0.14), &map),

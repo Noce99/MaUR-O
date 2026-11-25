@@ -920,10 +920,8 @@ mod tests {
     fn a_dash_point_keeps_a_short_piece_of_a_line_bare_and_a_short_line_shows_its_tag() {
         // A 518 fence, whose set shows at least one tag: Mapper puts one in each
         // section between dash points, a tile one in the line.
-        let (mut map, _) = read_xml_map_str(
-            crate::osm_orienteering::Standard::Issprom.reference(),
-        )
-        .unwrap();
+        let (mut map, _) =
+            read_xml_map_str(crate::osm_orienteering::Standard::Issprom.reference()).unwrap();
         map.objects.clear();
         let index = map.symbols.iter().position(|s| s.code() == "518").unwrap();
         let symbol_id = map.symbol_ids[index];
@@ -933,7 +931,10 @@ mod tests {
             let mut object = Object::new(ObjectKind::Path(PathObject::default()));
             object.symbol_id = symbol_id;
             object.symbol_index = Some(index);
-            object.coords = points.iter().map(|&(x, y, f)| Coord::new(x, y, f)).collect();
+            object.coords = points
+                .iter()
+                .map(|&(x, y, f)| Coord::new(x, y, f))
+                .collect();
             map.objects = vec![object];
             let renderer = if tiles {
                 Renderer::for_tiles(&map, window)

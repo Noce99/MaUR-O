@@ -437,8 +437,14 @@ fn points_to_areas(map: &Map, table: &SymbolTable, adapted: &mut Adapted) {
                 .map(|&i| {
                     let at = points[i].1;
                     geo::Rect::new(
-                        GeoCoord { x: at.x - h, y: at.y - h },
-                        GeoCoord { x: at.x + h, y: at.y + h },
+                        GeoCoord {
+                            x: at.x - h,
+                            y: at.y - h,
+                        },
+                        GeoCoord {
+                            x: at.x + h,
+                            y: at.y + h,
+                        },
                     )
                     .to_polygon()
                 })
