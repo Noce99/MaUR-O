@@ -131,3 +131,55 @@ fn a_map_no_service_covers_is_a_warning() {
     assert_eq!(std::fs::read(&map).unwrap(), before);
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
+
+#[test]
+fn google_is_listed() {
+    ortho()
+        .arg("--list-services")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("google"));
+}
+
+#[test]
+fn a_zoom_is_for_google_only() {
+    ortho()
+        .args(["--zoom", "18", "tests/data/empty.xmap"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("--service google"));
+}
+
+#[test]
+fn google_takes_a_zoom_not_a_pixel_size() {
+    ortho()
+        .args([
+            "--service",
+            "google",
+            "--pixel-size",
+            "0.5",
+            "tests/data/empty.xmap",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("--zoom"));
+    ortho()
+        .args([
+            "--service",
+            "google",
+            "--zoom",
+            "23",
+            "tests/data/empty.xmap",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("--zoom"));
+}
+
+#[test]
+fn google_still_needs_a_map_on_the_earth() {
+    ortho()
+        .args(["--service", "google", "tests/data/shapes.xmap"])
+        .assert()
+        .code(3);
+}

@@ -4,6 +4,8 @@
 //! ```text
 //! mauro ortho [--service ID] [--pixel-size M] [--margin M]
 //!                [--image FILE] <map-file> [output-map-file]
+//! mauro ortho --service google [--zoom LEVEL] [--margin M]
+//!                [--image FILE] <map-file> [output-map-file]
 //! mauro ortho --list-services
 //! ```
 //!
@@ -14,6 +16,14 @@
 //! before coarser, newer before older). `--service` picks one by its id
 //! instead. A map that no service has photos of is reported with a warning,
 //! and nothing is written.
+//!
+//! `--service google` downloads Google's satellite tiles instead, which
+//! cover every map, wherever it is. It is never picked by itself: Google's
+//! terms do not license its imagery for download, so it is for whoever
+//! takes that on. Its detail is a zoom level, `--zoom` (19 by default,
+//! about 0.3 m a pixel at the equator, finer towards the poles), not a
+//! pixel size, and its image is always in Web Mercator (EPSG:3857), whole
+//! 256-pixel tiles, so a little more than the map's box.
 //!
 //! The map has to be an OpenOrienteering Mapper `.omap`/`.xmap` file,
 //! georeferenced: placed on the earth in a projected CRS, with the latitude
@@ -34,8 +44,12 @@
 //! re-downloads the image and leaves the map's templates as they are.
 //!
 //! `--pixel-size` trades detail for size: the photos' own resolution is the
-//! default, and an image larger than 300 megapixels (about 3.5 × 3.5 km at
-//! 0.2 m) needs a larger one.
+//! default. An image may have at most 300 megapixels (about 3.5 × 3.5 km at
+//! 0.2 m) and 65 000 pixels a side, so a larger area is downloaded as
+//! several images, each under those limits, in as few as it takes, cut on
+//! whole tiles: `forest_google_1.jpg`, `forest_google_2.jpg`, ... row by row
+//! from the north-west corner, each with its world file and each its own
+//! template. Only one is ever held in memory.
 //!
 //! The photos belong to the agency that serves them: credit them (the tool
 //! prints how) wherever a map drawn over them is published.
@@ -58,15 +72,20 @@ use image::{ImageFormat, RgbImage};
 use maur_o::image_template::{add_image_template, Added, ImageTemplate};
 use maur_o::orthophoto::{
     capabilities_url, footprint, geographic_anchor, get_map_url, is_blank, pixel_size, request_crs,
-    Capabilities, GeographicAnchor, Grid, ProjectedBox, Service,
+    xyz_ground_resolution, Capabilities, GeographicAnchor, Grid, ProjectedBox, Service, Tile,
+    TileRange, WEB_MERCATOR, XYZ_TILE_SIZE,
 };
-use maur_o::orthophoto_services::SERVICES;
+use maur_o::orthophoto_services::{GOOGLE, SERVICES};
 use maur_o::progress::Progress;
 use maur_o::stats::coordinate_bounds;
 use maur_o::xml_reader::read_xml_map_str;
 
-/// The most pixels the stitched image may have: 900 MB of RGB in memory.
+/// The most pixels one stitched image may have: 900 MB of RGB in memory.
+/// A larger area is downloaded as several images.
 const MAX_PIXELS: u64 = 300_000_000;
+
+/// The longest side one image may have: under JPEG's 65 535.
+const MAX_SIDE: u32 = 65_000;
 
 /// The longest side of the low-resolution image the coverage is checked on.
 const PROBE_SIZE: f64 = 512.0;
@@ -81,6 +100,18 @@ const WORKERS: usize = 4;
 
 /// How many times a tile is asked for before giving up.
 const ATTEMPTS: usize = 3;
+
+/// How long to wait before asking a WMS again.
+const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// Who Google's tiles are asked for as: a browser, as Google's own maps
+/// ask for them, which it turns away less often than a tool by name. The
+/// WMS services are asked as `maur-o/<version>`.
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+
+/// How long to wait before asking Google again: it turns away a burst of
+/// requests for a while, and asking again at once only prolongs it.
+const GOOGLE_RETRY_DELAY: Duration = Duration::from_secs(4);
 
 /// The largest response read: far more than a 2000-pixel tile.
 const MAX_RESPONSE: u64 = 64 << 20;
@@ -112,6 +143,11 @@ pub struct Args {
     /// service's own.
     #[arg(long, value_name = "METERS", alias = "pixel_size")]
     pixel_size: Option<f64>,
+
+    /// The zoom level of Google's tiles, with `--service google` only: each
+    /// level up halves the pixel, 19 is about 0.3 m. Defaults to 19.
+    #[arg(long, value_name = "LEVEL")]
+    zoom: Option<u8>,
 
     /// How far beyond the map's objects to download, in meters on the ground.
     #[arg(long, value_name = "METERS", default_value_t = 50.0)]
@@ -159,6 +195,32 @@ fn list_services() {
             service.id, service.ground_resolution, service.years, service.area
         );
     }
+    println!(
+        "{:<34} {:>6}  {:<11} {} (only with --service {}, --zoom for detail)",
+        GOOGLE.id, "zoom", "varies", GOOGLE.area, GOOGLE.id
+    );
+}
+
+/// A photo to download, and what to say about it.
+struct Plan {
+    /// Where the whole photo is, in `epsg`.
+    grid: Grid,
+    /// Its tiles: each where it goes in `grid`, and its URL.
+    tiles: Vec<(Tile, String)>,
+    /// The tiles' side: an image of `grid` is only ever cut on multiples
+    /// of it, so every tile falls in one image.
+    unit: u32,
+    /// What the tiles are, where the service is sure to send that.
+    format: Option<ImageFormat>,
+    /// How long to wait before asking for a tile again.
+    delay: Duration,
+    epsg: i32,
+    /// The service's id, for the image's name.
+    id: &'static str,
+    attribution: &'static str,
+    licence: &'static str,
+    /// Its pixel's side on the ground, in meters.
+    ground_pixel: f64,
 }
 
 fn run(args: Args) -> Result<(), Failure> {
@@ -167,7 +229,25 @@ fn run(args: Args) -> Result<(), Failure> {
         return Ok(());
     }
     let map_file = args.map_file.clone().expect("clap requires it");
-    let chosen = match &args.service {
+    let google = args.service.as_deref() == Some(GOOGLE.id);
+    if let Some(zoom) = args.zoom {
+        if !google {
+            return Err(fail(1, "--zoom is for --service google only"));
+        }
+        if zoom > GOOGLE.max_zoom {
+            return Err(fail(
+                1,
+                format!("--zoom must be between 0 and {}", GOOGLE.max_zoom),
+            ));
+        }
+    }
+    if google && args.pixel_size.is_some() {
+        return Err(fail(
+            1,
+            "Google's tiles come in zoom levels: give --zoom, not --pixel-size",
+        ));
+    }
+    let chosen = match args.service.as_deref().filter(|_| !google) {
         Some(id) => Some(SERVICES.iter().find(|s| s.id == id).ok_or_else(|| {
             fail(
                 1,
@@ -217,6 +297,165 @@ fn run(args: Args) -> Result<(), Failure> {
     }
     let map_epsg = map.georeferencing.as_ref().map_or(0, |g| g.epsg);
 
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(120)))
+        .user_agent(if google {
+            BROWSER_USER_AGENT
+        } else {
+            concat!("maur-o/", env!("CARGO_PKG_VERSION"))
+        })
+        .build()
+        .into();
+    let plan = if google {
+        plan_google(
+            &map,
+            &anchor,
+            args.zoom.unwrap_or(GOOGLE.default_zoom),
+            args.margin,
+        )?
+    } else {
+        plan_wms(&agent, chosen, &map_file, &map, &anchor, map_epsg, &args)?
+    };
+    let Plan {
+        grid,
+        epsg,
+        id,
+        attribution,
+        licence,
+        ground_pixel,
+        ..
+    } = plan;
+
+    // The photo, as one image or, too large for one, as several: each
+    // downloaded, written and dropped before the next.
+    let image_path = args.image.clone().unwrap_or_else(|| {
+        let stem = output.file_stem().unwrap_or_default().to_string_lossy();
+        output.with_file_name(format!("{stem}_{id}.jpg"))
+    });
+    let pieces = grid.split(MAX_PIXELS, MAX_SIDE, plan.unit);
+    if pieces.len() > 1 {
+        println!(
+            "{} × {} pixels is too large for one image: downloading it as {} images",
+            grid.width,
+            grid.height,
+            pieces.len()
+        );
+    }
+    let mut edited = xml.clone();
+    let (mut added, mut already_there) = (0, 0);
+    for (n, piece) in pieces.iter().enumerate() {
+        let piece_grid = grid.sub_grid(piece);
+        let tiles = plan
+            .tiles
+            .iter()
+            .filter(|(tile, _)| {
+                (piece.x..piece.x + piece.width).contains(&tile.x)
+                    && (piece.y..piece.y + piece.height).contains(&tile.y)
+            })
+            .map(|(tile, url)| {
+                let tile = Tile {
+                    x: tile.x - piece.x,
+                    y: tile.y - piece.y,
+                    ..*tile
+                };
+                (tile, url.clone())
+            })
+            .collect();
+        let label = if pieces.len() > 1 {
+            format!("Image {}/{}", n + 1, pieces.len())
+        } else {
+            "Downloading".to_owned()
+        };
+        let photo = download(&agent, &piece_grid, tiles, plan.format, plan.delay, &label)?;
+        let path = if pieces.len() > 1 {
+            numbered(&image_path, n + 1, pieces.len())
+        } else {
+            image_path.clone()
+        };
+        image_writer(&photo, &path)?;
+        drop(photo);
+        let world_file = world_file_path(&path);
+        std::fs::write(&world_file, piece_grid.world_file())
+            .map_err(|e| fail(4, format!("cannot write {}: {e}", world_file.display())))?;
+        println!("Wrote {} and {}", path.display(), world_file.display());
+
+        let absolute = std::path::absolute(&path)
+            .map_err(|e| fail(4, format!("cannot place {}: {e}", path.display())))?;
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let relpath = relative_to_map(&absolute, &output);
+        let template = ImageTemplate {
+            name: &name,
+            path: &absolute.to_string_lossy(),
+            relpath: &relpath,
+            epsg,
+        };
+        let outcome;
+        (edited, outcome) = add_image_template(&edited, &template).map_err(|e| fail(2, e))?;
+        match outcome {
+            Added::Added => added += 1,
+            Added::AlreadyThere => already_there += 1,
+        }
+    }
+
+    // The map.
+    if added > 0 || output != map_file {
+        write_atomically(&output, edited.as_bytes())?;
+    }
+    println!(
+        "{} × {} pixels, about {:.0} × {:.0} m of ground",
+        grid.width,
+        grid.height,
+        f64::from(grid.width) * ground_pixel,
+        f64::from(grid.height) * ground_pixel,
+    );
+    let (them, templates, images) = if pieces.len() > 1 {
+        ("them", "templates", "images were")
+    } else {
+        ("it", "a template", "image was")
+    };
+    match (added, already_there) {
+        (_, 0) => println!("Added {them} to {} as {templates}", output.display()),
+        (0, _) => println!(
+            "{} already had {them} as {templates}; only the {images} replaced",
+            output.display()
+        ),
+        (added, _) => println!(
+            "Added {added} of them to {} as templates; it already had the other {already_there}",
+            output.display()
+        ),
+    }
+    println!("Photos: {attribution} ({licence}) — credit them wherever the map is published.");
+    Ok(())
+}
+
+/// `path` with `_<n>` before its extension, `n` zero-padded to as many
+/// digits as `count` has: `forest_google.jpg` → `forest_google_07.jpg`.
+fn numbered(path: &Path, n: usize, count: usize) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let digits = count.to_string().len();
+    let name = match path.extension() {
+        Some(ext) => format!("{stem}_{n:0digits$}.{}", ext.to_string_lossy()),
+        None => format!("{stem}_{n:0digits$}"),
+    };
+    path.with_file_name(name)
+}
+
+/// The photo from the first WMS with photos of the whole map (or most of
+/// it): `chosen`, where one was picked.
+fn plan_wms(
+    agent: &ureq::Agent,
+    chosen: Option<&'static Service>,
+    map_file: &Path,
+    map: &maur_o::map::Map,
+    anchor: &GeographicAnchor,
+    map_epsg: i32,
+    args: &Args,
+) -> Result<Plan, Failure> {
+    let (margin, pixel_size_arg) = (args.margin, args.pixel_size);
     let candidates: Vec<&Service> = match chosen {
         Some(service) => vec![service],
         None => SERVICES
@@ -225,21 +464,15 @@ fn run(args: Args) -> Result<(), Failure> {
             .collect(),
     };
     if candidates.is_empty() {
-        return Err(not_covered(&map_file, &anchor));
+        return Err(not_covered(map_file, anchor));
     }
-
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(120)))
-        .user_agent(concat!("maur-o/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into();
 
     // The first service with photos of the whole map; failing that, the one
     // with photos of most of it.
     let mut best: Option<Choice> = None;
     let mut skipped: Vec<(&Service, Skip)> = Vec::new();
     for &service in &candidates {
-        match try_service(&agent, service, &map, &anchor, map_epsg, args.margin) {
+        match try_service(agent, service, map, anchor, map_epsg, margin) {
             Ok(choice) => {
                 let full = choice.coverage >= FULL_COVERAGE;
                 if best.as_ref().is_none_or(|b| choice.coverage > b.coverage) {
@@ -253,7 +486,7 @@ fn run(args: Args) -> Result<(), Failure> {
         }
     }
     let Some(choice) = best else {
-        return Err(nothing_usable(&map_file, &anchor, skipped));
+        return Err(nothing_usable(map_file, anchor, skipped));
     };
     for (service, skip) in &skipped {
         if let Skip::Failed((_, message)) | Skip::NoCrs(message) = skip {
@@ -278,79 +511,78 @@ fn run(args: Args) -> Result<(), Failure> {
     }
 
     // The photo itself, tile by tile.
-    let ground_pixel = args.pixel_size.unwrap_or(service.ground_resolution);
+    let ground_pixel = pixel_size_arg.unwrap_or(service.ground_resolution);
     let grid = Grid::covering(
         &footprint,
         pixel_size(epsg, map_epsg, anchor.lat, ground_pixel),
     );
-    if grid.pixel_count() > MAX_PIXELS || grid.width > 65_000 || grid.height > 65_000 {
-        return Err(fail(
-            1,
-            format!(
-                "{} × {} pixels is too large an image; give a --pixel-size larger than {ground_pixel} m",
-                grid.width, grid.height
-            ),
-        ));
-    }
     println!(
         "Downloading {} ({}, {} m a pixel) in EPSG:{epsg}",
         service.area, service.years, ground_pixel
     );
-    let photo = download(&agent, service, epsg, &grid)?;
-
-    let image_path = args.image.clone().unwrap_or_else(|| {
-        let stem = output.file_stem().unwrap_or_default().to_string_lossy();
-        output.with_file_name(format!("{stem}_{}.jpg", service.id))
-    });
-    image_writer(&photo, &image_path)?;
-    let world_file = world_file_path(&image_path);
-    std::fs::write(&world_file, grid.world_file())
-        .map_err(|e| fail(4, format!("cannot write {}: {e}", world_file.display())))?;
-
-    // The map.
-    let absolute = std::path::absolute(&image_path)
-        .map_err(|e| fail(4, format!("cannot place {}: {e}", image_path.display())))?;
-    let name = image_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
-    let relpath = relative_to_map(&absolute, &output);
-    let template = ImageTemplate {
-        name: &name,
-        path: &absolute.to_string_lossy(),
-        relpath: &relpath,
+    let tiles = grid
+        .tiles(service.max_tile_size)
+        .into_iter()
+        .map(|tile| {
+            let url = get_map_url(
+                service,
+                epsg,
+                &grid.tile_box(&tile),
+                tile.width,
+                tile.height,
+                "image/jpeg",
+                false,
+            );
+            (tile, url)
+        })
+        .collect();
+    Ok(Plan {
+        grid,
+        tiles,
+        unit: service.max_tile_size,
+        format: Some(ImageFormat::Jpeg),
+        delay: RETRY_DELAY,
         epsg,
-    };
-    let (edited, added) = add_image_template(&xml, &template).map_err(|e| fail(2, e))?;
-    if added == Added::Added || output != map_file {
-        write_atomically(&output, edited.as_bytes())?;
-    }
+        id: service.id,
+        attribution: service.attribution,
+        licence: service.licence,
+        ground_pixel,
+    })
+}
 
+/// The photo from Google's satellite tiles at `zoom`, in Web Mercator.
+fn plan_google(
+    map: &maur_o::map::Map,
+    anchor: &GeographicAnchor,
+    zoom: u8,
+    margin: f64,
+) -> Result<Plan, Failure> {
+    let area = footprint(map, anchor, WEB_MERCATOR, margin).map_err(|e| fail(3, e))?;
+    let range = TileRange::covering(&area, zoom);
+    let grid = range.grid();
+    let ground_pixel = xyz_ground_resolution(zoom, anchor.lat);
     println!(
-        "{} × {} pixels, about {:.0} × {:.0} m of ground",
-        grid.width,
-        grid.height,
-        f64::from(grid.width) * ground_pixel,
-        f64::from(grid.height) * ground_pixel,
+        "Downloading {} tiles of {} at zoom {zoom} (about {ground_pixel:.2} m a pixel) in EPSG:{WEB_MERCATOR}",
+        range.count(),
+        GOOGLE.area
     );
-    println!(
-        "Wrote {} and {}",
-        image_path.display(),
-        world_file.display()
-    );
-    match added {
-        Added::Added => println!("Added it to {} as a template", output.display()),
-        Added::AlreadyThere => println!(
-            "{} already had it as a template; only the image was replaced",
-            output.display()
-        ),
-    }
-    println!(
-        "Photos: {} ({}) — credit them wherever the map is published.",
-        service.attribution, service.licence
-    );
-    Ok(())
+    let tiles: Vec<(Tile, String)> = range
+        .tiles()
+        .into_iter()
+        .map(|(x, y, tile)| (tile, GOOGLE.tile_url(x, y, zoom)))
+        .collect();
+    Ok(Plan {
+        grid,
+        tiles,
+        unit: XYZ_TILE_SIZE,
+        format: None,
+        delay: GOOGLE_RETRY_DELAY,
+        epsg: WEB_MERCATOR,
+        id: GOOGLE.id,
+        attribution: GOOGLE.attribution,
+        licence: GOOGLE.licence,
+        ground_pixel,
+    })
 }
 
 /// Asks `service` whether it has photos of the map, and in which CRS.
@@ -365,7 +597,7 @@ fn try_service<'a>(
     // The capabilities say whether the layer is still there, and may name
     // more CRSs than the service is known for. Some servers' are broken,
     // which is no reason not to ask for the photo.
-    let capabilities = fetch(agent, &capabilities_url(service))
+    let capabilities = fetch(agent, &capabilities_url(service), RETRY_DELAY)
         .ok()
         .and_then(|(_, body)| Capabilities::parse(&String::from_utf8_lossy(&body)).ok());
     if let Some(capabilities) = &capabilities {
@@ -414,7 +646,7 @@ fn try_service<'a>(
         "image/png",
         true,
     );
-    let probe_image = fetch_image(agent, &url, None)
+    let probe_image = fetch_image(agent, &url, None, RETRY_DELAY)
         .map_err(Skip::Failed)?
         .to_rgba8();
     let photographed = probe_image.pixels().filter(|p| !is_blank(p.0)).count();
@@ -483,15 +715,15 @@ fn nothing_usable(
 }
 
 /// GETs `url`: its content type and body, asking up to [`ATTEMPTS`] times,
-/// since some servers fail a request now and then. A failure to connect,
-/// an HTTP error status and a body too large are all exit code 6.
-fn fetch(agent: &ureq::Agent, url: &str) -> Result<(String, Vec<u8>), Failure> {
+/// `delay` apart, since some servers fail a request now and then. A failure
+/// to connect, an HTTP error status and a body too large are all exit code 6.
+fn fetch(agent: &ureq::Agent, url: &str, delay: Duration) -> Result<(String, Vec<u8>), Failure> {
     let mut result = fetch_once(agent, url);
     for _ in 1..ATTEMPTS {
         if result.is_ok() {
             break;
         }
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(delay);
         result = fetch_once(agent, url);
     }
     result
@@ -524,8 +756,9 @@ fn fetch_image(
     agent: &ureq::Agent,
     url: &str,
     format: Option<ImageFormat>,
+    delay: Duration,
 ) -> Result<image::DynamicImage, Failure> {
-    let (content_type, body) = fetch(agent, url)?;
+    let (content_type, body) = fetch(agent, url, delay)?;
     if !content_type.starts_with("image/") {
         let text = String::from_utf8_lossy(&body);
         let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -543,16 +776,19 @@ fn fetch_image(
     .map_err(|e| fail(6, format!("the service sent an unreadable photo: {e}")))
 }
 
-/// The whole grid's photo, its tiles downloaded [`WORKERS`] at a time.
+/// The whole grid's photo from `tiles` (each where it goes in the grid, and
+/// its URL), downloaded [`WORKERS`] at a time, `delay` between attempts,
+/// its progress bar labelled `label`.
 fn download(
     agent: &ureq::Agent,
-    service: &Service,
-    epsg: i32,
     grid: &Grid,
+    tiles: Vec<(Tile, String)>,
+    format: Option<ImageFormat>,
+    delay: Duration,
+    label: &str,
 ) -> Result<RgbImage, Failure> {
-    let tiles = grid.tiles(service.max_tile_size);
     let photo = Mutex::new(RgbImage::new(grid.width, grid.height));
-    let progress = Mutex::new(Progress::new("Downloading", tiles.len()));
+    let progress = Mutex::new(Progress::new(label, tiles.len()));
     let next = AtomicUsize::new(0);
     let failure: Mutex<Option<Failure>> = Mutex::new(None);
 
@@ -563,23 +799,14 @@ fn download(
                 if i >= tiles.len() || failure.lock().unwrap().is_some() {
                     return;
                 }
-                let tile = &tiles[i];
-                let url = get_map_url(
-                    service,
-                    epsg,
-                    &grid.tile_box(tile),
-                    tile.width,
-                    tile.height,
-                    "image/jpeg",
-                    false,
-                );
-                let mut result = fetch_image(agent, &url, Some(ImageFormat::Jpeg));
+                let (tile, url) = &tiles[i];
+                let mut result = fetch_image(agent, url, format, delay);
                 for _ in 1..ATTEMPTS {
                     if result.is_ok() {
                         break;
                     }
-                    std::thread::sleep(Duration::from_secs(2));
-                    result = fetch_image(agent, &url, Some(ImageFormat::Jpeg));
+                    std::thread::sleep(delay);
+                    result = fetch_image(agent, url, format, delay);
                 }
                 match result {
                     Ok(piece) => {

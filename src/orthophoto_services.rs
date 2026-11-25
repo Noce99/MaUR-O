@@ -10,7 +10,7 @@
 //! older; and the services whose box spills furthest over their
 //! neighbours' ground (France's, Italy's national ones) come last.
 
-use crate::orthophoto::{LatLonBox, Service};
+use crate::orthophoto::{LatLonBox, Service, TileService};
 
 /// Every service, best first.
 pub const SERVICES: &[Service] = &[
@@ -1061,6 +1061,21 @@ pub const SERVICES: &[Service] = &[
 
 ];
 
+/// Google's satellite imagery: tiles of the whole world, for any map no
+/// open service has photos of, or newer ones. Only ever used when asked for
+/// by name (`--service google`), never picked for a map by itself, since
+/// Google's terms do not allow downloading its imagery for use outside its
+/// own maps.
+pub const GOOGLE: TileService = TileService {
+    id: "google",
+    area: "the whole world (Google satellite)",
+    url: "https://mts0.googleapis.com/vt?lyrs=s&x={x}&y={y}&z={z}",
+    default_zoom: 19,
+    max_zoom: 22,
+    attribution: "Imagery © Google",
+    licence: "Google Maps Platform terms; not licensed for download",
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1075,6 +1090,7 @@ mod tests {
                 "{} is listed twice",
                 service.id
             );
+            assert_ne!(service.id, GOOGLE.id, "google is taken");
             assert!(
                 service.url.ends_with('?') || service.url.ends_with('&'),
                 "{}",

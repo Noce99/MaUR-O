@@ -27,6 +27,10 @@
 //! 6. [`Grid::world_file`]: where the stitched image is on the earth, as the
 //!    world file Mapper reads beside it (`src/templates/world_file.cpp`).
 //!
+//! A world-wide XYZ tile service ([`TileService`]: Google's satellite
+//! tiles) skips steps 2, 4 and 5: it is always asked in Web Mercator, for
+//! whole tiles ([`TileRange`]) at a zoom level instead of a pixel size.
+//!
 //! Requests use WMS 1.1.1, whose `SRS` bounding box is always easting (or
 //! longitude) first. In 1.3.0 the axis order is whatever the EPSG registry
 //! says for that CRS, and many (EPSG:4326 itself, RDN2008's "N-E" UTM,
@@ -476,6 +480,76 @@ impl Grid {
         }
     }
 
+    /// The part of this grid a tile of it covers, as a grid of its own.
+    pub fn sub_grid(&self, tile: &Tile) -> Grid {
+        Grid {
+            west: self.west + f64::from(tile.x) * self.pixel_width,
+            north: self.north - f64::from(tile.y) * self.pixel_height,
+            width: tile.width,
+            height: tile.height,
+            ..*self
+        }
+    }
+
+    /// The grid cut into as few pieces as it takes for each to have at most
+    /// `max_pixels` pixels and sides of at most `max_side`, row by row from
+    /// the north-west corner. Every cut falls on a multiple of `unit`
+    /// pixels, so tiles of that size laid from the north-west corner
+    /// (as [`tiles`](Self::tiles) lays them) each fall in one piece. Of the
+    /// cuts into the fewest pieces, the one with the squarest pieces wins.
+    /// The whole grid, as one piece, where it fits; a piece never smaller
+    /// than one `unit` square, even where that does not fit.
+    pub fn split(&self, max_pixels: u64, max_side: u32, unit: u32) -> Vec<Tile> {
+        let unit = unit.max(1);
+        let units_x = self.width.div_ceil(unit);
+        let units_y = self.height.div_ceil(unit);
+        // The piece size with `columns` by `rows` pieces.
+        let piece = |columns: u32, rows: u32| {
+            (
+                (units_x.div_ceil(columns) * unit).min(self.width),
+                (units_y.div_ceil(rows) * unit).min(self.height),
+            )
+        };
+        let fits = |(w, h): (u32, u32)| {
+            u64::from(w) * u64::from(h) <= max_pixels && w <= max_side && h <= max_side
+        };
+        let squareness = |(w, h): (u32, u32)| f64::from(w.max(h)) / f64::from(w.min(h).max(1));
+        let mut best: Option<(u32, u32)> = None;
+        'count: for count in 1..=u64::from(units_x) * u64::from(units_y) {
+            for columns in 1..=units_x.min(count as u32) {
+                if count % u64::from(columns) != 0 {
+                    continue;
+                }
+                let rows = (count / u64::from(columns)) as u32;
+                if rows > units_y || !fits(piece(columns, rows)) {
+                    continue;
+                }
+                if best
+                    .is_none_or(|(c, r)| squareness(piece(columns, rows)) < squareness(piece(c, r)))
+                {
+                    best = Some((columns, rows));
+                }
+            }
+            if best.is_some() {
+                break 'count;
+            }
+        }
+        let (columns, rows) = best.unwrap_or((units_x, units_y));
+        let (piece_width, piece_height) = piece(columns, rows);
+        let mut pieces = Vec::new();
+        for y in (0..self.height).step_by(piece_height as usize) {
+            for x in (0..self.width).step_by(piece_width as usize) {
+                pieces.push(Tile {
+                    x,
+                    y,
+                    width: piece_width.min(self.width - x),
+                    height: piece_height.min(self.height - y),
+                });
+            }
+        }
+        pieces
+    }
+
     /// The ground the whole grid covers.
     pub fn bounds(&self) -> ProjectedBox {
         self.tile_box(&Tile {
@@ -497,6 +571,132 @@ impl Grid {
             self.west + pw / 2.0,
             self.north - ph / 2.0
         )
+    }
+}
+
+/// A world-wide map tile service in the "XYZ" scheme: Web Mercator
+/// ([`WEB_MERCATOR`]) cut into 256-pixel tiles, `2^z` by `2^z` of them at
+/// zoom level `z`, numbered from the north-west corner. Not a WMS: there is
+/// no choosing a CRS or a box, only which tiles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TileService {
+    /// A short name to pick it by: `google`.
+    pub id: &'static str,
+    /// What it is, for people.
+    pub area: &'static str,
+    /// A tile's URL, with `{x}`, `{y}` and `{z}` in it.
+    pub url: &'static str,
+    /// The zoom level asked for unless another is given.
+    pub default_zoom: u8,
+    /// The highest zoom level it serves.
+    pub max_zoom: u8,
+    /// Who to credit for the photos.
+    pub attribution: &'static str,
+    /// The terms they are published under.
+    pub licence: &'static str,
+}
+
+/// A tile's side, in pixels, in the XYZ scheme.
+pub const XYZ_TILE_SIZE: u32 = 256;
+
+/// Half the width of the Web Mercator world, in its meters: the world runs
+/// from minus this to this both ways.
+const MERCATOR_HALF: f64 = std::f64::consts::PI * WGS84_A;
+
+impl TileService {
+    /// The URL of tile `x`, `y` at zoom `z`.
+    pub fn tile_url(&self, x: u32, y: u32, z: u8) -> String {
+        self.url
+            .replace("{x}", &x.to_string())
+            .replace("{y}", &y.to_string())
+            .replace("{z}", &z.to_string())
+    }
+}
+
+/// The ground a pixel of an XYZ tile at zoom `z` covers at latitude `lat`,
+/// in meters: Web Mercator's pixel, shrunk by its scale there.
+pub fn xyz_ground_resolution(z: u8, lat: f64) -> f64 {
+    2.0 * MERCATOR_HALF / f64::from(XYZ_TILE_SIZE) / 2f64.powi(i32::from(z))
+        * lat.to_radians().cos()
+}
+
+/// The XYZ tiles covering a box, inclusive both ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileRange {
+    /// The zoom level.
+    pub zoom: u8,
+    /// The westernmost column.
+    pub first_x: u32,
+    /// The northernmost row.
+    pub first_y: u32,
+    /// The easternmost column.
+    pub last_x: u32,
+    /// The southernmost row.
+    pub last_y: u32,
+}
+
+impl TileRange {
+    /// The tiles at zoom `zoom` covering `area`, a box in [`WEB_MERCATOR`].
+    pub fn covering(area: &ProjectedBox, zoom: u8) -> TileRange {
+        let count = 2f64.powi(i32::from(zoom));
+        let size = 2.0 * MERCATOR_HALF / count;
+        let column = |x: f64| ((x + MERCATOR_HALF) / size).floor().clamp(0.0, count - 1.0) as u32;
+        let row = |y: f64| ((MERCATOR_HALF - y) / size).floor().clamp(0.0, count - 1.0) as u32;
+        TileRange {
+            zoom,
+            first_x: column(area.min_x),
+            first_y: row(area.max_y),
+            last_x: column(area.max_x),
+            last_y: row(area.min_y),
+        }
+    }
+
+    /// How many tiles it has.
+    pub fn count(&self) -> usize {
+        (self.columns() * self.rows()) as usize
+    }
+
+    fn columns(&self) -> u32 {
+        self.last_x - self.first_x + 1
+    }
+
+    fn rows(&self) -> u32 {
+        self.last_y - self.first_y + 1
+    }
+
+    /// The pixel grid, in [`WEB_MERCATOR`], of the tiles stitched together.
+    pub fn grid(&self) -> Grid {
+        let pixel =
+            2.0 * MERCATOR_HALF / f64::from(XYZ_TILE_SIZE) / 2f64.powi(i32::from(self.zoom));
+        Grid {
+            west: -MERCATOR_HALF + f64::from(self.first_x * XYZ_TILE_SIZE) * pixel,
+            north: MERCATOR_HALF - f64::from(self.first_y * XYZ_TILE_SIZE) * pixel,
+            pixel_width: pixel,
+            pixel_height: pixel,
+            width: self.columns() * XYZ_TILE_SIZE,
+            height: self.rows() * XYZ_TILE_SIZE,
+        }
+    }
+
+    /// Every tile, row by row from the north-west corner: its column and
+    /// row in the scheme, and where it goes in [`grid`](Self::grid).
+    pub fn tiles(&self) -> Vec<(u32, u32, Tile)> {
+        let mut tiles = Vec::with_capacity(self.count());
+        for y in self.first_y..=self.last_y {
+            for x in self.first_x..=self.last_x {
+                tiles.push((
+                    x,
+                    y,
+                    Tile {
+                        x: (x - self.first_x) * XYZ_TILE_SIZE,
+                        y: (y - self.first_y) * XYZ_TILE_SIZE,
+                        width: XYZ_TILE_SIZE,
+                        height: XYZ_TILE_SIZE,
+                    },
+                ));
+            }
+        }
+        tiles
     }
 }
 
@@ -870,6 +1070,108 @@ mod tests {
         let last = grid.tile_box(tiles.last().unwrap());
         assert!((last.max_x - bounds.max_x).abs() < 1e-9);
         assert!((last.min_y - bounds.min_y).abs() < 1e-9);
+    }
+
+    /// A grid too large for one image is cut into the fewest pieces under
+    /// the limits, on whole tiles, covering it once; one that fits is one
+    /// piece. The 15872 × 18944 Google grid (62 × 74 tiles) that once was
+    /// refused as 0.2% over 300 megapixels is two pieces.
+    #[test]
+    fn a_grid_too_large_is_split_into_pieces_on_whole_tiles() {
+        let grid = Grid {
+            west: 1000.0,
+            north: 5000.0,
+            pixel_width: 0.5,
+            pixel_height: 0.5,
+            width: 15872,
+            height: 18944,
+        };
+        assert_eq!(
+            grid.split(u64::MAX, u32::MAX, 256),
+            vec![Tile {
+                x: 0,
+                y: 0,
+                width: 15872,
+                height: 18944
+            }]
+        );
+
+        let pieces = grid.split(300_000_000, 65_000, 256);
+        assert_eq!(pieces.len(), 2);
+        for limits in [(300_000_000, 65_000), (10_000_000, 3000), (1, 1)] {
+            let pieces = grid.split(limits.0, limits.1, 256);
+            let covered: u64 = pieces
+                .iter()
+                .map(|t| u64::from(t.width) * u64::from(t.height))
+                .sum();
+            assert_eq!(covered, grid.pixel_count());
+            for piece in &pieces {
+                assert_eq!((piece.x % 256, piece.y % 256), (0, 0));
+                if limits.0 > 1 {
+                    assert!(u64::from(piece.width) * u64::from(piece.height) <= limits.0);
+                    assert!(piece.width <= limits.1 && piece.height <= limits.1);
+                }
+            }
+        }
+        // Never below one tile, whatever the limit.
+        assert_eq!(grid.split(1, 1, 256).len(), 62 * 74);
+
+        let second = grid.sub_grid(&pieces[1]);
+        let bounds = grid.tile_box(&pieces[1]);
+        assert_eq!(second.bounds(), bounds);
+        assert_eq!(
+            (second.width, second.height),
+            (pieces[1].width, pieces[1].height)
+        );
+    }
+
+    /// The tiles round the box out to whole tiles, and their grid is where
+    /// the scheme puts them: a box around Bologna at zoom 18 is the
+    /// 12 × 11 tiles `downloader_1.2.py` asked Google for.
+    #[test]
+    fn xyz_tiles_cover_the_box_and_land_where_the_scheme_says() {
+        let (min_x, min_y) = web_mercator(44.378, 11.230);
+        let (max_x, max_y) = web_mercator(44.388, 11.245);
+        let area = ProjectedBox {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        };
+        let range = TileRange::covering(&area, 18);
+        assert_eq!(
+            (range.first_x, range.first_y, range.last_x, range.last_y),
+            (139_249, 94_926, 139_260, 94_936)
+        );
+        assert_eq!(range.count(), 12 * 11);
+        let grid = range.grid();
+        assert_eq!((grid.width, grid.height), (12 * 256, 11 * 256));
+        let bounds = grid.bounds();
+        assert!(bounds.min_x <= area.min_x && bounds.max_x >= area.max_x);
+        assert!(bounds.min_y <= area.min_y && bounds.max_y >= area.max_y);
+        // The north-west corner of tile 139249 at zoom 18 is 11.2294006° E.
+        let west = (grid.west / WGS84_A).to_degrees();
+        assert!((west - 11.229_400_634_765_625).abs() < 1e-9);
+        let tiles = range.tiles();
+        assert_eq!(tiles.len(), range.count());
+        let (x, y, last) = tiles.last().unwrap();
+        assert_eq!((*x, *y), (139_260, 94_936));
+        assert_eq!((last.x, last.y), (11 * 256, 10 * 256));
+    }
+
+    #[test]
+    fn a_tile_url_names_its_tile() {
+        let service = TileService {
+            id: "t",
+            area: "",
+            url: "https://example.org/{z}/{x}/{y}.jpg",
+            default_zoom: 19,
+            max_zoom: 20,
+            attribution: "",
+            licence: "",
+        };
+        assert_eq!(service.tile_url(3, 5, 7), "https://example.org/7/3/5.jpg");
+        assert!((xyz_ground_resolution(19, 0.0) - 0.298).abs() < 1e-3);
     }
 
     /// The world file names the centre of the top-left pixel, not its corner.

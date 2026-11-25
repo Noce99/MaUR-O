@@ -185,7 +185,11 @@ the reference point on the ellipsoid, and Mapper reprojects the image), the
 tile grid, `GetMap` URLs (WMS 1.1.1, or 1.3.0 where a server speaks nothing
 else), capabilities parsing, the world file, and what counts as "no photo"
 in a coverage probe. `orthophoto_services.rs` is the hand-checked list of
-services, in priority order (city before region before country). The binary
+services, in priority order (city before region before country). Google's
+satellite tiles (`orthophoto_services::GOOGLE`, a `TileService`: XYZ tiles
+in EPSG:3857, `TileRange` turning a box into tiles and a `Grid`) are
+separate from that list, used only by `--service google`, never picked
+automatically. The binary
 asks each service whose box holds the map for a small transparent probe and
 takes the first with photos of all of it. `image_template.rs` adds the image
 to the map file as a `TemplateImage` by editing the file's *text*, not by

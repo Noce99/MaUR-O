@@ -1,6 +1,8 @@
 //! `mauro ortho`'s screen: the map to add a photo to, and, once it is
 //! picked, where it is on the earth and which services cover it — worked
-//! out offline, so that the service is picked from those alone.
+//! out offline, so that the service is picked from those alone. Google's
+//! satellite tiles cover every map, so they are always among the choices;
+//! picked, the pixel size gives way to a zoom level, 19 to start with.
 
 use std::path::Path;
 
@@ -8,7 +10,7 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 
 use maur_o::orthophoto::{geographic_anchor, Service};
-use maur_o::orthophoto_services::SERVICES;
+use maur_o::orthophoto_services::{GOOGLE, SERVICES};
 
 use super::{number, pair, Loading};
 use crate::tui::form::{Field, Form, Tool};
@@ -21,9 +23,16 @@ const MAP: usize = 0;
 const OUTPUT: usize = 1;
 const SERVICE: usize = 2;
 const PIXEL: usize = 3;
-const MARGIN: usize = 4;
-const IMAGE: usize = 5;
-const LIST: usize = 6;
+const ZOOM: usize = 4;
+const MARGIN: usize = 5;
+const IMAGE: usize = 6;
+const LIST: usize = 7;
+
+/// The choices before the map is placed: the best, or Google's, which
+/// covers anywhere.
+fn first_choices() -> Vec<String> {
+    vec![BEST.to_string(), GOOGLE.id.to_string()]
+}
 
 /// Where the picked map is, and what covers it.
 struct Place {
@@ -72,15 +81,19 @@ impl Ortho {
                 Field::text("Output map")
                     .arg("output_map_file")
                     .hint("the map itself, changed in place"),
-                Field::choice("Service", &[BEST]).arg("service").help(
-                    "The service to download from: the best one for where the map is (the \
-                     first, best first, with photos of all of it), or one of those whose area \
-                     holds the map, listed beside once the map is picked.",
-                ),
+                Field::choice("Service", &[BEST, "google"])
+                    .arg("service")
+                    .help(
+                        "The service to download from: the best one for where the map is (the \
+                     first, best first, with photos of all of it), one of those whose area \
+                     holds the map, listed beside once the map is picked, or google, Google's \
+                     satellite tiles of anywhere (not licensed for download: on you).",
+                    ),
                 Field::text("Pixel size")
                     .arg("pixel_size")
                     .unit("m per pixel")
                     .hint("the service's own"),
+                Field::text("Zoom").arg("zoom").unit("level"),
                 Field::text("Margin").arg("margin").unit("m on the ground"),
                 Field::text("Image")
                     .arg("image")
@@ -89,16 +102,28 @@ impl Ortho {
             ],
         );
         form.open_picker(MAP);
-        Self {
+        let mut screen = Self {
             form,
             place: Loading::None,
-        }
+        };
+        screen.update();
+        screen
+    }
+
+    fn google(&self) -> bool {
+        self.form.choice(SERVICE) == GOOGLE.id
     }
 
     fn update(&mut self) {
         let listing = self.form.on(LIST);
-        for field in [MAP, OUTPUT, SERVICE, PIXEL, MARGIN, IMAGE] {
+        for field in [MAP, OUTPUT, SERVICE, MARGIN, IMAGE] {
             self.form.show(field, !listing);
+        }
+        let google = self.google();
+        self.form.show(PIXEL, !listing && !google);
+        self.form.show(ZOOM, !listing && google);
+        if google && self.form.text(ZOOM).is_empty() {
+            self.form.set_text(ZOOM, GOOGLE.default_zoom.to_string());
         }
     }
 }
@@ -125,9 +150,10 @@ impl Tool for Ortho {
                 } else {
                     Loading::None
                 };
-                self.form.set_choices(SERVICE, vec![BEST.to_string()]);
+                self.form.set_choices(SERVICE, first_choices());
+                self.update();
             }
-            LIST => self.update(),
+            SERVICE | LIST => self.update(),
             _ => {}
         }
     }
@@ -139,8 +165,10 @@ impl Tool for Ortho {
             if let Some(place) = self.place.ready() {
                 let choices = std::iter::once(BEST.to_string())
                     .chain(place.services.iter().map(|s| s.id.to_string()))
+                    .chain(std::iter::once(GOOGLE.id.to_string()))
                     .collect();
                 self.form.set_choices(SERVICE, choices);
+                self.update();
             }
         }
     }
@@ -164,6 +192,15 @@ impl Tool for Ortho {
             }
         }
         form.push_option(&mut args, PIXEL, "--pixel-size");
+        if let Some(zoom) = form.given(ZOOM) {
+            if !zoom.parse::<u8>().is_ok_and(|z| z <= GOOGLE.max_zoom) {
+                return Err(format!(
+                    "The zoom must be a whole number from 0 to {}.",
+                    GOOGLE.max_zoom
+                ));
+            }
+        }
+        form.push_option(&mut args, ZOOM, "--zoom");
         if number(form.text(MARGIN), "Margin")? < 0.0 {
             return Err("The margin cannot be negative.".to_string());
         }
@@ -189,7 +226,7 @@ impl Tool for Ortho {
                 Line::default(),
             ];
             if place.services.is_empty() {
-                lines.push(Line::from("No service covers it.").red());
+                lines.push(Line::from("No open service covers it; google does.").red());
             } else {
                 lines.push(Line::from("Covered by, best first").bold());
                 for s in &place.services {
@@ -199,6 +236,12 @@ impl Tool for Ortho {
                     )));
                 }
             }
+            lines.push(Line::from(format!(
+                "{}  zoom {}, about {:.2}m",
+                GOOGLE.id,
+                GOOGLE.default_zoom,
+                maur_o::orthophoto::xyz_ground_resolution(GOOGLE.default_zoom, place.lat)
+            )));
             lines
         });
         Some(("The map's place", lines))
@@ -236,6 +279,29 @@ mod tests {
             command(&screen).unwrap()[2..],
             ["--service", "it-emilia-romagna-2023", "--pixel-size", "0.5"]
         );
+    }
+
+    #[test]
+    fn google_trades_the_pixel_size_for_a_zoom_of_19() {
+        let mut screen = Ortho::new();
+        type_into(&mut screen.form, MAP, "forest.omap");
+        assert!(screen.form.shown(PIXEL) && !screen.form.shown(ZOOM));
+        press(&mut screen.form, SERVICE, KeyCode::Right);
+        screen.changed(SERVICE);
+        assert_eq!(screen.form.choice(SERVICE), "google");
+        assert!(!screen.form.shown(PIXEL) && screen.form.shown(ZOOM));
+        assert_eq!(screen.form.text(ZOOM), "19");
+        assert_eq!(
+            command(&screen).unwrap()[2..],
+            ["--service", "google", "--zoom", "19"]
+        );
+        type_into(&mut screen.form, ZOOM, "23");
+        assert!(command(&screen).is_err());
+
+        press(&mut screen.form, SERVICE, KeyCode::Left);
+        screen.changed(SERVICE);
+        assert!(screen.form.shown(PIXEL) && !screen.form.shown(ZOOM));
+        assert_eq!(command(&screen).unwrap(), ["ortho", "forest.omap"]);
     }
 
     #[test]

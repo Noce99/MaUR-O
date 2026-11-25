@@ -591,6 +591,7 @@ template, ready to draw over in Mapper.
 
 ```
 mauro ortho [--service ID] [--pixel-size M] [--margin M] [--image FILE] <map-file> [output-map-file]
+mauro ortho --service google [--zoom LEVEL] [--margin M] [--image FILE] <map-file> [output-map-file]
 mauro ortho --list-services
 ```
 
@@ -625,6 +626,15 @@ depending on the size asked for; capabilities documents cut short), none of
 which can be guessed. A new one goes in `src/orthophoto_services.rs` once it
 has been checked the same way.
 
+For any map, wherever it is, `--service google` downloads Google's
+satellite tiles instead. It is never picked by itself: Google's terms do not
+license its imagery for download, so using it is on whoever does. Its detail
+is a zoom level, `--zoom` (19 by default, about 0.3 m a pixel at the equator
+and 0.21 m at Bologna's latitude), and the image is always in Web Mercator
+(EPSG:3857), in whole 256-pixel tiles. Tiles are fetched four at a time and
+a failed one is asked for again after 4 seconds, since Google turns away a
+burst of requests for a while.
+
 The map has to be a Mapper `.omap`/`.xmap`, georeferenced: placed on the
 earth in a projected CRS, with the latitude and longitude Mapper keeps
 beside it. The photo is asked for in the map's own CRS where the service
@@ -636,7 +646,8 @@ OCAD map has to be saved as `.omap` in Mapper first.
 | --- | --- | --- |
 | `--service` | the best for the map's place | Which service to download from, by id. |
 | `--list-services` | | Lists every service, best first, and exits. |
-| `--pixel-size` | the service's own | The image's ground resolution, in meters. Above 300 megapixels (about 3.5 × 3.5 km at 0.2 m) a larger one is needed. |
+| `--pixel-size` | the service's own | The image's ground resolution, in meters. Not with `google`. |
+| `--zoom` | `19` | With `--service google` only: the tiles' zoom level, 0 to 22, each level up halving the pixel. |
 | `--margin` | `50` | How far beyond the map's objects to download, in meters. |
 | `--image` | `<map>_<service id>.jpg` | Where to write the image, beside the output map by default. Its world file (`.jgw`) goes beside it. |
 
@@ -644,7 +655,12 @@ The output map defaults to the input map, rewritten in place, and only its
 template list and saved view change. The view is updated so the photo shows
 when the map is opened, unless the map was saved with all templates hidden.
 Running the tool again downloads the image again and leaves the templates
-as they are. A map straddling two regions gets the one with photos of most
+as they are. An image may have at most 300 megapixels (about 3.5 × 3.5 km
+at 0.2 m) and 65 000 pixels a side, so a larger area is downloaded as
+several images, as few as it takes, cut on whole tiles and numbered row by
+row from the north-west corner (`<map>_<service id>_1.jpg`, `_2.jpg`, ...),
+each with its world file and added as its own template; only one is held
+in memory at a time. A map straddling two regions gets the one with photos of most
 of it, with a warning, and black where it has none.
 
 ```bash
