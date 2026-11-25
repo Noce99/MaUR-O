@@ -35,7 +35,7 @@ differently.
 | Contour geometry | `geo`, `geo-svg` | Polygon buffering and point-in-polygon for `mauro dem`; `geo-svg` draws its `--create_svg` diagnostics. |
 | Scratch space | `tempfile` | The temporary folder a benchmark archive is unpacked into. |
 | Terminal interface | `ratatui` (with its `crossterm`) | The interface a bare `mauro` opens in a terminal. Native-only like `ureq`, and only the binary uses it. |
-| HTTP | `ureq` | `mauro ortho`'s downloads from a mapping agency's WMS: blocking, rustls. Not built for wasm, and never used by the library itself. |
+| HTTP | `ureq` | `mauro ortho`'s and `mauro terrain`'s downloads from a mapping agency's WMS or an elevation server: blocking, rustls. Not built for wasm, and never used by the library itself. |
 
 `fontdb` + `rustybuzz` + `ttf-parser` + `tiny-skia` is the same pipeline
 [resvg](https://github.com/RazrFalcon/resvg) uses, which is what made text
@@ -124,12 +124,14 @@ one file per step; read that document first.
 | `bundle.rs` | Lines sharing a street laid out side by side: routes matched to the street and rail network, a fixed left-to-right order carried along each bundle, offsets smoothed where a bundle changes, the band capped in width, stops as one bar across it. Pure geometry on the paper, independent of OSM. |
 | `map_areas.rs` | The areas of an event's maps, read from a CSV table (`--maps`): outlines, names, forbidden zones, start and finish. |
 
-### Orthophotos
+### Orthophotos and terrain
 
 | File | Contents |
 | --- | --- |
 | `orthophoto.rs` | What an orthophoto WMS is asked for: a map's place in degrees, the CRS to ask in (the map's own, else Web Mercator or WGS84), its footprint there, the north-up pixel grid and its tiles, `GetMap`/`GetCapabilities` URLs (WMS 1.1.1 or 1.3.0), capabilities parsing, the coverage test, the world file. No network access. |
 | `orthophoto_services.rs` | The hand-checked list of open orthophoto WMS services across Europe, best first. |
+| `terrain.rs` | What an elevation server is asked for: `exportImage` (ArcGIS) and `GetCoverage` (WCS 2.0.1) requests in the map's own CRS, the axis labels a WCS may want, the tile size, reading a server's error, and the elevation raster the tiles are resampled into (through each tile's own georeferencing) and written out as a float GeoTIFF. No network access. |
+| `terrain_services.rs` | The hand-checked list of open elevation services (Emilia-Romagna's LiDAR surveys and 5 m DTM, INGV's TINITALY), best first. |
 | `image_template.rs` | Adds a georeferenced image to a Mapper file as its bottom-most template, by editing the file's text: the template list's `count` and `first_front_template`, and the saved view's `<ref template>` indices. |
 
 ### Binaries
@@ -148,6 +150,7 @@ comment:
 | `bin/mauro/dem_eval.rs` | `mauro dem-eval`: scores a predicted DEM against a ground truth. |
 | `bin/mauro/osm.rs` | `mauro osm`: converts an `.osm` file, or the data of an area downloaded from the Overpass API (`--download`, over `ureq`), into an `.omap`, drawn to ISSprOM (the default), ISOM or carto (`--standard`). |
 | `bin/mauro/ortho.rs` | `mauro ortho`: downloads a map's orthophoto tile by tile and adds it to the map as a template. |
+| `bin/mauro/terrain.rs` | `mauro terrain`: probes the services covering a map, downloads the best one's elevations tile by tile and writes them as one GeoTIFF. |
 
 ## One map per symbol
 

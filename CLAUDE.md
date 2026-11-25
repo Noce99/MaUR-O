@@ -14,7 +14,9 @@ contour lines. `mauro osm` goes the other way: it turns
 OpenStreetMap data (plus optional GTFS transit feeds) into a Mapper map, and
 `mauro ortho` downloads the aerial orthophoto of a map's ground
 (from about fifty open national and regional WMS services across Europe)
-and adds it to the map as a template. All of these are subcommands of the one binary, `mauro`.
+and adds it to the map as a template, and `mauro terrain` downloads the
+terrain model (DTM) of a map's ground as an elevation GeoTIFF. All of these
+are subcommands of the one binary, `mauro`.
 
 This crate is consumed by the o-mnia web app from a vendored copy (via
 `crates/maur-o-wasm`, o-mnia's own wasm-bindgen adapter — see that repo's
@@ -55,6 +57,7 @@ Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 | `mauro dem-eval` | Score a predicted DEM GeoTIFF against a ground-truth one (MSE/RMSE/MAE + error maps). |
 | `mauro osm` | Convert OpenStreetMap XML (a file, or downloaded for an area from the Overpass API with `--download`) into an `.omap` drawn to ISSprOM 2019 (default) or ISOM 2017-2, or (`--standard osm`, optionally with GTFS feeds) styled like openstreetmap-carto. |
 | `mauro ortho` | Download a map's aerial orthophoto from the best open WMS for its place (European national/regional agencies) and add it to the map as a georeferenced template. |
+| `mauro terrain` | Download a map's terrain model (Emilia-Romagna's LiDAR DTMs, INGV's TINITALY) as an elevation GeoTIFF in the map's own CRS — a ground truth for `mauro dem-eval`. |
 
 `src/bin/mauro/main.rs` is only the dispatcher (the clap `Cli`, one module per
 subcommand, each module's `Args` and `pub fn main(args) -> ExitCode`). A usage
@@ -198,6 +201,25 @@ that the model doesn't. The binary does the HTTP itself (`ureq`, a
 native-only dependency, so o-mnia's wasm build never sees it). Its
 integration tests (`tests/add_orthophoto.rs`) cover only the offline exit
 paths, so CI never depends on anyone's server.
+
+### Terrain models (`mauro terrain`)
+
+`terrain.rs` says what to ask an elevation server for and never touches
+the network: ArcGIS `exportImage` or WCS 2.0.1 `GetCoverage` requests for
+the map's footprint (`orthophoto::map_footprint`, `Grid`) in the map's own
+CRS, tile sizes, and `ElevationGrid`, which resamples each returned tile
+through the tile's *own* georeferencing (a reprojecting WCS lays its grid a
+little off the request) and writes the float GeoTIFF. Server quirks it
+works around, each found by hand: GeoServer wants the CRS's own axis labels
+(`E`/`N` or `X`/`Y`, `WCS_AXES`, tried in turn) and snaps boxes to its
+pixels, so it is asked for its native pixels over a grown box; ArcGIS's LZW
+does not decode, its bilinear blends no-data into real heights (so
+uncompressed, nearest neighbour), and it writes sparse (zero-byte) tiles
+where there is no data, which `dem_geo_tiff_evaluator::read_bytes` reads
+chunk by chunk. `terrain_services.rs` is the hand-checked list, best
+first. The binary probes each candidate with a coarse raster and takes the
+first with elevations of all of the map. Its integration tests
+(`tests/terrain.rs`) cover only the offline exit paths.
 
 ### Benchmark support modules
 

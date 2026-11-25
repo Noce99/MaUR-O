@@ -9,6 +9,7 @@ pub mod dem_eval;
 pub mod ortho;
 pub mod osm;
 pub mod render;
+pub mod terrain;
 
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};

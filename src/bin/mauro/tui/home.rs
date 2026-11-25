@@ -10,7 +10,7 @@ use ratatui::Frame;
 use super::form::Tool;
 use super::screens::{
     benchmark_create::BenchmarkCreate, benchmark_run::BenchmarkRun, dem::Dem, dem_eval::DemEval,
-    ortho::Ortho, osm::Osm, render::Render,
+    ortho::Ortho, osm::Osm, render::Render, terrain::Terrain,
 };
 use super::Action;
 
@@ -25,7 +25,7 @@ struct Entry {
 }
 
 /// The tools in the order the list shows them.
-const TOOLS: [Entry; 7] = [
+const TOOLS: [Entry; 8] = [
     Entry {
         command: "render",
         about: "Render a map to an image (PNG, JPEG, TIFF, BMP) or to SVG",
@@ -40,6 +40,11 @@ const TOOLS: [Entry; 7] = [
         command: "ortho",
         about: "Add a map's aerial orthophoto to it as a template",
         open: || Box::new(Ortho::new()),
+    },
+    Entry {
+        command: "terrain",
+        about: "Download a map's terrain model (DTM) as an elevation GeoTIFF",
+        open: || Box::new(Terrain::new()),
     },
     Entry {
         command: "dem",

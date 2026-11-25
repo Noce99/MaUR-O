@@ -8,6 +8,7 @@
 //! mauro dem-eval         score a predicted DEM GeoTIFF against a ground-truth one
 //! mauro osm              convert OpenStreetMap data into a map
 //! mauro ortho            add a map's aerial orthophoto to it as a template
+//! mauro terrain          download a map's terrain model (DTM) as an elevation GeoTIFF
 //! ```
 //!
 //! Each subcommand is documented in its own module, exit codes included;
@@ -27,6 +28,7 @@ mod dem_eval;
 mod ortho;
 mod osm;
 mod render;
+mod terrain;
 mod tui;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -60,6 +62,7 @@ enum Cmd {
     DemEval(dem_eval::Args),
     Osm(osm::Args),
     Ortho(ortho::Args),
+    Terrain(terrain::Args),
 }
 
 #[derive(Subcommand)]
@@ -102,5 +105,6 @@ fn main() -> ExitCode {
             osm::main(args, osm_matches)
         }
         Cmd::Ortho(args) => ortho::main(args),
+        Cmd::Terrain(args) => terrain::main(args),
     }
 }

@@ -30,7 +30,11 @@ It also ships tools that go beyond drawing a map:
   optionally with bus and train lines from GTFS feeds;
 - **`mauro ortho`** downloads the aerial orthophoto of a map's ground from
   a national or regional mapping agency (about fifty open services across
-  Europe) and adds it to the map as a georeferenced template.
+  Europe) and adds it to the map as a georeferenced template;
+- **`mauro terrain`** downloads the terrain model (DTM) of a map's ground —
+  Emilia-Romagna's 0.5 m LiDAR surveys, or 10 m for all of Italy — as an
+  elevation GeoTIFF in the map's own CRS, the ground truth `mauro dem-eval`
+  scores `mauro dem` against.
 
 Everything is also usable as a Rust library (`maur_o`): besides rendering, it
 covers OCAD import, course layout, runnability grids and route finding,
@@ -51,6 +55,7 @@ together.
   - [`mauro dem-eval`](#mauro-dem-eval)
   - [`mauro osm`](#mauro-osm)
   - [`mauro ortho`](#mauro-ortho)
+  - [`mauro terrain`](#mauro-terrain)
 - [Using it as a library](#using-it-as-a-library)
 - [Development](#development)
 - [Implementation Details](#implementation-details)
@@ -91,6 +96,7 @@ tool:
 | [`mauro dem-eval`](#mauro-dem-eval) | Scores a predicted elevation GeoTIFF against a ground-truth one. |
 | [`mauro osm`](#mauro-osm) | Converts OpenStreetMap data into a Mapper map, drawn to ISSprOM, ISOM or openstreetmap.org's look. |
 | [`mauro ortho`](#mauro-ortho) | Adds the aerial orthophoto of a map's ground to it as a template. |
+| [`mauro terrain`](#mauro-terrain) | Downloads the terrain model (DTM) of a map's ground as an elevation GeoTIFF. |
 
 `mauro --help` lists them, and every one of them takes `--help` and
 `--version` (`mauro render --help`). `mauro` on its own, in a terminal,
@@ -156,8 +162,8 @@ the form, what can be known before running:
   options change;
 - `osm` measures the area asked for, against the download limit, and the
   scale the map comes out at;
-- `ortho` finds where the map is on the earth, and which services cover it,
-  to choose among;
+- `ortho` and `terrain` find where the map is on the earth, and which
+  services cover it, to choose among;
 - `dem` reads the map; `benchmark run` reads the archive: how many maps and
   references it holds, and what they were drawn at.
 
@@ -679,6 +685,81 @@ Exit codes: `0` success, `1` a usage error, `2` the map could not be read,
 the photo can be placed in), `4` the image or the map could not be written,
 `5` no service has photos of the map's ground, `6` the service could not be
 reached or answered with something other than a photo.
+
+### `mauro terrain`
+
+Downloads the terrain model (DTM: the bare ground, without trees or
+buildings) of the ground a map covers, as an elevation GeoTIFF in the map's
+own CRS.
+
+```
+mauro terrain [--service ID] [--pixel-size M] [--margin M] [--output FILE] <map-file>
+mauro terrain --list-services
+```
+
+The elevations come from open servers (no key, no account), each checked by
+hand the way `mauro ortho`'s are. The service is picked by where the map is:
+the first in `--list-services`'s order with elevations of the whole map.
+Finer models come before coarser ones and newer surveys before older ones.
+`--service` picks one by id instead.
+
+| Id | Pixel | Covers |
+| --- | --- | --- |
+| `it-er-lidar-2025-26` | 0.5 m | Emilia-Romagna's 2025–26 LiDAR survey (under way) |
+| `it-modena-2024` | 0.5 m | Modena (municipality), LiDAR |
+| `it-er-lidar-2023-24` | 0.5 m | Emilia-Romagna's 2023–24 LiDAR survey, about half the region |
+| `it-bologna-2023` | 0.5 m | Bologna (municipality), LiDAR |
+| `it-er-lidar-2022` | 0.5 m | Emilia-Romagna's 2022 LiDAR survey |
+| `it-er-dtm-5m` | 5 m | All of Emilia-Romagna |
+| `it-tinitaly` | 10 m | All of Italy (INGV's TINITALY 1.1) |
+
+Emilia-Romagna's models come from the region's ArcGIS server (`exportImage`)
+and TINITALY from INGV's WCS (`GetCoverage`). Both reproject to the map's
+CRS themselves. The region's LiDAR surveys are a patchwork: where none covers
+all of a map, the tool says which ones cover how much of it, falls back to
+the 5 m model, and `--service` downloads a partial one anyway (no data
+where it has none). Left out on purpose: the region's narrow river-corridor
+surveys, and the national 1 m LiDAR its server also offers, which is
+licensed for institutional use only.
+
+The map may be a Mapper `.omap`/`.xmap` or an OCAD `.ocd`, georeferenced in
+a projected CRS with an EPSG code. The area downloaded is the box around the
+map's objects, `--margin` meters wider on every side, north-up in the map's
+CRS. The GeoTIFF has one band of 32-bit float elevations in meters, `-9999`
+(its `GDAL_NODATA`) where there are none, deflate-compressed, with plain
+`ModelPixelScale`/`ModelTiepoint` georeferencing that every GIS reads. Since
+it is in the same CRS as `mauro dem`'s output, `mauro dem-eval` can score
+one against the other directly.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--service` | the best for the map's place | Which service to download from, by id. |
+| `--list-services` | | Lists every service, best first, and exits. |
+| `--pixel-size` | the model's own | The raster's ground resolution, in meters. |
+| `--margin` | `50` | How far beyond the map's objects to download, in meters. |
+| `--output`, `-o` | `<map>_<service id>.tif` | Where to write the GeoTIFF, beside the map by default. |
+
+Tiles of up to 2000 × 2000 pixels are fetched four at a time. The raster is
+held in memory whole, so it may have at most 80 megapixels: about
+4.5 × 4.5 km at 0.5 m. A larger area is turned away with the `--pixel-size`
+that would fit. At 0.5 m, a square kilometre takes about 15 seconds.
+
+```bash
+mauro terrain casalecchio.omap   # writes casalecchio_it-er-lidar-2023-24.tif (or whichever covers it)
+mauro dem casalecchio.omap && mauro dem-eval casalecchio_it-er-lidar-2023-24.tif <dem output>.tif
+```
+
+The elevations belong to whoever serves them, and the tool prints who to
+credit: the region of Emilia-Romagna's models are CC BY 4.0 according to its
+catalogue, and TINITALY is CC BY 4.0, to be cited as Tarquini et al. (2023),
+doi:10.13127/tinitaly/1.1.
+
+Exit codes: `0` success, `1` a usage error (an area too large for one
+raster at that pixel size included), `2` the map could not be read, `3` the
+map is not georeferenced in a projected CRS with an EPSG code, or has no
+objects, `4` the GeoTIFF could not be written, `5` no service has
+elevations of the map's ground, `6` the service could not be reached or
+answered with something other than elevations.
 
 ## Using it as a library
 
