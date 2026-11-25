@@ -9,9 +9,9 @@ use ratatui::Frame;
 
 use super::form::Tool;
 use super::screens::{
-    benchmark_create::BenchmarkCreate, benchmark_run::BenchmarkRun, dem::Dem, dem_eval::DemEval,
-    ortho::Ortho, osm::Osm, render::Render, tiles_build::TilesBuild, tiles_query::TilesQuery,
-    tiles_serve::TilesServe,
+    benchmark_create::BenchmarkCreate, benchmark_run::BenchmarkRun, contours::Contours, dem::Dem,
+    dem_eval::DemEval, ortho::Ortho, osm::Osm, render::Render, terrain::Terrain,
+    tiles_build::TilesBuild, tiles_query::TilesQuery, tiles_serve::TilesServe,
 };
 use super::Action;
 
@@ -26,7 +26,7 @@ struct Entry {
 }
 
 /// The tools in the order the list shows them.
-const TOOLS: [Entry; 10] = [
+const TOOLS: [Entry; 12] = [
     Entry {
         command: "render",
         about: "Render a map to an image (PNG, JPEG, TIFF, BMP) or to SVG",
@@ -41,6 +41,16 @@ const TOOLS: [Entry; 10] = [
         command: "ortho",
         about: "Add a map's aerial orthophoto to it as a template",
         open: || Box::new(Ortho::new()),
+    },
+    Entry {
+        command: "terrain",
+        about: "Download a map's terrain model (DTM) as an elevation GeoTIFF",
+        open: || Box::new(Terrain::new()),
+    },
+    Entry {
+        command: "contours",
+        about: "Draw a terrain model's contour lines into a map",
+        open: || Box::new(Contours::new()),
     },
     Entry {
         command: "dem",

@@ -11,6 +11,8 @@
 //! mauro tiles build      convert maps into a MOT archive (a tiled world map)
 //! mauro tiles query      list what a MOT archive holds around a place
 //! mauro tiles serve      serve a MOT archive as a slippy map in a browser
+//! mauro terrain          download a map's terrain model (DTM) as an elevation GeoTIFF
+//! mauro contours         draw a terrain model's contour lines into a map
 //! ```
 //!
 //! Each subcommand is documented in its own module, exit codes included;
@@ -25,11 +27,13 @@
 
 mod benchmark_create;
 mod benchmark_run;
+mod contours;
 mod dem;
 mod dem_eval;
 mod ortho;
 mod osm;
 mod render;
+mod terrain;
 mod tiles_build;
 mod tiles_query;
 mod tiles_serve;
@@ -69,6 +73,8 @@ enum Cmd {
     /// Keeps maps in, and reads them back from, a MOT archive: a tiled world map.
     #[command(subcommand)]
     Tiles(TilesCmd),
+    Terrain(terrain::Args),
+    Contours(contours::Args),
 }
 
 #[derive(Subcommand)]
@@ -121,5 +127,7 @@ fn main() -> ExitCode {
         Cmd::Tiles(TilesCmd::Build(args)) => tiles_build::main(args),
         Cmd::Tiles(TilesCmd::Query(args)) => tiles_query::main(args),
         Cmd::Tiles(TilesCmd::Serve(args)) => tiles_serve::main(args),
+        Cmd::Terrain(args) => terrain::main(args),
+        Cmd::Contours(args) => contours::main(args),
     }
 }

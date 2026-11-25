@@ -35,7 +35,7 @@ differently.
 | Contour geometry | `geo`, `geo-svg` | Polygon buffering and point-in-polygon for `mauro dem`; `geo-svg` draws its `--create_svg` diagnostics. |
 | Scratch space | `tempfile` | The temporary folder a benchmark archive is unpacked into. |
 | Terminal interface | `ratatui` (with its `crossterm`) | The interface a bare `mauro` opens in a terminal. Native-only like `ureq`, and only the binary uses it. |
-| HTTP | `ureq` | `mauro ortho`'s downloads from a mapping agency's WMS: blocking, rustls. Not built for wasm, and never used by the library itself. |
+| HTTP | `ureq` | `mauro ortho`'s and `mauro terrain`'s downloads from a mapping agency's WMS or an elevation server: blocking, rustls. Not built for wasm, and never used by the library itself. |
 
 `fontdb` + `rustybuzz` + `ttf-parser` + `tiny-skia` is the same pipeline
 [resvg](https://github.com/RazrFalcon/resvg) uses, which is what made text
@@ -131,12 +131,15 @@ one file per step; read that document first.
 | `mot_render.rs` | Draws a MOT tile with the crate's renderer: turns its objects back into a `Map` with the ISOM symbols, in paper millimetres at the scale asked for (a Mercator meter is `1 / cos(latitude)` ground meters, at the latitude of the tile holding the data, so every view of it is on one paper), every fill pattern laid out from the object's pattern origin and turned with the map, and paints the window of the tile asked for, which may be a part of it (overzoom), and the coverage areas (tinted or only outlined, the edges a tile cut not drawn); `coverage_mask` and `composite` stack layers by priority, each hiding the ones below inside its coverage. |
 | `mot_archive.rs` | MOT tiles in a PMTiles v3 archive (the `pmtiles` crate, gzip per tile, the layer's symbol set, grid, zoom range and the file each coverage came from in the metadata), and reading a tile or a box back. Native only. |
 
-### Orthophotos
+### Orthophotos and terrain
 
 | File | Contents |
 | --- | --- |
 | `orthophoto.rs` | What an orthophoto WMS is asked for: a map's place in degrees, the CRS to ask in (the map's own, else Web Mercator or WGS84), its footprint there, the north-up pixel grid and its tiles, `GetMap`/`GetCapabilities` URLs (WMS 1.1.1 or 1.3.0), capabilities parsing, the coverage test, the world file. No network access. |
 | `orthophoto_services.rs` | The hand-checked list of open orthophoto WMS services across Europe, best first. |
+| `terrain.rs` | What an elevation server is asked for: `exportImage` (ArcGIS) and `GetCoverage` (WCS 2.0.1) requests in the map's own CRS, the axis labels a WCS may want, the tile size, reading a server's error, and the elevation raster the tiles are resampled into (through each tile's own georeferencing) and written out as a float GeoTIFF. No network access. |
+| `terrain_services.rs` | The hand-checked list of open elevation services (Emilia-Romagna's LiDAR surveys and 5 m DTM, INGV's TINITALY), best first. |
+| `contour_lines.rs` | Contour lines from an elevation raster (`mauro contours`): a no-data-aware Gaussian blur, the levels and which are index contours or form lines, marching squares chained into open and closed lines, Douglas–Peucker, the map's contour symbols by code, and the lines added to a Mapper file as a map part of their own by editing its text. |
 | `image_template.rs` | Adds a georeferenced image to a Mapper file as its bottom-most template, by editing the file's text: the template list's `count` and `first_front_template`, and the saved view's `<ref template>` indices. |
 
 ### Binaries
@@ -155,6 +158,7 @@ comment:
 | `bin/mauro/dem_eval.rs` | `mauro dem-eval`: scores a predicted DEM against a ground truth. |
 | `bin/mauro/osm.rs` | `mauro osm`: converts an `.osm` file, or the data of an area downloaded from the Overpass API (`--download`, over `ureq`), into an `.omap`, drawn to ISSprOM (the default), ISOM or carto (`--standard`). |
 | `bin/mauro/ortho.rs` | `mauro ortho`: downloads a map's orthophoto tile by tile and adds it to the map as a template. |
+| `bin/mauro/terrain.rs` | `mauro terrain`: probes the services covering a map, downloads the best one's elevations tile by tile and writes them as one GeoTIFF. |
 | `bin/mauro/tiles_build.rs` | Converts maps into a MOT archive. |
 | `bin/mauro/tiles_query.rs` | Lists the objects of a MOT archive around a place, by symbol. |
 | `bin/mauro/tiles_serve.rs`, `bin/mauro/tiles_serve.html` | A std-only HTTP server for one or more MOT archives (layers, highest priority first), drawing and stacking tiles on request with `mot_render`, and the one-page slippy-map viewer it serves. |

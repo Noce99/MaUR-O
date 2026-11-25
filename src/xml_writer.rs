@@ -163,6 +163,15 @@ fn native(mm: f64) -> i64 {
     crate::geometry::qround(mm * 1000.0) as i64
 }
 
+/// One object, as Mapper's `Object::save()` writes it: an `<object>`
+/// element, to go inside a part's `<objects>`. Its rotation is written where
+/// it has one and `rotatable` says the symbol can be turned.
+pub fn object_element(object: &Object, rotatable: bool) -> String {
+    let mut out = String::new();
+    write_object(&mut out, object, rotatable);
+    out
+}
+
 /// One object, as `Object::save()` writes it.
 fn write_object(out: &mut String, object: &Object, rotatable: bool) {
     let kind = match object.kind {

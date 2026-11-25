@@ -50,7 +50,11 @@
 //! world *under* a map: [`orthophoto`] says which aerial photo of a map's
 //! ground to ask which WMS for ([`orthophoto_services`] lists them, across
 //! Europe), and [`image_template`] adds the
-//! downloaded image to the map file as the template a mapper draws over.
+//! downloaded image to the map file as the template a mapper draws over;
+//! [`terrain`] says which elevation model of its ground to ask which server
+//! for ([`terrain_services`] lists them: LiDAR surveys, a national DTM), and
+//! writes the downloaded tiles out as one elevation GeoTIFF, whose contour
+//! lines [`contour_lines`] draws into the map.
 //!
 //! # A map of the world
 //!
@@ -128,6 +132,7 @@ pub mod archive_info;
 pub mod bundle;
 pub mod bus;
 pub mod contour_geometry;
+pub mod contour_lines;
 pub mod contour_raster;
 pub mod contour_symbols;
 pub mod contours_to_raster_config;
@@ -179,6 +184,8 @@ pub mod step4_elevation;
 pub mod step5_elevation_raster;
 pub mod step5_gravity_raster;
 pub mod svg;
+pub mod terrain;
+pub mod terrain_services;
 pub mod text;
 pub mod validate;
 pub mod xml_reader;

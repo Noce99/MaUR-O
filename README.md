@@ -31,6 +31,13 @@ It also ships tools that go beyond drawing a map:
 - **`mauro ortho`** downloads the aerial orthophoto of a map's ground from
   a national or regional mapping agency (about fifty open services across
   Europe) and adds it to the map as a georeferenced template;
+- **`mauro terrain`** downloads the terrain model (DTM) of a map's ground —
+  Emilia-Romagna's 0.5 m LiDAR surveys, or 10 m for all of Italy — as an
+  elevation GeoTIFF in the map's own CRS, the ground truth `mauro dem-eval`
+  scores `mauro dem` against;
+- **`mauro contours`** draws that terrain model's contour lines into the map,
+  at a given equidistance, in blue copies of the map's own contour, index
+  contour and form line symbols;
 - **`mauro tiles build`**, **`mauro tiles query`** and **`mauro tiles serve`** keep maps in, read
   them back from, and show on a web page, a MOT archive: a tiled, compact vector format meant to hold every map
   of the world as one map (a draft, see `mds/MOT-Format.md`).
@@ -54,6 +61,8 @@ together.
   - [`mauro dem-eval`](#mauro-dem-eval)
   - [`mauro osm`](#mauro-osm)
   - [`mauro ortho`](#mauro-ortho)
+  - [`mauro terrain`](#mauro-terrain)
+  - [`mauro contours`](#mauro-contours)
   - [`mauro tiles build`](#mauro-tiles-build)
   - [`mauro tiles query`](#mauro-tiles-query)
   - [`mauro tiles serve`](#mauro-tiles-serve)
@@ -97,6 +106,8 @@ tool:
 | [`mauro dem-eval`](#mauro-dem-eval) | Scores a predicted elevation GeoTIFF against a ground-truth one. |
 | [`mauro osm`](#mauro-osm) | Converts OpenStreetMap data into a Mapper map, drawn to ISSprOM, ISOM or openstreetmap.org's look. |
 | [`mauro ortho`](#mauro-ortho) | Adds the aerial orthophoto of a map's ground to it as a template. |
+| [`mauro terrain`](#mauro-terrain) | Downloads the terrain model (DTM) of a map's ground as an elevation GeoTIFF. |
+| [`mauro contours`](#mauro-contours) | Draws a terrain model's contour lines into a map, at a given equidistance. |
 | [`mauro tiles build`](#mauro-tiles-build) | Converts maps into a MOT archive (tiled world map, in PMTiles). |
 | [`mauro tiles query`](#mauro-tiles-query) | Lists the objects of a MOT archive around a place, by symbol. |
 | [`mauro tiles serve`](#mauro-tiles-serve) | Serves a MOT archive as a slippy map to look at in a browser, drawn with the crate's renderer. |
@@ -165,8 +176,8 @@ the form, what can be known before running:
   options change;
 - `osm` measures the area asked for, against the download limit, and the
   scale the map comes out at;
-- `ortho` finds where the map is on the earth, and which services cover it,
-  to choose among;
+- `ortho` and `terrain` find where the map is on the earth, and which
+  services cover it, to choose among;
 - `dem` reads the map; `benchmark run` reads the archive: how many maps and
   references it holds, and what they were drawn at.
 
@@ -860,6 +871,140 @@ otherwise.
 | 1 | Bad usage. |
 | 2 | The archive cannot be read, or holds another symbol set. |
 | 4 | The address cannot be used. |
+
+### `mauro terrain`
+
+Downloads the terrain model (DTM: the bare ground, without trees or
+buildings) of the ground a map covers, as an elevation GeoTIFF in the map's
+own CRS.
+
+```
+mauro terrain [--service ID] [--pixel-size M] [--margin M] [--output FILE] <map-file>
+mauro terrain --list-services
+```
+
+The elevations come from open servers (no key, no account), each checked by
+hand the way `mauro ortho`'s are. The service is picked by where the map is:
+the first in `--list-services`'s order with elevations of the whole map.
+Finer models come before coarser ones and newer surveys before older ones.
+`--service` picks one by id instead.
+
+| Id | Pixel | Covers |
+| --- | --- | --- |
+| `it-er-lidar-2025-26` | 0.5 m | Emilia-Romagna's 2025–26 LiDAR survey (under way) |
+| `it-modena-2024` | 0.5 m | Modena (municipality), LiDAR |
+| `it-er-lidar-2023-24` | 0.5 m | Emilia-Romagna's 2023–24 LiDAR survey, about half the region |
+| `it-bologna-2023` | 0.5 m | Bologna (municipality), LiDAR |
+| `it-er-lidar-2022` | 0.5 m | Emilia-Romagna's 2022 LiDAR survey |
+| `it-er-dtm-5m` | 5 m | All of Emilia-Romagna |
+| `it-tinitaly` | 10 m | All of Italy (INGV's TINITALY 1.1) |
+
+Emilia-Romagna's models come from the region's ArcGIS server (`exportImage`)
+and TINITALY from INGV's WCS (`GetCoverage`). Both reproject to the map's
+CRS themselves. The region's LiDAR surveys are a patchwork: where none covers
+all of a map, the tool says which ones cover how much of it, falls back to
+the 5 m model, and `--service` downloads a partial one anyway (no data
+where it has none). Left out on purpose: the region's narrow river-corridor
+surveys, and the national 1 m LiDAR its server also offers, which is
+licensed for institutional use only.
+
+The map may be a Mapper `.omap`/`.xmap` or an OCAD `.ocd`, georeferenced in
+a projected CRS with an EPSG code. The area downloaded is the box around the
+map's objects, `--margin` meters wider on every side, north-up in the map's
+CRS. The GeoTIFF has one band of 32-bit float elevations in meters, `-9999`
+(its `GDAL_NODATA`) where there are none, deflate-compressed, with plain
+`ModelPixelScale`/`ModelTiepoint` georeferencing that every GIS reads. Since
+it is in the same CRS as `mauro dem`'s output, `mauro dem-eval` can score
+one against the other directly.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--service` | the best for the map's place | Which service to download from, by id. |
+| `--list-services` | | Lists every service, best first, and exits. |
+| `--pixel-size` | the model's own | The raster's ground resolution, in meters. |
+| `--margin` | `50` | How far beyond the map's objects to download, in meters. |
+| `--output`, `-o` | `<map>_<service id>.tif` | Where to write the GeoTIFF, beside the map by default. |
+
+Tiles of up to 2000 × 2000 pixels are fetched four at a time. The raster is
+held in memory whole, so it may have at most 80 megapixels: about
+4.5 × 4.5 km at 0.5 m. A larger area is turned away with the `--pixel-size`
+that would fit. At 0.5 m, a square kilometre takes about 15 seconds.
+
+```bash
+mauro terrain casalecchio.omap   # writes casalecchio_it-er-lidar-2023-24.tif (or whichever covers it)
+mauro dem casalecchio.omap && mauro dem-eval casalecchio_it-er-lidar-2023-24.tif <dem output>.tif
+```
+
+The elevations belong to whoever serves them, and the tool prints who to
+credit: the region of Emilia-Romagna's models are CC BY 4.0 according to its
+catalogue, and TINITALY is CC BY 4.0, to be cited as Tarquini et al. (2023),
+doi:10.13127/tinitaly/1.1.
+
+Exit codes: `0` success, `1` a usage error (an area too large for one
+raster at that pixel size included), `2` the map could not be read, `3` the
+map is not georeferenced in a projected CRS with an EPSG code, or has no
+objects, `4` the GeoTIFF could not be written, `5` no service has
+elevations of the map's ground, `6` the service could not be reached or
+answered with something other than elevations.
+
+### `mauro contours`
+
+Draws the contour lines of a terrain model into a map, at a given
+equidistance, with the map's own symbols: what `mauro dem` does, the other
+way round.
+
+```
+mauro contours [--equidistance M] [--index N] [--form-lines] [--smooth M]
+               [--min-length M] [--output FILE] <map-file> <dtm.tif>
+```
+
+The terrain model is an elevation GeoTIFF in the map's own CRS, such as the
+one `mauro terrain` downloads for it; one in another CRS is turned away. The
+map may be a Mapper `.omap`/`.xmap` or an OCAD `.ocd`, georeferenced in a
+projected CRS with an EPSG code.
+
+Contours are drawn at multiples of the equidistance with the map's contour
+symbol (`101`), every `--index`th of them, counted from 0 m, with its index
+contour (`102`), and with `--form-lines` a form line (`103`) halfway between
+two contours. A map without the symbol a line needs is turned away; a map
+with no index contour symbol takes `--index 0`. The model is blurred first
+(a Gaussian, `--smooth` meters wide), so a LiDAR survey's every furrow does
+not become a wiggle, then traced by marching squares; lines end where the
+model has no elevations, and lines shorter than `--min-length` are left out.
+
+The lines are drawn in blue, so they can be told from the map's own
+contours. The map gets a colour named `generated_contours`, just above the
+one its contours are drawn in, and a blue copy of each contour symbol the
+lines need, with the same widths, dashes and code: `generated_contours`,
+`generated_index_contours`, `generated_form_lines`. A later run reuses them.
+
+The lines go into a map part of their own, `DTM contours, 5 m` (after the
+equidistance), so they can be compared with the map's own contours, hidden
+or deleted in one go. Running again at the same equidistance replaces that
+part. Nothing else in the map changes: it is edited as text, like `mauro
+ortho` adds its template. The map is written beside the original as
+`<map>_contours.omap` unless `--output` names another `.omap` or `.xmap`,
+which may be the map itself.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--equidistance`, `-e` | `5` | The vertical distance between two contours, in meters. |
+| `--index` | `5` | Every how many contours one is an index contour; `0` for none. |
+| `--form-lines` | | Draws form lines halfway between the contours. |
+| `--smooth` | `2` | The blur's standard deviation, in meters on the ground; `0` for none. |
+| `--min-length` | `20` | The shortest line drawn, in meters on the ground. |
+| `--output`, `-o` | `<map>_contours.omap` | Where to write the map (`.omap` or `.xmap`). |
+
+```bash
+mauro terrain forest.omap   # writes forest_it-er-lidar-2023-24.tif (or whichever covers it)
+mauro contours forest.omap forest_it-er-lidar-2023-24.tif --equidistance 2.5 --form-lines
+```
+
+Exit codes: `0` success, `1` a usage error (an output that is not an
+`.omap` or `.xmap` file included), `2` the map could not be read, `3` the map
+is not georeferenced in a projected CRS with an EPSG code, or has no symbol
+for a line it needs, `4` the terrain model could not be read, is not in the
+map's CRS, or has no elevations, `5` the map could not be written.
 
 ## Using it as a library
 

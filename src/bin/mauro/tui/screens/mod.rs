@@ -4,11 +4,13 @@
 
 pub mod benchmark_create;
 pub mod benchmark_run;
+pub mod contours;
 pub mod dem;
 pub mod dem_eval;
 pub mod ortho;
 pub mod osm;
 pub mod render;
+pub mod terrain;
 pub mod tiles_build;
 pub mod tiles_query;
 pub mod tiles_serve;

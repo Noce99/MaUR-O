@@ -23,6 +23,7 @@
 //! [`evaluate`] shifts the prediction by the one constant that minimizes its
 //! mean squared error against the ground truth before scoring it at all.
 
+use std::io::{Read, Seek};
 use std::path::Path;
 
 use tiff::decoder::{Decoder, DecodingResult};
@@ -173,6 +174,13 @@ impl GeoRaster {
             Some(v)
         }
     }
+
+    /// The value at world coordinates `(x, y)`, bilinearly interpolated
+    /// between the four nearest pixel centres; `None` outside the raster or
+    /// where one of them has no data.
+    pub fn sample(&self, x: f64, y: f64) -> Option<f64> {
+        bilinear_sample(self, x, y)
+    }
 }
 
 fn decoding_result_to_f64(result: DecodingResult) -> Result<Vec<f64>, String> {
@@ -191,7 +199,7 @@ fn decoding_result_to_f64(result: DecodingResult) -> Result<Vec<f64>, String> {
     })
 }
 
-fn read_nodata(decoder: &mut Decoder<std::fs::File>) -> Result<Option<f64>, String> {
+fn read_nodata<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<Option<f64>, String> {
     match decoder.find_tag(Tag::Unknown(GDAL_NODATA_TAG)) {
         Ok(Some(value)) => {
             let text = value.into_string().map_err(|e| e.to_string())?;
@@ -212,7 +220,7 @@ fn read_nodata(decoder: &mut Decoder<std::fs::File>) -> Result<Option<f64>, Stri
 /// real-world DEM exports -- SRTM, LiDAR-derived rasters, GIS software in
 /// general -- almost always carry instead, assuming a single tiepoint;
 /// always axis-aligned, since that pair can't express a rotation at all).
-fn read_transform(decoder: &mut Decoder<std::fs::File>) -> Result<AffineTransform, String> {
+fn read_transform<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<AffineTransform, String> {
     if let Some(value) = decoder
         .find_tag(Tag::Unknown(MODEL_TRANSFORMATION_TAG))
         .map_err(|e| e.to_string())?
@@ -275,7 +283,7 @@ fn read_transform(decoder: &mut Decoder<std::fs::File>) -> Result<AffineTransfor
     })
 }
 
-fn read_crs(decoder: &mut Decoder<std::fs::File>) -> Result<CrsKey, String> {
+fn read_crs<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<CrsKey, String> {
     match decoder.find_tag(Tag::Unknown(GEO_KEY_DIRECTORY_TAG)) {
         Ok(Some(value)) => {
             let keys = value.into_u16_vec().map_err(|e| e.to_string())?;
@@ -284,6 +292,47 @@ fn read_crs(decoder: &mut Decoder<std::fs::File>) -> Result<CrsKey, String> {
         Ok(None) => Ok(CrsKey::Unspecified),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Every pixel value of the image, row by row: all at once, or, where the
+/// file is *sparse* -- some of its tiles or strips have no bytes at all,
+/// which the TIFF spec allows for chunks with nothing in them, and ArcGIS
+/// writes wherever a raster has no data -- chunk by chunk, `NaN` for the
+/// empty ones.
+fn read_values<R: Read + Seek>(decoder: &mut Decoder<R>, width: usize) -> Result<Vec<f64>, String> {
+    let counts_tag = match decoder.get_chunk_type() {
+        tiff::decoder::ChunkType::Tile => Tag::TileByteCounts,
+        tiff::decoder::ChunkType::Strip => Tag::StripByteCounts,
+    };
+    let counts = decoder
+        .get_tag_u64_vec(counts_tag)
+        .map_err(|e| e.to_string())?;
+    if !counts.contains(&0) {
+        let image = decoder.read_image().map_err(|e| e.to_string())?;
+        return decoding_result_to_f64(image);
+    }
+    let (_, height) = decoder.dimensions().map_err(|e| e.to_string())?;
+    let mut values = vec![f64::NAN; width * height as usize];
+    let (chunk_width, chunk_height) = decoder.chunk_dimensions();
+    let across = width.div_ceil(chunk_width as usize).max(1);
+    for (index, &bytes) in counts.iter().enumerate() {
+        if bytes == 0 {
+            continue;
+        }
+        let index32 = u32::try_from(index).map_err(|e| e.to_string())?;
+        let (data_width, data_height) = decoder.chunk_data_dimensions(index32);
+        let chunk =
+            decoding_result_to_f64(decoder.read_chunk(index32).map_err(|e| e.to_string())?)?;
+        let x0 = (index % across) * chunk_width as usize;
+        let y0 = (index / across) * chunk_height as usize;
+        for row in 0..data_height as usize {
+            let start = (y0 + row) * width + x0;
+            let source = row * data_width as usize;
+            values[start..start + data_width as usize]
+                .copy_from_slice(&chunk[source..source + data_width as usize]);
+        }
+    }
+    Ok(values)
 }
 
 /// Reads `path` as a single-band georeferenced DEM: its pixel values, its
@@ -296,38 +345,43 @@ fn read_crs(decoder: &mut Decoder<std::fs::File>) -> Result<CrsKey, String> {
 pub fn read(path: &Path) -> Result<GeoRaster, String> {
     let file =
         std::fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    let mut decoder =
-        Decoder::new(file).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    read_from(file, &path.display().to_string())
+}
+
+/// [`read`], from a TIFF already in memory (one just downloaded, say);
+/// `name` is what its errors call it.
+pub fn read_bytes(bytes: &[u8], name: &str) -> Result<GeoRaster, String> {
+    read_from(std::io::Cursor::new(bytes), name)
+}
+
+/// [`read`] from any reader; `name` is what its errors call it.
+fn read_from<R: Read + Seek>(reader: R, name: &str) -> Result<GeoRaster, String> {
+    let mut decoder = Decoder::new(reader).map_err(|e| format!("cannot read {name}: {e}"))?;
 
     let (width, height) = decoder
         .dimensions()
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        .map_err(|e| format!("cannot read {name}: {e}"))?;
     let (width, height) = (width as usize, height as usize);
 
     match decoder.colortype() {
         Ok(ColorType::Gray(_)) => {}
         Ok(other) => {
             return Err(format!(
-                "{}: expected a single-band DEM, found colortype {other:?}",
-                path.display()
+                "{name}: expected a single-band DEM, found colortype {other:?}"
             ))
         }
-        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        Err(e) => return Err(format!("cannot read {name}: {e}")),
     }
 
-    let nodata = read_nodata(&mut decoder).map_err(|e| format!("{}: {e}", path.display()))?;
-    let transform = read_transform(&mut decoder).map_err(|e| format!("{}: {e}", path.display()))?;
-    let crs = read_crs(&mut decoder).map_err(|e| format!("{}: {e}", path.display()))?;
+    let nodata = read_nodata(&mut decoder).map_err(|e| format!("{name}: {e}"))?;
+    let transform = read_transform(&mut decoder).map_err(|e| format!("{name}: {e}"))?;
+    let crs = read_crs(&mut decoder).map_err(|e| format!("{name}: {e}"))?;
 
-    let image = decoder
-        .read_image()
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut values =
-        decoding_result_to_f64(image).map_err(|e| format!("{}: {e}", path.display()))?;
+        read_values(&mut decoder, width).map_err(|e| format!("cannot read {name}: {e}"))?;
     if values.len() != width * height {
         return Err(format!(
-            "{}: expected {} pixel(s), decoded {}",
-            path.display(),
+            "{name}: expected {} pixel(s), decoded {}",
             width * height,
             values.len()
         ));
@@ -885,6 +939,20 @@ mod tests {
                 row_y: -5.0,
             }
         );
+    }
+
+    /// What Emilia-Romagna's ArcGIS server sent for a 2000-pixel box its
+    /// survey has nothing of: 256 tiles of no bytes at all, which a plain
+    /// read of the whole image fails on.
+    #[test]
+    fn reads_a_sparse_geotiff_as_no_data() {
+        let bytes = include_bytes!("../tests/data/arcgis_sparse.tif");
+        let g = read_bytes(bytes, "arcgis_sparse.tif").unwrap();
+        assert_eq!((g.width, g.height), (2000, 2000));
+        assert_eq!(g.values.len(), 2000 * 2000);
+        assert!(g.values.iter().all(|v| v.is_nan()));
+        assert_eq!(g.crs, CrsKey::Projected(7791));
+        assert_eq!(g.transform.pixel_to_world(0.0, 0.0), (682000.0, 4925000.0));
     }
 
     #[test]

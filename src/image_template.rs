@@ -176,20 +176,20 @@ fn shift_refs(body: &str) -> String {
 }
 
 /// Where an element is in a document's text.
-struct Element {
+pub(crate) struct Element {
     /// Its opening tag's `<`.
-    start: usize,
+    pub(crate) start: usize,
     /// Just past its opening tag's `>`.
-    open_end: usize,
+    pub(crate) open_end: usize,
     /// Its closing tag's `<`; `None` for a self-closing `<name .../>`.
-    end: Option<usize>,
+    pub(crate) end: Option<usize>,
 }
 
 /// The first `<name>` element at or after `from`. Not a general XML parser:
 /// it relies on a `<` in a Mapper file only ever starting a tag (text and
 /// attribute values have theirs escaped) and on the element not nesting
 /// inside itself, both true of `templates` and `map_view`.
-fn find_element(xml: &str, name: &str, from: usize) -> Option<Element> {
+pub(crate) fn find_element(xml: &str, name: &str, from: usize) -> Option<Element> {
     let opening = format!("<{name}");
     let mut search = from;
     let start = loop {
@@ -217,7 +217,7 @@ fn find_element(xml: &str, name: &str, from: usize) -> Option<Element> {
 }
 
 /// The value of attribute `name` in the opening tag `tag`.
-fn attr<'t>(tag: &'t str, name: &str) -> Option<&'t str> {
+pub(crate) fn attr<'t>(tag: &'t str, name: &str) -> Option<&'t str> {
     let key = format!(" {name}=\"");
     let start = tag.find(&key)? + key.len();
     let len = tag[start..].find('"')?;
@@ -226,7 +226,7 @@ fn attr<'t>(tag: &'t str, name: &str) -> Option<&'t str> {
 
 /// `tag` with attribute `name` set to `value`: replaced where it is there,
 /// added at the end where it is not.
-fn set_attr(tag: &str, name: &str, value: &str) -> String {
+pub(crate) fn set_attr(tag: &str, name: &str, value: &str) -> String {
     let key = format!(" {name}=\"");
     if let Some(at) = tag.find(&key) {
         let start = at + key.len();
@@ -242,7 +242,7 @@ fn set_attr(tag: &str, name: &str, value: &str) -> String {
 }
 
 /// `text` safe inside a double-quoted attribute.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

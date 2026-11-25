@@ -197,6 +197,8 @@ mod tests {
             "mauro render",
             "mauro osm",
             "mauro ortho",
+            "mauro terrain",
+            "mauro contours",
             "mauro dem",
             "mauro dem-eval",
             "mauro benchmark create",
