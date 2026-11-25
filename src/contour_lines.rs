@@ -27,6 +27,13 @@
 //! [`Options::min_length`] are left out: closed ones that short are the
 //! blur's leftovers, not knolls a map would show.
 //!
+//! They are drawn in blue, so they can be told from the map's own
+//! contours: [`add_generated_symbols`] gives the map a colour named
+//! [`GENERATED`], just above the one its contours are drawn in, and a copy
+//! of each contour symbol the lines need in it (`generated_contours`,
+//! `generated_index_contours`, `generated_form_lines`): the same widths and
+//! dashes, the same code, another colour.
+//!
 //! [`add_contour_part`] puts them into a map file as a part of their own,
 //! by editing the file's text (like [`crate::image_template`], so nothing
 //! Mapper keeps that [`crate::map`] does not is lost), and replaces a part
@@ -40,8 +47,11 @@ use geo::Coord as GeoCoord;
 use crate::dem_geo_tiff_evaluator::GeoRaster;
 use crate::geotiff::projected_to_ground;
 use crate::image_template::{attr, escape, find_element, set_attr};
-use crate::map::{coord_flag, Coord, Georeferencing, Map, Object, ObjectKind, PathObject, Symbol};
-use crate::xml_writer::object_element;
+use crate::map::{
+    coord_flag, Color, Coord, Georeferencing, Map, Object, ObjectKind, PathObject, Symbol,
+};
+use crate::xml_reader::read_fragments_str;
+use crate::xml_writer::{color_element, object_element};
 
 /// How far a simplified line may stray from the traced one, in mm on the
 /// paper: a fifth of an ISOM contour's width.
@@ -451,21 +461,9 @@ pub fn contour_objects(
     let levels = levels(low, high, options);
     let mut ids = Vec::with_capacity(levels.len());
     for level in &levels {
-        let id = symbols.for_kind(level.kind).ok_or_else(|| {
-            format!(
-                "the map has no {} symbol ({})",
-                match level.kind {
-                    Kind::Contour => "contour",
-                    Kind::Index => "index contour",
-                    Kind::FormLine => "form line",
-                },
-                match level.kind {
-                    Kind::Contour => "101",
-                    Kind::Index => "102",
-                    Kind::FormLine => "103",
-                }
-            )
-        })?;
+        let id = symbols
+            .for_kind(level.kind)
+            .ok_or_else(|| missing_symbol(level.kind))?;
         ids.push(id);
     }
     let elevations: Vec<f64> = levels.iter().map(|l| l.elevation).collect();
@@ -512,6 +510,267 @@ pub fn contour_objects(
         objects.push(object);
     }
     Ok(objects)
+}
+
+/// The name of the colour the generated lines are drawn in, and of the
+/// contour symbol drawn in it.
+pub const GENERATED: &str = "generated_contours";
+
+/// The colour the generated lines are drawn in: a blue far from water's
+/// cyan.
+pub const GENERATED_RGB: (f32, f32, f32) = (0.0, 0.4, 1.0);
+
+impl Kind {
+    /// The map's code for it.
+    pub fn code(self) -> &'static str {
+        match self {
+            Kind::Contour => "101",
+            Kind::Index => "102",
+            Kind::FormLine => "103",
+        }
+    }
+
+    /// What a map calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Contour => "contour",
+            Kind::Index => "index contour",
+            Kind::FormLine => "form line",
+        }
+    }
+
+    /// The name of the blue copy of its symbol.
+    pub fn generated_name(self) -> &'static str {
+        match self {
+            Kind::Contour => GENERATED,
+            Kind::Index => "generated_index_contours",
+            Kind::FormLine => "generated_form_lines",
+        }
+    }
+}
+
+/// The kinds of line `options` may draw.
+pub fn kinds(options: &Options) -> Vec<Kind> {
+    let mut kinds = vec![Kind::Contour];
+    if options.index_every > 0 {
+        kinds.push(Kind::Index);
+    }
+    if options.form_lines {
+        kinds.push(Kind::FormLine);
+    }
+    kinds
+}
+
+/// Why a map cannot draw a line of this kind.
+fn missing_symbol(kind: Kind) -> String {
+    format!("the map has no {} symbol ({})", kind.name(), kind.code())
+}
+
+impl ContourSymbols {
+    fn set(&mut self, kind: Kind, id: i32) {
+        match kind {
+            Kind::Contour => self.contour = Some(id),
+            Kind::Index => self.index = Some(id),
+            Kind::FormLine => self.form_line = Some(id),
+        }
+    }
+}
+
+/// The colour attributes a Mapper file refers to a colour by its priority
+/// with: a symbol's, and a spot colour's components'.
+const COLOR_REFERENCES: [&str; 4] = ["color", "inner_color", "outer_color", "spotcolor"];
+
+/// `text` with every attribute in `names` of every tag in it (text between
+/// tags left alone) that holds an integer passed through `change`: replaced
+/// where `change` gives another value.
+fn rewrite_tags(text: &str, names: &[&str], mut change: impl FnMut(i32) -> Option<i32>) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut rest = text;
+    while let Some(at) = rest.find('<') {
+        let end = rest[at..].find('>').map_or(rest.len(), |e| at + e + 1);
+        out.push_str(&rest[..at]);
+        let mut tag = rest[at..end].to_string();
+        for name in names {
+            if let Some(changed) = attr(&tag, name)
+                .and_then(|v| v.parse::<i32>().ok())
+                .and_then(&mut change)
+            {
+                tag = set_attr(&tag, name, &changed.to_string());
+            }
+        }
+        out.push_str(&tag);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The colours a symbol's text refers to.
+fn colors_of(text: &str) -> Vec<i32> {
+    let mut colors = Vec::new();
+    rewrite_tags(text, &COLOR_REFERENCES[..3], |c| {
+        colors.push(c);
+        None
+    });
+    colors
+}
+
+/// `xml` with a colour named [`GENERATED`] at priority `at`: every colour
+/// from `at` on moves one down, and every reference to it with it.
+fn insert_color(xml: &str, at: i32) -> Result<String, String> {
+    let colors = find_element(xml, "colors", 0).ok_or("the file has no colours")?;
+    let symbols = find_element(xml, "symbols", colors.open_end).ok_or("the file has no symbols")?;
+    let region_end = symbols.end.unwrap_or(symbols.open_end);
+    let shifted = rewrite_tags(
+        &xml[colors.start..region_end],
+        &[
+            "priority",
+            "color",
+            "inner_color",
+            "outer_color",
+            "spotcolor",
+        ],
+        |p| (p >= at).then_some(p + 1),
+    );
+    let xml = format!("{}{shifted}{}", &xml[..colors.start], &xml[region_end..]);
+
+    let colors = find_element(&xml, "colors", 0).ok_or("the file has no colours")?;
+    let colors_end = colors.end.unwrap_or(colors.open_end);
+    // Before the colour now one below it, or last.
+    let mut insert = colors_end;
+    let mut from = colors.open_end;
+    while let Some(color) = find_element(&xml, "color", from) {
+        if color.start >= colors_end {
+            break;
+        }
+        let tag = &xml[color.start..color.open_end];
+        if attr(tag, "priority").and_then(|p| p.parse::<i32>().ok()) == Some(at + 1) {
+            insert = color.start;
+            break;
+        }
+        from = color.end.map_or(color.open_end, |e| e + "</color>".len());
+    }
+    let element = color_element(
+        at as usize,
+        &Color {
+            name: GENERATED.to_string(),
+            rgb: GENERATED_RGB,
+            ..Color::default()
+        },
+    );
+    let open_tag = &xml[colors.start..colors.open_end];
+    let count = attr(open_tag, "count")
+        .and_then(|c| c.parse::<u32>().ok())
+        .unwrap_or(0);
+    Ok(format!(
+        "{}{}{}{element}\n{}",
+        &xml[..colors.start],
+        set_attr(open_tag, "count", &(count + 1).to_string()),
+        &xml[colors.open_end..insert],
+        &xml[insert..]
+    ))
+}
+
+/// `xml` (a whole map file, which `map` was read from) with the blue
+/// symbols the lines `options` asks for are drawn with, and their ids.
+///
+/// Where the map has them already (named as [`Kind::generated_name`] says,
+/// from an earlier run), those; otherwise each is a copy of the map's own
+/// symbol of that kind ([`ContourSymbols::of`]), with every colour it is
+/// drawn in replaced by [`GENERATED`], added after the map's other
+/// symbols. The colour is added too where the map has none of that name,
+/// just above the topmost colour the copied symbols were drawn in, so the
+/// lines are drawn as high up as the map's own contours. An error where
+/// the map has no symbol of a kind to copy.
+pub fn add_generated_symbols(
+    xml: &str,
+    map: &Map,
+    options: &Options,
+) -> Result<(String, ContourSymbols), String> {
+    let originals = ContourSymbols::of(map);
+    let by_name = |name: &str| {
+        map.symbols
+            .iter()
+            .zip(&map.symbol_ids)
+            .find(|(symbol, _)| symbol.name() == name)
+            .map(|(_, &id)| id)
+    };
+    let mut generated = ContourSymbols {
+        contour: None,
+        index: None,
+        form_line: None,
+    };
+    let mut to_copy = Vec::new();
+    for kind in kinds(options) {
+        match by_name(kind.generated_name()) {
+            Some(id) => generated.set(kind, id),
+            None => {
+                let original = originals
+                    .for_kind(kind)
+                    .ok_or_else(|| missing_symbol(kind))?;
+                to_copy.push((kind, original));
+            }
+        }
+    }
+    if to_copy.is_empty() {
+        return Ok((xml.to_owned(), generated));
+    }
+
+    let mut xml = xml.to_owned();
+    let fragments = read_fragments_str(&xml)?;
+    let existing = fragments
+        .colors
+        .iter()
+        .find(|c| attr(&c.text, "name") == Some(GENERATED))
+        .and_then(|c| attr(&c.text, "priority")?.parse::<i32>().ok());
+    let blue = match existing {
+        Some(priority) => priority,
+        None => {
+            let topmost = to_copy
+                .iter()
+                .filter_map(|&(_, id)| fragments.symbol(id))
+                .flat_map(|f| colors_of(&f.text))
+                .filter(|&c| c >= 0)
+                .min()
+                .unwrap_or(fragments.colors.len() as i32);
+            xml = insert_color(&xml, topmost)?;
+            topmost
+        }
+    };
+
+    let fragments = read_fragments_str(&xml)?;
+    let first_id = fragments.symbols.iter().map(|f| f.id).max().unwrap_or(-1) + 1;
+    let mut copies = String::new();
+    let added = to_copy.len() as u32;
+    for (id, (kind, original)) in (first_id..).zip(to_copy) {
+        let text = &fragments
+            .symbol(original)
+            .ok_or_else(|| missing_symbol(kind))?
+            .text;
+        let blue_copy = rewrite_tags(text, &COLOR_REFERENCES[..3], |c| (c >= 0).then_some(blue));
+        let open_end = blue_copy.find('>').map_or(blue_copy.len(), |e| e + 1);
+        let open = set_attr(&blue_copy[..open_end], "id", &id.to_string());
+        let open = set_attr(&open, "name", kind.generated_name());
+        copies.push_str(&open);
+        copies.push_str(&blue_copy[open_end..]);
+        copies.push('\n');
+        generated.set(kind, id);
+    }
+
+    let symbols = find_element(&xml, "symbols", 0).ok_or("the file has no symbols")?;
+    let symbols_end = symbols.end.ok_or("the file's symbol list is empty")?;
+    let open_tag = &xml[symbols.start..symbols.open_end];
+    let count = attr(open_tag, "count")
+        .and_then(|c| c.parse::<u32>().ok())
+        .unwrap_or(0);
+    let xml = format!(
+        "{}{}{}{copies}{}",
+        &xml[..symbols.start],
+        set_attr(open_tag, "count", &(count + added).to_string()),
+        &xml[symbols.open_end..symbols_end],
+        &xml[symbols_end..]
+    );
+    Ok((xml, generated))
 }
 
 /// What [`add_contour_part`] did.
@@ -743,5 +1002,79 @@ mod tests {
         // 101.0 is the contour; 101.1, a slope line, is a point symbol.
         assert_eq!(symbols.contour, Some(0));
         assert_eq!(symbols.index, None);
+    }
+
+    /// Two colours, the second a spot colour made of the first; a contour
+    /// in the first, a border in the second, and an index contour.
+    const SYMBOLS: &str = "<map><colors count=\"2\">\n\
+         <color priority=\"0\" name=\"Black\"><spotcolors/></color>\n\
+         <color priority=\"1\" name=\"Brown\"><spotcolors><component factor=\"1\" spotcolor=\"0\"/></spotcolors></color>\n\
+         </colors><barrier><symbols count=\"3\">\n\
+         <symbol type=\"2\" id=\"0\" code=\"101\" name=\"Contour\"><description>color=\"1\"</description>\
+         <line_symbol color=\"1\" line_width=\"140\"/></symbol>\n\
+         <symbol type=\"2\" id=\"1\" code=\"102\" name=\"Index contour\"><line_symbol color=\"1\" line_width=\"250\"/></symbol>\n\
+         <symbol type=\"4\" id=\"7\" code=\"201\" name=\"Area\"><area_symbol inner_color=\"1\"/></symbol>\n\
+         </symbols><parts count=\"1\"><part name=\"p\"><objects count=\"0\"></objects></part></parts></barrier></map>";
+
+    fn with_generated(xml: &str, options: &Options) -> (String, ContourSymbols) {
+        let (map, _) = crate::xml_reader::read_xml_map_str(xml).unwrap();
+        add_generated_symbols(xml, &map, options).unwrap()
+    }
+
+    #[test]
+    fn generated_symbols_are_blue_copies_above_the_contours_colour() {
+        let (xml, ids) = with_generated(SYMBOLS, &Options::default());
+        assert_eq!(ids.contour, Some(8));
+        assert_eq!(ids.index, Some(9));
+        assert_eq!(ids.form_line, None);
+        // The blue takes the brown's place; the brown, and everything
+        // referring to it, moves one down. The black above stays.
+        assert!(xml.contains("<colors count=\"3\">"));
+        assert!(xml.contains("<color priority=\"0\" name=\"Black\">"));
+        assert!(xml.contains("<color priority=\"1\" name=\"generated_contours\""));
+        assert!(xml.contains("<color priority=\"2\" name=\"Brown\"><spotcolors><component factor=\"1\" spotcolor=\"0\"/>"));
+        assert!(xml.contains("<area_symbol inner_color=\"2\"/>"));
+        assert!(xml.contains("<symbols count=\"5\">"));
+        assert!(xml.contains(
+            "<symbol type=\"2\" id=\"8\" code=\"101\" name=\"generated_contours\">\
+             <description>color=\"1\"</description><line_symbol color=\"1\" line_width=\"140\"/>"
+        ));
+        assert!(xml.contains(
+            "<symbol type=\"2\" id=\"9\" code=\"102\" name=\"generated_index_contours\">\
+             <line_symbol color=\"1\" line_width=\"250\"/>"
+        ));
+        // The original contour is drawn in the brown still.
+        assert!(xml.contains(
+            "name=\"Contour\"><description>color=\"1\"</description><line_symbol color=\"2\""
+        ));
+        // Text is not a tag: the description is left alone.
+        assert_eq!(
+            xml.matches("<description>color=\"1\"</description>")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn generated_symbols_are_made_once() {
+        let (once, first) = with_generated(SYMBOLS, &Options::default());
+        let (twice, second) = with_generated(&once, &Options::default());
+        assert_eq!(once, twice);
+        assert_eq!(first, second);
+        // A kind asked for later gets its copy, in the colour already there.
+        let form = Options {
+            form_lines: true,
+            ..Options::default()
+        };
+        let (map, _) = crate::xml_reader::read_xml_map_str(&once).unwrap();
+        let err = add_generated_symbols(&once, &map, &form).unwrap_err();
+        assert!(err.contains("form line symbol (103)"), "{err}");
+        let no_index = Options {
+            index_every: 0,
+            ..Options::default()
+        };
+        let (_, ids) = with_generated(&once, &no_index);
+        assert_eq!(ids.contour, Some(8));
+        assert_eq!(ids.index, None);
     }
 }

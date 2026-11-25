@@ -230,7 +230,10 @@ elevation raster (`dem_geo_tiff_evaluator::read`, so in the map's CRS),
 traces it by marching squares (saddles decided by the cell's mean, lines
 ending at no-data), simplifies the lines and places them on the paper
 through `geotiff::projected_to_ground`, with the map's own symbols coded
-101/102/103 (`ContourSymbols`). `add_contour_part` puts them into the
+101/102/103 (`ContourSymbols`), or rather with blue copies of them
+(`add_generated_symbols`: a `generated_contours` colour inserted just above
+the contours' own, every colour reference in the file's tags renumbered
+past it). `add_contour_part` puts them into the
 file's text as a map part of their own (replacing one of the same name),
 with `image_template.rs`'s text helpers and `xml_writer::object_element`.
 

@@ -36,8 +36,8 @@ It also ships tools that go beyond drawing a map:
   elevation GeoTIFF in the map's own CRS, the ground truth `mauro dem-eval`
   scores `mauro dem` against;
 - **`mauro contours`** draws that terrain model's contour lines into the map,
-  at a given equidistance, with the map's own contour, index contour and
-  form line symbols.
+  at a given equidistance, in blue copies of the map's own contour, index
+  contour and form line symbols.
 
 Everything is also usable as a Rust library (`maur_o`): besides rendering, it
 covers OCAD import, course layout, runnability grids and route finding,
@@ -790,6 +790,12 @@ with no index contour symbol takes `--index 0`. The model is blurred first
 (a Gaussian, `--smooth` meters wide), so a LiDAR survey's every furrow does
 not become a wiggle, then traced by marching squares; lines end where the
 model has no elevations, and lines shorter than `--min-length` are left out.
+
+The lines are drawn in blue, so they can be told from the map's own
+contours. The map gets a colour named `generated_contours`, just above the
+one its contours are drawn in, and a blue copy of each contour symbol the
+lines need, with the same widths, dashes and code: `generated_contours`,
+`generated_index_contours`, `generated_form_lines`. A later run reuses them.
 
 The lines go into a map part of their own, `DTM contours, 5 m` (after the
 equidistance), so they can be compared with the map's own contours, hidden

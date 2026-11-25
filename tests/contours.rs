@@ -69,16 +69,23 @@ fn a_cone_is_drawn_as_rings_in_a_part_of_their_own() {
     let written = std::fs::read_to_string(&out).unwrap();
     assert!(written.contains("<parts count=\"2\""));
     assert!(written.contains("<part name=\"DTM contours, 5 m\">"));
+    // The blue goes above the map's brown, which moves down one.
+    assert!(written.contains("<colors count=\"2\""));
+    assert!(written.contains("<color priority=\"0\" name=\"generated_contours\""));
+    assert!(written.contains("<color priority=\"1\" name=\"Brown\""));
+    assert!(
+        written.contains("<symbol type=\"2\" id=\"2\" code=\"101.0\" name=\"generated_contours\">")
+    );
     // The cone is 0 m high at its edges' middles (200 m from the top), so
     // every level from 5 to 95 m is one closed ring; those below are arcs
     // across the raster's corners.
     let (map, _) = maur_o::xml_reader::read_xml_map(&out).unwrap();
-    // The map's own two contours, squares 40 and 100 m wide, come first.
+    // Drawn with the blue copy of the map's contour symbol (id 0), the
+    // map's next id; the map's own contours keep theirs.
     let rings: Vec<_> = map
         .objects
         .iter()
-        .skip(2)
-        .filter(|o| o.symbol_id == 0 && o.coords.last().unwrap().is_close_point())
+        .filter(|o| o.symbol_id == 2 && o.coords.last().unwrap().is_close_point())
         .collect();
     assert_eq!(rings.len(), 19);
     // The innermost ring (95 m) is 10 m from the top: 1 mm at 1:10000.
@@ -106,6 +113,9 @@ fn a_cone_is_drawn_as_rings_in_a_part_of_their_own() {
             .success();
         let written = std::fs::read_to_string(&out).unwrap();
         assert!(written.contains(&format!("<parts count=\"{parts}\"")));
+        // The colour and the symbol are the first run's.
+        assert!(written.contains("<colors count=\"2\""));
+        assert_eq!(written.matches("name=\"generated_contours\"").count(), 2);
     }
 }
 

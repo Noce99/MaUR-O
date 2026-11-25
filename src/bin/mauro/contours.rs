@@ -19,6 +19,14 @@
 //! (103) halfway between two contours. A map without the symbol a line
 //! needs is turned away.
 //!
+//! The lines are drawn in blue, so they can be told from the map's own
+//! contours: the map gets a colour named `generated_contours`, just above
+//! the one its contours are drawn in, and a blue copy of each of those
+//! symbols a line needs (same widths and dashes, same code), named
+//! `generated_contours`, `generated_index_contours` and
+//! `generated_form_lines`, after its other symbols. A map that has them
+//! already, from an earlier run, keeps them.
+//!
 //! The model is blurred first, by a Gaussian `--smooth` meters wide (its
 //! standard deviation, 2 by default, 0 for none), so a LiDAR survey's every
 //! furrow does not become a wiggle. Lines shorter than `--min-length`
@@ -45,7 +53,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use maur_o::contour_lines::{
-    add_contour_part, contour_objects, ContourSymbols, Options, PartAdded,
+    add_contour_part, add_generated_symbols, contour_objects, Options, PartAdded,
 };
 use maur_o::dem_geo_tiff_evaluator::{read, CrsKey};
 use maur_o::ocd::{is_ocd_file, ocd_to_omap_xml};
@@ -170,7 +178,6 @@ fn run(args: Args) -> Result<(), Failure> {
             ))
         }
     };
-    let symbols = ContourSymbols::of(&map);
 
     // The terrain model.
     let raster = read(&args.dtm).map_err(|e| fail(4, e))?;
@@ -213,7 +220,7 @@ fn run(args: Args) -> Result<(), Failure> {
         smooth: args.smooth,
         min_length: args.min_length,
     };
-    let objects = contour_objects(&raster, &georef, &symbols, &options).map_err(|e| {
+    let (xml, symbols) = add_generated_symbols(&xml, &map, &options).map_err(|e| {
         let hint = if e.contains("index contour") {
             "; --index 0 draws none"
         } else {
@@ -221,6 +228,7 @@ fn run(args: Args) -> Result<(), Failure> {
         };
         fail(3, format!("{e}{hint}"))
     })?;
+    let objects = contour_objects(&raster, &georef, &symbols, &options).map_err(|e| fail(3, e))?;
 
     let part = format!("DTM contours, {} m", args.equidistance);
     let (with_part, added) =
