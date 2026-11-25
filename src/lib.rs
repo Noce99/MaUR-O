@@ -53,7 +53,8 @@
 //! downloaded image to the map file as the template a mapper draws over;
 //! [`terrain`] says which elevation model of its ground to ask which server
 //! for ([`terrain_services`] lists them: LiDAR surveys, a national DTM), and
-//! writes the downloaded tiles out as one elevation GeoTIFF.
+//! writes the downloaded tiles out as one elevation GeoTIFF, whose contour
+//! lines [`contour_lines`] draws into the map.
 //!
 //! # From contours to elevation
 //!
@@ -120,6 +121,7 @@ pub mod archive_info;
 pub mod bundle;
 pub mod bus;
 pub mod contour_geometry;
+pub mod contour_lines;
 pub mod contour_raster;
 pub mod contour_symbols;
 pub mod contours_to_raster_config;

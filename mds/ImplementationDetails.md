@@ -132,6 +132,7 @@ one file per step; read that document first.
 | `orthophoto_services.rs` | The hand-checked list of open orthophoto WMS services across Europe, best first. |
 | `terrain.rs` | What an elevation server is asked for: `exportImage` (ArcGIS) and `GetCoverage` (WCS 2.0.1) requests in the map's own CRS, the axis labels a WCS may want, the tile size, reading a server's error, and the elevation raster the tiles are resampled into (through each tile's own georeferencing) and written out as a float GeoTIFF. No network access. |
 | `terrain_services.rs` | The hand-checked list of open elevation services (Emilia-Romagna's LiDAR surveys and 5 m DTM, INGV's TINITALY), best first. |
+| `contour_lines.rs` | Contour lines from an elevation raster (`mauro contours`): a no-data-aware Gaussian blur, the levels and which are index contours or form lines, marching squares chained into open and closed lines, Douglas–Peucker, the map's contour symbols by code, and the lines added to a Mapper file as a map part of their own by editing its text. |
 | `image_template.rs` | Adds a georeferenced image to a Mapper file as its bottom-most template, by editing the file's text: the template list's `count` and `first_front_template`, and the saved view's `<ref template>` indices. |
 
 ### Binaries

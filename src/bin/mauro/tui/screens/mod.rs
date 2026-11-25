@@ -4,6 +4,7 @@
 
 pub mod benchmark_create;
 pub mod benchmark_run;
+pub mod contours;
 pub mod dem;
 pub mod dem_eval;
 pub mod ortho;

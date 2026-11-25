@@ -9,6 +9,7 @@
 //! mauro osm              convert OpenStreetMap data into a map
 //! mauro ortho            add a map's aerial orthophoto to it as a template
 //! mauro terrain          download a map's terrain model (DTM) as an elevation GeoTIFF
+//! mauro contours         draw a terrain model's contour lines into a map
 //! ```
 //!
 //! Each subcommand is documented in its own module, exit codes included;
@@ -23,6 +24,7 @@
 
 mod benchmark_create;
 mod benchmark_run;
+mod contours;
 mod dem;
 mod dem_eval;
 mod ortho;
@@ -63,6 +65,7 @@ enum Cmd {
     Osm(osm::Args),
     Ortho(ortho::Args),
     Terrain(terrain::Args),
+    Contours(contours::Args),
 }
 
 #[derive(Subcommand)]
@@ -106,5 +109,6 @@ fn main() -> ExitCode {
         }
         Cmd::Ortho(args) => ortho::main(args),
         Cmd::Terrain(args) => terrain::main(args),
+        Cmd::Contours(args) => contours::main(args),
     }
 }

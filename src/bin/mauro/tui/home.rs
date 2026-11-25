@@ -9,8 +9,8 @@ use ratatui::Frame;
 
 use super::form::Tool;
 use super::screens::{
-    benchmark_create::BenchmarkCreate, benchmark_run::BenchmarkRun, dem::Dem, dem_eval::DemEval,
-    ortho::Ortho, osm::Osm, render::Render, terrain::Terrain,
+    benchmark_create::BenchmarkCreate, benchmark_run::BenchmarkRun, contours::Contours, dem::Dem,
+    dem_eval::DemEval, ortho::Ortho, osm::Osm, render::Render, terrain::Terrain,
 };
 use super::Action;
 
@@ -25,7 +25,7 @@ struct Entry {
 }
 
 /// The tools in the order the list shows them.
-const TOOLS: [Entry; 8] = [
+const TOOLS: [Entry; 9] = [
     Entry {
         command: "render",
         about: "Render a map to an image (PNG, JPEG, TIFF, BMP) or to SVG",
@@ -45,6 +45,11 @@ const TOOLS: [Entry; 8] = [
         command: "terrain",
         about: "Download a map's terrain model (DTM) as an elevation GeoTIFF",
         open: || Box::new(Terrain::new()),
+    },
+    Entry {
+        command: "contours",
+        about: "Draw a terrain model's contour lines into a map",
+        open: || Box::new(Contours::new()),
     },
     Entry {
         command: "dem",

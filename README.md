@@ -34,7 +34,10 @@ It also ships tools that go beyond drawing a map:
 - **`mauro terrain`** downloads the terrain model (DTM) of a map's ground —
   Emilia-Romagna's 0.5 m LiDAR surveys, or 10 m for all of Italy — as an
   elevation GeoTIFF in the map's own CRS, the ground truth `mauro dem-eval`
-  scores `mauro dem` against.
+  scores `mauro dem` against;
+- **`mauro contours`** draws that terrain model's contour lines into the map,
+  at a given equidistance, with the map's own contour, index contour and
+  form line symbols.
 
 Everything is also usable as a Rust library (`maur_o`): besides rendering, it
 covers OCAD import, course layout, runnability grids and route finding,
@@ -56,6 +59,7 @@ together.
   - [`mauro osm`](#mauro-osm)
   - [`mauro ortho`](#mauro-ortho)
   - [`mauro terrain`](#mauro-terrain)
+  - [`mauro contours`](#mauro-contours)
 - [Using it as a library](#using-it-as-a-library)
 - [Development](#development)
 - [Implementation Details](#implementation-details)
@@ -97,6 +101,7 @@ tool:
 | [`mauro osm`](#mauro-osm) | Converts OpenStreetMap data into a Mapper map, drawn to ISSprOM, ISOM or openstreetmap.org's look. |
 | [`mauro ortho`](#mauro-ortho) | Adds the aerial orthophoto of a map's ground to it as a template. |
 | [`mauro terrain`](#mauro-terrain) | Downloads the terrain model (DTM) of a map's ground as an elevation GeoTIFF. |
+| [`mauro contours`](#mauro-contours) | Draws a terrain model's contour lines into a map, at a given equidistance. |
 
 `mauro --help` lists them, and every one of them takes `--help` and
 `--version` (`mauro render --help`). `mauro` on its own, in a terminal,
@@ -760,6 +765,59 @@ map is not georeferenced in a projected CRS with an EPSG code, or has no
 objects, `4` the GeoTIFF could not be written, `5` no service has
 elevations of the map's ground, `6` the service could not be reached or
 answered with something other than elevations.
+
+### `mauro contours`
+
+Draws the contour lines of a terrain model into a map, at a given
+equidistance, with the map's own symbols: what `mauro dem` does, the other
+way round.
+
+```
+mauro contours [--equidistance M] [--index N] [--form-lines] [--smooth M]
+               [--min-length M] [--output FILE] <map-file> <dtm.tif>
+```
+
+The terrain model is an elevation GeoTIFF in the map's own CRS, such as the
+one `mauro terrain` downloads for it; one in another CRS is turned away. The
+map may be a Mapper `.omap`/`.xmap` or an OCAD `.ocd`, georeferenced in a
+projected CRS with an EPSG code.
+
+Contours are drawn at multiples of the equidistance with the map's contour
+symbol (`101`), every `--index`th of them, counted from 0 m, with its index
+contour (`102`), and with `--form-lines` a form line (`103`) halfway between
+two contours. A map without the symbol a line needs is turned away; a map
+with no index contour symbol takes `--index 0`. The model is blurred first
+(a Gaussian, `--smooth` meters wide), so a LiDAR survey's every furrow does
+not become a wiggle, then traced by marching squares; lines end where the
+model has no elevations, and lines shorter than `--min-length` are left out.
+
+The lines go into a map part of their own, `DTM contours, 5 m` (after the
+equidistance), so they can be compared with the map's own contours, hidden
+or deleted in one go. Running again at the same equidistance replaces that
+part. Nothing else in the map changes: it is edited as text, like `mauro
+ortho` adds its template. The map is written beside the original as
+`<map>_contours.omap` unless `--output` names another `.omap` or `.xmap`,
+which may be the map itself.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--equidistance`, `-e` | `5` | The vertical distance between two contours, in meters. |
+| `--index` | `5` | Every how many contours one is an index contour; `0` for none. |
+| `--form-lines` | | Draws form lines halfway between the contours. |
+| `--smooth` | `2` | The blur's standard deviation, in meters on the ground; `0` for none. |
+| `--min-length` | `20` | The shortest line drawn, in meters on the ground. |
+| `--output`, `-o` | `<map>_contours.omap` | Where to write the map (`.omap` or `.xmap`). |
+
+```bash
+mauro terrain forest.omap   # writes forest_it-er-lidar-2023-24.tif (or whichever covers it)
+mauro contours forest.omap forest_it-er-lidar-2023-24.tif --equidistance 2.5 --form-lines
+```
+
+Exit codes: `0` success, `1` a usage error (an output that is not an
+`.omap` or `.xmap` file included), `2` the map could not be read, `3` the map
+is not georeferenced in a projected CRS with an EPSG code, or has no symbol
+for a line it needs, `4` the terrain model could not be read, is not in the
+map's CRS, or has no elevations, `5` the map could not be written.
 
 ## Using it as a library
 

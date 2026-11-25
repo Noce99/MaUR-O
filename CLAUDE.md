@@ -15,7 +15,8 @@ OpenStreetMap data (plus optional GTFS transit feeds) into a Mapper map, and
 `mauro ortho` downloads the aerial orthophoto of a map's ground
 (from about fifty open national and regional WMS services across Europe)
 and adds it to the map as a template, and `mauro terrain` downloads the
-terrain model (DTM) of a map's ground as an elevation GeoTIFF. All of these
+terrain model (DTM) of a map's ground as an elevation GeoTIFF, which
+`mauro contours` draws into the map as contour lines. All of these
 are subcommands of the one binary, `mauro`.
 
 This crate is consumed by the o-mnia web app from a vendored copy (via
@@ -58,6 +59,7 @@ Cargo workspace — one crate, one binary (`mauro`) with a subcommand per tool.
 | `mauro osm` | Convert OpenStreetMap XML (a file, or downloaded for an area from the Overpass API with `--download`) into an `.omap` drawn to ISSprOM 2019 (default) or ISOM 2017-2, or (`--standard osm`, optionally with GTFS feeds) styled like openstreetmap-carto. |
 | `mauro ortho` | Download a map's aerial orthophoto from the best open WMS for its place (European national/regional agencies) and add it to the map as a georeferenced template. |
 | `mauro terrain` | Download a map's terrain model (Emilia-Romagna's LiDAR DTMs, INGV's TINITALY) as an elevation GeoTIFF in the map's own CRS — a ground truth for `mauro dem-eval`. |
+| `mauro contours` | Draw a terrain model's (a GeoTIFF in the map's CRS) contour lines into the map at a given equidistance, with its own 101/102/103 symbols, in a map part of their own. |
 
 `src/bin/mauro/main.rs` is only the dispatcher (the clap `Cli`, one module per
 subcommand, each module's `Args` and `pub fn main(args) -> ExitCode`). A usage
@@ -220,6 +222,17 @@ chunk by chunk. `terrain_services.rs` is the hand-checked list, best
 first. The binary probes each candidate with a coarse raster and takes the
 first with elevations of all of the map. Its integration tests
 (`tests/terrain.rs`) cover only the offline exit paths.
+
+### Contours from a terrain model (`mauro contours`)
+
+`contour_lines.rs` is `mauro dem` the other way round: it blurs an
+elevation raster (`dem_geo_tiff_evaluator::read`, so in the map's CRS),
+traces it by marching squares (saddles decided by the cell's mean, lines
+ending at no-data), simplifies the lines and places them on the paper
+through `geotiff::projected_to_ground`, with the map's own symbols coded
+101/102/103 (`ContourSymbols`). `add_contour_part` puts them into the
+file's text as a map part of their own (replacing one of the same name),
+with `image_template.rs`'s text helpers and `xml_writer::object_element`.
 
 ### Benchmark support modules
 
