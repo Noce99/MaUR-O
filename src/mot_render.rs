@@ -21,12 +21,13 @@
 //! paper, and a fill pattern's elements (laid out on the paper) fall in the
 //! same places in each, not a little apart across the edges between views.
 //!
-//! Every fill pattern is turned with the map and laid out from the pattern
-//! origin the tile keeps for the object, near the object (see
-//! [`crate::mot_convert`]), as Mapper lays out a rotatable one. Mapper lays a
-//! pattern which is not rotatable out from the paper's origin, square to the
-//! paper; in a tile the paper is the tile's, so it would start again at each
-//! tile's corner and lose the map's turn.
+//! Every fill pattern is laid out on the world's lattice ([`crate::mot_lattice`]):
+//! square to the UTM grid's north, or turned from it as far as the tile says the
+//! mapper turned it, from the point of the lattice nearest the middle of the view
+//! (within the object). Areas of one symbol from two maps side by side then
+//! continue into each other. The north lines (601.x) are the exception: they are
+//! laid out from the origin the tile keeps for them, turned as their map is, and
+//! [`TileRenderer::hide_north_lines`] leaves them out.
 //!
 //! Any tile of the pyramid can be drawn from the tile of a coarser or finer level
 //! that holds its ground: [`TileRenderer::render`] takes the tile with the data
@@ -50,6 +51,8 @@ use crate::map::{Coord, Map, Object, ObjectKind, PathObject, Point, Symbol, Text
 use crate::mot::{
     ground_per_mercator, lat_lon, node_flag, Shape, Tile, TileId, TileObject, COVERAGE_SYMBOL,
 };
+use crate::mot_convert::fill_patterns;
+use crate::mot_lattice::{anchor, grid_turn, keeps_its_map};
 use crate::mot_symbols::SymbolTable;
 use crate::renderer::Renderer;
 use crate::xml_reader::read_xml_map_str;
@@ -80,6 +83,27 @@ pub struct TileRenderer {
     symbol_index: Vec<Option<usize>>,
     /// The scale the symbol set is drawn at in its reference map.
     symbol_scale: f64,
+    /// For each symbol of the template, whether its patterns keep their map's
+    /// lattice (the north lines), not the world's.
+    own_lattice: Vec<bool>,
+    /// Whether the north lines are left out.
+    hide_north_lines: bool,
+}
+
+/// Where a tile is drawn: what [`TileRenderer::object`] needs to lay the patterns
+/// out on the world's lattice.
+struct Place {
+    /// The data tile's west and north edges, in Mercator meters.
+    west: f64,
+    north: f64,
+    /// Meters of Mercator per unit of the tile.
+    grid_m: f64,
+    /// Millimetres of paper per Mercator meter, east-west and north-south.
+    per_meter: (f64, f64),
+    /// The scale drawn at.
+    scale: f64,
+    /// The middle of the view, in Mercator meters.
+    middle: (f64, f64),
 }
 
 impl TileRenderer {
@@ -110,11 +134,25 @@ impl TileRenderer {
                     .position(|s| s.code() == code && !s.is_helper_symbol())
             })
             .collect();
+        let own_lattice = template
+            .symbols
+            .iter()
+            .map(|s| keeps_its_map(s.code()))
+            .collect();
         TileRenderer {
             template,
             symbol_index,
             symbol_scale,
+            own_lattice,
+            hide_north_lines: false,
         }
+    }
+
+    /// Leaves the north lines (601.x) out, or draws them again: they are the
+    /// map's own, turned to its magnetic north and spaced from its own origin, and
+    /// where maps meet they do not continue into each other.
+    pub fn hide_north_lines(&mut self, hide: bool) {
+        self.hide_north_lines = hide;
     }
 
     /// The scale (its denominator) at which the symbols are as big on the ground
@@ -173,6 +211,14 @@ impl TileRenderer {
             view_size * per_meter.1,
         );
         let near = window.adjusted(-REACH_MM, -REACH_MM, REACH_MM, REACH_MM);
+        let place = Place {
+            west: data_west,
+            north: data_north,
+            grid_m: f64::from(tile.grid_cm) / 100.0,
+            per_meter,
+            scale,
+            middle: (view_west + view_size / 2.0, view_north - view_size / 2.0),
+        };
 
         self.template.scale_denominator = scale.round().clamp(1.0, f64::from(i32::MAX)) as i32;
         let mut objects = Vec::new();
@@ -191,7 +237,7 @@ impl TileRenderer {
                 || f64::from(y1) < v0
                 || f64::from(y0) > v1;
             if !outside {
-                objects.extend(self.object(o, per_unit));
+                objects.extend(self.object(o, per_unit, &place, [x0, y0, x1, y1]));
             }
         }
         self.template.objects = objects;
@@ -224,22 +270,62 @@ impl TileRenderer {
     }
 
     /// The map's object for a tile's, in paper millimetres; `None` where its
-    /// symbol is not in the template.
-    fn object(&self, o: &TileObject, per_unit: (f64, f64)) -> Option<Object> {
+    /// symbol is not in the template, or is left out. `bounds` is the box of its
+    /// nodes, in the tile's units (`[x0, y0, x1, y1]`).
+    fn object(
+        &self,
+        o: &TileObject,
+        per_unit: (f64, f64),
+        place: &Place,
+        bounds: [i32; 4],
+    ) -> Option<Object> {
         let index = (*self.symbol_index.get(usize::from(o.symbol))?)?;
+        let own_lattice = self.own_lattice[index];
+        if own_lattice && self.hide_north_lines {
+            return None;
+        }
         let point = |x: i32, y: i32| (f64::from(x) * per_unit.0, f64::from(y) * per_unit.1);
         let kind = match &o.shape {
             Shape::Point => ObjectKind::Point,
-            Shape::Path(pattern) => ObjectKind::Path(match pattern {
-                Some(p) => {
-                    let (x, y) = point(p.origin.0, p.origin.1);
-                    PathObject {
-                        pattern_rotation: p.rotation,
-                        pattern_origin: Point::new(x, y),
-                    }
+            Shape::Path(Some(p)) if own_lattice => {
+                let (x, y) = point(p.origin.0, p.origin.1);
+                ObjectKind::Path(PathObject {
+                    pattern_rotation: p.rotation,
+                    pattern_origin: Point::new(x, y),
+                })
+            }
+            Shape::Path(pattern) => {
+                let mut patterns = Vec::new();
+                fill_patterns(&self.template, &self.template.symbols[index], &mut patterns);
+                if patterns.is_empty() || own_lattice {
+                    ObjectKind::Path(PathObject::default())
+                } else {
+                    // Laid out from the point of the world's lattice nearest the
+                    // middle of the view, within the object: drawn from that
+                    // near, the paper of the tile and the grid agree to far less
+                    // than a pixel.
+                    let rotation = pattern.as_ref().map_or(0.0, |p| p.rotation);
+                    let [x0, y0, x1, y1] = bounds.map(f64::from);
+                    let near = (
+                        place.middle.0.clamp(
+                            place.west + x0 * place.grid_m,
+                            place.west + x1 * place.grid_m,
+                        ),
+                        place.middle.1.clamp(
+                            place.north - y1 * place.grid_m,
+                            place.north - y0 * place.grid_m,
+                        ),
+                    );
+                    let at = anchor(&patterns, rotation, place.scale, near);
+                    ObjectKind::Path(PathObject {
+                        pattern_rotation: rotation + grid_turn(at),
+                        pattern_origin: Point::new(
+                            (at.0 - place.west) * place.per_meter.0,
+                            (place.north - at.1) * place.per_meter.1,
+                        ),
+                    })
                 }
-                None => PathObject::default(),
-            }),
+            }
             Shape::Text(t) => ObjectKind::Text(TextObject {
                 text: t.text.clone(),
                 h_align: i32::from(t.h_align),
@@ -1104,6 +1190,74 @@ mod tests {
             let (a, b) = (drawn(&mut renderer, coarse), drawn(&mut renderer, fine));
             let off = differing(&a, &b);
             assert!(off < 100, "{code}: {off} pixels differ");
+        }
+    }
+
+    /// Two areas of one symbol side by side, as two maps meeting store them (each
+    /// with the origin and the turn of its own paper), draw the dots one area
+    /// over both would: the patterns are laid out on the world's lattice, not on
+    /// the maps' papers. Only along the edge between them (where the two fills'
+    /// antialiasing meets) may pixels differ.
+    #[test]
+    fn two_areas_side_by_side_continue_each_others_pattern() {
+        let table = SymbolTable::isom();
+        let mut renderer = TileRenderer::new(&table);
+        let data = TileId {
+            z: 14,
+            x: 8683,
+            y: 5931,
+        };
+        let view = TileId {
+            z: 17,
+            x: data.x * 8 + 3,
+            y: data.y * 8 + 4,
+        };
+        let (mx, my) = middle(view);
+        let side = TileId::size(view.z);
+        // Square to the grid, and turned (by a little more in one half: as the tiles
+        // of one area turned by its mapper have it, each worked out on its own).
+        for (code, turn) in [("211", 0.0), ("402", 0.0), ("412", 0.0), ("211", 0.3)] {
+            let whole = tile_with_an_area(&table, data, code, (mx, my), 4.0 * side, (mx, my));
+            let mut halves = Tile::new(5);
+            for (dx, origin) in [(-1.0, (mx + 37.3, my - 81.9)), (1.0, (mx - 3.1, my + 5.7))] {
+                let half =
+                    tile_with_an_area(&table, data, code, (mx + dx * side, my), 2.0 * side, origin);
+                halves.objects.extend(half.objects);
+            }
+            // Each laid out from its own origin.
+            for (k, o) in halves.objects.iter_mut().enumerate() {
+                if let Shape::Path(Some(p)) = &mut o.shape {
+                    p.rotation = turn + if turn == 0.0 { 0.0 } else { k as f64 * 1e-6 };
+                }
+            }
+            let mut whole = whole;
+            whole.objects[0].shape = Shape::Path(Some(crate::mot::Pattern {
+                rotation: turn,
+                origin: (0, 0),
+            }));
+            let draw = |renderer: &mut TileRenderer, tile: &Tile| {
+                renderer
+                    .render(data, tile, view, SCALE, 512, CoverageStyle::None)
+                    .unwrap()
+            };
+            let (a, b) = (draw(&mut renderer, &whole), draw(&mut renderer, &halves));
+            let off = a
+                .pixels()
+                .iter()
+                .zip(b.pixels())
+                .enumerate()
+                .filter(|(i, (p, q))| {
+                    let x = (i % 512) as i32;
+                    let d = |x: u8, y: u8| x.abs_diff(y);
+                    (x - 256).abs() > 2
+                        && d(p.red(), q.red())
+                            .max(d(p.green(), q.green()))
+                            .max(d(p.blue(), q.blue()))
+                            .max(d(p.alpha(), q.alpha()))
+                            > 32
+                })
+                .count();
+            assert!(off < 50, "{code} turned {turn}: {off} pixels differ");
         }
     }
 

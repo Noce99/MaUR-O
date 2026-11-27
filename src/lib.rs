@@ -156,6 +156,7 @@ pub mod mot_clip;
 pub mod mot_convert;
 pub mod mot_cut;
 pub mod mot_history;
+pub mod mot_lattice;
 pub mod mot_render;
 pub mod mot_symbols;
 pub mod naming;

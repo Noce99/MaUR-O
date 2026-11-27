@@ -27,9 +27,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::map::{
-    fill_pattern_type, FillPattern, Georeferencing, Map, ObjectKind, PartRef, Point, Symbol,
-};
+use crate::map::{FillPattern, Georeferencing, Map, ObjectKind, PartRef, Point, Symbol};
 use crate::mot::node_flag;
 use crate::mot::{
     ground_angle, Grid, Node, Pattern, Shape, Text, Tile, TileId, TileObject, COVERAGE_SYMBOL,
@@ -37,6 +35,7 @@ use crate::mot::{
 };
 use crate::mot_adapt::{adapt, Adapted};
 use crate::mot_clip::{clip_line, clip_ring, flatten, simplify, Rect, Vertex};
+use crate::mot_lattice::{from_grid, grid_turn, keeps_its_map, nearest_origin};
 use crate::mot_symbols::{Match, SymbolTable, ZoomRule};
 use crate::ocd::{is_ocd_file, ocd_to_omap_xml};
 use crate::orthophoto::{
@@ -546,11 +545,15 @@ fn convert_cut(
                     _ => false,
                 }
         };
-        // The patterns of an area: laid out from a point of the lattice near
-        // each tile (below), not one for the whole object. The paper is not
-        // quite flat on the earth, and a lattice laid out from far away (the
-        // middle of a large area of north lines or of scattered trees) is off
-        // by a fraction of its period by the time it reaches the tile.
+        // The patterns of an area are laid out on the world's lattice when the
+        // tile is drawn (`mot_lattice`); the tile keeps only a turn the mapper
+        // gave them. The north lines keep their map's lattice instead, from a
+        // point of it near each tile (below), not one for the whole object: the
+        // paper is not quite flat on the earth, and a lattice laid out from far
+        // away is off by a fraction of its period by the time it reaches the tile.
+        let own_lattice = table
+            .get(id_in_table)
+            .is_some_and(|e| keeps_its_map(&e.code));
         let pattern_place = match &object.kind {
             ObjectKind::Path(p)
                 if wants_pattern(p.pattern_rotation, (p.pattern_origin.x, p.pattern_origin.y)) =>
@@ -634,12 +637,25 @@ fn convert_cut(
                             let half = TileId::size(options.zoom) / 2.0;
                             placement.paper((west + half, top - half), middle)
                         });
-                        let at = pattern_anchor(
-                            patterns,
-                            *rotation,
-                            *origin,
-                            Point::new(near.0.clamp(lo.x, hi.x), near.1.clamp(lo.y, hi.y)),
-                        );
+                        let near = Point::new(near.0.clamp(lo.x, hi.x), near.1.clamp(lo.y, hi.y));
+                        if !own_lattice {
+                            // On the world's lattice (`mot_lattice`), which the
+                            // renderer lays it out on: only a turn the mapper gave
+                            // it is kept, as one from grid north.
+                            let (a, b) = (project(near.x, near.y), project(near.x + 1.0, near.y));
+                            let turn = ground_angle(a, b, place(near.x, near.y).0);
+                            return Pattern {
+                                rotation: if *stored == 0.0 {
+                                    0.0
+                                } else {
+                                    from_grid(stored + turn - grid_turn(a))
+                                },
+                                origin: (0, 0),
+                            };
+                        }
+                        // The north lines keep their map's: laid out from a point of
+                        // its lattice near the tile, turned as the map is there.
+                        let at = nearest_origin(patterns, *rotation, *origin, near);
                         // The map's turn there, not at its middle: the
                         // meridians converge across a map, by some 0.04° over
                         // 5 km, and a pattern turned by the middle's slides
@@ -810,9 +826,110 @@ fn store_coverage(
 }
 
 /// Whether a path has a closed part: an area, or a ring drawn as a line.
+/// `map` with its fill patterns laid out as its tiles lay them out (on the world's
+/// lattice, [`crate::mot_lattice`]), not on its own paper: what the map is compared
+/// with its tiles as, the patterns of each in the same places.
+///
+/// Each patterned area is laid out from the point of the lattice nearest its
+/// middle (in the patterns of the symbol its tiles have, at the symbol set's
+/// scale), square to the grid's north or turned as far from it as the mapper
+/// turned it; its symbols' patterns are all made rotatable so that this is what
+/// Mapper's renderer does. The north lines are left as they are, on the map's
+/// paper. An error where the map cannot be placed.
+pub fn lay_out_on_the_world_lattice(
+    map: &mut Map,
+    anchor: &GeographicAnchor,
+    table: &SymbolTable,
+) -> Result<(), String> {
+    let (template, _) = crate::xml_reader::read_xml_map_str(table.reference())?;
+    let scale = f64::from(template.scale_denominator);
+    let mut placed: Vec<(usize, f64, Point)> = Vec::new();
+    {
+        let placement = Placement::new(map, anchor)?;
+        // The direction of the paper's east at the paper point `p`, on the ground.
+        let paper_turn = |p: Point| {
+            let a = placement.mercator(p.x, p.y);
+            let b = placement.mercator(p.x + 1.0, p.y);
+            ground_angle(a, b, crate::mot::lat_lon(a.0, a.1).0)
+        };
+        for (i, object) in map.objects.iter().enumerate() {
+            let ObjectKind::Path(path) = &object.kind else {
+                continue;
+            };
+            let Some(symbol) = object.symbol_index.and_then(|k| map.symbols.get(k)) else {
+                continue;
+            };
+            let mut own = Vec::new();
+            fill_patterns(map, symbol, &mut own);
+            if own.is_empty() || keeps_its_map(symbol.code()) || object.coords.is_empty() {
+                continue;
+            }
+            let Some((id, _)) = table.closest(symbol, map) else {
+                continue;
+            };
+            let Some(code) = table.get(id).map(|e| &e.code) else {
+                continue;
+            };
+            let Some(theirs) = template
+                .symbols
+                .iter()
+                .find(|s| s.code() == code && !s.is_helper_symbol())
+            else {
+                continue;
+            };
+            let mut patterns = Vec::new();
+            fill_patterns(&template, theirs, &mut patterns);
+            if patterns.is_empty() {
+                continue;
+            }
+            let (mut lo, mut hi) = (
+                Point::new(f64::MAX, f64::MAX),
+                Point::new(f64::MIN, f64::MIN),
+            );
+            for c in &object.coords {
+                lo = Point::new(lo.x.min(c.x), lo.y.min(c.y));
+                hi = Point::new(hi.x.max(c.x), hi.y.max(c.y));
+            }
+            let middle = Point::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0);
+            let m = placement.mercator(middle.x, middle.y);
+            // As the tiles keep it (`convert`): only a turn the mapper gave it.
+            let turned = own.iter().any(|p| p.rotatable);
+            let rotation = if !turned || path.pattern_rotation == 0.0 {
+                0.0
+            } else {
+                from_grid(path.pattern_rotation + paper_turn(middle) - grid_turn(m))
+            };
+            let at = crate::mot_lattice::anchor(&patterns, rotation, scale, m);
+            let (x, y) = placement.paper(at, (middle.x, middle.y));
+            let origin = Point::new(x, y);
+            placed.push((i, rotation + grid_turn(at) - paper_turn(origin), origin));
+        }
+    }
+    fn rotatable(symbols: &mut [Symbol]) {
+        for symbol in symbols {
+            if keeps_its_map(symbol.code()) {
+                continue;
+            }
+            match symbol {
+                Symbol::Area(a) => a.patterns.iter_mut().for_each(|p| p.rotatable = true),
+                Symbol::Combined(c) => rotatable(&mut c.owned_parts),
+                _ => {}
+            }
+        }
+    }
+    rotatable(&mut map.symbols);
+    for (i, rotation, origin) in placed {
+        if let ObjectKind::Path(p) = &mut map.objects[i].kind {
+            p.pattern_rotation = rotation;
+            p.pattern_origin = origin;
+        }
+    }
+    Ok(())
+}
+
 /// The fill patterns `symbol` lays out, those of a combined symbol's parts
 /// included.
-fn fill_patterns<'a>(map: &'a Map, symbol: &'a Symbol, out: &mut Vec<&'a FillPattern>) {
+pub fn fill_patterns<'a>(map: &'a Map, symbol: &'a Symbol, out: &mut Vec<&'a FillPattern>) {
     match symbol {
         Symbol::Area(a) => out.extend(a.patterns.iter()),
         Symbol::Combined(c) => {
@@ -831,63 +948,6 @@ fn fill_patterns<'a>(map: &'a Map, symbol: &'a Symbol, out: &mut Vec<&'a FillPat
         }
         _ => {}
     }
-}
-
-/// The pattern origin `origin` (paper mm) of an object whose patterns are
-/// `patterns`, turned by `rotation` where rotatable, moved by whole periods of
-/// the patterns to as near `near` as they allow: the same lines and the same
-/// elements along them, laid out from beside the object. Each tile's piece of
-/// an object is given its own, from the point of the object nearest the
-/// tile's middle, and turned as the map is there.
-///
-/// Mapper lays patterns out from the paper's origin unless an object says
-/// otherwise, and a map's paper origin may be hundreds of kilometres from its
-/// objects (a projected reference point at an easting of 0, say). A tile is
-/// drawn on a paper of its own latitude's scale, and from that far the
-/// slightest difference of scale between two tiles moves the elements by a
-/// good part of their spacing; from beside the object, by next to nothing.
-/// The periods are the map's own patterns', so where a tile's symbol is the
-/// map's at the map's scale the elements are where Mapper puts them, and
-/// neighbouring areas of one symbol still line up; drawn with other sizes the
-/// pattern is only anchored near the object.
-///
-/// The lines across which the elements repeat are those of the first pattern
-/// and of the first pattern at another angle (the two hatchings of an
-/// out-of-bounds area); where the patterns are all on one angle, the origin
-/// moves freely along their lines unless they lay elements along them.
-fn pattern_anchor(patterns: &[&FillPattern], rotation: f64, origin: Point, near: Point) -> Point {
-    // (unit vector, period): moving the origin by a multiple of the period
-    // along the vector leaves the pattern as it was. As the renderer lays the
-    // patterns out: y down, the normal of lines at angle r is (sin r, cos r).
-    let mut periods: Vec<(Point, f64)> = Vec::new();
-    for p in patterns {
-        if p.line_spacing <= 0.0 {
-            continue;
-        }
-        let r = p.angle + if p.rotatable { rotation } else { 0.0 };
-        periods.push((Point::new(r.sin(), r.cos()), p.line_spacing));
-        if p.pattern_type == fill_pattern_type::POINT && p.point_distance > 0.0 {
-            periods.push((Point::new(r.cos(), -r.sin()), p.point_distance));
-        }
-    }
-    let Some(&(u1, p1)) = periods.first() else {
-        return origin;
-    };
-    let cross = |a: Point, b: Point| a.x * b.y - a.y * b.x;
-    let v = near - origin;
-    let whole = |u: Point, p: f64| (u.dot(v) / p).round() * p;
-    let a = whole(u1, p1);
-    let shift = match periods.iter().find(|(u, _)| cross(u1, *u).abs() > 1e-6) {
-        Some(&(u2, p2)) => {
-            // dot(shift, u1) = a, dot(shift, u2) = b
-            let b = whole(u2, p2);
-            let det = cross(u1, u2);
-            Point::new((a * u2.y - b * u1.y) / det, (u1.x * b - u2.x * a) / det)
-        }
-        // Lines only, all at one angle: free along them.
-        None => u1 * a + (v - u1 * u1.dot(v)),
-    };
-    origin + shift
 }
 
 fn flags_closed(coords: &[crate::map::Coord]) -> bool {
@@ -1118,7 +1178,7 @@ pub fn merge_tiles(into: &mut BTreeMap<TileId, Tile>, from: BTreeMap<TileId, Til
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map::{coord_flag, Coord, Georeferencing, Object, PathObject};
+    use crate::map::{coord_flag, fill_pattern_type, Coord, Georeferencing, Object, PathObject};
     use crate::mot::node_flag;
     use crate::osm_convert::{utm, utm_inverse};
     use crate::osm_orienteering::ISOM;
@@ -1858,9 +1918,10 @@ mod tests {
 
     /// A map whose north is east of true north (declination east) is turned
     /// clockwise on the earth; Mapper's rotations are counterclockwise, so its
-    /// symbols and fill patterns are stored turned by minus that much. Magnetic
-    /// north lines drawn as a pattern then point to magnetic north, not as far
-    /// west of true north.
+    /// symbols and its north lines' pattern are stored turned by minus that
+    /// much: they then point to magnetic north, not as far west of true north.
+    /// Another pattern not turned in the map is laid on the world's grid
+    /// (`mot_lattice`), as one not turned from grid north.
     #[test]
     fn a_map_turned_clockwise_turns_its_symbols_and_patterns_clockwise() {
         let mut map = empty_map();
@@ -1877,18 +1938,25 @@ mod tests {
             ObjectKind::Point,
             vec![Coord::new(0.0, 0.0, 0)],
         );
+        let square = vec![
+            Coord::new(-5.0, -5.0, 0),
+            Coord::new(5.0, -5.0, 0),
+            Coord::new(5.0, 5.0, 0),
+            Coord::new(-5.0, 5.0, coord_flag::CLOSE_POINT),
+        ];
         let area = object_of(
             &map,
-            |s| matches!(s, Symbol::Area(a) if !a.patterns.is_empty()),
+            |s| s.code() == "211",
             ObjectKind::Path(PathObject::default()),
-            vec![
-                Coord::new(-5.0, -5.0, 0),
-                Coord::new(5.0, -5.0, 0),
-                Coord::new(5.0, 5.0, 0),
-                Coord::new(-5.0, 5.0, coord_flag::CLOSE_POINT),
-            ],
+            square.clone(),
         );
-        map.objects.extend([point, area]);
+        let north_lines = object_of(
+            &map,
+            |s| s.code() == "601.2",
+            ObjectKind::Path(PathObject::default()),
+            square,
+        );
+        map.objects.extend([point, area, north_lines]);
         let converted =
             convert(&map, &anchor, &SymbolTable::isom(), 0, &Options::default()).unwrap();
         let tile = converted.tiles.values().next().unwrap();
@@ -1903,15 +1971,20 @@ mod tests {
             "{}",
             point.rotation
         );
-        let pattern = tile
-            .objects
-            .iter()
-            .find_map(|o| match &o.shape {
-                Shape::Path(Some(p)) => Some(p.rotation),
-                _ => None,
-            })
-            .unwrap();
-        assert!((pattern - expected).abs() < 1e-3, "{pattern}");
+        let table = SymbolTable::isom();
+        let pattern = |code: &str| {
+            let id = table.id_of(code).unwrap();
+            tile.objects
+                .iter()
+                .find_map(|o| match &o.shape {
+                    Shape::Path(Some(p)) if o.symbol == id => Some(p.rotation),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let north = pattern("601.2");
+        assert!((north - expected).abs() < 1e-3, "{north}");
+        assert_eq!(pattern("211"), 0.0);
     }
 
     #[test]
@@ -2067,7 +2140,7 @@ mod tests {
         for code in ["211", "709", "308", "414"] {
             let patterns = patterns_of(&map, code);
             let origin = Point::new(3.3, -7.1);
-            let moved = pattern_anchor(&patterns, 0.3, origin, near);
+            let moved = nearest_origin(&patterns, 0.3, origin, near);
             let shift = moved - origin;
             let mut largest: f64 = 0.0;
             for p in patterns {
@@ -2088,6 +2161,10 @@ mod tests {
         }
     }
 
+    /// North lines laid out from 400 km away are stored laid out from beside
+    /// them, on their map's lattice. The other patterns keep only the turn the
+    /// mapper gave them, from grid north: stony ground turns with the object,
+    /// cultivated land does not, and goes on the grid unturned.
     #[test]
     fn a_far_pattern_origin_is_stored_beside_its_object() {
         let mut map = empty_map();
@@ -2107,8 +2184,7 @@ mod tests {
             pattern_rotation: 1.0,
             pattern_origin: Point::new(0.0, 0.0),
         };
-        // Stony ground turns with the object; cultivated land does not.
-        for code in ["211", "412"] {
+        for code in ["211", "412", "601.2"] {
             let o = object_of(
                 &map,
                 |s| s.code() == code,
@@ -2125,12 +2201,18 @@ mod tests {
             &Options::default(),
         )
         .unwrap();
+        let table = SymbolTable::isom();
+        let north_lines = table.id_of("601.2").unwrap();
         let mut rotations = Vec::new();
         for tile in converted.tiles.values() {
             for o in &tile.objects {
                 let Shape::Path(Some(pattern)) = &o.shape else {
                     continue;
                 };
+                rotations.push((o.symbol, pattern.rotation));
+                if o.symbol != north_lines {
+                    continue;
+                }
                 let (cx, cy) = (
                     o.nodes.iter().map(|n| f64::from(n.x)).sum::<f64>() / o.nodes.len() as f64,
                     o.nodes.iter().map(|n| f64::from(n.y)).sum::<f64>() / o.nodes.len() as f64,
@@ -2139,24 +2221,24 @@ mod tests {
                     f64::from(pattern.origin.0) - cx,
                     f64::from(pattern.origin.1) - cy,
                 );
-                // 5 cm units: within 200 m of the 200 m square's nodes.
+                // 5 cm units: within one spacing of the lines (300 m) and the
+                // 200 m square of its nodes' middle.
                 assert!(
-                    dx.hypot(dy) < 4_000.0,
+                    dx.hypot(dy) < 8_000.0,
                     "the origin is {dx}, {dy} units away"
                 );
-                rotations.push((o.symbol, pattern.rotation));
             }
         }
-        let table = SymbolTable::isom();
         let rotation = |code: &str| {
             let id = table.id_of(code).unwrap();
             rotations.iter().find(|r| r.0 == id).unwrap().1
         };
-        // The map's turn only, for the pattern that does not follow the object
-        // (taken where each pattern is laid out from: the two lattices' points
-        // are a little apart).
-        let off = rotation("211") - rotation("412") - 1.0;
-        assert!(off.abs() < 1e-5, "{off}");
+        // The map's paper is zone 32's grid (no grivation), but 400 km east the
+        // square is in zone 33, whose grid north is some 4° from it: the
+        // mapper's turn on the ground, from that zone's grid north.
+        let off = rotation("211") - 1.0;
+        assert!((off.to_degrees() + 4.2).abs() < 0.5, "{}", off.to_degrees());
+        assert_eq!(rotation("412"), 0.0);
     }
 
     #[test]
