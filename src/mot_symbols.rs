@@ -539,11 +539,7 @@ impl SymbolTable {
 
     /// The line of the [`SymbolMap`] for `symbol`, one of `map`'s.
     fn crossref_for(&self, symbol: &Symbol, map: &Map) -> Option<&CrossRule> {
-        let own = map
-            .symbol_set
-            .as_deref()
-            .is_some_and(|set| set.trim().eq_ignore_ascii_case(self.standard));
-        if own {
+        if self.own_set(map) {
             return None;
         }
         let code = symbol.code();
@@ -552,6 +548,14 @@ impl SymbolTable {
         of_code()
             .find(|r| r.name.as_deref().is_some_and(|n| name.starts_with(n)))
             .or_else(|| of_code().find(|r| r.name.is_none()))
+    }
+
+    /// Whether `map` is drawn in the table's own symbol set, which the
+    /// [`SymbolMap`] is not for.
+    fn own_set(&self, map: &Map) -> bool {
+        map.symbol_set
+            .as_deref()
+            .is_some_and(|set| set.trim().eq_ignore_ascii_case(self.standard))
     }
 
     /// Whether the table's [`SymbolMap`] says to leave `symbol`, one of `map`'s,
@@ -751,8 +755,14 @@ impl SymbolTable {
             }
         }
 
+        // A map drawn in the table's own set has the symbols it accepts as the set
+        // has them: one of them is itself (a piece of the maps sent back).
+        let own = self.own_set(map);
         let mut code = symbol.code();
-        if let Some(id) = self.id_of(code).filter(|&id| fits(id) && standard(id)) {
+        if let Some(id) = self
+            .id_of(code)
+            .filter(|&id| fits(id) && (standard(id) || own))
+        {
             return Some((id, Match::Code));
         }
         while let Some(dot) = code.rfind('.') {
@@ -1078,6 +1088,16 @@ mod tests {
             0.4,
         );
         assert_eq!(code_of(&table, &named, &map), None);
+        // In a map of the table's own set, its code is: the set has it.
+        let own = Map {
+            symbol_set: Some("ISSprOM 2019-2".into()),
+            ..Map::default()
+        };
+        assert_eq!(
+            code_of(&table, &line_of("520.1.90"), &own),
+            Some(("520.1.90".to_string(), Match::Code))
+        );
+        assert_eq!(code_of(&table, &named, &own), None, "not by name");
         // A symbol map's line is.
         let mapped = SymbolTable::issprom()
             .with_symbol_map(

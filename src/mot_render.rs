@@ -262,8 +262,103 @@ impl TileRenderer {
                 Coord::new(x, y, i32::from(n.flags & keep))
             })
             .collect();
+        if matches!(o.shape, Shape::Path(_)) {
+            object.coords = without_cut_borders(&o.nodes, std::mem::take(&mut object.coords));
+        }
         Some(object)
     }
+}
+
+/// The coordinates `coords` of the tile's path `nodes` with gap points where its
+/// closed parts are cut (along the edges leaving a node flagged
+/// [`node_flag::CLIPPED`]): an area's border, or a closed line, is not drawn along
+/// them, as Mapper leaves a line out between two gap points. A tile's own edges are
+/// past what is drawn of it anyway; this is for the cuts made inside it, where two
+/// maps meet.
+///
+/// A part whose cut runs on past its end into its start is begun again where that
+/// cut begins: Mapper closes a part ended inside a gap with a straight line back to
+/// its start, across it.
+fn without_cut_borders(nodes: &[crate::mot::Node], coords: Vec<Coord>) -> Vec<Coord> {
+    let ends = node_flag::CLOSE_POINT | node_flag::HOLE_POINT;
+    let mut out = Vec::with_capacity(coords.len());
+    let mut start = 0;
+    for end in 0..nodes.len() {
+        let flag = i32::from(nodes[end].flags);
+        if flag & node_flag::HOLE_POINT == 0 && end + 1 != nodes.len() {
+            continue;
+        }
+        // One part: start..=end, cut along the edges `cut` (by the node each leaves).
+        let mut part: Vec<(Coord, bool)> = (start..=end)
+            .map(|i| {
+                (
+                    coords[i],
+                    i32::from(nodes[i].flags) & node_flag::CLIPPED != 0,
+                )
+            })
+            .collect();
+        start = end + 1;
+        let closed = flag & node_flag::CLOSE_POINT != 0
+            && part.len() > 2
+            && part[0].0.pos() == part[part.len() - 1].0.pos();
+        if !closed || !part.iter().any(|p| p.1) {
+            out.extend(part.into_iter().map(|p| p.0));
+            continue;
+        }
+        let edges = segments(&part);
+        let cut = |k: usize| edges[k].1 && part[edges[k].0].1;
+        // A cut beginning after an edge which is not: there is one unless the whole
+        // part is cut.
+        if let Some(k) =
+            (0..edges.len()).find(|&k| cut(k) && !cut((k + edges.len() - 1) % edges.len()))
+        {
+            let at = edges[k].0;
+            if at != 0 {
+                let last = part.len() - 1;
+                let close = part[last].0.flags & ends;
+                let mut turned: Vec<(Coord, bool)> =
+                    part[at..last].iter().chain(&part[..=at]).copied().collect();
+                for p in &mut turned {
+                    p.0.flags &= !ends;
+                }
+                turned.last_mut().unwrap().0.flags |= close;
+                part = turned;
+            }
+        }
+        let edges = segments(&part);
+        let mut run: Option<usize> = None;
+        for &(i, straight) in &edges {
+            match (straight && part[i].1, run) {
+                (true, None) => run = Some(i),
+                (false, Some(a)) => {
+                    part[a].0.flags |= node_flag::GAP_POINT;
+                    part[i].0.flags |= node_flag::GAP_POINT;
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(a) = run {
+            let last = part.len() - 1;
+            part[a].0.flags |= node_flag::GAP_POINT;
+            part[last].0.flags |= node_flag::GAP_POINT;
+        }
+        out.extend(part.into_iter().map(|p| p.0));
+    }
+    out
+}
+
+/// The segments of a closed part, each as the node it leaves and whether it is
+/// straight (a curve's control points are not where one begins).
+fn segments(part: &[(Coord, bool)]) -> Vec<(usize, bool)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 1 < part.len() {
+        let curve = part[i].0.flags & node_flag::CURVE_START != 0;
+        out.push((i, !curve));
+        i += if curve { 3 } else { 1 };
+    }
+    out
 }
 
 /// How a node of the tile `data`, in its grid units, falls in the `pixels` square
@@ -460,6 +555,129 @@ mod tests {
             0,
             "empty ground is transparent"
         );
+    }
+
+    #[test]
+    fn a_building_cut_where_two_maps_meet_has_no_border_along_the_cut() {
+        // ISSprOM's building: grey, with a black border.
+        let table = SymbolTable::issprom();
+        let mut renderer = TileRenderer::new(&table);
+        let id = TileId {
+            z: 14,
+            x: 8700,
+            y: 5900,
+        };
+        let side = (TileId::size(id.z) * 100.0 / 5.0) as i32;
+        let (x, y, size) = (side * 3 / 10, side * 3 / 10, 800);
+        let cut = node_flag::CLIPPED as u8;
+        let building = |east: u8| {
+            let mut tile = Tile::new(5);
+            tile.objects.push(TileObject {
+                id: 0,
+                symbol: table.id_of("521").unwrap(),
+                rotation: 0.0,
+                shape: Shape::Path(None),
+                nodes: vec![
+                    node(x, y, 0),
+                    node(x + size, y, east), // the east edge
+                    node(x + size, y + size, 0),
+                    node(x, y + size, 0),
+                    node(x, y, node_flag::CLOSE_POINT as u8),
+                ],
+            });
+            tile
+        };
+        let draw = |renderer: &mut TileRenderer, tile: &Tile| {
+            renderer
+                .render(id, tile, id, SCALE, 4096, CoverageStyle::None)
+                .unwrap()
+        };
+        let whole = draw(&mut renderer, &building(0));
+        let halved = draw(&mut renderer, &building(cut));
+        // The row across the building's middle, where it is drawn.
+        let drawn: Vec<u32> = (0..whole.height())
+            .filter(|&y| (0..whole.width()).any(|x| whole.pixel(x, y).unwrap().alpha() > 0))
+            .collect();
+        let row = (drawn[0] + drawn[drawn.len() - 1]) / 2;
+        // Its dark pixels, west and east of its middle.
+        let dark = |pixmap: &Pixmap| -> Vec<u32> {
+            (0..pixmap.width())
+                .filter(|&x| {
+                    let p = pixmap.pixel(x, row).unwrap();
+                    let paper = 3 * (255 - u32::from(p.alpha()));
+                    let sum = u32::from(p.red()) + u32::from(p.green()) + u32::from(p.blue());
+                    sum + paper < 100
+                })
+                .collect()
+        };
+        let all = dark(&whole);
+        let middle = (all[0] + all[all.len() - 1]) / 2;
+        let sides = |row: &[u32]| {
+            let west = row.iter().filter(|&&x| x < middle).count();
+            (west, row.len() - west)
+        };
+        let (west, east) = sides(&all);
+        assert!(west > 1 && east > 1, "a border all round: {west} {east}");
+        assert_eq!(sides(&dark(&halved)), (west, 0), "no border along the cut");
+    }
+
+    #[test]
+    fn a_cut_running_on_to_the_end_of_a_ring_is_not_closed_across_it() {
+        let table = SymbolTable::issprom();
+        let mut renderer = TileRenderer::new(&table);
+        let id = TileId {
+            z: 14,
+            x: 8700,
+            y: 5900,
+        };
+        let side = (TileId::size(id.z) * 100.0 / 5.0) as i32;
+        let (x, y, size) = (side * 3 / 10, side * 3 / 10, 800);
+        let cut = node_flag::CLIPPED as u8;
+        let hole = (node_flag::HOLE_POINT | node_flag::CLOSE_POINT) as u8;
+        // Cut along its south and west edges, the last two of its outline, which a
+        // hole follows: closed across, the outline would run from its south-east
+        // corner to its north-west one.
+        let mut tile = Tile::new(5);
+        tile.objects.push(TileObject {
+            id: 0,
+            symbol: table.id_of("521").unwrap(),
+            rotation: 0.0,
+            shape: Shape::Path(None),
+            nodes: vec![
+                node(x, y, 0),
+                node(x + size, y, 0),
+                node(x + size, y + size, cut),
+                node(x, y + size, cut),
+                node(x, y, hole),
+                node(x + 50, y + 50, 0),
+                node(x + 100, y + 50, 0),
+                node(x + 100, y + 100, 0),
+                node(x + 50, y + 50, node_flag::CLOSE_POINT as u8),
+            ],
+        });
+        let pixmap = renderer
+            .render(id, &tile, id, SCALE, 4096, CoverageStyle::None)
+            .unwrap();
+        let drawn: Vec<(u32, u32)> = (0..pixmap.height())
+            .flat_map(|y| (0..pixmap.width()).map(move |x| (x, y)))
+            .filter(|&(x, y)| pixmap.pixel(x, y).unwrap().alpha() > 0)
+            .collect();
+        let (x0, x1) = (
+            drawn.iter().map(|p| p.0).min().unwrap(),
+            drawn.iter().map(|p| p.0).max().unwrap(),
+        );
+        let (y0, y1) = (
+            drawn.iter().map(|p| p.1).min().unwrap(),
+            drawn.iter().map(|p| p.1).max().unwrap(),
+        );
+        // Along the diagonal between those corners, away from the hole: grey only.
+        for k in 3..8 {
+            let (fx, fy) = (f64::from(k) / 10.0, 1.0 - f64::from(k) / 10.0);
+            let px = x0 + (f64::from(x1 - x0) * fx) as u32;
+            let py = y0 + (f64::from(y1 - y0) * fy) as u32;
+            let p = pixmap.pixel(px, py).unwrap();
+            assert!(p.red() > 60, "dark at {k}/10 across: {p:?}");
+        }
     }
 
     /// A tile with a coverage ring over the middle half of it, whose west edge
