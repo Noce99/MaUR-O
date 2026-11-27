@@ -180,6 +180,11 @@ pub struct SymbolEntry {
     /// tells a [`SymbolMap`] which of a road's or a stairway's footprints a
     /// symbol is.
     pub width: f64,
+    /// Half the width it draws a line, its borders out to their outer edges,
+    /// in the units of [`width`](Self::width); 0 for none. How much of an area
+    /// a line of it drawn under the area shows through a cut
+    /// ([`crate::mot_cut`]).
+    pub footprint: f64,
     /// The priority, in the standard's colour order, of the topmost colour its
     /// areas are filled with (lower is drawn on top); `None` for no plain fill.
     pub fill: Option<i32>,
@@ -477,6 +482,7 @@ impl SymbolTable {
                 whole: lays_out_along(symbol, &map),
                 spaced: spaces_out(symbol, &map, false),
                 width: widest_line(symbol, &map),
+                footprint: crate::mot_cut::footprint_half(symbol, &map),
                 fill: crate::mot_cut::fill_priority(symbol, &map),
                 top: crate::mot_cut::top_priority(symbol, &map),
                 paint: crate::mot_cut::paint_priority(symbol, &map),

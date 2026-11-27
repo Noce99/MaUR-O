@@ -88,7 +88,9 @@ pub struct Converted {
     /// theirs, or they have none.
     pub dropped: usize,
     /// How many objects were left out because their symbol is hidden or a
-    /// drawing aid, which draws nothing on the printed map.
+    /// drawing aid, which draws nothing on the printed map, or because they are
+    /// texts: the tiles keep none (a map's texts are its title, its credits,
+    /// its scale, which mean nothing on the one map of the world).
     pub hidden: usize,
     /// How many objects were left out of this level by the rules of their
     /// symbols: not shown yet at this zoom, or too small to see.
@@ -445,6 +447,7 @@ fn convert_cut(
     let mut near_tile: HashMap<TileId, (f64, f64)> = HashMap::new();
     let mut remapped_symbols = vec![0usize; map.symbols.len()];
     let mut dropped_symbols = vec![0usize; map.symbols.len()];
+    let mut texts = 0usize;
 
     // Ids are given in order along a Z-order curve through each object's first
     // node. Inside a tile objects are sorted by (symbol, id), so this keeps
@@ -477,6 +480,11 @@ fn convert_cut(
 
     for &(_, position) in &order {
         let (object, made) = object_at(position);
+        if matches!(object.kind, ObjectKind::Text(_)) {
+            converted.hidden += 1;
+            texts += 1;
+            continue;
+        }
         let Some(index) = object.symbol_index else {
             converted.dropped += 1;
             continue;
@@ -730,6 +738,11 @@ fn convert_cut(
         store_coverage(&mut converted.tiles, &corners, id, options, grid_cm);
     }
 
+    if texts > 0 {
+        converted.warnings.push(format!(
+            "texts are left out, the tiles keep none: {texts} objects"
+        ));
+    }
     // `notes` and `remapped_symbols` both have one entry per symbol of the map.
     converted.warnings.extend(
         notes
@@ -1310,6 +1323,43 @@ mod tests {
         assert!(
             (x - ax).abs() < 0.05 && (y - ay).abs() < 0.05,
             "{x},{y} vs {ax},{ay}"
+        );
+    }
+
+    #[test]
+    fn texts_are_left_out() {
+        let mut map = empty_map();
+        let point = object_of(
+            &map,
+            |s| matches!(s, Symbol::Point(_)),
+            ObjectKind::Point,
+            vec![Coord::new(0.0, 0.0, 0)],
+        );
+        let text = object_of(
+            &map,
+            |s| matches!(s, Symbol::Text(_)),
+            ObjectKind::Text(crate::map::TextObject {
+                text: "Scala 1:10000".into(),
+                ..Default::default()
+            }),
+            vec![Coord::new(5.0, 5.0, 0)],
+        );
+        map.objects.extend([point, text]);
+        let converted = convert_map(&map);
+        assert_eq!(converted.objects, 1, "the point only");
+        assert_eq!(converted.hidden, 1);
+        assert!(converted
+            .tiles
+            .values()
+            .flat_map(|t| &t.objects)
+            .all(|o| !matches!(o.shape, Shape::Text(_))));
+        assert!(
+            converted
+                .warnings
+                .iter()
+                .any(|w| w == "texts are left out, the tiles keep none: 1 objects"),
+            "{:?}",
+            converted.warnings
         );
     }
 

@@ -135,7 +135,9 @@ to get ground coordinates.
     the Bologna archive is 0.2% smaller than with an offset-less cut of
     everything, the whole lines being few and mostly short.
   - A **point** or a **text** is not cut: it is in every tile whose grown box
-    holds it.
+    holds it. `mauro tiles build` stores no texts: a map's texts are its title,
+    its credits, its scale, which mean nothing on the one map of the world, and
+    a text longer than the buffer would be cut at a tile's edge (below).
   - Limits: a closed ring drawn as a line gets cut edges which a renderer must
     know not to stroke, and a symbol (or text) bigger than the buffer is cut at the
     edge of the neighbouring tile that holds it.

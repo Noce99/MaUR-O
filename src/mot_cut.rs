@@ -182,6 +182,8 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
     // above what the map draws over it.
     let mut tops: Vec<Option<Order>> = Vec::with_capacity(map.symbols.len());
     let mut paints: Vec<Option<(Order, SymbolKind)>> = Vec::with_capacity(map.symbols.len());
+    // Half the width each symbol's lines are drawn in the standard: 0 for none.
+    let mut drawn: Vec<f64> = Vec::with_capacity(map.symbols.len());
     for symbol in &map.symbols {
         let entry = symbol
             .is_visible()
@@ -192,8 +194,10 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
             fills.push(None);
             tops.push(None);
             paints.push(None);
+            drawn.push(0.0);
             continue;
         };
+        drawn.push(entry.footprint);
         let course = entry.code.starts_with('7');
         fills.push(match (entry.kind, fill_priority(symbol, map), entry.fill) {
             (SymbolKind::Area, Some(own), Some(standard)) if !course => {
@@ -266,7 +270,14 @@ pub fn cut_hidden(map: &Map, table: &SymbolTable) -> Cuts {
                     shape.union(piece)
                 }),
             _ => {
-                let half = footprint_half(&map.symbols[s], map);
+                // As wide as the line is drawn in the map, or in the standard
+                // where that is narrower: cut wider than the standard's line,
+                // the area would leave white along it (a club's 0.40 mm hedge
+                // is ISSprOM's 0.25 mm 410.1).
+                let mut half = footprint_half(&map.symbols[s], map);
+                if drawn[s] > 0.0 {
+                    half = half.min(drawn[s]);
+                }
                 if half <= 0.0 {
                     continue;
                 }
@@ -755,6 +766,25 @@ mod tests {
         // The planter is a hole of the paved area: two closed parts.
         let closes = cut.iter().filter(|c| c.is_close_point()).count();
         assert!(closes >= 2, "{closes}");
+    }
+
+    #[test]
+    fn a_line_narrower_in_the_standard_cuts_only_as_wide_as_it_is_drawn() {
+        // The map's hedge is 0.40 mm, ISSprOM's 410.1 0.25 mm: cut 0.40 wide,
+        // the paved area would leave white along both sides of it.
+        let paved = square(0.0, 0.0, 10.0);
+        let hedge = [(0.0, 5.0), (10.0, 5.0)];
+        let m = map(
+            &[("501.5", "area", "bottom"), ("410.1", "line", "top")],
+            &[(0, &paved), (1, &hedge)],
+        );
+        let cuts = cut_hidden(&m, &SymbolTable::issprom());
+        let cut = &cuts.coords[&0];
+        assert!(
+            (area_of(cut) - (100.0 - 10.0 * 0.25)).abs() < 1e-6,
+            "{}",
+            area_of(cut)
+        );
     }
 
     #[test]
