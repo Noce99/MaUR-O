@@ -164,6 +164,7 @@ impl Projection {
                 // aside — which this map has no way of knowing — it is zero.
                 declination: 0.0,
                 grid_scale_factor,
+                auxiliary_scale_factor: 1.0,
             },
         }
     }

@@ -558,13 +558,17 @@ pub struct Georeference {
     pub declination: f64,
     /// The projection's own scale at the reference point.
     pub grid_scale_factor: f64,
+    /// Mapper's auxiliary (elevation) scale factor, by which the paper is
+    /// scaled on top of the grid's: 1 for a map made at its declared scale,
+    /// otherwise what a fit of the map onto the ground found it to be off by.
+    pub auxiliary_scale_factor: f64,
 }
 
 /// The `<georeferencing>` element of a map placed in a projected CRS named
 /// by its EPSG code, as Mapper writes one.
 pub fn georeferencing_element(georef: &Georeference) -> String {
     format!(
-        "<georeferencing scale=\"{}\" grid_scale_factor=\"{}\" auxiliary_scale_factor=\"1\" declination=\"{}\" grivation=\"{}\">\
+        "<georeferencing scale=\"{}\" grid_scale_factor=\"{}\" auxiliary_scale_factor=\"{}\" declination=\"{}\" grivation=\"{}\">\
          <ref_point x=\"0\" y=\"0\"/>\
          <projected_crs id=\"EPSG\"><spec language=\"PROJ.4\">+init=epsg:{}</spec><parameter>{}</parameter>\
          <ref_point x=\"{:.6}\" y=\"{:.6}\"/></projected_crs>\
@@ -572,6 +576,7 @@ pub fn georeferencing_element(georef: &Georeference) -> String {
          <ref_point_deg lat=\"{:.8}\" lon=\"{:.8}\"/></geographic_crs></georeferencing>",
         georef.scale,
         number(georef.grid_scale_factor),
+        number(georef.auxiliary_scale_factor),
         qt_number(georef.declination, 4),
         qt_number(georef.grivation, 4),
         georef.epsg,
@@ -921,9 +926,11 @@ mod tests {
             grivation: -1.64,
             declination: 0.0,
             grid_scale_factor: 1.00002,
+            auxiliary_scale_factor: 1.03,
         });
         for expected in [
             "scale=\"6085\"",
+            "auxiliary_scale_factor=\"1.03\"",
             "declination=\"0\" grivation=\"-1.64\"",
             "+init=epsg:32632</spec><parameter>32632</parameter>",
             "<ref_point x=\"686512.250000\" y=\"4929301.500000\"/>",
